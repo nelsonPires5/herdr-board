@@ -9,8 +9,8 @@
 use board_core::capability::HarnessCapabilities;
 use board_core::model::{Card, Column};
 use board_core::protocol::{
-    CardCreateParams, CardUpdateParams, ColumnCreateParams, ColumnUpdateParams, Effort, SpaceInfo,
-    SpaceKind, Trigger,
+    CardCreateParams, CardUpdateParams, ColumnCreateParams, ColumnUpdateParams, Effort,
+    SessionInfo, SpaceInfo, SpaceKind, Trigger,
 };
 use tui_textarea::TextArea;
 
@@ -47,11 +47,14 @@ pub enum FieldId {
     ModelCustom,
     Effort,
     Permission,
+    /// herdr session selector; `(default)` = the daemon's default session.
+    Session,
     SpaceKind,
     SpaceRef,
     /// Free-text space ref, revealed when the `SpaceRef` selector is `(custom)`.
     SpaceRefCustom,
-    WorktreeBase,
+    /// Working directory for a `new_workspace` space (shown only for that kind).
+    SpaceCwd,
     // column
     Name,
     Trigger,
@@ -234,6 +237,10 @@ pub struct Form {
     /// Live workspace list for the space selector (card forms only). Empty when
     /// unfetched / failed → the space ref falls back to free-text.
     pub spaces: Vec<SpaceInfo>,
+    /// Live herdr session list for the session selector (card forms only).
+    /// Empty when unfetched / failed → only `(default)` (plus any preselected
+    /// session) is offered.
+    pub sessions: Vec<SessionInfo>,
 }
 
 /// The params produced by a successful submit, ready for a client call.
@@ -252,10 +259,11 @@ impl Form {
         let values = CardValues::from_card(None);
         Form {
             kind: FormKind::CardCreate { column_id },
-            fields: build_card_fields(&values, None, &[]),
+            fields: build_card_fields(&values, None, &[], &[]),
             focus: 0,
             caps: None,
             spaces: Vec::new(),
+            sessions: Vec::new(),
         }
     }
 
@@ -263,10 +271,11 @@ impl Form {
         let values = CardValues::from_card(Some(card));
         Form {
             kind: FormKind::CardEdit { card_id: card.id },
-            fields: build_card_fields(&values, None, &[]),
+            fields: build_card_fields(&values, None, &[], &[]),
             focus: 0,
             caps: None,
             spaces: Vec::new(),
+            sessions: Vec::new(),
         }
     }
 
@@ -277,6 +286,7 @@ impl Form {
             focus: 0,
             caps: None,
             spaces: Vec::new(),
+            sessions: Vec::new(),
         }
     }
 
@@ -287,6 +297,7 @@ impl Form {
             focus: 0,
             caps: None,
             spaces: Vec::new(),
+            sessions: Vec::new(),
         }
     }
 
@@ -297,6 +308,7 @@ impl Form {
             focus: 0,
             caps: None,
             spaces: Vec::new(),
+            sessions: Vec::new(),
         }
     }
 
@@ -314,14 +326,21 @@ impl Form {
             .unwrap_or_else(|| "claude".to_string())
     }
 
-    /// Install freshly fetched capabilities / spaces and rebuild the guided
-    /// card fields (preserving whatever the user already selected/typed).
+    /// The currently selected herdr session (`None` = the daemon's default
+    /// session). Drives which session `space.list` is fetched for.
+    pub fn current_session(&self) -> Option<String> {
+        self.opt_choice_str(FieldId::Session)
+    }
+
+    /// Install freshly fetched capabilities / spaces / sessions and rebuild the
+    /// guided card fields (preserving whatever the user already selected/typed).
     /// A `None` argument means the fetch failed — the affected selectors fall
-    /// back to free-text. No-op for non-card forms.
+    /// back to free-text / minimal menus. No-op for non-card forms.
     pub fn apply_options(
         &mut self,
         caps: Option<HarnessCapabilities>,
         spaces: Option<Vec<SpaceInfo>>,
+        sessions: Option<Vec<SessionInfo>>,
     ) {
         if !self.is_card_form() {
             return;
@@ -329,6 +348,9 @@ impl Form {
         self.caps = caps;
         if let Some(sp) = spaces {
             self.spaces = sp;
+        }
+        if let Some(se) = sessions {
+            self.sessions = se;
         }
         self.rebuild_card_fields();
     }
@@ -350,7 +372,7 @@ impl Form {
             return;
         }
         let values = self.card_values();
-        self.fields = build_card_fields(&values, self.caps.as_ref(), &self.spaces);
+        self.fields = build_card_fields(&values, self.caps.as_ref(), &self.spaces, &self.sessions);
         if self.focus >= self.fields.len() {
             self.focus = 0;
         }
@@ -368,11 +390,12 @@ impl Form {
             model: self.card_model().unwrap_or_default(),
             effort: self.opt_choice_str(FieldId::Effort),
             permission: self.opt_choice_str(FieldId::Permission),
+            session: self.current_session(),
             space_kind: self
                 .opt_choice_str(FieldId::SpaceKind)
                 .unwrap_or_else(|| "workspace".to_string()),
             space_ref: self.card_space_ref().unwrap_or_default(),
-            worktree_base: self.raw_text(FieldId::WorktreeBase),
+            space_cwd: self.raw_text(FieldId::SpaceCwd),
         }
     }
 
@@ -436,24 +459,24 @@ impl Form {
 
     // -- focus / visibility --------------------------------------------------
 
-    /// Whether a field is currently shown. The `(custom)` free-text companions
-    /// appear only when their selector is on `(custom)`; worktree base only for
-    /// the worktree space kind.
+    /// Whether a field is currently shown. The `(custom)` free-text companion
+    /// appears only when the `SpaceRef` selector is on `(custom)`; `cwd` only for
+    /// the `new_workspace` space kind.
     pub fn field_visible(&self, idx: usize) -> bool {
         match self.fields[idx].id {
-            FieldId::WorktreeBase => self.space_kind_is_worktree(),
+            FieldId::SpaceCwd => self.space_kind_is_new_workspace(),
             FieldId::ModelCustom => self.model_is_custom(),
             FieldId::SpaceRefCustom => self.space_ref_is_custom(),
             _ => true,
         }
     }
 
-    fn space_kind_is_worktree(&self) -> bool {
+    fn space_kind_is_new_workspace(&self) -> bool {
         self.fields
             .iter()
             .find(|f| f.id == FieldId::SpaceKind)
             .and_then(|f| f.choice_val())
-            .map(|v| matches!(v, ChoiceVal::Str(s) if s == "worktree"))
+            .map(|v| matches!(v, ChoiceVal::Str(s) if s == "new_workspace"))
             .unwrap_or(false)
     }
 
@@ -509,13 +532,10 @@ impl Form {
                     model: self.card_model(),
                     effort: self.opt_effort(FieldId::Effort),
                     permission_mode: self.opt_choice_str(FieldId::Permission),
+                    session: self.current_session(),
                     space_kind: self.opt_space_kind(),
                     space_ref: self.card_space_ref(),
-                    worktree_base: if self.space_kind_is_worktree() {
-                        self.opt_text(FieldId::WorktreeBase)
-                    } else {
-                        None
-                    },
+                    space_cwd: self.new_workspace_cwd(),
                     position: None,
                 }))
             }
@@ -532,13 +552,10 @@ impl Form {
                     model: self.card_model(),
                     effort: self.opt_effort(FieldId::Effort),
                     permission_mode: self.opt_choice_str(FieldId::Permission),
+                    session: self.current_session(),
                     space_kind: self.opt_space_kind(),
                     space_ref: self.card_space_ref(),
-                    worktree_base: if self.space_kind_is_worktree() {
-                        self.opt_text(FieldId::WorktreeBase)
-                    } else {
-                        None
-                    },
+                    space_cwd: self.new_workspace_cwd(),
                 }))
             }
             FormKind::ColumnCreate => {
@@ -638,9 +655,37 @@ impl Form {
         self.opt_choice_str(FieldId::SpaceKind)
             .and_then(|s| SpaceKind::parse_str(&s))
     }
+    /// The `cwd` text, only for a `new_workspace` space (else `None`).
+    fn new_workspace_cwd(&self) -> Option<String> {
+        if self.space_kind_is_new_workspace() {
+            self.opt_text(FieldId::SpaceCwd)
+        } else {
+            None
+        }
+    }
     fn opt_int(&self, id: FieldId) -> Option<i64> {
         self.opt_text(id).and_then(|s| s.parse().ok())
     }
+}
+
+/// Parse the current herdr session name from a `HERDR_SOCKET_PATH` value.
+///
+/// A named session's socket lives at `…/sessions/<name>/herdr.sock`; anything
+/// else (unset, or the plain default `…/herdr.sock`) means the daemon's default
+/// session, represented as `None`. Pure so it can be unit-tested; the env read
+/// lives in [`detect_current_session`].
+pub fn session_name_from_socket(path: Option<&str>) -> Option<String> {
+    // Expect the tail `sessions/<name>/herdr.sock`.
+    let rest = path?.strip_suffix("/herdr.sock")?;
+    let (parent, name) = rest.rsplit_once('/')?;
+    let last_seg = parent.rsplit('/').next().unwrap_or(parent);
+    (last_seg == "sessions" && !name.is_empty()).then(|| name.to_string())
+}
+
+/// Read `HERDR_SOCKET_PATH` and resolve it to the current session name
+/// (`None` = the daemon's default session).
+fn detect_current_session() -> Option<String> {
+    session_name_from_socket(std::env::var("HERDR_SOCKET_PATH").ok().as_deref())
 }
 
 // -- field templates ---------------------------------------------------------
@@ -686,10 +731,13 @@ struct CardValues {
     effort: Option<String>,
     /// Permission-mode wire string, or `None` for the harness default.
     permission: Option<String>,
+    /// Selected herdr session name, or `None` for the daemon's default session.
+    session: Option<String>,
     space_kind: String,
-    /// Effective space ref (workspace id or free text; "" = unset).
+    /// Effective space ref (workspace id, or new-workspace label / free text).
     space_ref: String,
-    worktree_base: String,
+    /// Working directory for a `new_workspace` space ("" = unset).
+    space_cwd: String,
 }
 
 impl CardValues {
@@ -702,12 +750,15 @@ impl CardValues {
                 model: c.model.clone().unwrap_or_default(),
                 effort: c.effort.map(|e| e.as_str().to_string()),
                 permission: c.permission_mode.clone(),
+                session: c.session.clone(),
                 space_kind: c.space_kind.as_str().to_string(),
                 space_ref: c.space_ref.clone().unwrap_or_default(),
-                worktree_base: c.worktree_base.clone().unwrap_or_default(),
+                space_cwd: c.space_cwd.clone().unwrap_or_default(),
             },
             None => CardValues {
                 harness: "claude".to_string(),
+                // A new card defaults to the session the TUI itself runs in.
+                session: detect_current_session(),
                 space_kind: "workspace".to_string(),
                 ..CardValues::default()
             },
@@ -728,14 +779,15 @@ fn union_efforts(caps: &HarnessCapabilities) -> Vec<Effort> {
 }
 
 /// Build the guided card fields from the current values and (optional) live
-/// catalog / workspace list. The field list is a fixed 11 entries in a stable
-/// order — `(custom)` companions and `worktree base` are hidden via
+/// catalog / workspace / session lists. The field list is a fixed set in a
+/// stable order — `(custom)` companions and `cwd` are hidden via
 /// [`Form::field_visible`] rather than omitted, so focus indices stay stable
 /// across rebuilds.
 fn build_card_fields(
     values: &CardValues,
     caps: Option<&HarnessCapabilities>,
     spaces: &[SpaceInfo],
+    sessions: &[SessionInfo],
 ) -> Vec<Field> {
     let v = values;
 
@@ -836,21 +888,38 @@ fn build_card_fields(
         .unwrap_or(0);
     let permission_field = Field::choice(FieldId::Permission, "permission", perm_opts, perm_idx);
 
-    // -- space kind ----------------------------------------------------------
+    // -- session (running sessions + `(default)` = daemon's default) ---------
+    let session_field = session_field(v.session.as_deref(), sessions);
+
+    // -- space kind (exactly workspace / new workspace) ----------------------
     let space_opts = vec![
-        ChoiceOpt::str("workspace"),
-        ChoiceOpt::str("cwd"),
-        ChoiceOpt::str("worktree"),
+        ChoiceOpt {
+            label: "workspace".to_string(),
+            val: ChoiceVal::Str("workspace".to_string()),
+        },
+        ChoiceOpt {
+            label: "new workspace".to_string(),
+            val: ChoiceVal::Str("new_workspace".to_string()),
+        },
     ];
     let space_idx = space_opts
         .iter()
-        .position(|o| o.label == v.space_kind)
+        .position(|o| matches!(&o.val, ChoiceVal::Str(s) if *s == v.space_kind))
         .unwrap_or(0);
+    let is_new_workspace = v.space_kind == "new_workspace";
 
-    // -- space ref (workspace selector, else free text) ----------------------
-    let is_workspace = v.space_kind == "workspace";
+    // -- space ref --------------------------------------------------------
+    //  * workspace     → an open-workspace selector (label shown, id stored),
+    //    with a `(custom)` free-text escape hatch; free text if none fetched.
+    //  * new_workspace → a plain text field: the workspace label/name.
+    let is_workspace = !is_new_workspace;
     let ref_matches_workspace = spaces.iter().any(|s| s.id == v.space_ref);
-    let (space_ref_field, space_ref_custom_init) = if is_workspace && !spaces.is_empty() {
+    let (space_ref_field, space_ref_custom_init) = if is_new_workspace {
+        (
+            Field::text(FieldId::SpaceRef, "workspace name", &v.space_ref, false),
+            "",
+        )
+    } else if is_workspace && !spaces.is_empty() {
         // Show the label but store the id; keep a `(custom)` escape hatch.
         let mut opts: Vec<ChoiceOpt> = spaces
             .iter()
@@ -906,16 +975,34 @@ fn build_card_fields(
         model_custom_field,
         effort_field,
         permission_field,
+        session_field,
         Field::choice(FieldId::SpaceKind, "space", space_opts, space_idx),
         space_ref_field,
         space_ref_custom_field,
-        Field::text(
-            FieldId::WorktreeBase,
-            "worktree base",
-            &v.worktree_base,
-            false,
-        ),
+        Field::text(FieldId::SpaceCwd, "cwd", &v.space_cwd, false),
     ]
+}
+
+/// Build the session selector: `(default)` (the daemon's default session, wire
+/// value `None`) plus every running session by name. `current` (the preselected
+/// session name, `None` = default) is always offered even if it is not in the
+/// fetched list — so the env-detected session survives the empty→fetched
+/// rebuild and edits of cards whose session is stopped stay visible.
+fn session_field(current: Option<&str>, sessions: &[SessionInfo]) -> Field {
+    let mut opts = vec![ChoiceOpt::default_opt()];
+    for s in sessions.iter().filter(|s| s.running) {
+        opts.push(ChoiceOpt::str(&s.name));
+    }
+    if let Some(name) = current {
+        if !opts.iter().any(|o| o.label == name) {
+            opts.push(ChoiceOpt::str(name));
+        }
+    }
+    let idx = match current {
+        Some(name) => opts.iter().position(|o| o.label == name).unwrap_or(0),
+        None => 0,
+    };
+    Field::choice(FieldId::Session, "session", opts, idx)
 }
 
 fn column_fields(col: Option<&Column>, columns: &[Column]) -> Vec<Field> {
@@ -1027,4 +1114,38 @@ fn column_fields(col: Option<&Column>, columns: &[Column]) -> Vec<Field> {
             false,
         ),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::session_name_from_socket;
+
+    #[test]
+    fn session_name_from_named_session_socket() {
+        assert_eq!(
+            session_name_from_socket(Some("/home/np/.config/herdr/sessions/feature/herdr.sock")),
+            Some("feature".to_string())
+        );
+    }
+
+    #[test]
+    fn session_name_from_default_socket_is_none() {
+        // The plain default socket (no `sessions/<name>/` segment) = default.
+        assert_eq!(
+            session_name_from_socket(Some("/home/np/.config/herdr/herdr.sock")),
+            None
+        );
+    }
+
+    #[test]
+    fn session_name_unset_or_unrelated_is_none() {
+        assert_eq!(session_name_from_socket(None), None);
+        assert_eq!(session_name_from_socket(Some("")), None);
+        assert_eq!(session_name_from_socket(Some("/tmp/whatever.sock")), None);
+        // A `sessions` dir with an empty name is not a valid session.
+        assert_eq!(
+            session_name_from_socket(Some("/x/sessions//herdr.sock")),
+            None
+        );
+    }
 }

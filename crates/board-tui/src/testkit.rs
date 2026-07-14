@@ -4,21 +4,27 @@
 use board_core::capability::{claude_capabilities, HarnessCapabilities};
 use board_core::client::{BoardClient, FakeBoardClient};
 use board_core::protocol::{
-    CardCreateParams, CardStatus, ColumnCreateParams, Effort, Event, RunOutcome, SpaceInfo,
-    SpaceKind, SpaceListResult, Trigger,
+    CardCreateParams, CardStatus, ColumnCreateParams, Effort, Event, RunOutcome, SessionInfo,
+    SessionListResult, SpaceInfo, SpaceKind, SpaceListResult, Trigger,
 };
 use serde_json::{json, Value};
 
-/// A [`FakeBoardClient`] wrapper that also answers the two catalog RPCs
-/// (`harness.capabilities` / `space.list`) which the real daemon serves but the
-/// bare fake does not. Everything else delegates to the inner fake.
+/// A [`FakeBoardClient`] wrapper that also answers the catalog RPCs
+/// (`harness.capabilities` / `session.list` / `space.list`) which the real
+/// daemon serves but the bare fake does not. Everything else delegates to the
+/// inner fake.
 ///
-/// Tests can stub failures (`without_caps` / `without_spaces`) to exercise the
-/// form's free-text fallback path.
+/// `space.list` is session-scoped: the default session returns [`demo_spaces`],
+/// a named session returns a different set (so tests can observe the workspace
+/// list re-fetching when the session field changes).
+///
+/// Tests can stub failures (`without_caps` / `without_spaces` /
+/// `without_sessions`) to exercise the form's fallback paths.
 pub struct DemoClient {
     inner: FakeBoardClient,
     caps: Option<HarnessCapabilities>,
     spaces: Option<Vec<SpaceInfo>>,
+    sessions: Option<Vec<SessionInfo>>,
 }
 
 impl DemoClient {
@@ -27,6 +33,7 @@ impl DemoClient {
             inner,
             caps: Some(claude_capabilities()),
             spaces: Some(demo_spaces()),
+            sessions: Some(demo_sessions()),
         }
     }
 
@@ -39,6 +46,12 @@ impl DemoClient {
     /// Make `space.list` fail (space ref falls back to free-text).
     pub fn without_spaces(mut self) -> DemoClient {
         self.spaces = None;
+        self
+    }
+
+    /// Make `session.list` fail (session selector keeps just `(default)`).
+    pub fn without_sessions(mut self) -> DemoClient {
+        self.sessions = None;
         self
     }
 
@@ -56,8 +69,19 @@ impl BoardClient for DemoClient {
                 None => anyhow::bail!("harness.capabilities: stubbed failure"),
             },
             "space.list" => match &self.spaces {
-                Some(s) => Ok(json!(SpaceListResult { spaces: s.clone() })),
+                Some(_) => {
+                    let session = params.get("session").and_then(|v| v.as_str());
+                    Ok(json!(SpaceListResult {
+                        spaces: demo_spaces_for(session)
+                    }))
+                }
                 None => anyhow::bail!("space.list: stubbed failure"),
+            },
+            "session.list" => match &self.sessions {
+                Some(s) => Ok(json!(SessionListResult {
+                    sessions: s.clone()
+                })),
+                None => anyhow::bail!("session.list: stubbed failure"),
             },
             _ => self.inner.call(method, params),
         }
@@ -68,8 +92,24 @@ impl BoardClient for DemoClient {
     }
 }
 
-/// Demo workspaces surfaced by the stubbed `space.list`. `w4` matches the seeded
-/// running card's `space_ref`, so editing it preselects that workspace.
+/// Demo sessions surfaced by the stubbed `session.list`.
+pub fn demo_sessions() -> Vec<SessionInfo> {
+    vec![
+        SessionInfo {
+            name: "default".to_string(),
+            default: true,
+            running: true,
+        },
+        SessionInfo {
+            name: "feature".to_string(),
+            default: false,
+            running: true,
+        },
+    ]
+}
+
+/// Demo workspaces for the default session. `w4` matches the seeded running
+/// card's `space_ref`, so editing it preselects that workspace.
 pub fn demo_spaces() -> Vec<SpaceInfo> {
     vec![
         SpaceInfo {
@@ -85,6 +125,19 @@ pub fn demo_spaces() -> Vec<SpaceInfo> {
             label: "docs site".to_string(),
         },
     ]
+}
+
+/// Workspaces for a given session. The default session (`None` / `"default"`)
+/// gets [`demo_spaces`]; the `"feature"` session gets its own single workspace
+/// so a session change visibly re-scopes the list.
+pub fn demo_spaces_for(session: Option<&str>) -> Vec<SpaceInfo> {
+    match session {
+        Some("feature") => vec![SpaceInfo {
+            id: "w9".to_string(),
+            label: "feature sandbox".to_string(),
+        }],
+        _ => demo_spaces(),
+    }
 }
 
 fn col(name: &str, trigger: Trigger) -> ColumnCreateParams {
@@ -147,6 +200,7 @@ pub fn demo_client() -> anyhow::Result<DemoClient> {
         "[\"claude\"]",
         "prompt",
         Some("sess-1"),
+        None,
     )?;
     c.db().start_run(run.id, Some("w4"), Some("p1"))?;
 
@@ -200,6 +254,7 @@ pub fn demo_client() -> anyhow::Result<DemoClient> {
         "[\"claude\"]",
         "p",
         Some("sess-2"),
+        None,
     )?;
     c.db().start_run(r1.id, Some("w1"), Some("p2"))?;
     c.db()
@@ -211,6 +266,7 @@ pub fn demo_client() -> anyhow::Result<DemoClient> {
         "[\"claude\"]",
         "p",
         Some("sess-2"),
+        None,
     )?;
     c.db().start_run(r2.id, Some("w1"), Some("p3"))?;
     c.db()

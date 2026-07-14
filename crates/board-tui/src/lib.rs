@@ -22,7 +22,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use board_core::capability::HarnessCapabilities;
 use board_core::client::BoardClient;
-use board_core::protocol::{Event, SpaceInfo, SpaceListResult};
+use board_core::protocol::{Event, SessionInfo, SessionListResult, SpaceInfo, SpaceListResult};
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event as CtEvent, KeyEventKind};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -207,11 +207,15 @@ impl Driver {
     /// hand them to the form. A failed fetch is non-fatal: the affected
     /// selectors fall back to free-text and the user gets a status-line warning.
     fn load_form_options(&mut self) {
-        let Some(harness) = self.app.form.as_ref().map(|f| f.current_harness()) else {
+        let Some(form) = self.app.form.as_ref() else {
             return;
         };
+        let harness = form.current_harness();
+        // The workspace list is scoped to the currently selected session.
+        let session = form.current_session();
         let caps = fetch_capabilities(self.client.as_mut(), &harness);
-        let spaces = fetch_spaces(self.client.as_mut());
+        let sessions = fetch_sessions(self.client.as_mut());
+        let spaces = fetch_spaces(self.client.as_mut(), session.as_deref());
 
         let mut warning: Option<String> = None;
         let caps_opt = match caps {
@@ -230,8 +234,10 @@ impl Driver {
                 None
             }
         };
+        // Sessions failing is non-fatal: keep `(default)` + any preselection.
+        let sessions_opt = sessions.ok();
         if let Some(form) = self.app.form.as_mut() {
-            form.apply_options(caps_opt, spaces_opt);
+            form.apply_options(caps_opt, spaces_opt, sessions_opt);
         }
         if let Some(w) = warning {
             self.app.set_toast(w, true);
@@ -263,11 +269,19 @@ fn fetch_capabilities(client: &mut dyn BoardClient, harness: &str) -> Result<Har
     Ok(serde_json::from_value(v)?)
 }
 
-/// Fetch `space.list` via the client's generic `call`.
-fn fetch_spaces(client: &mut dyn BoardClient) -> Result<Vec<SpaceInfo>> {
-    let v = client.call("space.list", serde_json::json!({}))?;
+/// Fetch `space.list` (scoped to `session`, `None` = default) via the client's
+/// generic `call`.
+fn fetch_spaces(client: &mut dyn BoardClient, session: Option<&str>) -> Result<Vec<SpaceInfo>> {
+    let v = client.call("space.list", serde_json::json!({ "session": session }))?;
     let r: SpaceListResult = serde_json::from_value(v)?;
     Ok(r.spaces)
+}
+
+/// Fetch `session.list` via the client's generic `call`.
+fn fetch_sessions(client: &mut dyn BoardClient) -> Result<Vec<SessionInfo>> {
+    let v = client.call("session.list", serde_json::json!({}))?;
+    let r: SessionListResult = serde_json::from_value(v)?;
+    Ok(r.sessions)
 }
 
 fn epoch_secs() -> i64 {

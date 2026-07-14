@@ -123,8 +123,8 @@ fn form_field_cycling_wraps_and_skips_hidden() {
     update(&mut app, key(KeyCode::Char('n'))); // open new-card form
     assert_eq!(app.screen, Screen::CardForm);
 
-    // Focus starts at Title (0). Tab advances; worktree_base is hidden while
-    // space != worktree, so the visible-field walk skips it.
+    // Focus starts at Title (0). Tab advances; `cwd` is hidden while the space
+    // kind is `workspace`, so the visible-field walk skips it.
     let start = app.form.as_ref().unwrap().focus;
     assert_eq!(start, 0);
     update(&mut app, key(KeyCode::Tab));
@@ -139,28 +139,37 @@ fn form_field_cycling_wraps_and_skips_hidden() {
     assert!(app.form.as_ref().unwrap().field_visible(last));
     assert_ne!(
         app.form.as_ref().unwrap().fields[last].id,
-        FieldId::WorktreeBase
+        FieldId::SpaceCwd
     );
 }
 
 #[test]
-fn worktree_base_visibility_follows_space_kind() {
+fn cwd_visibility_follows_space_kind() {
     let mut form = Form::card_create(1);
-    // Find the space-kind choice field and cycle it to "worktree".
+    // Find the space-kind choice field and cycle it to "new workspace".
     let space_idx = form
         .fields
         .iter()
         .position(|f| f.id == FieldId::SpaceKind)
         .unwrap();
-    let wt_idx = form
+    let cwd_idx = form
         .fields
         .iter()
-        .position(|f| f.id == FieldId::WorktreeBase)
+        .position(|f| f.id == FieldId::SpaceCwd)
         .unwrap();
-    assert!(!form.field_visible(wt_idx)); // hidden by default (workspace)
-                                          // workspace -> cwd -> worktree
-    form.fields[space_idx].cycle(2);
-    assert!(form.field_visible(wt_idx));
+    assert!(!form.field_visible(cwd_idx)); // hidden by default (workspace)
+                                           // workspace -> new workspace
+    form.fields[space_idx].cycle(1);
+    assert!(form.field_visible(cwd_idx));
+}
+
+#[test]
+fn space_kind_selector_has_exactly_two_options() {
+    let form = Form::card_create(1);
+    assert_eq!(
+        opt_labels(&form, FieldId::SpaceKind),
+        vec!["workspace", "new workspace"]
+    );
 }
 
 #[test]
@@ -327,7 +336,7 @@ fn fetch_failure_falls_back_to_free_text() {
 #[test]
 fn model_selector_cycles_catalog_plus_custom() {
     let mut form = Form::card_create(1);
-    form.apply_options(Some(split_effort_caps()), Some(vec![]));
+    form.apply_options(Some(split_effort_caps()), Some(vec![]), None);
     assert_eq!(
         opt_labels(&form, FieldId::Model),
         vec!["opus", "haiku", "(custom)"]
@@ -337,7 +346,7 @@ fn model_selector_cycles_catalog_plus_custom() {
 #[test]
 fn effort_options_follow_selected_model_and_reset_when_invalid() {
     let mut form = Form::card_create(1);
-    form.apply_options(Some(split_effort_caps()), Some(vec![]));
+    form.apply_options(Some(split_effort_caps()), Some(vec![]), None);
     // Default model = opus -> efforts low/high.
     assert_eq!(
         opt_labels(&form, FieldId::Effort),
@@ -366,7 +375,7 @@ fn effort_kept_when_still_valid_across_model_change() {
     // Give both models `low`.
     caps.models[1].efforts = vec![Effort::Low, Effort::Medium];
     let mut form = Form::card_create(1);
-    form.apply_options(Some(caps), Some(vec![]));
+    form.apply_options(Some(caps), Some(vec![]), None);
     set_choice(&mut form, FieldId::Effort, "low");
     set_choice(&mut form, FieldId::Model, "haiku");
     form.on_model_changed();
@@ -381,7 +390,7 @@ fn effort_kept_when_still_valid_across_model_change() {
 #[test]
 fn custom_model_reveals_free_text_and_submits_it() {
     let mut form = Form::card_create(7);
-    form.apply_options(Some(split_effort_caps()), Some(vec![]));
+    form.apply_options(Some(split_effort_caps()), Some(vec![]), None);
     form.fields[0].set_text("t"); // title required
     set_choice(&mut form, FieldId::Model, "(custom)");
     // ModelCustom becomes visible; type an arbitrary id.
@@ -419,6 +428,7 @@ fn space_selector_shows_label_but_stores_id() {
     form.apply_options(
         Some(board_core::capability::claude_capabilities()),
         Some(spaces),
+        None,
     );
     // space_kind defaults to workspace -> the ref is a selector.
     assert!(is_choice(&form, FieldId::SpaceRef));
@@ -443,6 +453,7 @@ fn space_custom_escape_hatch_stores_free_text() {
     form.apply_options(
         Some(board_core::capability::claude_capabilities()),
         Some(spaces),
+        None,
     );
     form.fields[0].set_text("t");
     set_choice(&mut form, FieldId::SpaceRef, "(custom)");
@@ -480,14 +491,14 @@ fn changing_space_kind_toggles_selector_and_free_text() {
     d.handle(key(KeyCode::Char('n')));
     // Workspace (default) -> space ref is a selector.
     assert!(is_choice(d.app.form.as_ref().unwrap(), FieldId::SpaceRef));
-    // Navigate focus to the space-kind field and cycle to `cwd`.
+    // Navigate focus to the space-kind field and cycle to `new workspace`.
     let form = d.app.form.as_mut().unwrap();
     form.focus = form
         .fields
         .iter()
         .position(|f| f.id == FieldId::SpaceKind)
         .unwrap();
-    d.handle(key(KeyCode::Right)); // cycle space kind: workspace -> cwd
+    d.handle(key(KeyCode::Right)); // cycle space kind: workspace -> new workspace
     let form = d.app.form.as_ref().unwrap();
     assert_eq!(
         form.fields
@@ -495,8 +506,97 @@ fn changing_space_kind_toggles_selector_and_free_text() {
             .find(|f| f.id == FieldId::SpaceKind)
             .unwrap()
             .display(),
-        "cwd"
+        "new workspace"
     );
-    // cwd -> free text ref.
+    // new_workspace -> the space ref becomes a free-text `workspace name`.
     assert!(!is_choice(form, FieldId::SpaceRef));
+    // ...and the `cwd` field is now visible.
+    let cwd_idx = form
+        .fields
+        .iter()
+        .position(|f| f.id == FieldId::SpaceCwd)
+        .unwrap();
+    assert!(form.field_visible(cwd_idx));
+}
+
+#[test]
+fn new_workspace_submit_carries_name_and_cwd() {
+    let mut form = Form::card_create(1);
+    form.apply_options(
+        Some(board_core::capability::claude_capabilities()),
+        Some(vec![]),
+        None,
+    );
+    form.fields[0].set_text("t"); // title required
+    set_choice(&mut form, FieldId::SpaceKind, "new workspace");
+    form.on_space_kind_changed();
+    // Both space ref (label) and cwd are now plain text fields.
+    assert!(!is_choice(&form, FieldId::SpaceRef));
+    form.fields
+        .iter_mut()
+        .find(|f| f.id == FieldId::SpaceRef)
+        .unwrap()
+        .set_text("my-feature");
+    form.fields
+        .iter_mut()
+        .find(|f| f.id == FieldId::SpaceCwd)
+        .unwrap()
+        .set_text("/repo/feature");
+    match form.submit().unwrap() {
+        Submit::CardCreate(p) => {
+            assert_eq!(
+                p.space_kind,
+                Some(board_core::protocol::SpaceKind::NewWorkspace)
+            );
+            assert_eq!(p.space_ref.as_deref(), Some("my-feature"));
+            assert_eq!(p.space_cwd.as_deref(), Some("/repo/feature"));
+        }
+        _ => panic!("expected CardCreate"),
+    }
+}
+
+#[test]
+fn changing_session_refetches_spaces() {
+    // The demo client returns different workspaces per session, so switching the
+    // session field re-scopes the space selector.
+    let mut d = driver_of(demo_client().unwrap());
+    d.handle(key(KeyCode::Char('n')));
+    // Default session -> demo_spaces (MELI scraper / auth refactor / docs site).
+    let before = opt_labels(d.app.form.as_ref().unwrap(), FieldId::SpaceRef);
+    assert!(before.iter().any(|l| l.contains("MELI scraper")));
+    // Focus the session field and cycle to "feature".
+    let form = d.app.form.as_mut().unwrap();
+    form.focus = form
+        .fields
+        .iter()
+        .position(|f| f.id == FieldId::Session)
+        .unwrap();
+    // Session options are [(default), default, feature]; cycle to "feature".
+    d.handle(key(KeyCode::Right)); // (default) -> default (re-fetch)
+    d.handle(key(KeyCode::Right)); // default -> feature (re-fetch)
+    let form = d.app.form.as_ref().unwrap();
+    assert_eq!(
+        form.fields
+            .iter()
+            .find(|f| f.id == FieldId::Session)
+            .unwrap()
+            .display(),
+        "feature"
+    );
+    let after = opt_labels(form, FieldId::SpaceRef);
+    assert!(
+        after.iter().any(|l| l.contains("feature sandbox")),
+        "space list re-scoped to the feature session; got {after:?}"
+    );
+}
+
+#[test]
+fn session_selector_offers_default_plus_running() {
+    let mut d = driver_of(demo_client().unwrap());
+    d.handle(key(KeyCode::Char('n')));
+    let labels = opt_labels(d.app.form.as_ref().unwrap(), FieldId::Session);
+    // (default) first, then the running demo sessions.
+    assert_eq!(labels[0], "(default)");
+    assert!(labels.contains(&"default".to_string()));
+    assert!(labels.contains(&"feature".to_string()));
 }

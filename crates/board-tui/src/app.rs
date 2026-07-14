@@ -60,8 +60,9 @@ pub enum Effect {
     RunDone(i64, RunOutcome),
     /// Hand the focused multiline text field to `$EDITOR`.
     EditFocusedTextArea,
-    /// Fetch `harness.capabilities` + `space.list` for the open card form and
-    /// populate its guided selectors. Emitted on form open and harness change.
+    /// Fetch `harness.capabilities` + `session.list` + `space.list` for the open
+    /// card form and populate its guided selectors. Emitted on form open and on
+    /// harness/session change (the latter re-scopes the workspace list).
     LoadFormOptions,
     Quit,
 }
@@ -527,10 +528,13 @@ fn form_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
                 if let Some(delta) = delta {
                     let fid = form.focused().id;
                     form.focused_mut().cycle(delta);
-                    // A changed harness needs fresh capabilities; model/space-kind
+                    // A changed harness needs fresh capabilities; a changed
+                    // session needs its own workspace list; model/space-kind
                     // changes reshape the dependent selectors in place.
                     match fid {
-                        FieldId::Harness => return vec![Effect::LoadFormOptions],
+                        FieldId::Harness | FieldId::Session => {
+                            return vec![Effect::LoadFormOptions]
+                        }
                         FieldId::Model => form.on_model_changed(),
                         FieldId::SpaceKind => form.on_space_kind_changed(),
                         _ => {}

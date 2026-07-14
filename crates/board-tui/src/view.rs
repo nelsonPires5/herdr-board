@@ -274,6 +274,10 @@ fn draw_detail(app: &App, f: &mut Frame, area: Rect) {
                 card.permission_mode.as_deref().unwrap_or("-")
             )),
             Span::raw(format!(
+                "   session={}",
+                card.session.as_deref().unwrap_or("(default)")
+            )),
+            Span::raw(format!(
                 "   space={}:{}",
                 card.space_kind.as_str(),
                 card.space_ref.as_deref().unwrap_or("-")
