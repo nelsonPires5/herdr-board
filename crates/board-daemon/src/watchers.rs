@@ -2,6 +2,8 @@
 //! poller, and the herdr status-event thread. Each maps a completion signal
 //! onto a `finalize_run` per `docs/protocol.md` §4.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -172,48 +174,75 @@ async fn poll_once(d: &Arc<Daemon>) {
 
 // -- herdr status-event thread ----------------------------------------------
 
-/// Blocking thread: subscribes to herdr status/exit events for active panes and
-/// applies status → card effects. Reconnects when the watched pane set changes
-/// (checked after each received event) or on disconnect. No-op without herdr.
+/// Blocking thread multiplexing one event stream **per session socket** that
+/// has active panes (the fix for the multi-session bug: `agent.start`'s
+/// `pane.agent_status_changed` subscription is validated per socket, so each
+/// session needs its own stream). No-op without herdr.
+///
+/// Design (deliberately simple, no per-session thread lifecycle): a single
+/// thread holds a `socket → HerdrEvents` map. Each pass it reads the watch set
+/// (`panes_by_socket` + generation). On a generation change it drops every
+/// connection and rebuilds (subscriptions must reflect the new pane sets);
+/// between changes it (re)connects any watched socket missing a live stream
+/// (covers first-connect and reconnect-after-disconnect) and polls each stream
+/// with a short deadline so shutdown and watch changes are honored promptly.
 pub fn herdr_event_thread(d: Arc<Daemon>) {
-    let Some(herdr) = d.herdr.clone() else {
+    if d.herdr.is_none() {
         return;
-    };
-    let sock = herdr.socket_path().to_path_buf();
+    }
+    let mut conns: HashMap<PathBuf, HerdrEvents> = HashMap::new();
+    let mut current_gen: Option<u64> = None;
 
     while !d.is_shutdown() {
-        let (panes, generation) = {
+        let (panes_by_socket, generation) = {
             let w = d.watch.lock().unwrap();
-            (w.panes.clone(), w.generation)
+            (w.panes_by_socket.clone(), w.generation)
         };
-        let subs = watch_subscriptions(&panes);
-        let mut events = match HerdrEvents::connect_with_retry(&sock, &subs, &Backoff::bounded(4)) {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::debug!("herdr events connect failed: {e}");
-                std::thread::sleep(Duration::from_secs(1));
+
+        // Watch set changed → drop all streams so they resubscribe fresh.
+        if current_gen != Some(generation) {
+            current_gen = Some(generation);
+            conns.clear();
+        }
+        // Forget streams for sockets no longer watched.
+        conns.retain(|sock, _| panes_by_socket.contains_key(sock));
+        // (Re)connect any watched socket missing a live stream.
+        for (sock, panes) in &panes_by_socket {
+            if conns.contains_key(sock) {
                 continue;
             }
-        };
-        loop {
-            // Bounded wait so shutdown and watch-set changes are honored even
-            // when no events flow (a freshly spawned pane must get its
-            // agent-status subscription promptly, not after the next event).
-            match events.poll_event(Duration::from_millis(500)) {
-                Ok(Some(ev)) => handle_event(&d, ev),
+            let subs = watch_subscriptions(panes);
+            match HerdrEvents::connect_with_retry(sock, &subs, &Backoff::bounded(4)) {
+                Ok(ev) => {
+                    conns.insert(sock.clone(), ev);
+                }
+                Err(e) => tracing::debug!("herdr events connect {sock:?} failed: {e}"),
+            }
+        }
+
+        if conns.is_empty() {
+            // Nothing to watch yet; wait for the next spawn.
+            std::thread::sleep(Duration::from_millis(500));
+            continue;
+        }
+
+        // Poll each stream once with a short deadline.
+        let mut broken: Vec<PathBuf> = Vec::new();
+        for (sock, ev) in conns.iter_mut() {
+            match ev.poll_event(Duration::from_millis(200)) {
+                Ok(Some(event)) => handle_event(&d, event),
                 Ok(None) => {}
                 Err(e) => {
-                    tracing::debug!("herdr events stream ended: {e}");
-                    break;
+                    tracing::debug!("herdr events {sock:?} ended: {e}");
+                    broken.push(sock.clone());
                 }
             }
             if d.is_shutdown() {
                 return;
             }
-            // Reconnect with the new pane set if it changed.
-            if d.watch.lock().unwrap().generation != generation {
-                break;
-            }
+        }
+        for sock in broken {
+            conns.remove(&sock); // reconnected on a later pass if still watched
         }
     }
 }

@@ -2,7 +2,7 @@
 //! (plain child processes, used by tests with the fake harness).
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
@@ -94,9 +94,11 @@ impl Spawner for LocalSpawner {
 /// Launches agents as herdr panes via `agent.start`; kills via `pane.close`;
 /// liveness via `session.snapshot`.
 ///
-/// Holds only the socket path and opens a fresh [`HerdrClient`] per call, so a
-/// missing herdr surfaces as a per-run spawn error (the daemon marks the run
-/// `fail`) rather than crashing at startup.
+/// Holds a *default* socket path and opens a fresh [`HerdrClient`] per call —
+/// but each call targets the run's session socket when one is supplied
+/// (`SpawnReq::herdr_socket` for spawn, `SpawnHandle::herdr_socket` for
+/// kill/liveness), falling back to the default. A missing herdr surfaces as a
+/// per-run spawn error (the daemon marks the run `fail`) rather than crashing.
 #[derive(Clone)]
 pub struct HerdrSpawner {
     socket: PathBuf,
@@ -107,14 +109,16 @@ impl HerdrSpawner {
         HerdrSpawner { socket }
     }
 
-    fn client(&self) -> anyhow::Result<HerdrClient> {
-        HerdrClient::connect(&self.socket).map_err(|e| anyhow!("herdr unavailable: {e}"))
+    /// Open a client on `socket` (the run's session), else the default socket.
+    fn client_for(&self, socket: Option<&Path>) -> anyhow::Result<HerdrClient> {
+        let target = socket.unwrap_or(&self.socket);
+        HerdrClient::connect(target).map_err(|e| anyhow!("herdr unavailable: {e}"))
     }
 }
 
 impl Spawner for HerdrSpawner {
     fn spawn(&self, req: &SpawnReq) -> anyhow::Result<SpawnHandle> {
-        let mut client = self.client()?;
+        let mut client = self.client_for(req.herdr_socket.as_deref())?;
         let env: BTreeMap<String, String> = req.env.iter().cloned().collect();
 
         // Placement into a labeled tab (grid layout) only makes sense with a
@@ -141,12 +145,13 @@ impl Spawner for HerdrSpawner {
             pane_id: Some(started.pane_id().to_string()),
             workspace_id: Some(started.workspace_id().to_string()),
             pid: None,
+            herdr_socket: req.herdr_socket.clone(),
         })
     }
 
     fn kill(&self, h: &SpawnHandle) -> anyhow::Result<()> {
         if let Some(pane) = &h.pane_id {
-            let mut client = self.client()?;
+            let mut client = self.client_for(h.herdr_socket.as_deref())?;
             client
                 .pane_close(pane)
                 .with_context(|| format!("herdr pane.close {pane}"))?;
@@ -158,7 +163,7 @@ impl Spawner for HerdrSpawner {
         let Some(pane) = &h.pane_id else {
             return Ok(false);
         };
-        let mut client = self.client()?;
+        let mut client = self.client_for(h.herdr_socket.as_deref())?;
         let snap = client
             .session_snapshot()
             .context("herdr session.snapshot")?;

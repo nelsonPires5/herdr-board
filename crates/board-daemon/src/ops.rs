@@ -7,7 +7,8 @@ use std::sync::Arc;
 use board_core::capability::capabilities_for;
 use board_core::db::BOARD_ID;
 use board_core::engine::{
-    decide_entry, validate_card_edit, validate_column_delete, validate_column_permission_override,
+    decide_entry, validate_card_edit, validate_card_space, validate_column_delete,
+    validate_column_permission_override,
 };
 use board_core::protocol::*;
 use board_core::{Error, Result};
@@ -43,7 +44,8 @@ pub fn handle_request(d: &Arc<Daemon>, method: &str, params: Value) -> Result<Va
         "run.cancel" => run_cancel(d, from(params)?),
         "run.retry" => run_retry(d, from(params)?),
         "harness.capabilities" => harness_capabilities(d, from(params)?),
-        "space.list" => space_list(d),
+        "space.list" => space_list(d, from(params)?),
+        "session.list" => session_list(d),
         other => Err(Error::BadRequest(format!("unknown method: {other}"))),
     }
 }
@@ -137,6 +139,11 @@ fn column_delete(d: &Arc<Daemon>, p: ColumnDeleteParams) -> Result<Value> {
 // -- cards ------------------------------------------------------------------
 
 fn card_create(d: &Arc<Daemon>, p: CardCreateParams) -> Result<Value> {
+    validate_card_space(
+        p.space_kind.unwrap_or(SpaceKind::Workspace),
+        p.space_ref.as_deref(),
+        p.space_cwd.as_deref(),
+    )?;
     let card = d.store.lock().create_card(&p)?;
     let column = require_column(d, card.column_id)?;
     d.emit_changed(
@@ -163,9 +170,10 @@ fn card_update(d: &Arc<Daemon>, p: CardUpdateParams) -> Result<Value> {
         || p.model.is_some()
         || p.effort.is_some()
         || p.permission_mode.is_some()
+        || p.session.is_some()
         || p.space_kind.is_some()
         || p.space_ref.is_some()
-        || p.worktree_base.is_some();
+        || p.space_cwd.is_some();
     validate_card_edit(card.status, edits_locked)?;
     let card = d.store.lock().update_card(&p)?;
     d.emit_changed(BoardChangedReason::CardUpdated, Some(card.id), None);
@@ -319,12 +327,18 @@ fn harness_capabilities(d: &Arc<Daemon>, p: HarnessCapabilitiesParams) -> Result
     }
 }
 
-fn space_list(d: &Arc<Daemon>) -> Result<Value> {
-    let herdr = d
-        .herdr
+fn space_list(d: &Arc<Daemon>, p: SpaceListParams) -> Result<Value> {
+    let reg = d
+        .session_registry
         .as_ref()
         .ok_or_else(|| Error::HerdrUnavailable("herdr not connected".into()))?;
-    let mut client = herdr.clone();
+    // Resolve the requested session (None = default) to its socket; an
+    // unknown/stopped session errors listing the known ones.
+    let resolved = reg
+        .resolve(p.session.as_deref())
+        .map_err(|e| Error::HerdrUnavailable(format!("session '{:?}': {e:#}", p.session)))?;
+    let mut client = board_herdr::HerdrClient::connect(&resolved.socket)
+        .map_err(|e| Error::HerdrUnavailable(format!("herdr unavailable: {e}")))?;
     let workspaces = client
         .workspace_list()
         .map_err(|e| Error::HerdrUnavailable(format!("workspace.list: {e}")))?;
@@ -336,6 +350,17 @@ fn space_list(d: &Arc<Daemon>) -> Result<Value> {
         })
         .collect();
     Ok(json!(SpaceListResult { spaces }))
+}
+
+fn session_list(d: &Arc<Daemon>) -> Result<Value> {
+    let reg = d
+        .session_registry
+        .as_ref()
+        .ok_or_else(|| Error::HerdrUnavailable("herdr not connected".into()))?;
+    let sessions = reg
+        .session_infos()
+        .map_err(|e| Error::HerdrUnavailable(format!("session.list: {e:#}")))?;
+    Ok(json!(SessionListResult { sessions }))
 }
 
 #[cfg(test)]
@@ -363,6 +388,7 @@ mod tests {
             PathBuf::from("/tmp/board-test.sock"),
             Arc::new(LocalSpawner::new()),
             None, // no herdr
+            None, // no session registry
             events_tx,
             dispatch_tx,
             shutdown_tx,

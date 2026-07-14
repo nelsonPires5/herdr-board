@@ -16,7 +16,7 @@ use board_core::prompt::{assemble_prompt, effective_settings};
 use board_core::protocol::{BoardChangedReason, CardStatus, RunOutcome, SpaceKind};
 use board_core::spawn::SpawnReq;
 use board_core::{Error, Result};
-use board_herdr::{NotificationSound, WorktreeCreateParams};
+use board_herdr::{HerdrClient, NotificationSound, WorkspaceCreateParams, WorkspaceInfo};
 use uuid::Uuid;
 
 use crate::state::{ActiveRun, Daemon, MAX_AUTO_HOPS};
@@ -93,6 +93,7 @@ pub fn enqueue_run(d: &Arc<Daemon>, card_id: i64, column_id: i64, is_retry: bool
         &argv_json,
         &prompt,
         session_for_run.as_deref(),
+        card.session.as_deref(),
     )?;
     db.set_card_status(card_id, CardStatus::Queued)?;
     Ok(run)
@@ -172,105 +173,67 @@ async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result<bool> {
         // retries once with the run-scoped `name_fallback`.
         name: run_pane_name(card.id, &column.name),
         name_fallback: Some(run_pane_name_unique(card.id, &column.name, run.id)),
-        // Workspace/worktree runs land in a `kanban` tab (find-or-create + grid
-        // layout); cwd runs have no herdr workspace to place a tab in.
-        tab_label: match card.space_kind {
-            SpaceKind::Workspace | SpaceKind::Worktree => Some("kanban".to_string()),
-            SpaceKind::Cwd => None,
-        },
+        // Both space kinds land in a `kanban` tab (find-or-create + grid layout).
+        tab_label: Some("kanban".to_string()),
         cwd: None,
         workspace_ref: None,
+        herdr_socket: None,
         env,
         argv,
     };
 
-    let mut worktree_ws: Option<String> = None;
-    match card.space_kind {
-        SpaceKind::Workspace => {
-            req.workspace_ref = card.space_ref.clone();
-            // Resolve the ref (users type labels as often as ids) and the
-            // workspace cwd — agent.start does not inherit the latter (the
-            // daemon is not a pane, so herdr's "follow" policy resolves to the
-            // daemon's own context).
-            if let (Some(herdr), Some(ws_ref)) = (&d.herdr, card.space_ref.clone()) {
-                let mut client = herdr.clone();
-                let resolved = tokio::task::spawn_blocking(
-                    move || -> anyhow::Result<(String, Option<String>)> {
-                        let workspaces = client.workspace_list()?;
-                        let ws = workspaces
-                            .iter()
-                            .find(|w| w.workspace_id == ws_ref)
-                            .or_else(|| {
-                                workspaces
-                                    .iter()
-                                    .find(|w| w.label.eq_ignore_ascii_case(&ws_ref))
-                            })
-                            .ok_or_else(|| {
-                                let known: Vec<String> = workspaces
-                                    .iter()
-                                    .map(|w| format!("{} ({})", w.workspace_id, w.label))
-                                    .collect();
-                                anyhow::anyhow!(
-                                    "herdr workspace '{ws_ref}' not found by id or label; \
-                                     known: {}",
-                                    known.join(", ")
-                                )
-                            })?;
-                        let id = ws.workspace_id.clone();
-                        let cwd = client.session_snapshot().ok().and_then(|s| {
-                            s.panes
-                                .iter()
-                                .find(|p| p.workspace_id == id)
-                                .and_then(|p| p.cwd.clone())
-                        });
-                        Ok((id, cwd))
-                    },
-                )
-                .await
-                .map_err(|e| Error::BadRequest(format!("workspace resolve join: {e}")))?;
-                match resolved {
-                    Ok((id, cwd)) => {
-                        req.workspace_ref = Some(id);
-                        req.cwd = cwd.map(PathBuf::from);
-                    }
-                    Err(e) => {
-                        fail_queued_run(d, run, card, &format!("{e:#}"))?;
-                        return Ok(false);
-                    }
+    // Resolve the card's herdr session to a concrete socket. `None` session →
+    // the daemon's default socket. An unknown/stopped session fails the run
+    // with a clear error listing the known sessions.
+    if let Some(reg) = &d.session_registry {
+        match reg.resolve(card.session.as_deref()) {
+            Ok(resolved) => {
+                // Only stamp a non-default socket on the req (keeps the default
+                // path implicit, matching the spawner's fallback).
+                if resolved.socket.as_path() != reg.default_socket() {
+                    req.herdr_socket = Some(resolved.socket);
                 }
             }
+            Err(e) => {
+                fail_queued_run(d, run, card, &format!("session resolve: {e:#}"))?;
+                return Ok(false);
+            }
         }
-        SpaceKind::Cwd => req.cwd = card.space_ref.clone().map(PathBuf::from),
-        SpaceKind::Worktree => {
-            if let Some(herdr) = &d.herdr {
-                let mut client = herdr.clone();
-                let cwd = card.space_ref.clone();
-                let base = card.worktree_base.clone();
-                let branch = format!("board/card-{}", card.id);
-                let created = tokio::task::spawn_blocking(move || {
-                    client.worktree_create(&WorktreeCreateParams {
-                        cwd,
-                        base,
-                        branch: Some(branch),
-                        focus: false,
-                        ..Default::default()
-                    })
-                })
-                .await
-                .map_err(|e| Error::BadRequest(format!("worktree join: {e}")))?;
-                match created {
-                    Ok(c) => {
-                        req.cwd = Some(PathBuf::from(c.path().to_string()));
-                        req.workspace_ref = Some(c.workspace_id().to_string());
-                        worktree_ws = Some(c.workspace_id().to_string());
-                    }
-                    Err(e) => {
-                        fail_queued_run(d, run, card, &format!("worktree.create failed: {e}"))?;
-                        return Ok(false);
-                    }
-                }
-            } else {
-                req.cwd = card.space_ref.clone().map(PathBuf::from);
+    }
+
+    // Resolve the workspace (existing or freshly created) within the card's
+    // session, plus its cwd — agent.start does not inherit the latter (the
+    // daemon is not a pane, so herdr's "follow" policy resolves to the daemon's
+    // own context). Skipped entirely under the local spawner (no session_registry).
+    if d.session_registry.is_some() {
+        let socket = req
+            .herdr_socket
+            .clone()
+            .unwrap_or_else(|| d.default_herdr_socket());
+        let kind = card.space_kind;
+        let space_ref = card.space_ref.clone();
+        let space_cwd = card.space_cwd.clone();
+        let resolved =
+            tokio::task::spawn_blocking(move || -> anyhow::Result<(String, Option<String>)> {
+                let mut client = HerdrClient::connect(&socket)
+                    .map_err(|e| anyhow::anyhow!("herdr unavailable: {e}"))?;
+                resolve_space(
+                    &mut client,
+                    kind,
+                    space_ref.as_deref(),
+                    space_cwd.as_deref(),
+                )
+            })
+            .await
+            .map_err(|e| Error::BadRequest(format!("workspace resolve join: {e}")))?;
+        match resolved {
+            Ok((id, cwd)) => {
+                req.workspace_ref = Some(id);
+                req.cwd = cwd.map(PathBuf::from);
+            }
+            Err(e) => {
+                fail_queued_run(d, run, card, &format!("{e:#}"))?;
+                return Ok(false);
             }
         }
     }
@@ -294,7 +257,7 @@ async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result<bool> {
 
     let is_local = handle.pid.is_some();
     let pane_id = handle.pane_id.clone();
-    let ws_id = handle.workspace_id.clone().or(worktree_ws);
+    let ws_id = handle.workspace_id.clone();
     {
         let db = d.store.lock();
         db.start_run(run.id, ws_id.as_deref(), pane_id.as_deref())?;
@@ -476,5 +439,152 @@ fn apply_transition(
             );
         }
         Ok(card)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Space resolution (per-session)
+// ---------------------------------------------------------------------------
+
+/// Resolve a card's space within its session to `(workspace_id, cwd)`.
+///
+/// - [`SpaceKind::Workspace`]: `space_ref` is an existing workspace id or a
+///   case-insensitive label; cwd comes from the workspace's pane snapshot.
+/// - [`SpaceKind::NewWorkspace`]: reuse an open workspace whose label matches
+///   `space_ref`, else `workspace.create {label, cwd}`; cwd is `space_cwd`.
+fn resolve_space(
+    client: &mut HerdrClient,
+    kind: SpaceKind,
+    space_ref: Option<&str>,
+    space_cwd: Option<&str>,
+) -> anyhow::Result<(String, Option<String>)> {
+    let workspaces = client.workspace_list()?;
+    match kind {
+        SpaceKind::Workspace => {
+            let ws_ref =
+                space_ref.ok_or_else(|| anyhow::anyhow!("workspace space requires a space_ref"))?;
+            let id = resolve_workspace_ref(&workspaces, ws_ref).map_err(|m| anyhow::anyhow!(m))?;
+            let cwd = workspace_cwd(client, &id);
+            Ok((id, cwd))
+        }
+        SpaceKind::NewWorkspace => {
+            let label = space_ref.filter(|s| !s.trim().is_empty()).ok_or_else(|| {
+                anyhow::anyhow!("new_workspace space requires a label (space_ref)")
+            })?;
+            let cwd = space_cwd
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| anyhow::anyhow!("new_workspace space requires space_cwd"))?;
+            match find_workspace_by_label(&workspaces, label) {
+                // Reuse: prefer the workspace's live cwd, fall back to the card's.
+                Some(id) => {
+                    let live = workspace_cwd(client, &id);
+                    Ok((id, live.or_else(|| Some(cwd.to_string()))))
+                }
+                None => {
+                    let created = client.workspace_create(&WorkspaceCreateParams {
+                        label: Some(label.to_string()),
+                        cwd: Some(cwd.to_string()),
+                        focus: false,
+                        ..Default::default()
+                    })?;
+                    Ok((created.workspace_id().to_string(), Some(cwd.to_string())))
+                }
+            }
+        }
+    }
+}
+
+/// Look up a workspace's cwd via its first pane in the session snapshot.
+fn workspace_cwd(client: &mut HerdrClient, workspace_id: &str) -> Option<String> {
+    client.session_snapshot().ok().and_then(|s| {
+        s.panes
+            .iter()
+            .find(|p| p.workspace_id == workspace_id)
+            .and_then(|p| p.cwd.clone())
+    })
+}
+
+/// Resolve a `workspace` space_ref (id, else case-insensitive label) to a
+/// workspace id among the open `workspaces`. Err message lists the known ones.
+fn resolve_workspace_ref(
+    workspaces: &[WorkspaceInfo],
+    ws_ref: &str,
+) -> std::result::Result<String, String> {
+    workspaces
+        .iter()
+        .find(|w| w.workspace_id == ws_ref)
+        .or_else(|| {
+            workspaces
+                .iter()
+                .find(|w| w.label.eq_ignore_ascii_case(ws_ref))
+        })
+        .map(|w| w.workspace_id.clone())
+        .ok_or_else(|| {
+            let known: Vec<String> = workspaces
+                .iter()
+                .map(|w| format!("{} ({})", w.workspace_id, w.label))
+                .collect();
+            format!(
+                "herdr workspace '{ws_ref}' not found by id or label; known: {}",
+                known.join(", ")
+            )
+        })
+}
+
+/// Find an open workspace whose label case-insensitively matches `label`.
+fn find_workspace_by_label(workspaces: &[WorkspaceInfo], label: &str) -> Option<String> {
+    workspaces
+        .iter()
+        .find(|w| w.label.eq_ignore_ascii_case(label))
+        .map(|w| w.workspace_id.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{find_workspace_by_label, resolve_workspace_ref};
+    use board_herdr::{AgentStatus, WorkspaceInfo};
+
+    fn ws(id: &str, label: &str) -> WorkspaceInfo {
+        WorkspaceInfo {
+            workspace_id: id.to_string(),
+            label: label.to_string(),
+            number: 0,
+            focused: false,
+            active_tab_id: String::new(),
+            agent_status: AgentStatus::Unknown,
+        }
+    }
+
+    #[test]
+    fn resolve_ref_by_id_then_label() {
+        let all = [ws("w1", "Alpha"), ws("w2", "Beta")];
+        assert_eq!(resolve_workspace_ref(&all, "w2").unwrap(), "w2");
+        // Case-insensitive label match.
+        assert_eq!(resolve_workspace_ref(&all, "alpha").unwrap(), "w1");
+    }
+
+    #[test]
+    fn resolve_ref_unknown_lists_known() {
+        let all = [ws("w1", "Alpha")];
+        let err = resolve_workspace_ref(&all, "ghost").unwrap_err();
+        assert!(err.contains("ghost"));
+        assert!(err.contains("w1"));
+    }
+
+    #[test]
+    fn new_workspace_reuse_matches_label_case_insensitively() {
+        let all = [ws("w1", "Alpha"), ws("w2", "MyFeature")];
+        // Reuse: label already open → return its id (no create).
+        assert_eq!(
+            find_workspace_by_label(&all, "myfeature").as_deref(),
+            Some("w2")
+        );
+    }
+
+    #[test]
+    fn new_workspace_create_when_absent() {
+        let all = [ws("w1", "Alpha")];
+        // Absent → None → dispatch will call workspace.create.
+        assert!(find_workspace_by_label(&all, "brand-new").is_none());
     }
 }

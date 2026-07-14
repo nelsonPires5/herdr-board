@@ -7,6 +7,7 @@
 mod dispatch;
 mod ops;
 mod server;
+mod session;
 mod settings;
 mod singleton;
 mod spawner;
@@ -111,11 +112,19 @@ async fn async_main(db_path: PathBuf, socket_path: PathBuf) -> anyhow::Result<()
     let db = Db::open(&db_path)?;
     let store = Store::new(db);
 
-    // Herdr handle (best effort): used for notifications, worktrees, liveness,
-    // status, and the event thread. Absence never crashes the daemon.
+    // Herdr handle (best effort): used for notifications, liveness, status, and
+    // the default-session event stream. Absence never crashes the daemon.
     let herdr: Option<HerdrClient> = match settings.spawner {
         SpawnerKind::Local => None,
         SpawnerKind::Herdr => HerdrClient::connect_default().ok(),
+    };
+
+    // Session registry (herdr spawner only): resolves card sessions to sockets.
+    let session_registry = match settings.spawner {
+        SpawnerKind::Local => None,
+        SpawnerKind::Herdr => Some(crate::session::SessionRegistry::new(
+            board_herdr::default_socket_path(),
+        )),
     };
 
     let spawner: Arc<dyn Spawner> = match settings.spawner {
@@ -135,6 +144,7 @@ async fn async_main(db_path: PathBuf, socket_path: PathBuf) -> anyhow::Result<()
         socket_path.clone(),
         spawner,
         herdr,
+        session_registry,
         events_tx,
         dispatch_tx,
         shutdown_tx,
@@ -186,10 +196,19 @@ async fn adopt_runs(d: &Arc<Daemon>) {
         }
     };
     for (run, card) in active {
+        // Resolve the run's session socket so kill/liveness target the right
+        // session after a restart (default session → None handle socket).
+        let herdr_socket = d.session_registry.as_ref().and_then(|reg| {
+            reg.resolve(run.session.as_deref())
+                .ok()
+                .filter(|r| Some(r.socket.as_path()) != Some(reg.default_socket()))
+                .map(|r| r.socket)
+        });
         let handle = SpawnHandle {
             pane_id: run.herdr_pane_id.clone(),
             workspace_id: run.herdr_workspace_id.clone(),
             pid: None,
+            herdr_socket,
         };
         let alive = if handle.pane_id.is_some() {
             let spawner = d.spawner.clone();

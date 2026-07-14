@@ -21,10 +21,13 @@ pub struct Store {
 }
 
 /// A hashable string form of the per-space queue key: cards sharing a
-/// `(space_kind, space_ref)` run serially. (`SpaceKind` is not `Hash`.)
+/// `(session, space_kind, space_ref)` run serially. Session is part of the key
+/// so the same label/ref in two herdr sessions are distinct spaces.
+/// (`SpaceKind` is not `Hash`.)
 pub fn space_key_str(card: &Card) -> String {
     format!(
-        "{}\u{1f}{}",
+        "{}\u{1f}{}\u{1f}{}",
+        card.session.as_deref().unwrap_or(""),
         card.space_kind.as_str(),
         card.space_ref.as_deref().unwrap_or("")
     )

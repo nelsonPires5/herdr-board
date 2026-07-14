@@ -14,6 +14,7 @@ use board_herdr::{HerdrClient, NotificationSound};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, watch};
 
+use crate::session::SessionRegistry;
 use crate::settings::DaemonSettings;
 use crate::store::Store;
 
@@ -42,11 +43,16 @@ pub struct Sched {
     pub chain_hops: HashMap<i64, u32>,
 }
 
-/// The set of panes the herdr event watcher should subscribe to, plus a
-/// generation counter bumped whenever it changes so the watcher reconnects.
+/// The panes the herdr event watcher should subscribe to, grouped by the herdr
+/// socket (session) they live on, plus a generation counter bumped whenever the
+/// set changes so the watcher rebuilds its per-session subscriptions.
+///
+/// Grouping by socket is what fixes the multi-session bug: `agent.start`'s
+/// `pane.agent_status_changed` subscription is validated per socket, so each
+/// session needs its own event stream over its own socket.
 #[derive(Default)]
 pub struct WatchState {
-    pub panes: Vec<String>,
+    pub panes_by_socket: HashMap<PathBuf, Vec<String>>,
     pub generation: u64,
 }
 
@@ -59,7 +65,12 @@ pub struct Daemon {
     pub db_path: PathBuf,
     pub socket_path: PathBuf,
     pub spawner: Arc<dyn Spawner>,
+    /// Default-session herdr client (notifications, status, default-session
+    /// space listing). `None` when the daemon runs with the local spawner.
     pub herdr: Option<HerdrClient>,
+    /// herdr session registry (present iff `herdr` is). Resolves card sessions
+    /// to sockets and backs `session.list` / session-scoped `space.list`.
+    pub session_registry: Option<SessionRegistry>,
     pub events_tx: broadcast::Sender<Event>,
     pub dispatch_tx: mpsc::UnboundedSender<()>,
     pub sched: Mutex<Sched>,
@@ -78,6 +89,7 @@ impl Daemon {
         socket_path: PathBuf,
         spawner: Arc<dyn Spawner>,
         herdr: Option<HerdrClient>,
+        session_registry: Option<SessionRegistry>,
         events_tx: broadcast::Sender<Event>,
         dispatch_tx: mpsc::UnboundedSender<()>,
         shutdown_tx: watch::Sender<bool>,
@@ -90,6 +102,7 @@ impl Daemon {
             socket_path,
             spawner,
             herdr,
+            session_registry,
             events_tx,
             dispatch_tx,
             sched: Mutex::new(Sched::default()),
@@ -143,18 +156,41 @@ impl Daemon {
         }
     }
 
-    /// Recompute the herdr watch pane-set from active runs; bump generation on change.
+    /// The herdr socket a run's pane lives on: its handle's socket, else the
+    /// default session socket.
+    pub fn default_herdr_socket(&self) -> PathBuf {
+        self.session_registry
+            .as_ref()
+            .map(|r| r.default_socket().to_path_buf())
+            .unwrap_or_else(board_herdr::default_socket_path)
+    }
+
+    /// Recompute the herdr watch pane-set (grouped by session socket) from
+    /// active runs; bump generation on change so the watcher rebuilds.
     pub fn refresh_watch(&self) {
-        let panes: Vec<String> = {
+        let default_sock = self.default_herdr_socket();
+        let grouped: HashMap<PathBuf, Vec<String>> = {
             let s = self.sched.lock().unwrap();
-            s.active
-                .values()
-                .filter_map(|a| a.pane_id.clone())
-                .collect()
+            let mut m: HashMap<PathBuf, Vec<String>> = HashMap::new();
+            for a in s.active.values() {
+                if let Some(pane) = a.pane_id.clone() {
+                    let sock = a
+                        .handle
+                        .herdr_socket
+                        .clone()
+                        .unwrap_or_else(|| default_sock.clone());
+                    m.entry(sock).or_default().push(pane);
+                }
+            }
+            // Deterministic ordering so equality comparison is stable.
+            for v in m.values_mut() {
+                v.sort();
+            }
+            m
         };
         let mut w = self.watch.lock().unwrap();
-        if w.panes != panes {
-            w.panes = panes;
+        if w.panes_by_socket != grouped {
+            w.panes_by_socket = grouped;
             w.generation += 1;
         }
     }
