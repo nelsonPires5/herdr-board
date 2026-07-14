@@ -13,8 +13,59 @@ use crate::protocol::{
 };
 use crate::{Error, Result};
 
-/// Embedded migration v1 (repo-root `schema.sql`).
+/// Embedded current schema (repo-root `schema.sql`, kept at the latest shape =
+/// [`SCHEMA_VERSION`]). A fresh DB is created straight from this.
 const SCHEMA_SQL: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../schema.sql"));
+
+/// The latest schema version embedded in [`SCHEMA_SQL`].
+const SCHEMA_VERSION: i64 = 2;
+
+/// v1 → v2 migration. SQLite cannot alter a CHECK constraint or drop a column
+/// in place, so `cards` is rebuilt. Legacy `space_kind` values `cwd`/`worktree`
+/// are best-effort converted to `workspace` (keeping `space_ref` as-is — for a
+/// former `cwd` the ref was a path, now interpreted as a workspace id/label; a
+/// former `worktree` loses its `worktree_base`, worktrees no longer being a
+/// board concept). New columns `cards.session`, `cards.space_cwd`, and
+/// `runs.session` are added (NULL = daemon's default session); `worktree_base`
+/// is dropped.
+const V2_MIGRATION_SQL: &str = "
+CREATE TABLE cards_v2 (
+  id              INTEGER PRIMARY KEY,
+  board_id        INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+  column_id       INTEGER NOT NULL REFERENCES columns(id),
+  position        INTEGER NOT NULL,
+  title           TEXT NOT NULL,
+  description     TEXT NOT NULL DEFAULT '',
+  harness         TEXT NOT NULL DEFAULT 'claude',
+  model           TEXT,
+  effort          TEXT CHECK (effort IN (NULL,'low','medium','high','xhigh','max')),
+  permission_mode TEXT,
+  session         TEXT,
+  space_kind      TEXT NOT NULL DEFAULT 'workspace'
+                    CHECK (space_kind IN ('workspace','new_workspace')),
+  space_ref       TEXT,
+  space_cwd       TEXT,
+  status          TEXT NOT NULL DEFAULT 'idle'
+                    CHECK (status IN ('idle','queued','running','blocked','failed')),
+  session_id      TEXT,
+  created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+INSERT INTO cards_v2
+  (id,board_id,column_id,position,title,description,harness,model,effort,
+   permission_mode,session,space_kind,space_ref,space_cwd,status,session_id,
+   created_at,updated_at)
+  SELECT id,board_id,column_id,position,title,description,harness,model,effort,
+    permission_mode, NULL,
+    CASE space_kind WHEN 'cwd' THEN 'workspace' WHEN 'worktree' THEN 'workspace'
+                    ELSE space_kind END,
+    space_ref, NULL, status, session_id, created_at, updated_at
+  FROM cards;
+DROP TABLE cards;
+ALTER TABLE cards_v2 RENAME TO cards;
+CREATE INDEX idx_cards_column ON cards(column_id, position);
+ALTER TABLE runs ADD COLUMN session TEXT;
+";
 
 /// The single global board id.
 pub const BOARD_ID: i64 = 1;
@@ -61,13 +112,18 @@ impl Db {
         Ok(db)
     }
 
-    /// Apply migrations gated on `PRAGMA user_version`. v1 = embedded schema +
-    /// seed (`board id=1 'main'`, column `Todo` manual position 0). Idempotent.
+    /// Apply migrations gated on `PRAGMA user_version`. Idempotent.
+    ///
+    /// - A fresh DB (`version 0`) is built straight from [`SCHEMA_SQL`] (the
+    ///   current shape) plus the seed (`board id=1 'main'`, column `Todo` manual
+    ///   position 0) and stamped [`SCHEMA_VERSION`] — no per-version replay.
+    /// - An existing v1 DB is upgraded in place by [`V2_MIGRATION_SQL`].
     fn migrate(&self) -> Result<()> {
         let version: i64 = self
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if version < 1 {
+            // Fresh DB: schema.sql already reflects the latest (v2) shape.
             self.conn.execute_batch(SCHEMA_SQL)?;
             self.conn.execute(
                 "INSERT INTO boards (id, name) VALUES (?1, 'main')",
@@ -78,7 +134,12 @@ impl Db {
                  VALUES (?1, 'Todo', 0, 'manual', 0)",
                 params![BOARD_ID],
             )?;
-            self.conn.execute_batch("PRAGMA user_version = 1;")?;
+            self.conn
+                .execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
+        } else if version < 2 {
+            // Existing v1 DB: upgrade the space model in place.
+            self.conn.execute_batch(V2_MIGRATION_SQL)?;
+            self.conn.execute_batch("PRAGMA user_version = 2;")?;
         }
         Ok(())
     }
@@ -348,8 +409,8 @@ impl Db {
         self.conn.execute(
             "INSERT INTO cards
              (board_id,column_id,position,title,description,harness,model,effort,permission_mode,
-              space_kind,space_ref,worktree_base,status,session_id)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'idle',NULL)",
+              session,space_kind,space_ref,space_cwd,status,session_id)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'idle',NULL)",
             params![
                 board_id,
                 column_id,
@@ -360,9 +421,10 @@ impl Db {
                 p.model,
                 effort,
                 p.permission_mode,
+                p.session,
                 space_kind,
                 p.space_ref,
-                p.worktree_base,
+                p.space_cwd,
             ],
         )?;
         let id = self.conn.last_insert_rowid();
@@ -392,19 +454,22 @@ impl Db {
         if let Some(v) = &p.permission_mode {
             c.permission_mode = Some(v.clone());
         }
+        if let Some(v) = &p.session {
+            c.session = Some(v.clone());
+        }
         if let Some(v) = p.space_kind {
             c.space_kind = v;
         }
         if let Some(v) = &p.space_ref {
             c.space_ref = Some(v.clone());
         }
-        if let Some(v) = &p.worktree_base {
-            c.worktree_base = Some(v.clone());
+        if let Some(v) = &p.space_cwd {
+            c.space_cwd = Some(v.clone());
         }
         self.conn.execute(
             "UPDATE cards SET title=?1,description=?2,harness=?3,model=?4,effort=?5,
-             permission_mode=?6,space_kind=?7,space_ref=?8,worktree_base=?9,
-             updated_at=datetime('now') WHERE id=?10",
+             permission_mode=?6,session=?7,space_kind=?8,space_ref=?9,space_cwd=?10,
+             updated_at=datetime('now') WHERE id=?11",
             params![
                 c.title,
                 c.description,
@@ -412,9 +477,10 @@ impl Db {
                 c.model,
                 c.effort.map(|e| e.as_str()),
                 c.permission_mode,
+                c.session,
                 c.space_kind.as_str(),
                 c.space_ref,
-                c.worktree_base,
+                c.space_cwd,
                 c.id,
             ],
         )?;
@@ -534,17 +600,20 @@ impl Db {
         argv_json: &str,
         prompt_snapshot: &str,
         session_id: Option<&str>,
+        session: Option<&str>,
     ) -> Result<Run> {
         self.conn.execute(
-            "INSERT INTO runs (card_id,column_id,harness,argv_json,prompt_snapshot,session_id)
-             VALUES (?1,?2,?3,?4,?5,?6)",
+            "INSERT INTO runs
+             (card_id,column_id,harness,argv_json,prompt_snapshot,session_id,session)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)",
             params![
                 card_id,
                 column_id,
                 harness,
                 argv_json,
                 prompt_snapshot,
-                session_id
+                session_id,
+                session
             ],
         )?;
         self.get_run(self.conn.last_insert_rowid())
@@ -700,9 +769,10 @@ fn row_to_card(row: &Row) -> rusqlite::Result<Card> {
         model: row.get("model")?,
         effort,
         permission_mode: row.get("permission_mode")?,
+        session: row.get("session")?,
         space_kind: SpaceKind::parse_str(&space_s).ok_or_else(|| conv_err("space_kind"))?,
         space_ref: row.get("space_ref")?,
-        worktree_base: row.get("worktree_base")?,
+        space_cwd: row.get("space_cwd")?,
         status: CardStatus::parse_str(&status_s).ok_or_else(|| conv_err("status"))?,
         session_id: row.get("session_id")?,
         created_at: row.get("created_at")?,
@@ -736,6 +806,7 @@ fn row_to_run(row: &Row) -> rusqlite::Result<Run> {
         herdr_workspace_id: row.get("herdr_workspace_id")?,
         herdr_pane_id: row.get("herdr_pane_id")?,
         session_id: row.get("session_id")?,
+        session: row.get("session")?,
         started_at: row.get("started_at")?,
         ended_at: row.get("ended_at")?,
         outcome,

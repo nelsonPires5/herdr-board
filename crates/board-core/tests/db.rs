@@ -2,6 +2,7 @@
 
 use board_core::db::{Db, BOARD_ID};
 use board_core::protocol::{CardCreateParams, ColumnCreateParams, RunOutcome, SpaceKind, Trigger};
+use rusqlite::Connection;
 
 fn mem() -> Db {
     Db::open_in_memory().unwrap()
@@ -10,7 +11,7 @@ fn mem() -> Db {
 #[test]
 fn migration_seeds_board_and_todo_column() {
     let db = mem();
-    assert_eq!(db.user_version().unwrap(), 1);
+    assert_eq!(db.user_version().unwrap(), 2);
     let board = db.get_board(BOARD_ID).unwrap();
     assert_eq!(board.name, "main");
     let cols = db.list_columns(BOARD_ID).unwrap();
@@ -31,10 +32,97 @@ fn migration_idempotent_on_reopen() {
     // Reopen: must not re-seed (still exactly one board, one column).
     {
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.user_version().unwrap(), 1);
+        assert_eq!(db.user_version().unwrap(), 2);
         assert_eq!(db.list_columns(BOARD_ID).unwrap().len(), 1);
         assert_eq!(db.get_board(BOARD_ID).unwrap().name, "main");
     }
+}
+
+/// A v1 database (legacy `cards` shape with `cwd`/`worktree` kinds and
+/// `worktree_base`) must upgrade to v2: kinds converted to `workspace`,
+/// `worktree_base` gone, and the new `session`/`space_cwd`/`runs.session`
+/// columns present.
+#[test]
+fn migration_v2_upgrades_v1_database() {
+    const V1_SCHEMA: &str = "
+    CREATE TABLE boards (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')));
+    CREATE TABLE columns (id INTEGER PRIMARY KEY, board_id INTEGER NOT NULL,
+      name TEXT NOT NULL, position INTEGER NOT NULL, system_prompt TEXT,
+      trigger TEXT NOT NULL DEFAULT 'manual', on_success_column_id INTEGER,
+      on_fail_column_id INTEGER, fresh_session INTEGER NOT NULL DEFAULT 0,
+      harness_override TEXT, model_override TEXT, effort_override TEXT,
+      permission_override TEXT, timeout_minutes INTEGER, UNIQUE (board_id, name));
+    CREATE TABLE cards (id INTEGER PRIMARY KEY, board_id INTEGER NOT NULL,
+      column_id INTEGER NOT NULL, position INTEGER NOT NULL, title TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '', harness TEXT NOT NULL DEFAULT 'claude',
+      model TEXT, effort TEXT, permission_mode TEXT,
+      space_kind TEXT NOT NULL DEFAULT 'workspace'
+        CHECK (space_kind IN ('workspace','cwd','worktree')),
+      space_ref TEXT, worktree_base TEXT,
+      status TEXT NOT NULL DEFAULT 'idle', session_id TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')));
+    CREATE TABLE comments (id INTEGER PRIMARY KEY, card_id INTEGER NOT NULL,
+      author TEXT NOT NULL, body TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')));
+    CREATE TABLE runs (id INTEGER PRIMARY KEY, card_id INTEGER NOT NULL,
+      column_id INTEGER NOT NULL, harness TEXT NOT NULL, argv_json TEXT NOT NULL,
+      prompt_snapshot TEXT NOT NULL, herdr_workspace_id TEXT, herdr_pane_id TEXT,
+      session_id TEXT, started_at TEXT, ended_at TEXT, outcome TEXT,
+      result_summary TEXT, log_path TEXT);
+    ";
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    {
+        // Hand-build a v1 DB with one legacy `worktree` and one `cwd` card.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(V1_SCHEMA).unwrap();
+        conn.execute("INSERT INTO boards (id, name) VALUES (1, 'main')", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO columns (board_id, name, position, trigger, fresh_session)
+             VALUES (1, 'Todo', 0, 'manual', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cards (board_id,column_id,position,title,space_kind,space_ref,worktree_base)
+             VALUES (1,1,0,'wt','worktree','/repo','main')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cards (board_id,column_id,position,title,space_kind,space_ref)
+             VALUES (1,1,1,'cw','cwd','/some/dir')",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA user_version = 1;").unwrap();
+    }
+    // Open via Db → runs the v2 migration.
+    let db = Db::open(&path).unwrap();
+    assert_eq!(db.user_version().unwrap(), 2);
+    let cards = db.list_cards(BOARD_ID).unwrap();
+    assert_eq!(cards.len(), 2);
+    for c in &cards {
+        assert_eq!(c.space_kind, SpaceKind::Workspace, "legacy kind converted");
+        assert!(c.session.is_none());
+        assert!(c.space_cwd.is_none());
+    }
+    // space_ref is preserved as-is (best-effort conversion).
+    assert!(cards
+        .iter()
+        .any(|c| c.space_ref.as_deref() == Some("/repo")));
+    assert!(cards
+        .iter()
+        .any(|c| c.space_ref.as_deref() == Some("/some/dir")));
+    // runs.session now exists and defaults NULL.
+    let card = &cards[0];
+    let run = db
+        .create_run(card.id, card.column_id, "claude", "[]", "p", None, None)
+        .unwrap();
+    assert!(run.session.is_none());
 }
 
 #[test]
@@ -173,6 +261,7 @@ fn comments_and_runs_roundtrip() {
             "[]",
             "prompt",
             Some("sess"),
+            None,
         )
         .unwrap();
     assert!(run.started_at.is_none());
@@ -217,11 +306,11 @@ fn queued_runs_by_space_key_fifo() {
             ..Default::default()
         })
         .unwrap();
-    db.create_run(c1.id, c1.column_id, "claude", "[]", "p", None)
+    db.create_run(c1.id, c1.column_id, "claude", "[]", "p", None, None)
         .unwrap();
-    db.create_run(c2.id, c2.column_id, "claude", "[]", "p", None)
+    db.create_run(c2.id, c2.column_id, "claude", "[]", "p", None, None)
         .unwrap();
-    db.create_run(other.id, other.column_id, "claude", "[]", "p", None)
+    db.create_run(other.id, other.column_id, "claude", "[]", "p", None, None)
         .unwrap();
 
     let w4 = db

@@ -20,13 +20,18 @@ pub enum Trigger {
     Auto,
 }
 
-/// Where a card's agent runs.
+/// Where a card's agent runs, within its herdr session.
+///
+/// - [`SpaceKind::Workspace`] — an ALREADY-OPEN workspace in the session;
+///   `space_ref` is its workspace id (or, on dispatch, a case-insensitive label).
+/// - [`SpaceKind::NewWorkspace`] — the daemon creates a workspace on first
+///   dispatch (label = `space_ref`, cwd = `space_cwd`), reusing an existing
+///   workspace with that label if one is already open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum SpaceKind {
     Workspace,
-    Cwd,
-    Worktree,
+    NewWorkspace,
 }
 
 /// Live card status.
@@ -82,7 +87,7 @@ macro_rules! str_enum {
 }
 
 str_enum!(Trigger { Manual => "manual", Auto => "auto" });
-str_enum!(SpaceKind { Workspace => "workspace", Cwd => "cwd", Worktree => "worktree" });
+str_enum!(SpaceKind { Workspace => "workspace", NewWorkspace => "new_workspace" });
 str_enum!(CardStatus {
     Idle => "idle", Queued => "queued", Running => "running",
     Blocked => "blocked", Failed => "failed",
@@ -321,12 +326,16 @@ pub struct CardCreateParams {
     pub effort: Option<Effort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
+    /// herdr session name; `None` = the daemon's default session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub space_kind: Option<SpaceKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub space_ref: Option<String>,
+    /// Working directory for a `new_workspace` space (required for that kind).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worktree_base: Option<String>,
+    pub space_cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<i64>,
 }
@@ -347,12 +356,16 @@ pub struct CardUpdateParams {
     pub effort: Option<Effort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
+    /// herdr session name; `None` = the daemon's default session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub space_kind: Option<SpaceKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub space_ref: Option<String>,
+    /// Working directory for a `new_workspace` space.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worktree_base: Option<String>,
+    pub space_cwd: Option<String>,
 }
 
 /// `card.move` params — the dispatch trigger.
@@ -439,8 +452,30 @@ pub struct SpaceInfo {
     pub label: String,
 }
 
-/// `space.list` result (no params).
+/// `space.list` params. `session` (`None` = default) scopes the listed
+/// workspaces to that herdr session.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpaceListParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+}
+
+/// `space.list` result.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpaceListResult {
     pub spaces: Vec<SpaceInfo>,
+}
+
+/// A herdr session as surfaced by `session.list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionInfo {
+    pub name: String,
+    pub default: bool,
+    pub running: bool,
+}
+
+/// `session.list` result (no params).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionListResult {
+    pub sessions: Vec<SessionInfo>,
 }

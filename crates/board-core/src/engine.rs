@@ -3,7 +3,7 @@
 //! validation verdicts). The daemon executes the resulting effects.
 
 use crate::model::Column;
-use crate::protocol::{CardStatus, RunOutcome, Trigger};
+use crate::protocol::{CardStatus, RunOutcome, SpaceKind, Trigger};
 
 /// Validation failures that map onto protocol error code 3 (invalid state) or 1.
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
@@ -16,6 +16,8 @@ pub enum ValidationError {
     CardBusy,
     #[error("bypassPermissions is only allowed as an explicit per-card setting, never a column override")]
     BypassNotAllowed,
+    #[error("new_workspace space requires a non-empty space_ref (label) and space_cwd")]
+    NewWorkspaceIncomplete,
 }
 
 impl ValidationError {
@@ -24,7 +26,7 @@ impl ValidationError {
             ValidationError::ColumnHasCards
             | ValidationError::ColumnHasActiveCard
             | ValidationError::CardBusy => 3,
-            ValidationError::BypassNotAllowed => 1,
+            ValidationError::BypassNotAllowed | ValidationError::NewWorkspaceIncomplete => 1,
         }
     }
 }
@@ -161,6 +163,25 @@ pub fn validate_card_edit(
 ) -> Result<(), ValidationError> {
     if edits_locked_fields && matches!(status, CardStatus::Running | CardStatus::Queued) {
         return Err(ValidationError::CardBusy);
+    }
+    Ok(())
+}
+
+/// Validate a card's space configuration at `card.create`. A `new_workspace`
+/// space needs both a label (`space_ref`) and a working directory (`space_cwd`);
+/// a plain `workspace` space has no such requirement here (an empty ref is
+/// resolved/errored at dispatch).
+pub fn validate_card_space(
+    kind: SpaceKind,
+    space_ref: Option<&str>,
+    space_cwd: Option<&str>,
+) -> Result<(), ValidationError> {
+    if kind == SpaceKind::NewWorkspace {
+        let ref_ok = space_ref.is_some_and(|s| !s.trim().is_empty());
+        let cwd_ok = space_cwd.is_some_and(|s| !s.trim().is_empty());
+        if !ref_ok || !cwd_ok {
+            return Err(ValidationError::NewWorkspaceIncomplete);
+        }
     }
     Ok(())
 }

@@ -1,4 +1,7 @@
--- herdr-board SQLite schema (WAL mode; boardd is the only writer)
+-- herdr-board SQLite schema (WAL mode; boardd is the only writer).
+-- This file is the CURRENT (schema v2) shape: a fresh DB is created directly
+-- from it and stamped `PRAGMA user_version = 2`. Existing v1 DBs are upgraded
+-- by the v2 migration in board-core/src/db.rs (kept in sync with this file).
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 
@@ -40,13 +43,14 @@ CREATE TABLE cards (
   model           TEXT,
   effort          TEXT CHECK (effort IN (NULL,'low','medium','high','xhigh','max')),
   permission_mode TEXT,                        -- e.g. acceptEdits, plan; bypass = explicit opt-in
+  session         TEXT,                        -- herdr session name; NULL = daemon's default session
   space_kind      TEXT NOT NULL DEFAULT 'workspace'
-                    CHECK (space_kind IN ('workspace','cwd','worktree')),
-  space_ref       TEXT,                        -- herdr workspace id | path
-  worktree_base   TEXT,                        -- base ref when space_kind='worktree'
+                    CHECK (space_kind IN ('workspace','new_workspace')),
+  space_ref       TEXT,                        -- workspace id (workspace) | new-workspace label (new_workspace)
+  space_cwd       TEXT,                        -- working dir when space_kind='new_workspace'
   status          TEXT NOT NULL DEFAULT 'idle'
                     CHECK (status IN ('idle','queued','running','blocked','failed')),
-  session_id      TEXT,                        -- harness session for --resume
+  session_id      TEXT,                        -- harness conversation id for --resume
   created_at      TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -68,7 +72,8 @@ CREATE TABLE runs (
   prompt_snapshot    TEXT NOT NULL,
   herdr_workspace_id TEXT,
   herdr_pane_id      TEXT,
-  session_id         TEXT,
+  session_id         TEXT,                     -- harness conversation id (--resume)
+  session            TEXT,                     -- herdr session name; NULL = default session
   started_at         TEXT,
   ended_at           TEXT,
   outcome            TEXT CHECK (outcome IN (NULL,'ok','fail','cancelled','lost')),

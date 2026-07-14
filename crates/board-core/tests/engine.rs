@@ -1,11 +1,11 @@
 //! Column-engine transition, entry, and validation tests.
 
 use board_core::engine::{
-    decide_entry, decide_transition, format_duration, validate_card_edit, validate_column_delete,
-    validate_column_permission_override, ValidationError,
+    decide_entry, decide_transition, format_duration, validate_card_edit, validate_card_space,
+    validate_column_delete, validate_column_permission_override, ValidationError,
 };
 use board_core::model::Column;
-use board_core::protocol::{CardStatus, RunOutcome, Trigger};
+use board_core::protocol::{CardStatus, RunOutcome, SpaceKind, Trigger};
 
 fn col(id: i64, name: &str, trigger: Trigger, on_ok: Option<i64>, on_fail: Option<i64>) -> Column {
     Column {
@@ -154,6 +154,28 @@ fn validate_bypass_override_refused() {
     assert_eq!(
         validate_column_permission_override(Some("bypassPermissions")),
         Err(ValidationError::BypassNotAllowed)
+    );
+}
+
+#[test]
+fn validate_new_workspace_requires_ref_and_cwd() {
+    // workspace kind: no ref/cwd requirement here.
+    assert!(validate_card_space(SpaceKind::Workspace, None, None).is_ok());
+    assert!(validate_card_space(SpaceKind::Workspace, Some("w4"), None).is_ok());
+
+    // new_workspace needs BOTH a non-empty label and cwd.
+    assert!(validate_card_space(SpaceKind::NewWorkspace, Some("feat"), Some("/repo")).is_ok());
+    assert_eq!(
+        validate_card_space(SpaceKind::NewWorkspace, Some("feat"), None),
+        Err(ValidationError::NewWorkspaceIncomplete)
+    );
+    assert_eq!(
+        validate_card_space(SpaceKind::NewWorkspace, None, Some("/repo")),
+        Err(ValidationError::NewWorkspaceIncomplete)
+    );
+    assert_eq!(
+        validate_card_space(SpaceKind::NewWorkspace, Some("  "), Some("/repo")),
+        Err(ValidationError::NewWorkspaceIncomplete)
     );
 }
 

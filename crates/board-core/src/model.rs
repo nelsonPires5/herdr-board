@@ -43,10 +43,15 @@ pub struct Card {
     pub model: Option<String>,
     pub effort: Option<Effort>,
     pub permission_mode: Option<String>,
+    /// herdr session name; `None` = the daemon's default session.
+    pub session: Option<String>,
     pub space_kind: SpaceKind,
+    /// Workspace id (kind `workspace`) or new-workspace label (kind `new_workspace`).
     pub space_ref: Option<String>,
-    pub worktree_base: Option<String>,
+    /// Working directory for a `new_workspace` space; `None` otherwise.
+    pub space_cwd: Option<String>,
     pub status: CardStatus,
+    /// Harness conversation id for `--resume` (distinct from `session`).
     pub session_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -73,7 +78,10 @@ pub struct Run {
     pub prompt_snapshot: String,
     pub herdr_workspace_id: Option<String>,
     pub herdr_pane_id: Option<String>,
+    /// harness conversation id (`--resume`); distinct from the herdr `session`.
     pub session_id: Option<String>,
+    /// herdr session name this run spawned into; `None` = default session.
+    pub session: Option<String>,
     pub started_at: Option<String>,
     pub ended_at: Option<String>,
     pub outcome: Option<RunOutcome>,

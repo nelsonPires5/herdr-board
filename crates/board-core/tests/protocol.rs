@@ -79,8 +79,8 @@ fn event_tagging() {
 fn enums_serialize_lowercase() {
     assert_eq!(serde_json::to_string(&Trigger::Auto).unwrap(), "\"auto\"");
     assert_eq!(
-        serde_json::to_string(&SpaceKind::Worktree).unwrap(),
-        "\"worktree\""
+        serde_json::to_string(&SpaceKind::NewWorkspace).unwrap(),
+        "\"new_workspace\""
     );
     assert_eq!(serde_json::to_string(&Effort::Xhigh).unwrap(), "\"xhigh\"");
     assert_eq!(
