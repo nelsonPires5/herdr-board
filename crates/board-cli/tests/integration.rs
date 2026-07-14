@@ -1,0 +1,482 @@
+//! Daemon integration tests exercising the real `board` binary and boardd with
+//! the `LocalSpawner` and the fake harness (no herdr, no Claude cost). Each test
+//! gets its own temp DB, socket, config, and daemon process.
+
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
+
+use board_core::client::{BoardClient, UnixClient};
+use board_core::protocol::{
+    CardCreateParams, CardMoveParams, CardStatus, ColumnCreateParams, Event, RunOutcome, Trigger,
+};
+
+const BOARD_BIN: &str = env!("CARGO_BIN_EXE_board");
+
+fn fixtures_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+}
+
+/// A daemon under test, torn down on drop.
+struct TestDaemon {
+    child: Child,
+    socket: PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+impl TestDaemon {
+    fn start(extra: &[(&str, &str)]) -> TestDaemon {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("board.db");
+        let socket = dir.path().join("boardd.sock");
+        let cfg = dir.path().join("config.toml");
+        let fake = fixtures_dir().join("fake-agent.sh");
+        std::fs::write(
+            &cfg,
+            format!(
+                "[harness.fake]\nargv = [\"bash\", \"{}\"]\n\n[daemon]\nspawner = \"local\"\n",
+                fake.display()
+            ),
+        )
+        .unwrap();
+
+        let mut cmd = Command::new(BOARD_BIN);
+        cmd.arg("daemon").arg("--foreground");
+        cmd.env("BOARD_DB", &db)
+            .env("BOARD_SOCKET", &socket)
+            .env("HERDR_BOARD_CONFIG", &cfg)
+            .env("BOARD_SPAWNER", "local")
+            .env("BOARD_BIN", BOARD_BIN)
+            .env("HOME", dir.path())
+            .env("BOARD_TICK_MS", "150")
+            .env("BOARD_LOCAL_POLL_MS", "150")
+            .env("FAKE_AGENT_SLEEP", "0.3")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        for (k, v) in extra {
+            cmd.env(k, v);
+        }
+        let child = cmd.spawn().expect("spawn daemon");
+
+        let td = TestDaemon {
+            child,
+            socket,
+            _dir: dir,
+        };
+        td.wait_ready();
+        td
+    }
+
+    fn wait_ready(&self) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok(mut c) = UnixClient::connect(&self.socket) {
+                if c.daemon_status().is_ok() {
+                    return;
+                }
+            }
+            if Instant::now() >= deadline {
+                panic!("daemon did not become ready");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    fn client(&self) -> UnixClient {
+        UnixClient::connect(&self.socket).expect("connect")
+    }
+}
+
+impl Drop for TestDaemon {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+// -- helpers -----------------------------------------------------------------
+
+fn col(name: &str, trigger: Trigger) -> ColumnCreateParams {
+    ColumnCreateParams {
+        name: name.to_string(),
+        trigger: Some(trigger),
+        ..Default::default()
+    }
+}
+
+fn fake_card(column_id: i64) -> CardCreateParams {
+    CardCreateParams {
+        title: "task".to_string(),
+        description: Some("do the thing".to_string()),
+        harness: Some("fake".to_string()),
+        column_id: Some(column_id),
+        ..Default::default()
+    }
+}
+
+fn todo_id(c: &mut UnixClient) -> i64 {
+    c.board_get().unwrap().columns[0].id
+}
+
+/// Poll `pred` until it returns true or the timeout elapses.
+fn poll(c: &mut UnixClient, secs: u64, mut pred: impl FnMut(&mut UnixClient) -> bool) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        if pred(c) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(80));
+    }
+}
+
+// -- tests -------------------------------------------------------------------
+
+#[test]
+fn happy_pipeline() {
+    let td = TestDaemon::start(&[]);
+    let mut c = td.client();
+    let todo = todo_id(&mut c);
+    let review = c.column_create(&col("review-h", Trigger::Manual)).unwrap();
+    let work = c
+        .column_create(&ColumnCreateParams {
+            on_success_column_id: Some(review.id),
+            ..col("work", Trigger::Auto)
+        })
+        .unwrap();
+    let card = c.card_create(&fake_card(todo)).unwrap();
+    c.card_move(&CardMoveParams {
+        id: card.id,
+        column_id: work.id,
+        position: None,
+    })
+    .unwrap();
+
+    let done = poll(&mut c, 15, |c| {
+        let d = c.card_get(card.id).unwrap();
+        d.card.column_id == review.id && d.card.status == CardStatus::Idle
+    });
+    assert!(done, "card should auto-move to review-h and go idle");
+
+    let d = c.card_get(card.id).unwrap();
+    assert!(
+        d.comments
+            .iter()
+            .any(|cm| cm.body == "fake: done work" && cm.author.starts_with("agent:")),
+        "agent comment present with agent author"
+    );
+    assert!(
+        d.comments.iter().any(|cm| cm.author == "system"),
+        "system transition comment present"
+    );
+    let run = d.runs.iter().find(|r| r.column_id == work.id).unwrap();
+    assert_eq!(run.outcome, Some(RunOutcome::Ok));
+    assert!(run.started_at.is_some() && run.ended_at.is_some());
+}
+
+#[test]
+fn fail_path_applies_on_fail() {
+    let td = TestDaemon::start(&[("FAKE_AGENT_OUTCOME", "fail")]);
+    let mut c = td.client();
+    let todo = todo_id(&mut c);
+    let back = c.column_create(&col("back", Trigger::Manual)).unwrap();
+    let work = c
+        .column_create(&ColumnCreateParams {
+            on_fail_column_id: Some(back.id),
+            ..col("work", Trigger::Auto)
+        })
+        .unwrap();
+    let card = c.card_create(&fake_card(todo)).unwrap();
+    c.card_move(&CardMoveParams {
+        id: card.id,
+        column_id: work.id,
+        position: None,
+    })
+    .unwrap();
+
+    let landed = poll(&mut c, 15, |c| {
+        c.card_get(card.id).unwrap().card.column_id == back.id
+    });
+    assert!(landed, "failed card should land in on_fail column");
+    let d = c.card_get(card.id).unwrap();
+    let run = d.runs.iter().find(|r| r.column_id == work.id).unwrap();
+    assert_eq!(run.outcome, Some(RunOutcome::Fail));
+    assert!(d.comments.iter().any(|cm| cm.author == "system"));
+}
+
+#[test]
+fn process_exit_without_done() {
+    let td = TestDaemon::start(&[("FAKE_AGENT_SILENT", "1")]);
+    let mut c = td.client();
+    let todo = todo_id(&mut c);
+    let review = c.column_create(&col("review-h", Trigger::Manual)).unwrap();
+    let work = c
+        .column_create(&ColumnCreateParams {
+            on_success_column_id: Some(review.id),
+            ..col("work", Trigger::Auto)
+        })
+        .unwrap();
+    let card = c.card_create(&fake_card(todo)).unwrap();
+    c.card_move(&CardMoveParams {
+        id: card.id,
+        column_id: work.id,
+        position: None,
+    })
+    .unwrap();
+
+    let failed = poll(&mut c, 15, |c| {
+        c.card_get(card.id).unwrap().card.status == CardStatus::Failed
+    });
+    assert!(failed, "silent-exit card should end failed");
+    let d = c.card_get(card.id).unwrap();
+    assert_eq!(d.card.column_id, work.id, "no transition on pane exit");
+    let run = d.runs.iter().find(|r| r.column_id == work.id).unwrap();
+    assert_eq!(run.outcome, Some(RunOutcome::Fail));
+    assert!(d
+        .comments
+        .iter()
+        .any(|cm| cm.body.contains("pane exited without board done")));
+}
+
+#[test]
+fn timeout_kills_and_applies_on_fail() {
+    let td = TestDaemon::start(&[("BOARD_TIMEOUT_UNIT_SECS", "1"), ("FAKE_AGENT_SLEEP", "10")]);
+    let mut c = td.client();
+    let todo = todo_id(&mut c);
+    let back = c.column_create(&col("back", Trigger::Manual)).unwrap();
+    let work = c
+        .column_create(&ColumnCreateParams {
+            on_fail_column_id: Some(back.id),
+            timeout_minutes: Some(1), // 1 * 1s unit = ~1s
+            ..col("work", Trigger::Auto)
+        })
+        .unwrap();
+    let card = c.card_create(&fake_card(todo)).unwrap();
+    c.card_move(&CardMoveParams {
+        id: card.id,
+        column_id: work.id,
+        position: None,
+    })
+    .unwrap();
+
+    let landed = poll(&mut c, 15, |c| {
+        c.card_get(card.id).unwrap().card.column_id == back.id
+    });
+    assert!(
+        landed,
+        "timed-out card should be killed and moved to on_fail"
+    );
+    let d = c.card_get(card.id).unwrap();
+    let run = d.runs.iter().find(|r| r.column_id == work.id).unwrap();
+    assert_eq!(run.outcome, Some(RunOutcome::Fail));
+    assert!(d.comments.iter().any(|cm| cm.body.contains("timed out")));
+}
+
+#[test]
+fn queue_serialization_same_space() {
+    let td = TestDaemon::start(&[("FAKE_AGENT_SLEEP", "2")]);
+    let mut c = td.client();
+    let todo = todo_id(&mut c);
+    let review = c.column_create(&col("review-h", Trigger::Manual)).unwrap();
+    let work = c
+        .column_create(&ColumnCreateParams {
+            on_success_column_id: Some(review.id),
+            ..col("work", Trigger::Auto)
+        })
+        .unwrap();
+    // Two cards with the same (default) space key -> must run serially.
+    let a = c.card_create(&fake_card(todo)).unwrap();
+    let b = c.card_create(&fake_card(todo)).unwrap();
+    c.card_move(&CardMoveParams {
+        id: a.id,
+        column_id: work.id,
+        position: None,
+    })
+    .unwrap();
+    c.card_move(&CardMoveParams {
+        id: b.id,
+        column_id: work.id,
+        position: None,
+    })
+    .unwrap();
+
+    let both_done = poll(&mut c, 25, |c| {
+        c.card_get(a.id).unwrap().card.column_id == review.id
+            && c.card_get(b.id).unwrap().card.column_id == review.id
+    });
+    assert!(both_done, "both cards should complete");
+
+    let mut runs: Vec<_> = c
+        .card_get(a.id)
+        .unwrap()
+        .runs
+        .into_iter()
+        .chain(c.card_get(b.id).unwrap().runs)
+        .filter(|r| r.column_id == work.id)
+        .collect();
+    runs.sort_by(|x, y| x.started_at.cmp(&y.started_at));
+    assert_eq!(runs.len(), 2);
+    let first_end = runs[0].ended_at.clone().unwrap();
+    let second_start = runs[1].started_at.clone().unwrap();
+    assert!(
+        second_start >= first_end,
+        "second run ({second_start}) should start after first ends ({first_end})"
+    );
+}
+
+#[test]
+fn cancel_running_card() {
+    let td = TestDaemon::start(&[("FAKE_AGENT_SLEEP", "10")]);
+    let mut c = td.client();
+    let todo = todo_id(&mut c);
+    let work = c.column_create(&col("work", Trigger::Auto)).unwrap();
+    let card = c.card_create(&fake_card(todo)).unwrap();
+    c.card_move(&CardMoveParams {
+        id: card.id,
+        column_id: work.id,
+        position: None,
+    })
+    .unwrap();
+
+    let running = poll(&mut c, 10, |c| {
+        c.card_get(card.id).unwrap().card.status == CardStatus::Running
+    });
+    assert!(running, "card should reach running");
+
+    let res = c.run_cancel(card.id).unwrap();
+    assert_eq!(res.run.outcome, Some(RunOutcome::Cancelled));
+    let d = c.card_get(card.id).unwrap();
+    assert_eq!(d.card.status, CardStatus::Failed);
+    assert_eq!(d.card.column_id, work.id, "cancel does not transition");
+}
+
+#[test]
+fn retry_creates_new_forked_run() {
+    let td = TestDaemon::start(&[("FAKE_AGENT_OUTCOME", "ok")]);
+    let mut c = td.client();
+    let todo = todo_id(&mut c);
+    // Auto column with no transitions: card stays put after an ok run.
+    let work = c.column_create(&col("work", Trigger::Auto)).unwrap();
+    let card = c.card_create(&fake_card(todo)).unwrap();
+    c.card_move(&CardMoveParams {
+        id: card.id,
+        column_id: work.id,
+        position: None,
+    })
+    .unwrap();
+
+    let done = poll(&mut c, 15, |c| {
+        let d = c.card_get(card.id).unwrap();
+        d.card.status == CardStatus::Idle && d.runs.iter().any(|r| r.ended_at.is_some())
+    });
+    assert!(done, "first run should finish and card go idle");
+    let first = c.card_get(card.id).unwrap();
+    let session = first.card.session_id.clone();
+    assert!(session.is_some(), "first run mints a session");
+    assert_eq!(first.runs.len(), 1);
+
+    c.run_retry(card.id).unwrap();
+    let two = poll(&mut c, 15, |c| c.card_get(card.id).unwrap().runs.len() == 2);
+    assert!(two, "retry creates a new run row");
+    let d = c.card_get(card.id).unwrap();
+    let new_run = d.runs.iter().max_by_key(|r| r.id).unwrap();
+    assert_eq!(
+        new_run.session_id, session,
+        "retry forks/reuses the same session id"
+    );
+}
+
+#[test]
+fn template_apply_on_empty_board() {
+    let td = TestDaemon::start(&[]);
+    let mut c = td.client();
+    let cols = c.template_apply("pipeline").unwrap();
+    let names: Vec<&str> = cols.iter().map(|x| x.name.as_str()).collect();
+    for expected in ["Todo", "Plan", "Execute", "Review", "Human Review", "Done"] {
+        assert!(names.contains(&expected), "missing column {expected}");
+    }
+    let find = |n: &str| cols.iter().find(|x| x.name == n).unwrap();
+    assert_eq!(find("Plan").on_success_column_id, Some(find("Execute").id));
+    assert_eq!(find("Plan").on_fail_column_id, Some(find("Todo").id));
+    assert_eq!(
+        find("Review").on_success_column_id,
+        Some(find("Human Review").id)
+    );
+    assert_eq!(find("Review").on_fail_column_id, Some(find("Execute").id));
+    assert_eq!(find("Review").model_override.as_deref(), Some("opus"));
+}
+
+#[test]
+fn template_refused_on_non_empty_board() {
+    let td = TestDaemon::start(&[]);
+    let mut c = td.client();
+    let todo = todo_id(&mut c);
+    c.card_create(&fake_card(todo)).unwrap();
+    let err = c.template_apply("pipeline").unwrap_err();
+    assert!(
+        err.to_string().contains("error 3"),
+        "expected invalid-state error, got: {err}"
+    );
+}
+
+#[test]
+fn single_instance_second_exits_zero() {
+    let td = TestDaemon::start(&[]);
+    // A second daemon on the same DB must lose the flock race and exit 0.
+    let dir = td._dir.path();
+    let mut cmd = Command::new(BOARD_BIN);
+    cmd.arg("daemon")
+        .env("BOARD_DB", dir.join("board.db"))
+        .env("BOARD_SOCKET", dir.join("boardd.sock"))
+        .env("HOME", dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut second = cmd.spawn().unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = second.try_wait().unwrap() {
+            assert!(status.success(), "second daemon should exit 0");
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = second.kill();
+            panic!("second daemon did not exit");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Original daemon still serving.
+    assert!(td.client().daemon_status().is_ok());
+}
+
+#[test]
+fn subscribe_receives_board_changed_on_card_create() {
+    let td = TestDaemon::start(&[]);
+    let mut c = td.client();
+    let todo = todo_id(&mut c);
+
+    let mut sub = c.subscribe().unwrap();
+    // Give the daemon a moment to register the subscription's forwarder.
+    std::thread::sleep(Duration::from_millis(300));
+
+    let (tx, rx) = std::sync::mpsc::channel::<Event>();
+    let handle = std::thread::spawn(move || {
+        if let Some(ev) = sub.next() {
+            let _ = tx.send(ev);
+        }
+    });
+
+    // Trigger an event on a separate connection.
+    let mut c2 = td.client();
+    c2.card_create(&fake_card(todo)).unwrap();
+
+    let ev = rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("should receive an event");
+    assert!(matches!(ev, Event::BoardChanged { .. }));
+    let _ = handle.join();
+}

@@ -1,0 +1,22 @@
+[package]
+name = "board-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "board"
+path = "src/main.rs"
+
+[dependencies]
+board-core = { workspace = true }
+board-tui = { workspace = true }
+board-daemon = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+board-herdr = { workspace = true }
+tempfile = { workspace = true }
