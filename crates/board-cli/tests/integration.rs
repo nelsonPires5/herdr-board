@@ -646,3 +646,82 @@ fn space_list_without_herdr_surfaces_error() {
     assert!(!out.status.success());
     assert!(out.stdout.is_empty());
 }
+
+#[test]
+fn session_list_without_herdr_surfaces_error() {
+    // The test daemon runs the local spawner (no session registry), so
+    // session.list yields the herdr-unavailable error (code 4); the CLI surfaces
+    // it cleanly (non-zero exit + message, no rows printed).
+    let td = TestDaemon::start(&[]);
+    let out = td.board(&["session", "list"]);
+    assert!(!out.status.success(), "session list should exit non-zero");
+    assert!(out.stdout.is_empty(), "no rows printed on error");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("herdr") && err.contains("error 4"),
+        "error surfaces herdr-unavailable; got: {err}"
+    );
+}
+
+#[test]
+fn card_new_new_workspace_missing_cwd_is_validation_error() {
+    // `new-workspace` requires both --space-ref and --space-cwd; omitting cwd
+    // must surface the daemon's validation error (code 1).
+    let td = TestDaemon::start(&[]);
+    let out = td.board(&[
+        "card",
+        "new",
+        "--title",
+        "needs cwd",
+        "--harness",
+        "fake",
+        "--space-kind",
+        "new-workspace",
+        "--space-ref",
+        "my-feature",
+    ]);
+    assert!(
+        !out.status.success(),
+        "missing space-cwd should exit non-zero"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("error 1"),
+        "error surfaces the validation code; got: {err}"
+    );
+}
+
+#[test]
+fn card_new_with_session_persists_and_shows() {
+    let td = TestDaemon::start(&[]);
+    // Create a card with an explicit --session (into the manual Todo column, so
+    // no dispatch / herdr is needed).
+    let out = td.board(&[
+        "card",
+        "new",
+        "--title",
+        "sessioned",
+        "--harness",
+        "fake",
+        "--session",
+        "my-sess",
+        "--json",
+    ]);
+    assert!(out.status.success(), "card new --session should succeed");
+    let card: serde_json::Value = serde_json::from_slice(&out.stdout).expect("parse Card json");
+    assert_eq!(
+        card["session"].as_str(),
+        Some("my-sess"),
+        "session persisted on the created card"
+    );
+    let id = card["id"].as_i64().expect("card id");
+
+    // `card show` (human) surfaces the session.
+    let out = td.board(&["card", "show", &id.to_string()]);
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("session: my-sess"),
+        "card show renders the session; got:\n{text}"
+    );
+}

@@ -14,7 +14,8 @@ use board_core::capability::HarnessCapabilities;
 use board_core::client::{BoardClient, UnixClient};
 use board_core::paths;
 use board_core::protocol::{
-    CardCreateParams, CardMoveParams, Effort, RunOutcome, SpaceKind, SpaceListResult,
+    CardCreateParams, CardMoveParams, Effort, RunOutcome, SessionListResult, SpaceKind,
+    SpaceListResult,
 };
 use clap::{Parser, Subcommand};
 use serde_json::json;
@@ -27,6 +28,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)] // clap arg enum; boxing hurts ergonomics
 enum Cmd {
     /// Open the kanban TUI (auto-starts the daemon).
     Tui,
@@ -100,6 +102,11 @@ enum Cmd {
         #[command(subcommand)]
         sub: SpaceCmd,
     },
+    /// herdr session operations.
+    Session {
+        #[command(subcommand)]
+        sub: SessionCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -121,12 +128,17 @@ enum CardCmd {
         effort: Option<String>,
         #[arg(long)]
         permission: Option<String>,
+        /// herdr session name (default: the daemon's default session).
+        #[arg(long)]
+        session: Option<String>,
+        /// Space kind: `workspace` (open workspace) or `new-workspace`.
         #[arg(long)]
         space_kind: Option<String>,
         #[arg(long)]
         space_ref: Option<String>,
+        /// Working directory for a `new-workspace` space (required for that kind).
         #[arg(long)]
-        worktree_base: Option<String>,
+        space_cwd: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -186,7 +198,19 @@ enum HarnessCmd {
 
 #[derive(Subcommand)]
 enum SpaceCmd {
-    /// List run spaces (herdr workspaces).
+    /// List run spaces (herdr workspaces) in a session.
+    List {
+        /// herdr session name (default: the daemon's default session).
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum SessionCmd {
+    /// List herdr sessions.
     List {
         #[arg(long)]
         json: bool,
@@ -227,6 +251,7 @@ fn real_main() -> Result<()> {
         Cmd::Column { sub } => cmd_column(sub),
         Cmd::Harness { sub } => cmd_harness(sub),
         Cmd::Space { sub } => cmd_space(sub),
+        Cmd::Session { sub } => cmd_session(sub),
     }
 }
 
@@ -310,9 +335,10 @@ fn cmd_card(sub: CardCmd) -> Result<()> {
             model,
             effort,
             permission,
+            session,
             space_kind,
             space_ref,
-            worktree_base,
+            space_cwd,
             json,
         } => {
             let column_id = match column {
@@ -326,9 +352,7 @@ fn cmd_card(sub: CardCmd) -> Result<()> {
                 None => None,
             };
             let space_kind = match space_kind {
-                Some(s) => Some(
-                    SpaceKind::parse_str(&s).ok_or_else(|| anyhow!("invalid space-kind: {s}"))?,
-                ),
+                Some(s) => Some(parse_space_kind(&s)?),
                 None => None,
             };
             let p = CardCreateParams {
@@ -339,9 +363,10 @@ fn cmd_card(sub: CardCmd) -> Result<()> {
                 model,
                 effort,
                 permission_mode: permission,
+                session,
                 space_kind,
                 space_ref,
-                worktree_base,
+                space_cwd,
                 position: None,
             };
             let card = c.card_create(&p)?;
@@ -360,6 +385,9 @@ fn cmd_card(sub: CardCmd) -> Result<()> {
                 print_json(&d)?;
             } else {
                 println!("#{} {}  [{}]", d.card.id, d.card.title, d.card.status);
+                if let Some(session) = &d.card.session {
+                    println!("session: {session}");
+                }
                 if !d.card.description.is_empty() {
                     println!("\n{}", d.card.description);
                 }
@@ -399,9 +427,14 @@ fn cmd_card(sub: CardCmd) -> Result<()> {
                 print_json(&cards)?;
             } else {
                 for card in &cards {
+                    let session = card
+                        .session
+                        .as_deref()
+                        .map(|s| format!("\tsession={s}"))
+                        .unwrap_or_default();
                     println!(
-                        "#{}\t[{}]\tcol={}\t{}",
-                        card.id, card.status, card.column_id, card.title
+                        "#{}\t[{}]\tcol={}\t{}{}",
+                        card.id, card.status, card.column_id, card.title, session
                     );
                 }
             }
@@ -564,8 +597,8 @@ fn cmd_harness(sub: HarnessCmd) -> Result<()> {
 fn cmd_space(sub: SpaceCmd) -> Result<()> {
     let mut c = connect_or_start()?;
     match sub {
-        SpaceCmd::List { json } => {
-            let v = c.call("space.list", json!({}))?;
+        SpaceCmd::List { session, json } => {
+            let v = c.call("space.list", json!({ "session": session }))?;
             let res: SpaceListResult = serde_json::from_value(v)?;
             if json {
                 print_json(&res)?;
@@ -578,6 +611,37 @@ fn cmd_space(sub: SpaceCmd) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn cmd_session(sub: SessionCmd) -> Result<()> {
+    let mut c = connect_or_start()?;
+    match sub {
+        SessionCmd::List { json } => {
+            let v = c.call("session.list", json!({}))?;
+            let res: SessionListResult = serde_json::from_value(v)?;
+            if json {
+                print_json(&res)?;
+            } else {
+                let width = res.sessions.iter().map(|s| s.name.len()).max().unwrap_or(0);
+                for s in &res.sessions {
+                    let running = if s.running { "running" } else { "stopped" };
+                    let marker = if s.default { "  (default)" } else { "" };
+                    println!("{:<width$}  {:<8}{}", s.name, running, marker);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Parse a `--space-kind` CLI value. Accepts `workspace` and `new-workspace`
+/// (the wire form `new_workspace` is also tolerated); anything else is an error.
+fn parse_space_kind(s: &str) -> Result<SpaceKind> {
+    match s {
+        "workspace" => Ok(SpaceKind::Workspace),
+        "new-workspace" | "new_workspace" => Ok(SpaceKind::NewWorkspace),
+        other => bail!("invalid space-kind '{other}' (expected: workspace, new-workspace)"),
+    }
 }
 
 // -- helpers -----------------------------------------------------------------
