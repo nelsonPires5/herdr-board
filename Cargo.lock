@@ -158,6 +158,7 @@ dependencies = [
  "crossterm",
  "insta",
  "ratatui",
+ "serde_json",
  "tempfile",
  "tui-textarea",
 ]

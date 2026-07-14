@@ -537,7 +537,7 @@ pub const HELP_KEYS: &[(&str, &str)] = &[
     ("H / L", "shove card left / right"),
     ("Enter", "card detail"),
     ("T", "apply template (empty board only)"),
-    ("R", "refresh"),
+    ("r", "refresh board"),
     ("?", "this help"),
     ("q / Esc", "back / quit"),
     ("--", "-- card detail --"),

@@ -20,8 +20,9 @@ use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
+use board_core::capability::HarnessCapabilities;
 use board_core::client::BoardClient;
-use board_core::protocol::Event;
+use board_core::protocol::{Event, SpaceInfo, SpaceListResult};
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event as CtEvent, KeyEventKind};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -197,7 +198,43 @@ impl Driver {
                 }
             }
             Effect::EditFocusedTextArea => self.edit_focused(),
+            Effect::LoadFormOptions => self.load_form_options(),
             Effect::Quit => self.app.should_quit = true,
+        }
+    }
+
+    /// Fetch the capability catalog + workspace list for the open card form and
+    /// hand them to the form. A failed fetch is non-fatal: the affected
+    /// selectors fall back to free-text and the user gets a status-line warning.
+    fn load_form_options(&mut self) {
+        let Some(harness) = self.app.form.as_ref().map(|f| f.current_harness()) else {
+            return;
+        };
+        let caps = fetch_capabilities(self.client.as_mut(), &harness);
+        let spaces = fetch_spaces(self.client.as_mut());
+
+        let mut warning: Option<String> = None;
+        let caps_opt = match caps {
+            Ok(c) => Some(c),
+            Err(e) => {
+                warning = Some(format!("capabilities unavailable ({e}); free-text"));
+                None
+            }
+        };
+        let spaces_opt = match spaces {
+            Ok(s) => Some(s),
+            Err(e) => {
+                if warning.is_none() {
+                    warning = Some(format!("spaces unavailable ({e}); free-text"));
+                }
+                None
+            }
+        };
+        if let Some(form) = self.app.form.as_mut() {
+            form.apply_options(caps_opt, spaces_opt);
+        }
+        if let Some(w) = warning {
+            self.app.set_toast(w, true);
         }
     }
 
@@ -214,6 +251,23 @@ impl Driver {
             }
         }
     }
+}
+
+/// Fetch `harness.capabilities` for `harness` via the client's generic `call`
+/// (works over the real socket; the fake testkit client stubs it).
+fn fetch_capabilities(client: &mut dyn BoardClient, harness: &str) -> Result<HarnessCapabilities> {
+    let v = client.call(
+        "harness.capabilities",
+        serde_json::json!({ "harness": harness }),
+    )?;
+    Ok(serde_json::from_value(v)?)
+}
+
+/// Fetch `space.list` via the client's generic `call`.
+fn fetch_spaces(client: &mut dyn BoardClient) -> Result<Vec<SpaceInfo>> {
+    let v = client.call("space.list", serde_json::json!({}))?;
+    let r: SpaceListResult = serde_json::from_value(v)?;
+    Ok(r.spaces)
 }
 
 fn epoch_secs() -> i64 {

@@ -2,7 +2,7 @@
 //! and `FakeBoardClient`. Everything is deterministic: a fixed `now`, fixed
 //! terminal sizes, and running-card timers pinned by rewriting `updated_at`.
 
-use board_core::client::FakeBoardClient;
+use board_core::client::{BoardClient, FakeBoardClient};
 use board_core::protocol::CardStatus;
 use board_tui::app::{App, Msg};
 use board_tui::editor::FakeEditor;
@@ -31,7 +31,7 @@ fn pin(app: &mut App) {
     }
 }
 
-fn driver(client: FakeBoardClient) -> Driver {
+fn driver<C: BoardClient + 'static>(client: C) -> Driver {
     Driver::with_editor(
         Box::new(client),
         Box::new(FakeEditor::new("edited via $EDITOR")),
@@ -73,6 +73,26 @@ fn new_card_modal() {
     let mut d = driver(demo_client().unwrap());
     key(&mut d, KeyCode::Char('n'));
     insta::assert_snapshot!("new_card_modal", render(&mut d, 80, 24));
+}
+
+#[test]
+fn new_card_modal_freetext_fallback() {
+    // Capability + space fetch both fail -> guided fields degrade to free text
+    // and the footer warns.
+    let client = demo_client().unwrap().without_caps().without_spaces();
+    let mut d = driver(client);
+    key(&mut d, KeyCode::Char('n'));
+    insta::assert_snapshot!("new_card_modal_fallback", render(&mut d, 80, 24));
+}
+
+#[test]
+fn edit_card_modal_selectors() {
+    // The running card in Plan has model/effort/permission set and space_ref
+    // "w4" -> the workspace selector preselects "MELI scraper (w4)".
+    let mut d = driver(demo_client().unwrap());
+    key(&mut d, KeyCode::Right); // Plan
+    key(&mut d, KeyCode::Char('e'));
+    insta::assert_snapshot!("edit_card_modal", render(&mut d, 80, 24));
 }
 
 #[test]

@@ -10,7 +10,7 @@ use board_core::protocol::{BoardSnapshot, CardDetail, CardMoveParams, CardStatus
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
-use crate::forms::{Form, FormKind, Submit};
+use crate::forms::{FieldId, FieldKind, Form, FormKind, Submit};
 
 /// Which modal/screen is active.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -60,6 +60,9 @@ pub enum Effect {
     RunDone(i64, RunOutcome),
     /// Hand the focused multiline text field to `$EDITOR`.
     EditFocusedTextArea,
+    /// Fetch `harness.capabilities` + `space.list` for the open card form and
+    /// populate its guided selectors. Emitted on form open and harness change.
+    LoadFormOptions,
     Quit,
 }
 
@@ -312,6 +315,7 @@ fn board_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
             if let Some(col_id) = app.col_id_at(app.sel_col) {
                 app.form = Some(Form::card_create(col_id));
                 app.screen = Screen::CardForm;
+                return vec![Effect::LoadFormOptions];
             }
         }
         KeyCode::Char('N') => {
@@ -322,6 +326,7 @@ fn board_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
             if let Some(card) = app.selected_card().cloned() {
                 app.form = Some(Form::card_edit(&card));
                 app.screen = Screen::CardForm;
+                return vec![Effect::LoadFormOptions];
             }
         }
         KeyCode::Char('E') => {
@@ -355,7 +360,10 @@ fn board_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
             }
             app.set_toast("template only applies to an empty board", true);
         }
-        KeyCode::Char('R') => return vec![Effect::Refetch],
+        KeyCode::Char('r') | KeyCode::Char('R') => {
+            app.set_toast("refreshed", false);
+            return vec![Effect::Refetch];
+        }
         KeyCode::Char('?') => app.screen = Screen::Help,
         KeyCode::Char('q') | KeyCode::Esc => return vec![Effect::Quit],
         _ => {}
@@ -511,14 +519,24 @@ fn form_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
         _ => {
             let form = app.form.as_mut().unwrap();
             if form.focused_is_choice() {
-                match k.code {
-                    KeyCode::Left | KeyCode::Up => form.focused_mut().cycle(-1),
-                    KeyCode::Right | KeyCode::Down | KeyCode::Char(' ') => {
-                        form.focused_mut().cycle(1)
+                let delta = match k.code {
+                    KeyCode::Left | KeyCode::Up => Some(-1),
+                    KeyCode::Right | KeyCode::Down | KeyCode::Char(' ') => Some(1),
+                    _ => None,
+                };
+                if let Some(delta) = delta {
+                    let fid = form.focused().id;
+                    form.focused_mut().cycle(delta);
+                    // A changed harness needs fresh capabilities; model/space-kind
+                    // changes reshape the dependent selectors in place.
+                    match fid {
+                        FieldId::Harness => return vec![Effect::LoadFormOptions],
+                        FieldId::Model => form.on_model_changed(),
+                        FieldId::SpaceKind => form.on_space_kind_changed(),
+                        _ => {}
                     }
-                    _ => {}
                 }
-            } else if let crate::forms::FieldKind::Text(ta) = &mut form.focused_mut().kind {
+            } else if let FieldKind::Text(ta) = &mut form.focused_mut().kind {
                 // Enter/Tab/Esc are handled above; everything else is editing.
                 ta.input(k);
             }

@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 board-core = { workspace = true }
 anyhow = { workspace = true }
+serde_json = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
 tui-textarea = { workspace = true }
@@ -23,4 +24,16 @@ fake-client = ["board-core/fake-client"]
 
 [[example]]
 name = "tui_fake"
+required-features = ["fake-client"]
+
+# The integration tests drive a FakeBoardClient / FakeEditor from `testkit`,
+# both gated behind `fake-client`; declare the dependency so a plain
+# `cargo test --workspace` (no `--all-features`) skips rather than fails to
+# compile them.
+[[test]]
+name = "update"
+required-features = ["fake-client"]
+
+[[test]]
+name = "snapshots"
 required-features = ["fake-client"]
