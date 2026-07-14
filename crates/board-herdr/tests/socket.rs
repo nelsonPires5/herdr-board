@@ -142,6 +142,75 @@ fn typed_result_extraction_workspace_create() {
 }
 
 #[test]
+fn tab_list_parses_live_payload() {
+    // Captured from a live herdr 0.7.3 socket (`tab.list`).
+    let path = serve_calls(|req| {
+        assert_eq!(req["method"], "tab.list");
+        // `None` workspace is sent explicitly as null.
+        assert!(req["params"]["workspace_id"].is_null());
+        reply_for(
+            req,
+            r#"{"type":"tab_list","tabs":[{"tab_id":"w1:t1","workspace_id":"w1","number":1,"label":"1","focused":false,"pane_count":1,"agent_status":"unknown"},{"tab_id":"w4:t1","workspace_id":"w4","number":1,"label":"1","focused":true,"pane_count":2,"agent_status":"idle"}]}"#,
+        )
+    });
+
+    let mut c = HerdrClient::connect(&path).unwrap();
+    let tabs = c.tab_list(None).unwrap();
+    assert_eq!(tabs.len(), 2);
+    assert_eq!(tabs[0].tab_id, "w1:t1");
+    assert_eq!(tabs[0].number, 1);
+    assert_eq!(tabs[0].pane_count, 1);
+    assert!(!tabs[0].focused);
+    assert!(tabs[1].focused);
+    assert_eq!(tabs[1].pane_count, 2);
+}
+
+#[test]
+fn pane_focus_returns_pane_info() {
+    let path = serve_calls(|req| {
+        assert_eq!(req["method"], "pane.focus");
+        assert_eq!(req["params"]["pane_id"], "w4:p2");
+        reply_for(
+            req,
+            r#"{"type":"pane_info","pane":{"pane_id":"w4:p2","terminal_id":"term-2","workspace_id":"w4","tab_id":"w4:t1","agent_status":"idle"}}"#,
+        )
+    });
+
+    let mut c = HerdrClient::connect(&path).unwrap();
+    let pane = c.pane_focus("w4:p2").unwrap();
+    assert_eq!(pane.pane_id, "w4:p2");
+    assert_eq!(pane.terminal_id, "term-2");
+}
+
+#[test]
+fn pane_layout_parses_live_payload() {
+    // Captured verbatim from a live herdr 0.7.3 socket (`pane.layout`, focused tab).
+    let path = serve_calls(|req| {
+        assert_eq!(req["method"], "pane.layout");
+        reply_for(
+            req,
+            r#"{"type":"pane_layout","layout":{"workspace_id":"w4","tab_id":"w4:t1","zoomed":false,"area":{"x":26,"y":1,"width":399,"height":55},"focused_pane_id":"w4:p1","panes":[{"pane_id":"w4:p1","focused":true,"rect":{"x":26,"y":1,"width":187,"height":55}},{"pane_id":"w4:p2","focused":false,"rect":{"x":213,"y":1,"width":212,"height":55}}],"splits":[{"id":"split_0_root","direction":"right","ratio":0.4675,"rect":{"x":26,"y":1,"width":399,"height":55}}]}}"#,
+        )
+    });
+
+    let mut c = HerdrClient::connect(&path).unwrap();
+    let layout = c.pane_layout(None).unwrap();
+    assert_eq!(layout.focused_pane_id, "w4:p1");
+    assert_eq!(layout.tab_id, "w4:t1");
+    assert!(!layout.zoomed);
+    assert_eq!(layout.area.width, 399);
+    assert_eq!(layout.panes.len(), 2);
+    assert_eq!(layout.panes[0].pane_id, "w4:p1");
+    assert!(layout.panes[0].focused);
+    assert_eq!(layout.panes[1].rect.x, 213);
+    assert_eq!(layout.panes[1].rect.width, 212);
+    assert_eq!(layout.splits.len(), 1);
+    assert_eq!(layout.splits[0].direction, "right");
+    assert!((layout.splits[0].ratio - 0.4675).abs() < 1e-9);
+    assert_eq!(layout.splits[0].id, "split_0_root");
+}
+
+#[test]
 fn error_response_maps_to_protocol_error() {
     let path = serve_calls(|req| {
         let id = req["id"].as_str().unwrap_or("");

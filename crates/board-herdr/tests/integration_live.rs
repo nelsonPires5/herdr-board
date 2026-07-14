@@ -64,6 +64,42 @@ fn live_session_snapshot() {
 
 #[test]
 #[ignore = "requires a live herdr socket"]
+fn live_tab_list() {
+    let Some(mut c) = client_or_skip() else {
+        return;
+    };
+    let tabs = c.tab_list(None).expect("tab.list");
+    eprintln!("live tabs: {}", tabs.len());
+    for t in &tabs {
+        assert!(!t.tab_id.is_empty());
+    }
+}
+
+#[test]
+#[ignore = "requires a live herdr socket"]
+fn live_pane_layout() {
+    let Some(mut c) = client_or_skip() else {
+        return;
+    };
+    // `None` = focused tab's layout.
+    let layout = c.pane_layout(None).expect("pane.layout");
+    eprintln!(
+        "live layout: {} panes, {} splits, focused={}",
+        layout.panes.len(),
+        layout.splits.len(),
+        layout.focused_pane_id
+    );
+    // The focused pane id, when present, should appear among the panes.
+    if !layout.focused_pane_id.is_empty() {
+        assert!(layout
+            .panes
+            .iter()
+            .any(|p| p.pane_id == layout.focused_pane_id));
+    }
+}
+
+#[test]
+#[ignore = "requires a live herdr socket"]
 fn live_pane_list_and_read() {
     let Some(mut c) = client_or_skip() else {
         return;

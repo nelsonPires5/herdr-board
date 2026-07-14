@@ -31,7 +31,8 @@ pub use events::{
     parse_event_line, watch_subscriptions, Backoff, HerdrEvent, HerdrEvents, Subscription,
 };
 pub use types::{
-    AgentInfo, AgentStarted, AgentStatus, NotificationShown, NotificationSound, PaneInfo,
-    PaneReadResult, Pong, ReadSource, SessionSnapshot, SplitDirection, TabCreated, TabInfo,
-    WorkspaceCreated, WorkspaceInfo, WorktreeCreated, WorktreeInfo, WorktreeRemoved,
+    AgentInfo, AgentStarted, AgentStatus, Layout, LayoutPane, LayoutSplit, NotificationShown,
+    NotificationSound, PaneInfo, PaneReadResult, Pong, ReadSource, Rect, SessionSnapshot,
+    SplitDirection, TabCreated, TabInfo, WorkspaceCreated, WorkspaceInfo, WorktreeCreated,
+    WorktreeInfo, WorktreeRemoved,
 };

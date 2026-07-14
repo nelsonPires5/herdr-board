@@ -64,14 +64,20 @@ pub struct WorkspaceInfo {
     pub agent_status: AgentStatus,
 }
 
-/// A tab.
+/// A tab, as it appears in snapshots and `tab.list`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct TabInfo {
     pub tab_id: String,
     #[serde(default)]
     pub workspace_id: String,
     #[serde(default)]
+    pub number: u64,
+    #[serde(default)]
     pub label: String,
+    #[serde(default)]
+    pub focused: bool,
+    #[serde(default)]
+    pub pane_count: u64,
     #[serde(default = "unknown_status")]
     pub agent_status: AgentStatus,
 }
@@ -275,6 +281,62 @@ pub struct Pong {
     pub protocol: u32,
     #[serde(default)]
     pub capabilities: BTreeMap<String, serde_json::Value>,
+}
+
+/// A rectangle in terminal cells, as reported inside a [`Layout`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+pub struct Rect {
+    #[serde(default)]
+    pub x: u64,
+    #[serde(default)]
+    pub y: u64,
+    #[serde(default)]
+    pub width: u64,
+    #[serde(default)]
+    pub height: u64,
+}
+
+/// A pane slot within a [`Layout`].
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct LayoutPane {
+    pub pane_id: String,
+    #[serde(default)]
+    pub focused: bool,
+    #[serde(default)]
+    pub rect: Rect,
+}
+
+/// A split node within a [`Layout`]. `direction` is `right`/`down` (kept as a
+/// string for forward-compatibility); `ratio` is the first child's fraction.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct LayoutSplit {
+    pub id: String,
+    #[serde(default)]
+    pub direction: String,
+    #[serde(default)]
+    pub ratio: f64,
+    #[serde(default)]
+    pub rect: Rect,
+}
+
+/// The pane layout of a tab (result of `pane.layout`): each pane's rectangle
+/// plus the split tree.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Layout {
+    #[serde(default)]
+    pub workspace_id: String,
+    #[serde(default)]
+    pub tab_id: String,
+    #[serde(default)]
+    pub zoomed: bool,
+    #[serde(default)]
+    pub area: Rect,
+    #[serde(default)]
+    pub focused_pane_id: String,
+    #[serde(default)]
+    pub panes: Vec<LayoutPane>,
+    #[serde(default)]
+    pub splits: Vec<LayoutSplit>,
 }
 
 fn unknown_status() -> AgentStatus {

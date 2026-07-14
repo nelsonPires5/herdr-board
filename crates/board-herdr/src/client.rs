@@ -17,9 +17,9 @@ use serde_json::{json, Value};
 use crate::envelope::{Request, Response};
 use crate::error::{HerdrError, Result};
 use crate::types::{
-    AgentStarted, NotificationShown, NotificationSound, PaneInfo, PaneReadResult, Pong, ReadSource,
-    SessionSnapshot, SplitDirection, TabCreated, WorkspaceCreated, WorkspaceInfo, WorktreeCreated,
-    WorktreeRemoved,
+    AgentStarted, Layout, NotificationShown, NotificationSound, PaneInfo, PaneReadResult, Pong,
+    ReadSource, SessionSnapshot, SplitDirection, TabCreated, TabInfo, WorkspaceCreated,
+    WorkspaceInfo, WorktreeCreated, WorktreeRemoved,
 };
 
 /// Default socket path: `$HERDR_SOCKET_PATH` (herdr's canonical variable,
@@ -231,6 +231,11 @@ impl HerdrClient {
         self.call_into("tab.create", serde_json::to_value(p)?)
     }
 
+    /// List tabs, optionally scoped to one workspace (`None` = all workspaces).
+    pub fn tab_list(&mut self, workspace_id: Option<&str>) -> Result<Vec<TabInfo>> {
+        self.call_field("tab.list", json!({ "workspace_id": workspace_id }), "tabs")
+    }
+
     // -- agent ---------------------------------------------------------------
 
     pub fn agent_start(&mut self, p: &AgentStartParams) -> Result<AgentStarted> {
@@ -280,6 +285,17 @@ impl HerdrClient {
     pub fn pane_close(&mut self, pane_id: &str) -> Result<()> {
         self.call("pane.close", json!({ "pane_id": pane_id }))?;
         Ok(())
+    }
+
+    /// Focus a pane; returns the pane's updated [`PaneInfo`].
+    pub fn pane_focus(&mut self, pane_id: &str) -> Result<PaneInfo> {
+        self.call_field("pane.focus", json!({ "pane_id": pane_id }), "pane")
+    }
+
+    /// Fetch the pane [`Layout`] for the tab containing `pane_id` (`None` = the
+    /// focused tab).
+    pub fn pane_layout(&mut self, pane_id: Option<&str>) -> Result<Layout> {
+        self.call_field("pane.layout", json!({ "pane_id": pane_id }), "layout")
     }
 
     // -- worktree ------------------------------------------------------------
