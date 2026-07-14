@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use board_core::capability::capabilities_for;
 use board_core::db::BOARD_ID;
 use board_core::engine::{
     decide_entry, validate_card_edit, validate_column_delete, validate_column_permission_override,
@@ -41,6 +42,8 @@ pub fn handle_request(d: &Arc<Daemon>, method: &str, params: Value) -> Result<Va
         "run.done" => run_done(d, from(params)?),
         "run.cancel" => run_cancel(d, from(params)?),
         "run.retry" => run_retry(d, from(params)?),
+        "harness.capabilities" => harness_capabilities(d, from(params)?),
+        "space.list" => space_list(d),
         other => Err(Error::BadRequest(format!("unknown method: {other}"))),
     }
 }
@@ -295,4 +298,126 @@ fn run_retry(d: &Arc<Daemon>, p: RunCardParams) -> Result<Value> {
     d.emit_changed(BoardChangedReason::CardUpdated, Some(p.card_id), None);
     let card = require_card(d, p.card_id)?;
     Ok(json!(RunActionResult { run, card }))
+}
+
+// -- harness / space --------------------------------------------------------
+
+fn harness_capabilities(d: &Arc<Daemon>, p: HarnessCapabilitiesParams) -> Result<Value> {
+    match capabilities_for(&p.harness, &d.config) {
+        Some(caps) => Ok(json!(caps)),
+        None => {
+            // Known harnesses: the builtin `claude` plus config-defined ones.
+            let mut known = vec!["claude".to_string()];
+            known.extend(d.config.harness.keys().cloned());
+            known.sort();
+            Err(Error::NotFound(format!(
+                "unknown harness '{}'; known: {}",
+                p.harness,
+                known.join(", ")
+            )))
+        }
+    }
+}
+
+fn space_list(d: &Arc<Daemon>) -> Result<Value> {
+    let herdr = d
+        .herdr
+        .as_ref()
+        .ok_or_else(|| Error::HerdrUnavailable("herdr not connected".into()))?;
+    let mut client = herdr.clone();
+    let workspaces = client
+        .workspace_list()
+        .map_err(|e| Error::HerdrUnavailable(format!("workspace.list: {e}")))?;
+    let spaces = workspaces
+        .into_iter()
+        .map(|w| SpaceInfo {
+            id: w.workspace_id,
+            label: w.label,
+        })
+        .collect();
+    Ok(json!(SpaceListResult { spaces }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::DaemonSettings;
+    use crate::spawner::LocalSpawner;
+    use crate::store::Store;
+    use board_core::config::{Config, HarnessDef};
+    use board_core::db::Db;
+    use std::path::PathBuf;
+    use tokio::sync::{broadcast, mpsc, watch};
+
+    fn test_daemon(config: Config) -> Arc<Daemon> {
+        let db = Db::open_in_memory().unwrap();
+        let store = Store::new(db);
+        let (events_tx, _events_rx) = broadcast::channel(16);
+        let (dispatch_tx, _dispatch_rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        Arc::new(Daemon::new(
+            store,
+            config,
+            DaemonSettings::default(),
+            PathBuf::from("/tmp/board-test.db"),
+            PathBuf::from("/tmp/board-test.sock"),
+            Arc::new(LocalSpawner::new()),
+            None, // no herdr
+            events_tx,
+            dispatch_tx,
+            shutdown_tx,
+        ))
+    }
+
+    #[test]
+    fn harness_capabilities_claude_ok() {
+        let d = test_daemon(Config::default());
+        let v = handle_request(&d, "harness.capabilities", json!({ "harness": "claude" })).unwrap();
+        assert_eq!(v["harness"], "claude");
+        assert_eq!(v["model_freeform"], true);
+        assert!(v["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["id"] == "sonnet"));
+    }
+
+    #[test]
+    fn harness_capabilities_config_defined_ok() {
+        let mut config = Config::default();
+        config.harness.insert(
+            "fake".to_string(),
+            HarnessDef {
+                argv: vec!["bash".into(), "fake.sh".into()],
+                models: vec!["m1".into()],
+                efforts: vec!["low".into()],
+                permission_modes: vec!["auto".into()],
+            },
+        );
+        let d = test_daemon(config);
+        let v = handle_request(&d, "harness.capabilities", json!({ "harness": "fake" })).unwrap();
+        assert_eq!(v["harness"], "fake");
+        assert_eq!(v["permission_modes"][0], "auto");
+    }
+
+    #[test]
+    fn harness_capabilities_unknown_is_not_found() {
+        let d = test_daemon(Config::default());
+        let err =
+            handle_request(&d, "harness.capabilities", json!({ "harness": "ghost" })).unwrap_err();
+        assert_eq!(err.code(), 2);
+        let msg = err.to_string();
+        assert!(msg.contains("ghost"), "message: {msg}");
+        assert!(
+            msg.contains("claude"),
+            "message lists known harnesses: {msg}"
+        );
+    }
+
+    #[test]
+    fn space_list_without_herdr_is_herdr_unavailable() {
+        let d = test_daemon(Config::default());
+        let err = handle_request(&d, "space.list", json!({})).unwrap_err();
+        assert_eq!(err.code(), 4);
+    }
 }

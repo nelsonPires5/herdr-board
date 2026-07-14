@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use board_core::capability::{run_pane_name, run_pane_name_unique};
 use board_core::db::BOARD_ID;
 use board_core::engine::{decide_transition, TransitionDecision};
 use board_core::harness::{build_invocation, plan_session, HarnessError, SessionPlan};
@@ -165,9 +166,18 @@ async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result<bool> {
 
     let argv: Vec<String> = serde_json::from_str(&run.argv_json)?;
     let mut req = SpawnReq {
-        // Unique per RUN: herdr agent names are exclusive while any pane using
-        // one is open, and finished panes stay open (visible) by design.
-        name: format!("board-card-{}-r{}", card.id, run.id),
+        // Stable, human-readable pane name `card-<id>-<column-slug>`. herdr
+        // agent names are exclusive while a pane using one is open (and finished
+        // panes stay open, visible, by design), so on collision the spawner
+        // retries once with the run-scoped `name_fallback`.
+        name: run_pane_name(card.id, &column.name),
+        name_fallback: Some(run_pane_name_unique(card.id, &column.name, run.id)),
+        // Workspace/worktree runs land in a `kanban` tab (find-or-create + grid
+        // layout); cwd runs have no herdr workspace to place a tab in.
+        tab_label: match card.space_kind {
+            SpaceKind::Workspace | SpaceKind::Worktree => Some("kanban".to_string()),
+            SpaceKind::Cwd => None,
+        },
         cwd: None,
         workspace_ref: None,
         env,
