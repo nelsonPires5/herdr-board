@@ -10,9 +10,12 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
+use board_core::capability::HarnessCapabilities;
 use board_core::client::{BoardClient, UnixClient};
 use board_core::paths;
-use board_core::protocol::{CardCreateParams, CardMoveParams, Effort, RunOutcome, SpaceKind};
+use board_core::protocol::{
+    CardCreateParams, CardMoveParams, Effort, RunOutcome, SpaceKind, SpaceListResult,
+};
 use clap::{Parser, Subcommand};
 use serde_json::json;
 
@@ -87,6 +90,16 @@ enum Cmd {
         #[command(subcommand)]
         sub: ColumnCmd,
     },
+    /// Harness capability queries.
+    Harness {
+        #[command(subcommand)]
+        sub: HarnessCmd,
+    },
+    /// Run-space (herdr workspace) operations.
+    Space {
+        #[command(subcommand)]
+        sub: SpaceCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -141,6 +154,45 @@ enum ColumnCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum HarnessCmd {
+    /// List known models and the efforts each accepts.
+    Models {
+        /// Harness name.
+        #[arg(default_value = "claude")]
+        harness: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the efforts a model accepts.
+    Efforts {
+        /// Harness name.
+        #[arg(default_value = "claude")]
+        harness: String,
+        #[arg(long)]
+        model: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the permission modes a harness understands.
+    Permissions {
+        /// Harness name.
+        #[arg(default_value = "claude")]
+        harness: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum SpaceCmd {
+    /// List run spaces (herdr workspaces).
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 fn main() {
     if let Err(e) = real_main() {
         eprintln!("board: {e:#}");
@@ -173,6 +225,8 @@ fn real_main() -> Result<()> {
         Cmd::Cancel { card_id, json } => cmd_run_action("run.cancel", card_id, json),
         Cmd::Retry { card_id, json } => cmd_run_action("run.retry", card_id, json),
         Cmd::Column { sub } => cmd_column(sub),
+        Cmd::Harness { sub } => cmd_harness(sub),
+        Cmd::Space { sub } => cmd_space(sub),
     }
 }
 
@@ -453,7 +507,108 @@ fn cmd_column(sub: ColumnCmd) -> Result<()> {
     Ok(())
 }
 
+fn cmd_harness(sub: HarnessCmd) -> Result<()> {
+    let mut c = connect_or_start()?;
+    match sub {
+        HarnessCmd::Models { harness, json } => {
+            let caps = harness_capabilities(&mut c, &harness)?;
+            if json {
+                print_json(&caps)?;
+            } else {
+                for m in &caps.models {
+                    println!("{}  {}", m.id, efforts_str(&m.efforts));
+                }
+                if caps.model_freeform {
+                    println!("\n(any model string accepted; these are known aliases)");
+                }
+            }
+        }
+        HarnessCmd::Efforts {
+            harness,
+            model,
+            json,
+        } => {
+            let caps = harness_capabilities(&mut c, &harness)?;
+            let (efforts, known) = match caps.models.iter().find(|m| m.id == model) {
+                Some(m) => (m.efforts.clone(), true),
+                None if caps.model_freeform => (union_efforts(&caps), false),
+                None => bail!("model '{model}' not known to harness '{harness}'"),
+            };
+            if json {
+                let efforts: Vec<&str> = efforts.iter().map(|e| e.as_str()).collect();
+                print_json(&json!({ "model": model, "efforts": efforts, "known": known }))?;
+            } else {
+                println!("{}", efforts_str(&efforts));
+                if !known {
+                    println!(
+                        "\n(model '{model}' unknown to {harness} but accepted; \
+                         showing all known efforts)"
+                    );
+                }
+            }
+        }
+        HarnessCmd::Permissions { harness, json } => {
+            let caps = harness_capabilities(&mut c, &harness)?;
+            if json {
+                print_json(&caps.permission_modes)?;
+            } else {
+                for p in &caps.permission_modes {
+                    println!("{p}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cmd_space(sub: SpaceCmd) -> Result<()> {
+    let mut c = connect_or_start()?;
+    match sub {
+        SpaceCmd::List { json } => {
+            let v = c.call("space.list", json!({}))?;
+            let res: SpaceListResult = serde_json::from_value(v)?;
+            if json {
+                print_json(&res)?;
+            } else {
+                let width = res.spaces.iter().map(|s| s.id.len()).max().unwrap_or(0);
+                for s in &res.spaces {
+                    println!("{:<width$}  {}", s.id, s.label);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 // -- helpers -----------------------------------------------------------------
+
+/// Fetch a harness's capability catalog (`harness.capabilities`).
+fn harness_capabilities(c: &mut UnixClient, harness: &str) -> Result<HarnessCapabilities> {
+    let v = c.call("harness.capabilities", json!({ "harness": harness }))?;
+    Ok(serde_json::from_value(v)?)
+}
+
+/// Render an effort list space-separated (e.g. `low medium high xhigh max`).
+fn efforts_str(efforts: &[Effort]) -> String {
+    efforts
+        .iter()
+        .map(|e| e.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Deduplicated union of every model's efforts, preserving first-seen order.
+fn union_efforts(caps: &HarnessCapabilities) -> Vec<Effort> {
+    let mut out = Vec::new();
+    for m in &caps.models {
+        for e in &m.efforts {
+            if !out.contains(e) {
+                out.push(*e);
+            }
+        }
+    }
+    out
+}
 
 fn env_card_id() -> Result<i64> {
     std::env::var("BOARD_CARD_ID")

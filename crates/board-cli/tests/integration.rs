@@ -86,6 +86,19 @@ impl TestDaemon {
     fn client(&self) -> UnixClient {
         UnixClient::connect(&self.socket).expect("connect")
     }
+
+    /// Run the `board` binary against this daemon's socket and capture its output.
+    fn board(&self, args: &[&str]) -> std::process::Output {
+        Command::new(BOARD_BIN)
+            .args(args)
+            .env("BOARD_SOCKET", &self.socket)
+            .env("BOARD_DB", self._dir.path().join("board.db"))
+            .env("HERDR_BOARD_CONFIG", self._dir.path().join("config.toml"))
+            .env("HOME", self._dir.path())
+            .stdin(Stdio::null())
+            .output()
+            .expect("run board binary")
+    }
 }
 
 impl Drop for TestDaemon {
@@ -479,4 +492,157 @@ fn subscribe_receives_board_changed_on_card_create() {
         .expect("should receive an event");
     assert!(matches!(ev, Event::BoardChanged { .. }));
     let _ = handle.join();
+}
+
+// -- harness / space CLI verbs -----------------------------------------------
+
+#[test]
+fn harness_models_claude_json_and_human() {
+    let td = TestDaemon::start(&[]);
+
+    // --json: full HarnessCapabilities — 4 models, 5 efforts each, freeform.
+    let out = td.board(&["harness", "models", "claude", "--json"]);
+    assert!(out.status.success(), "harness models --json should succeed");
+    let caps: board_core::capability::HarnessCapabilities =
+        serde_json::from_slice(&out.stdout).expect("parse HarnessCapabilities");
+    assert_eq!(caps.harness, "claude");
+    assert!(caps.model_freeform);
+    assert_eq!(caps.models.len(), 4, "claude has 4 known models");
+    let ids: Vec<&str> = caps.models.iter().map(|m| m.id.as_str()).collect();
+    for expected in ["fable", "opus", "sonnet", "haiku"] {
+        assert!(ids.contains(&expected), "missing model {expected}");
+    }
+    for m in &caps.models {
+        assert_eq!(m.efforts.len(), 5, "{} should list 5 efforts", m.id);
+    }
+
+    // human: one line per model with its efforts, plus the freeform note.
+    let out = td.board(&["harness", "models", "claude"]);
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("fable") && l.contains("low medium high xhigh max")),
+        "human output lists model efforts; got:\n{text}"
+    );
+    assert!(
+        text.contains("any model string accepted"),
+        "human output notes model_freeform; got:\n{text}"
+    );
+}
+
+#[test]
+fn harness_models_default_is_claude() {
+    let td = TestDaemon::start(&[]);
+    // No positional harness → defaults to claude.
+    let out = td.board(&["harness", "models", "--json"]);
+    assert!(out.status.success());
+    let caps: board_core::capability::HarnessCapabilities =
+        serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(caps.harness, "claude");
+}
+
+#[test]
+fn harness_models_unknown_harness_errors() {
+    let td = TestDaemon::start(&[]);
+    let out = td.board(&["harness", "models", "ghost"]);
+    assert!(
+        !out.status.success(),
+        "unknown harness should exit non-zero"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("ghost"), "error names the harness; got: {err}");
+    assert!(
+        err.contains("error 2") || err.contains("unknown harness"),
+        "error surfaces not-found; got: {err}"
+    );
+}
+
+#[test]
+fn harness_efforts_known_and_unknown_model() {
+    let td = TestDaemon::start(&[]);
+
+    // Known model: efforts from the catalog, known:true.
+    let out = td.board(&[
+        "harness", "efforts", "claude", "--model", "sonnet", "--json",
+    ]);
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["model"], "sonnet");
+    assert_eq!(v["known"], true);
+    assert_eq!(v["efforts"].as_array().unwrap().len(), 5);
+
+    // Unknown-but-freeform model: all efforts, known:false.
+    let out = td.board(&["harness", "efforts", "claude", "--model", "gpt-x", "--json"]);
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["model"], "gpt-x");
+    assert_eq!(v["known"], false);
+    assert_eq!(v["efforts"].as_array().unwrap().len(), 5);
+
+    // Human output notes the unknown-but-accepted model.
+    let out = td.board(&["harness", "efforts", "claude", "--model", "gpt-x"]);
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("unknown"),
+        "notes unknown model; got:\n{text}"
+    );
+}
+
+#[test]
+fn harness_permissions_matches_claude_modes() {
+    let td = TestDaemon::start(&[]);
+    let out = td.board(&["harness", "permissions", "claude", "--json"]);
+    assert!(out.status.success());
+    let modes: Vec<String> = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        modes,
+        vec![
+            "acceptEdits",
+            "auto",
+            "bypassPermissions",
+            "manual",
+            "dontAsk",
+            "plan"
+        ]
+    );
+
+    // Human output: one mode per line.
+    let out = td.board(&["harness", "permissions", "claude"]);
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    for mode in [
+        "acceptEdits",
+        "auto",
+        "bypassPermissions",
+        "manual",
+        "dontAsk",
+        "plan",
+    ] {
+        assert!(
+            text.lines().any(|l| l == mode),
+            "missing permission line {mode}; got:\n{text}"
+        );
+    }
+}
+
+#[test]
+fn space_list_without_herdr_surfaces_error() {
+    // The test daemon has no herdr, so space.list yields the herdr-unavailable
+    // error (code 4); the CLI must surface it cleanly (non-zero exit + message).
+    let td = TestDaemon::start(&[]);
+    let out = td.board(&["space", "list"]);
+    assert!(!out.status.success(), "space list should exit non-zero");
+    assert!(out.stdout.is_empty(), "no rows printed on error");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("herdr") && err.contains("error 4"),
+        "error surfaces herdr-unavailable; got: {err}"
+    );
+
+    // --json path fails the same way (error before any JSON is written).
+    let out = td.board(&["space", "list", "--json"]);
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty());
 }
