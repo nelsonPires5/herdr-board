@@ -52,10 +52,19 @@ board move <CARD_ID> <COLUMN> [--json]   # COLUMN = name (case-insensitive) or i
 board cancel <CARD_ID> [--json]          # kill the run; card -> failed, no transition
 board retry <CARD_ID> [--json]           # re-run in current column (forks session)
 board status [--json]                    # daemon status
+board session list [--json]              # herdr sessions (name, running, default)
+board space list [--session S] [--json]  # workspaces in a session (default if unset)
 board card new --title T [-d DESC] [--column C] [--harness H] [--model M] \
-   [--effort E] [--permission P] [--space-kind workspace|cwd|worktree] \
-   [--space-ref R] [--worktree-base B] [--json]
+   [--effort E] [--permission P] [--session S] \
+   [--space-kind workspace|new-workspace] [--space-ref R] [--space-cwd DIR] [--json]
 ```
+
+A card picks a **herdr session** (`--session`, the daemon's default session when
+unset) and a **space** within it: `workspace` runs in an already-open workspace
+(`--space-ref` = its id or label), while `new-workspace` makes the daemon open a
+workspace on first dispatch (`--space-ref` = label, `--space-cwd` = its working
+dir — both required). There is no worktree space kind; run per-branch isolation
+from the agent prompt instead.
 
 Examples:
 ```bash
@@ -74,7 +83,8 @@ that dispatches the agent. Creating a card directly into an `auto` column dispat
 # Create in the default Todo column, then dispatch by moving into an auto column:
 board card new --title "Add retry to the uploader" \
   -d "In src/upload.rs, retry failed PUTs 3x with backoff. Add a unit test." \
-  --harness claude --effort high --space-kind worktree --space-ref /path/to/repo
+  --harness claude --effort high \
+  --space-kind new-workspace --space-ref uploader --space-cwd /path/to/repo
 board move <new-card-id> Execute        # Execute is an auto column -> run starts
 ```
 

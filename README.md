@@ -18,7 +18,7 @@ The single `board` binary is TUI, daemon, and CLI (subcommands). Crates: `board-
 
 | Role | What |
 |---|---|
-| `board daemon` (boardd) | Owns SQLite state, the run queue, and orchestration. Talks to herdr's socket to create workspaces/worktrees, spawn agent panes, and watch status events. |
+| `board daemon` (boardd) | Owns SQLite state, the run queue, and orchestration. Talks to herdr's socket to resolve/create workspaces, spawn agent panes, and watch status events. |
 | `board tui` | The kanban board, run **inside a herdr overlay pane** as a plugin (`herdr-plugin.toml`). Talks to the daemon; auto-starts it if absent. |
 | `board <verb>` (CLI) | Same binary; the verbs agents call from inside a run (`comment`, `done`, `move`, …). |
 
@@ -46,9 +46,12 @@ If `overlay` placement is unavailable in your herdr, open the board on demand wi
 `herdr plugin pane open --plugin herdr-board --entrypoint board --placement overlay --focus`.
 
 **Named sessions**: herdr keeps a plugin registry *per session* (keybindings/config are global, plugins are not). In each named session run once, from inside it:
-`herdr plugin link /path/to/herdr-board`. Also note the boardd daemon binds the herdr
-session it starts under — for a fully separate session, run a second stack with
-`BOARD_SOCKET`/`BOARD_DB` overrides. Don't bind keys herdr already uses by default
+`herdr plugin link /path/to/herdr-board`. A single boardd runs one board across
+**every** herdr session: a card carries a `session` (the default session when
+unset), and the daemon resolves it to that session's socket at dispatch (via
+`herdr session list`) to create/resolve the workspace and spawn the pane there.
+Use a second stack with `BOARD_SOCKET`/`BOARD_DB` overrides only for a fully
+separate *board*. Don't bind keys herdr already uses by default
 (`prefix+k` is `focus_pane_up`; check `herdr --default-config`).
 
 The **agent skill** (`skill/SKILL.md`, copied to `~/.claude/skills/herdr-board/` by `install.sh`) teaches Claude Code sessions how to drive the board from inside a run.
@@ -78,13 +81,14 @@ The **agent skill** (`skill/SKILL.md`, copied to `~/.claude/skills/herdr-board/`
 ```
 board tui | daemon [--foreground] | status [--json]
 board card new --title T [-d D] [--column C] [--harness H] [--model M] [--effort E] \
-   [--permission P] [--space-kind workspace|cwd|worktree] [--space-ref R] [--worktree-base B]
+   [--permission P] [--session S] [--space-kind workspace|new-workspace] \
+   [--space-ref R] [--space-cwd DIR]      # space-cwd required for new-workspace
 board card show <ID> | card list [--column C] | column list
 board comment [CARD_ID] <BODY>            # CARD_ID defaults to $BOARD_CARD_ID
 board done [CARD_ID] --outcome ok|fail [--summary S]
 board move <CARD_ID> <COLUMN> | cancel <CARD_ID> | retry <CARD_ID>
 board harness models [HARNESS] | efforts [HARNESS] --model M | permissions [HARNESS]
-board space list                          # HARNESS defaults to "claude"
+board space list [--session S] | session list    # HARNESS defaults to "claude"
 ```
 
 `--json` is accepted everywhere. Agent lifecycle rules and examples live in `skill/SKILL.md`.

@@ -6,7 +6,7 @@
 |---|---|
 | **Board** | A pipeline definition: an ordered set of columns. One default board; more allowed (e.g. "features", "ops"). A fresh board contains **only a `Todo` column** — everything else is user-created. |
 | **Column** | A stage, entirely user-defined: create/rename/reorder/delete from the TUI (keyboard or mouse). Config: `system_prompt`, `trigger` (`auto` = entering the column starts a run; `manual` = waits for human), `on_success` / `on_fail` (move card to column X, or stay), optional overrides (model/effort/harness) applied to every card passing through. Nothing about column names or count is hardcoded. |
-| **Card** | A unit of work. Title, **description = the base prompt**, harness, model, effort, permission mode, target **space** (herdr workspace / cwd, optionally "fresh worktree"), position, live status (`idle · queued · running · blocked · failed`), and the harness `session_id` for resume. |
+| **Card** | A unit of work. Title, **description = the base prompt**, harness, model, effort, permission mode, a **herdr session** (`session`, null = daemon default) AND a **space** within it (`workspace` = an already-open workspace id; `new_workspace` = a label + cwd the daemon opens on first dispatch), position, live status (`idle · queued · running · blocked · failed`), and the harness `session_id` for resume. |
 | **Comment** | Timestamped note on a card. Author = `user`, `agent` (from a run), or `system` (daemon transitions). Comments are both the audit log **and** context for the next run. |
 | **Run** | One agent execution of a card in a column: argv, herdr pane/workspace ids, session id, started/ended, exit status, result summary. Cards keep full run history (retries = new runs). |
 
@@ -49,14 +49,35 @@ columns(id, board_id, name, position, system_prompt, trigger,
         model_override, effort_override, harness_override, permission_override)
 cards(id, board_id, column_id, position, title, description,
       harness, model, effort, permission_mode,
-      space_kind ('workspace'|'cwd'|'worktree'), space_ref, worktree_base,
+      session,                                   -- herdr session name (NULL = default)
+      space_kind ('workspace'|'new_workspace'), space_ref, space_cwd,
       status, session_id, created_at, updated_at)
 comments(id, card_id, author, body, created_at)
 runs(id, card_id, column_id, harness, argv_json, prompt_snapshot,
      herdr_workspace_id, herdr_pane_id, session_id,
+     session,                                    -- herdr session the run spawned into
      started_at, ended_at, outcome ('ok'|'fail'|'cancelled'|'lost'),
      result_summary, log_path)
 ```
+
+Schema is versioned via `PRAGMA user_version` (current = **v2**). A fresh DB is built straight from `schema.sql` (the latest shape) and stamped v2; an existing v1 DB is upgraded in place by the v2 migration in `board-core/src/db.rs` (rebuilds `cards` for the new CHECK, converts legacy `cwd`/`worktree` kinds → `workspace` best-effort, drops `worktree_base`, adds `cards.session`/`cards.space_cwd`/`runs.session`).
+
+### Session model
+
+Cards target a **herdr session** plus a space in it. Because two sessions can each show their own workspaces, the daemon must talk to the right socket per card — the old single-socket model showed the wrong session's workspaces.
+
+- **Registry**: session enumeration is not in the herdr socket API (a session only knows itself), so the daemon shells out to `herdr session list --json` (binary via `$HERDR_BIN_PATH`, else `herdr`), caching ~3s. It maps `name/default/running/socket_path`.
+- **Default**: a card with `session = null` uses the daemon's own bound herdr socket; its display name is the registry entry whose `socket_path` matches (else the synthetic `"default"`).
+- **Per-session client**: spawn / kill / liveness / workspace resolve-or-create all build a `HerdrClient` on the resolved session socket (carried on `SpawnReq`/`SpawnHandle` as `herdr_socket`, and persisted as `runs.session` so kill/liveness work after a daemon restart).
+- **Per-session watchers**: a single watcher thread multiplexes one `HerdrEvents` stream **per session socket** that has active panes (agent-status subscriptions are validated per socket). It holds a `socket → stream` map, rebuilds all streams on a watch-set generation change, and (re)connects any watched socket missing a live stream — simpler than per-session thread lifecycles while fitting the existing loop.
+
+### new_workspace flow
+
+On first dispatch of a `new_workspace` card: list the session's workspaces; if one's label matches `space_ref` (case-insensitive) reuse it, else `workspace.create {label:space_ref, cwd:space_cwd}`. Then proceed identically to a `workspace` card (cwd snapshot, kanban tab, grid layout).
+
+### Worktree removal
+
+The `cwd` and `worktree` space kinds are gone. Worktree isolation is now the **agent's** job — instructed via the column/card prompt (create a worktree, work in it) — not a board primitive, keeping the board's space model to "which session, which workspace".
 
 ## 4. Column configuration
 
@@ -174,9 +195,9 @@ Pane-idle scraping alone is the documented weak point of every tmux-style orches
 
 ## 7. Queueing & concurrency
 
-- **Per-space FIFO**: two agents mutating one working tree collide; cards targeting the same workspace/cwd run serially.
+- **Per-space FIFO**: two agents mutating one working tree collide; cards sharing a `(session, space_kind, space_ref)` key run serially.
 - **Global semaphore** (default 3) caps concurrent runs across spaces (cost + machine load).
-- `space_kind=worktree` escapes the per-repo queue: each card gets its own worktree/branch (herdr `worktree create`), unbounded parallelism, merge at Human Review.
+- A `new_workspace` card that opens a distinct workspace per label gets its own queue key, so distinct labels run in parallel (up to the global cap). Agent-driven worktree isolation (see §3) is what escapes a per-repo bottleneck now.
 
 ## 8. Failure & safety rails
 
