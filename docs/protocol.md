@@ -62,6 +62,13 @@ One global board (`id=1`, created on first migration with a single `Todo` column
 - `run.cancel {card_id}` → `{run, card}` — kills the pane (herdr `pane.close`), outcome `cancelled`, card status `failed`, no transition.
 - `run.retry {card_id}` → re-enqueue in current column (fresh run; claude gets `--fork-session` if a session exists).
 
+### harness / spaces
+- `harness.capabilities {harness}` → `{harness, models:[{id, efforts:["low"|"medium"|"high"|"xhigh"|"max"…]}], model_freeform: bool, permission_modes:[…]}`
+  - the catalog is static (no runtime query exists in the CLI). Builtin `claude` (CLI 2.1.209): models `fable`/`opus`/`sonnet`/`haiku`, each with all five efforts ascending; `model_freeform:true` (any model string accepted); `permission_modes` = `["acceptEdits","auto","bypassPermissions","manual","dontAsk","plan"]` (there is NO `default` literal — omit the flag for the default).
+  - config-defined harnesses (`[harness.NAME]`) report `model_freeform:true` and the `models`/`efforts`/`permission_modes` declared in config (efforts applied to every listed model).
+  - error 2 (not found) for an unknown harness.
+- `space.list` (no params) → `{spaces:[{id, label}]}` — the daemon fills it from herdr `workspace.list`.
+
 ## Events (streamed to subscribers)
 
 Coarse by design — the TUI just refetches `board.get` on any of them; payload is for logs/toasts.
@@ -77,7 +84,9 @@ Coarse by design — the TUI just refetches `board.get` on any of them; payload 
    - resolve prompt: `description + "\n\n## Card comments\n" + last 20 comments` (skip section if none)
    - resolve settings: card value, overridden by column `*_override` when set
    - session: resume card.session_id unless column.fresh_session or none → mint UUID, store on card
-   - herdr spawn: `agent.start {name:"board-card-<id>", workspace_id | cwd, env:{BOARD_CARD_ID,BOARD_RUN_ID,BOARD_SOCKET}, argv}`; `space_kind=worktree` → `worktree.create {cwd:space_ref, base:worktree_base, branch:"board/card-<id>"}` first, spawn with cwd=worktree path
+   - herdr spawn: `agent.start {name:"card-<id>-<column-slug>", workspace_id | cwd, tab_id?, split?, env:{BOARD_CARD_ID,BOARD_RUN_ID,BOARD_SOCKET}, argv}`; `space_kind=worktree` → `worktree.create {cwd:space_ref, base:worktree_base, branch:"board/card-<id>"}` first, spawn with cwd=worktree path
+   - pane name is `card-<id>-<column-slug>` (e.g. `card-14-execute`); on herdr `agent_name_taken` retry once with the run-scoped fallback `card-<id>-<column-slug>-r<run>`
+   - placement (workspace/worktree spawns): the agent lands in a `kanban` tab of the workspace — find-or-create the tab (first tab labeled `kanban`, lowest `number` on ties). A freshly-created tab is filled unsplit, then its leftover shell pane is closed; an existing tab splits its largest pane (`Right` if that pane's cell width ≥ 2× its height, else `Down`, to keep the mesh ≈ square). `agent_placement_not_found` (tab raced away) redoes find-or-create once. cwd spawns skip tab placement.
    - card status `running`, store pane/workspace ids on run, emit `run_started`
 4. Finish signals, priority order:
    - `run.done` from the agent (primary; semantics above)

@@ -59,7 +59,7 @@ The **agent skill** (`skill/SKILL.md`, copied to `~/.claude/skills/herdr-board/`
 |---|---|---|---|---|
 | `←/→ h/l` | focus column | | `Enter` | card detail |
 | `↑/↓ k/j` | focus card | | `T` | apply template (empty board only) |
-| `n` | new card | | `R` | refresh |
+| `n` | new card | | `r` | refresh board |
 | `N` | new column | | `?` | this help |
 | `e` | edit card | | `q / Esc` | back / quit |
 | `E` | edit focused column | | **card detail** | |
@@ -83,6 +83,8 @@ board card show <ID> | card list [--column C] | column list
 board comment [CARD_ID] <BODY>            # CARD_ID defaults to $BOARD_CARD_ID
 board done [CARD_ID] --outcome ok|fail [--summary S]
 board move <CARD_ID> <COLUMN> | cancel <CARD_ID> | retry <CARD_ID>
+board harness models [HARNESS] | efforts [HARNESS] --model M | permissions [HARNESS]
+board space list                          # HARNESS defaults to "claude"
 ```
 
 `--json` is accepted everywhere. Agent lifecycle rules and examples live in `skill/SKILL.md`.
