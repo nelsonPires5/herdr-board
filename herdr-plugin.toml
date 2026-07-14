@@ -1,0 +1,38 @@
+# herdr-plugin.toml — manifest for the herdr-board plugin.
+#
+# herdr-board is a kanban board that sits above herdr spaces: cards are prompts,
+# columns are pipeline stages, and moving a card into an `auto` column dispatches
+# a real AI coding agent into a visible herdr pane. This manifest wires the board
+# TUI into herdr as an overlay pane plus a keybindable action to summon it.
+#
+# Field reference validated against `herdr plugin` (herdr 0.7.3) and the installed
+# herdr-file-viewer manifest (platforms use OS names, not target triples).
+id = "herdr-board"
+name = "Herdr Board"
+version = "0.1.0"
+description = "Kanban board for AI coding agents: cards are prompts, columns are pipeline stages; moving a card dispatches an agent into a herdr pane."
+min_herdr_version = "0.7.0"
+platforms = ["linux"]
+
+# Build the `board` binary at install time (idempotent: cargo no-ops when nothing
+# changed). Produces target/release/board, which the pane command below runs.
+[[build]]
+command = ["./scripts/build.sh"]
+
+# The kanban TUI, spawned by herdr in an overlay pane. `overlay` is an accepted
+# placement (herdr 0.7.3: overlay|split|tab|zoomed). The same binary auto-starts
+# the boardd daemon if it is not already running.
+[[panes]]
+id = "board"
+title = "Board"
+placement = "overlay"
+command = ["./target/release/board", "tui"]
+
+# Summon the board — bind this to a key via a [[keys.command]] in
+# ~/.config/herdr/config.toml (see README). The launcher is idempotent
+# (open-or-focus, toggle-off on repeat), mirroring herdr-file-viewer's launcher.
+[[actions]]
+id = "open-board"
+title = "Open board"
+description = "Open the herdr-board kanban as an overlay pane (focus/toggle if already open)."
+command = ["bash", "scripts/open-board.sh"]
