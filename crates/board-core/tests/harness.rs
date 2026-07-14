@@ -137,6 +137,7 @@ fn custom_harness_uses_template_and_env() {
                 "{model}".into(),
                 "{effort}".into(),
             ],
+            ..Default::default()
         },
     );
     let inv = build_invocation(
@@ -164,6 +165,7 @@ fn custom_harness_drops_unset_placeholders() {
         "fake".into(),
         HarnessDef {
             argv: vec!["run".into(), "{model}".into(), "{permission_mode}".into()],
+            ..Default::default()
         },
     );
     let mut s = settings();

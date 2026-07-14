@@ -1,0 +1,123 @@
+//! Harness capability catalog + run-pane naming.
+
+use board_core::capability::{
+    capabilities_for, claude_capabilities, run_pane_name, run_pane_name_unique,
+};
+use board_core::config::Config;
+use board_core::protocol::Effort;
+
+#[test]
+fn claude_catalog_shape() {
+    let caps = claude_capabilities();
+    assert_eq!(caps.harness, "claude");
+    assert!(caps.model_freeform);
+
+    let ids: Vec<&str> = caps.models.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, ["fable", "opus", "sonnet", "haiku"]);
+
+    // Every model carries all five efforts, ascending.
+    for m in &caps.models {
+        assert_eq!(
+            m.efforts,
+            vec![
+                Effort::Low,
+                Effort::Medium,
+                Effort::High,
+                Effort::Xhigh,
+                Effort::Max
+            ]
+        );
+    }
+
+    assert_eq!(
+        caps.permission_modes,
+        vec![
+            "acceptEdits",
+            "auto",
+            "bypassPermissions",
+            "manual",
+            "dontAsk",
+            "plan"
+        ]
+    );
+}
+
+#[test]
+fn capabilities_for_builtin_and_unknown() {
+    let cfg = Config::default();
+    assert_eq!(
+        capabilities_for("claude", &cfg),
+        Some(claude_capabilities())
+    );
+    assert!(capabilities_for("nope", &cfg).is_none());
+}
+
+#[test]
+fn capabilities_for_config_harness() {
+    let toml = r#"
+[harness.fake]
+argv = ["bash", "/x.sh"]
+models = ["big", "small"]
+efforts = ["low", "high", "bogus"]
+permission_modes = ["auto", "manual"]
+"#;
+    let cfg = Config::from_toml(toml).unwrap();
+    let caps = capabilities_for("fake", &cfg).unwrap();
+    assert_eq!(caps.harness, "fake");
+    assert!(caps.model_freeform);
+    assert_eq!(caps.models.len(), 2);
+    // Unparseable efforts are dropped; the rest apply to every model.
+    for m in &caps.models {
+        assert_eq!(m.efforts, vec![Effort::Low, Effort::High]);
+    }
+    assert_eq!(caps.permission_modes, vec!["auto", "manual"]);
+}
+
+#[test]
+fn config_harness_without_capabilities_is_empty() {
+    // A bare `[harness.x] argv=[…]` (pre-existing config) still resolves.
+    let cfg = Config::from_toml("[harness.bare]\nargv = [\"x\"]\n").unwrap();
+    let caps = capabilities_for("bare", &cfg).unwrap();
+    assert!(caps.models.is_empty());
+    assert!(caps.permission_modes.is_empty());
+    assert!(caps.model_freeform);
+}
+
+#[test]
+fn pane_name_basic_slug() {
+    assert_eq!(run_pane_name(14, "Execute"), "card-14-execute");
+    assert_eq!(run_pane_name(1, "In Progress"), "card-1-in-progress");
+    assert_eq!(run_pane_name(7, "Code Review!!"), "card-7-code-review");
+}
+
+#[test]
+fn pane_name_empty_slug_omits_part() {
+    assert_eq!(run_pane_name(3, ""), "card-3");
+    assert_eq!(run_pane_name(3, "   "), "card-3");
+    assert_eq!(run_pane_name(3, "***"), "card-3");
+}
+
+#[test]
+fn pane_name_truncates_to_24() {
+    let name = run_pane_name(9, "abcdefghijklmnopqrstuv wxyz");
+    let slug = name.strip_prefix("card-9-").unwrap();
+    assert!(slug.len() <= 24, "slug too long: {slug}");
+    assert!(!slug.ends_with('-'));
+    // "...v" (22) + "-" + "w" fills exactly 24 chars.
+    assert_eq!(slug, "abcdefghijklmnopqrstuv-w");
+}
+
+#[test]
+fn pane_name_truncation_never_ends_on_dash() {
+    // 23 alnum chars then a separator that would land at index 24 as a dash.
+    let name = run_pane_name(9, "abcdefghijklmnopqrstuvw xyz");
+    let slug = name.strip_prefix("card-9-").unwrap();
+    assert!(!slug.ends_with('-'));
+    assert_eq!(slug, "abcdefghijklmnopqrstuvw");
+}
+
+#[test]
+fn pane_name_unique_adds_run_suffix() {
+    assert_eq!(run_pane_name_unique(14, "Execute", 5), "card-14-execute-r5");
+    assert_eq!(run_pane_name_unique(3, "", 2), "card-3-r2");
+}

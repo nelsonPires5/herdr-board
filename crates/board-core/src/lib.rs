@@ -2,6 +2,7 @@
 //!
 //! Pure, synchronous building blocks used by every other crate:
 //! - [`protocol`]: serde types for the boardd socket protocol (source of truth).
+//! - [`capability`]: static harness capability catalog + run-pane naming.
 //! - [`model`]: SQLite-row structs (Board/Column/Card/Comment/Run).
 //! - [`db`]: rusqlite store, migrations, CRUD, position management, queries.
 //! - [`engine`]: pure column-engine transition/entry/validation decisions.
@@ -12,6 +13,7 @@
 //! - [`client`]: blocking NDJSON `BoardClient` (+ `FakeBoardClient` behind a feature).
 //! - [`spawn`]: `Spawner` trait + request/handle types (implemented by Phase D).
 
+pub mod capability;
 pub mod client;
 pub mod config;
 pub mod db;

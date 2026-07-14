@@ -6,8 +6,16 @@ use std::path::PathBuf;
 /// A request to launch one agent process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpawnReq {
-    /// herdr agent/pane label, e.g. `board-card-42`.
+    /// herdr agent/pane label, e.g. `card-42-execute`.
     pub name: String,
+    /// Fallback agent name to retry with when `name` is already taken (herdr
+    /// agent names are exclusive while a pane using one is open). `None` skips
+    /// the retry.
+    pub name_fallback: Option<String>,
+    /// herdr tab label to place the agent pane in (find-or-create + grid
+    /// layout). `None` = no tab placement (cwd spaces / `LocalSpawner`, which
+    /// ignore it). Only honored when `workspace_ref` is also set.
+    pub tab_label: Option<String>,
     /// Working directory (for `cwd`/`worktree` spaces, or `LocalSpawner`).
     pub cwd: Option<PathBuf>,
     /// herdr workspace id (for `workspace` spaces).

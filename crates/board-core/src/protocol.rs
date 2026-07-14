@@ -419,3 +419,28 @@ pub struct RunActionResult {
     pub run: Run,
     pub card: Card,
 }
+
+// ---------------------------------------------------------------------------
+// harness / space methods
+// ---------------------------------------------------------------------------
+
+/// `harness.capabilities` params. The result is a
+/// [`HarnessCapabilities`](crate::capability::HarnessCapabilities); an unknown
+/// harness yields error code 2 (not found).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessCapabilitiesParams {
+    pub harness: String,
+}
+
+/// A run space (herdr workspace) as surfaced by `space.list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpaceInfo {
+    pub id: String,
+    pub label: String,
+}
+
+/// `space.list` result (no params).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpaceListResult {
+    pub spaces: Vec<SpaceInfo>,
+}

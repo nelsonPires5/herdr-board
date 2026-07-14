@@ -31,6 +31,26 @@ argv = ["bash", "/path/to/fake-agent.sh"]
     assert_eq!(c.idle_grace_seconds, 120);
     let fake = c.harness.get("fake").unwrap();
     assert_eq!(fake.argv, vec!["bash", "/path/to/fake-agent.sh"]);
+    // Capability fields default empty when the pre-existing `argv`-only form is used.
+    assert!(fake.models.is_empty());
+    assert!(fake.efforts.is_empty());
+    assert!(fake.permission_modes.is_empty());
+}
+
+#[test]
+fn harness_capability_fields_parse() {
+    let toml = r#"
+[harness.custom]
+argv = ["run", "{model}"]
+models = ["big", "small"]
+efforts = ["low", "high"]
+permission_modes = ["auto"]
+"#;
+    let c = Config::from_toml(toml).unwrap();
+    let h = c.harness.get("custom").unwrap();
+    assert_eq!(h.models, vec!["big", "small"]);
+    assert_eq!(h.efforts, vec!["low", "high"]);
+    assert_eq!(h.permission_modes, vec!["auto"]);
 }
 
 #[test]

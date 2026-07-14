@@ -1,8 +1,8 @@
 //! Serde round-trips for representative protocol messages.
 
 use board_core::protocol::{
-    BoardChangedReason, CardCreateParams, Effort, Event, Request, Response, RpcError, RunOutcome,
-    SpaceKind, Trigger,
+    BoardChangedReason, CardCreateParams, Effort, Event, HarnessCapabilitiesParams, Request,
+    Response, RpcError, RunOutcome, SpaceInfo, SpaceKind, SpaceListResult, Trigger,
 };
 use serde_json::json;
 
@@ -97,6 +97,36 @@ fn card_create_params_omit_none() {
     };
     let s = serde_json::to_string(&p).unwrap();
     assert_eq!(s, r#"{"title":"t"}"#);
+}
+
+#[test]
+fn harness_and_space_methods() {
+    let p = HarnessCapabilitiesParams {
+        harness: "claude".into(),
+    };
+    roundtrip(&p);
+    assert_eq!(
+        serde_json::to_string(&p).unwrap(),
+        r#"{"harness":"claude"}"#
+    );
+
+    let spaces = SpaceListResult {
+        spaces: vec![
+            SpaceInfo {
+                id: "w1".into(),
+                label: "main".into(),
+            },
+            SpaceInfo {
+                id: "w2".into(),
+                label: "docs".into(),
+            },
+        ],
+    };
+    roundtrip(&spaces);
+    assert_eq!(
+        serde_json::to_string(&spaces).unwrap(),
+        r#"{"spaces":[{"id":"w1","label":"main"},{"id":"w2","label":"docs"}]}"#
+    );
 }
 
 #[test]

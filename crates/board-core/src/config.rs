@@ -29,10 +29,23 @@ pub struct Config {
     pub harness: HashMap<String, HarnessDef>,
 }
 
-/// A config-defined harness: an argv template.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// A config-defined harness: an argv template plus an optional capability
+/// declaration (consumed by [`crate::capability::capabilities_for`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HarnessDef {
     pub argv: Vec<String>,
+    /// Known model aliases this harness accepts (advisory; model strings are
+    /// treated as free-form regardless).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
+    /// Reasoning-effort levels this harness accepts (parsed via
+    /// [`Effort::parse_str`](crate::protocol::Effort::parse_str); applied to
+    /// every listed model).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub efforts: Vec<String>,
+    /// Permission modes this harness accepts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub permission_modes: Vec<String>,
 }
 
 impl Default for Config {
