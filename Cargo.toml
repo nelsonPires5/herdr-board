@@ -1,0 +1,63 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/board-core",
+    "crates/board-herdr",
+    "crates/board-tui",
+    "crates/board-daemon",
+    "crates/board-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Storage
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Ids / cli / errors
+uuid = { version = "1", features = ["v4"] }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+thiserror = "1"
+
+# Async runtime (daemon only)
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "net",
+    "sync",
+    "time",
+    "process",
+    "signal",
+    "io-util",
+    "macros",
+] }
+
+# TUI
+ratatui = "0.28"
+crossterm = "0.28"
+tui-textarea = "0.6"
+
+# Paths / logging
+directories = "5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+libc = "0.2"
+
+# Dev / test
+insta = "1"
+tempfile = "3"
+
+# Internal crates
+board-core = { path = "crates/board-core" }
+board-herdr = { path = "crates/board-herdr" }
+board-tui = { path = "crates/board-tui" }
+board-daemon = { path = "crates/board-daemon" }
+board-cli = { path = "crates/board-cli" }

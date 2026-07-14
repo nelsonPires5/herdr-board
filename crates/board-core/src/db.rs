@@ -1,0 +1,745 @@
+//! rusqlite store: migrations, CRUD, position management, and the queries the
+//! daemon needs. `boardd` is the only writer; access is serialized upstream, so
+//! this type is deliberately synchronous.
+
+use std::path::Path;
+
+use rusqlite::{params, Connection, Row};
+
+use crate::model::{Board, Card, Column, Comment, Run};
+use crate::protocol::{
+    CardCreateParams, CardStatus, CardUpdateParams, ColumnCreateParams, ColumnUpdateParams, Effort,
+    RunOutcome, SpaceKind, Trigger,
+};
+use crate::{Error, Result};
+
+/// Embedded migration v1 (repo-root `schema.sql`).
+const SCHEMA_SQL: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../schema.sql"));
+
+/// The single global board id.
+pub const BOARD_ID: i64 = 1;
+
+/// SQLite-backed board store.
+pub struct Db {
+    conn: Connection,
+}
+
+fn conv_err(field: &str) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        0,
+        rusqlite::types::Type::Text,
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid enum value in {field}"),
+        )),
+    )
+}
+
+impl Db {
+    /// Open (or create) a file-backed db: makes parent dirs, enables WAL +
+    /// foreign keys, and runs migrations.
+    pub fn open(path: &Path) -> Result<Db> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        let conn = Connection::open(path)?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        Db::init(conn)
+    }
+
+    /// Open an in-memory db (tests, `FakeBoardClient`).
+    pub fn open_in_memory() -> Result<Db> {
+        Db::init(Connection::open_in_memory()?)
+    }
+
+    fn init(conn: Connection) -> Result<Db> {
+        conn.pragma_update(None, "foreign_keys", true)?;
+        let db = Db { conn };
+        db.migrate()?;
+        Ok(db)
+    }
+
+    /// Apply migrations gated on `PRAGMA user_version`. v1 = embedded schema +
+    /// seed (`board id=1 'main'`, column `Todo` manual position 0). Idempotent.
+    fn migrate(&self) -> Result<()> {
+        let version: i64 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version < 1 {
+            self.conn.execute_batch(SCHEMA_SQL)?;
+            self.conn.execute(
+                "INSERT INTO boards (id, name) VALUES (?1, 'main')",
+                params![BOARD_ID],
+            )?;
+            self.conn.execute(
+                "INSERT INTO columns (board_id, name, position, trigger, fresh_session)
+                 VALUES (?1, 'Todo', 0, 'manual', 0)",
+                params![BOARD_ID],
+            )?;
+            self.conn.execute_batch("PRAGMA user_version = 1;")?;
+        }
+        Ok(())
+    }
+
+    /// The current schema version.
+    pub fn user_version(&self) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))?)
+    }
+
+    // -- board ---------------------------------------------------------------
+
+    pub fn get_board(&self, id: i64) -> Result<Board> {
+        self.conn
+            .query_row(
+                "SELECT id, name FROM boards WHERE id=?1",
+                params![id],
+                |r| {
+                    Ok(Board {
+                        id: r.get(0)?,
+                        name: r.get(1)?,
+                    })
+                },
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Error::NotFound(format!("board {id}")),
+                other => Error::Sqlite(other),
+            })
+    }
+
+    // -- columns -------------------------------------------------------------
+
+    pub fn list_columns(&self, board_id: i64) -> Result<Vec<Column>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM columns WHERE board_id=?1 ORDER BY position, id")?;
+        let rows = stmt
+            .query_map(params![board_id], row_to_column)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn get_column(&self, id: i64) -> Result<Option<Column>> {
+        opt(self.conn.query_row(
+            "SELECT * FROM columns WHERE id=?1",
+            params![id],
+            row_to_column,
+        ))
+    }
+
+    fn require_column(&self, id: i64) -> Result<Column> {
+        self.get_column(id)?
+            .ok_or_else(|| Error::NotFound(format!("column {id}")))
+    }
+
+    /// The default (first) column of a board — the seed `Todo`.
+    pub fn default_column_id(&self, board_id: i64) -> Result<i64> {
+        self.conn
+            .query_row(
+                "SELECT id FROM columns WHERE board_id=?1 ORDER BY position, id LIMIT 1",
+                params![board_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Error::NotFound("no columns".into()),
+                other => Error::Sqlite(other),
+            })
+    }
+
+    pub fn create_column(&self, p: &ColumnCreateParams) -> Result<Column> {
+        let board_id = BOARD_ID;
+        let end: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(position)+1, 0) FROM columns WHERE board_id=?1",
+            params![board_id],
+            |r| r.get(0),
+        )?;
+        let trigger = p.trigger.unwrap_or(Trigger::Manual).as_str();
+        let fresh = i64::from(p.fresh_session.unwrap_or(false));
+        self.conn.execute(
+            "INSERT INTO columns
+             (board_id,name,position,system_prompt,trigger,on_success_column_id,on_fail_column_id,
+              fresh_session,harness_override,model_override,effort_override,permission_override,timeout_minutes)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+            params![
+                board_id,
+                p.name,
+                end,
+                p.system_prompt,
+                trigger,
+                p.on_success_column_id,
+                p.on_fail_column_id,
+                fresh,
+                p.harness_override,
+                p.model_override,
+                p.effort_override,
+                p.permission_override,
+                p.timeout_minutes,
+            ],
+        )?;
+        let id = self.conn.last_insert_rowid();
+        if let Some(pos) = p.position {
+            self.reorder_column(id, pos)?;
+        }
+        self.require_column(id)
+    }
+
+    pub fn update_column(&self, p: &ColumnUpdateParams) -> Result<Column> {
+        let mut c = self.require_column(p.id)?;
+        if let Some(v) = &p.name {
+            c.name = v.clone();
+        }
+        if let Some(v) = &p.system_prompt {
+            c.system_prompt = Some(v.clone());
+        }
+        if let Some(v) = p.trigger {
+            c.trigger = v;
+        }
+        if let Some(v) = p.on_success_column_id {
+            c.on_success_column_id = Some(v);
+        }
+        if let Some(v) = p.on_fail_column_id {
+            c.on_fail_column_id = Some(v);
+        }
+        if let Some(v) = p.fresh_session {
+            c.fresh_session = v;
+        }
+        if let Some(v) = &p.harness_override {
+            c.harness_override = Some(v.clone());
+        }
+        if let Some(v) = &p.model_override {
+            c.model_override = Some(v.clone());
+        }
+        if let Some(v) = &p.effort_override {
+            c.effort_override = Some(v.clone());
+        }
+        if let Some(v) = &p.permission_override {
+            c.permission_override = Some(v.clone());
+        }
+        if let Some(v) = p.timeout_minutes {
+            c.timeout_minutes = Some(v);
+        }
+        self.conn.execute(
+            "UPDATE columns SET name=?1,system_prompt=?2,trigger=?3,on_success_column_id=?4,
+             on_fail_column_id=?5,fresh_session=?6,harness_override=?7,model_override=?8,
+             effort_override=?9,permission_override=?10,timeout_minutes=?11 WHERE id=?12",
+            params![
+                c.name,
+                c.system_prompt,
+                c.trigger.as_str(),
+                c.on_success_column_id,
+                c.on_fail_column_id,
+                i64::from(c.fresh_session),
+                c.harness_override,
+                c.model_override,
+                c.effort_override,
+                c.permission_override,
+                c.timeout_minutes,
+                c.id,
+            ],
+        )?;
+        if let Some(pos) = p.position {
+            self.reorder_column(c.id, pos)?;
+        }
+        self.require_column(c.id)
+    }
+
+    /// Move a column to `position` and compact the whole board's ordering.
+    pub fn reorder_column(&self, id: i64, position: i64) -> Result<Vec<Column>> {
+        let board_id = self.require_column(id)?.board_id;
+        let mut ids: Vec<i64> = self
+            .conn
+            .prepare("SELECT id FROM columns WHERE board_id=?1 AND id<>?2 ORDER BY position, id")?
+            .query_map(params![board_id, id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let idx = (position.max(0) as usize).min(ids.len());
+        ids.insert(idx, id);
+        for (i, cid) in ids.iter().enumerate() {
+            self.conn.execute(
+                "UPDATE columns SET position=?1 WHERE id=?2",
+                params![i as i64, cid],
+            )?;
+        }
+        self.list_columns(board_id)
+    }
+
+    /// Delete a column, optionally moving its cards to `move_cards_to` first.
+    /// Callers should validate with the engine beforehand.
+    pub fn delete_column(&self, id: i64, move_cards_to: Option<i64>) -> Result<()> {
+        let board_id = self.require_column(id)?.board_id;
+        if let Some(dst) = move_cards_to {
+            let card_ids: Vec<i64> = self
+                .conn
+                .prepare("SELECT id FROM cards WHERE column_id=?1 ORDER BY position, id")?
+                .query_map(params![id], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            for cid in card_ids {
+                self.move_card(cid, dst, None)?;
+            }
+        }
+        self.conn
+            .execute("DELETE FROM columns WHERE id=?1", params![id])?;
+        // Compact remaining columns.
+        let ids: Vec<i64> = self
+            .conn
+            .prepare("SELECT id FROM columns WHERE board_id=?1 ORDER BY position, id")?
+            .query_map(params![board_id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (i, cid) in ids.iter().enumerate() {
+            self.conn.execute(
+                "UPDATE columns SET position=?1 WHERE id=?2",
+                params![i as i64, cid],
+            )?;
+        }
+        Ok(())
+    }
+
+    // -- cards ---------------------------------------------------------------
+
+    pub fn list_cards(&self, board_id: i64) -> Result<Vec<Card>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT c.* FROM cards c JOIN columns col ON col.id=c.column_id
+             WHERE c.board_id=?1 ORDER BY col.position, c.position, c.id",
+        )?;
+        let rows = stmt
+            .query_map(params![board_id], row_to_card)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn list_cards_in_column(&self, column_id: i64) -> Result<Vec<Card>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM cards WHERE column_id=?1 ORDER BY position, id")?;
+        let rows = stmt
+            .query_map(params![column_id], row_to_card)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn get_card(&self, id: i64) -> Result<Option<Card>> {
+        opt(self
+            .conn
+            .query_row("SELECT * FROM cards WHERE id=?1", params![id], row_to_card))
+    }
+
+    fn require_card(&self, id: i64) -> Result<Card> {
+        self.get_card(id)?
+            .ok_or_else(|| Error::NotFound(format!("card {id}")))
+    }
+
+    pub fn create_card(&self, p: &CardCreateParams) -> Result<Card> {
+        let board_id = BOARD_ID;
+        let column_id = match p.column_id {
+            Some(c) => c,
+            None => self.default_column_id(board_id)?,
+        };
+        let end: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(position)+1, 0) FROM cards WHERE column_id=?1",
+            params![column_id],
+            |r| r.get(0),
+        )?;
+        let description = p.description.clone().unwrap_or_default();
+        let harness = p.harness.clone().unwrap_or_else(|| "claude".to_string());
+        let space_kind = p.space_kind.unwrap_or(SpaceKind::Workspace).as_str();
+        let effort = p.effort.map(|e| e.as_str());
+        self.conn.execute(
+            "INSERT INTO cards
+             (board_id,column_id,position,title,description,harness,model,effort,permission_mode,
+              space_kind,space_ref,worktree_base,status,session_id)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'idle',NULL)",
+            params![
+                board_id,
+                column_id,
+                end,
+                p.title,
+                description,
+                harness,
+                p.model,
+                effort,
+                p.permission_mode,
+                space_kind,
+                p.space_ref,
+                p.worktree_base,
+            ],
+        )?;
+        let id = self.conn.last_insert_rowid();
+        if let Some(pos) = p.position {
+            self.move_card(id, column_id, Some(pos))?;
+        }
+        self.require_card(id)
+    }
+
+    pub fn update_card(&self, p: &CardUpdateParams) -> Result<Card> {
+        let mut c = self.require_card(p.id)?;
+        if let Some(v) = &p.title {
+            c.title = v.clone();
+        }
+        if let Some(v) = &p.description {
+            c.description = v.clone();
+        }
+        if let Some(v) = &p.harness {
+            c.harness = v.clone();
+        }
+        if let Some(v) = &p.model {
+            c.model = Some(v.clone());
+        }
+        if let Some(v) = p.effort {
+            c.effort = Some(v);
+        }
+        if let Some(v) = &p.permission_mode {
+            c.permission_mode = Some(v.clone());
+        }
+        if let Some(v) = p.space_kind {
+            c.space_kind = v;
+        }
+        if let Some(v) = &p.space_ref {
+            c.space_ref = Some(v.clone());
+        }
+        if let Some(v) = &p.worktree_base {
+            c.worktree_base = Some(v.clone());
+        }
+        self.conn.execute(
+            "UPDATE cards SET title=?1,description=?2,harness=?3,model=?4,effort=?5,
+             permission_mode=?6,space_kind=?7,space_ref=?8,worktree_base=?9,
+             updated_at=datetime('now') WHERE id=?10",
+            params![
+                c.title,
+                c.description,
+                c.harness,
+                c.model,
+                c.effort.map(|e| e.as_str()),
+                c.permission_mode,
+                c.space_kind.as_str(),
+                c.space_ref,
+                c.worktree_base,
+                c.id,
+            ],
+        )?;
+        self.require_card(c.id)
+    }
+
+    pub fn delete_card(&self, id: i64) -> Result<()> {
+        let card = self.require_card(id)?;
+        self.conn
+            .execute("DELETE FROM cards WHERE id=?1", params![id])?;
+        self.renumber_column_cards(card.column_id)?;
+        Ok(())
+    }
+
+    /// Move a card to `target_column` at `position` (append if `None`), compacting
+    /// both the source and target columns.
+    pub fn move_card(&self, id: i64, target_column: i64, position: Option<i64>) -> Result<Card> {
+        let old_column = self.require_card(id)?.column_id;
+        self.conn.execute(
+            "UPDATE cards SET column_id=?1, updated_at=datetime('now') WHERE id=?2",
+            params![target_column, id],
+        )?;
+        // Place within the target column.
+        let mut ids: Vec<i64> = self
+            .conn
+            .prepare("SELECT id FROM cards WHERE column_id=?1 AND id<>?2 ORDER BY position, id")?
+            .query_map(params![target_column, id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let idx = position
+            .map(|p| p.max(0) as usize)
+            .unwrap_or(ids.len())
+            .min(ids.len());
+        ids.insert(idx, id);
+        for (i, cid) in ids.iter().enumerate() {
+            self.conn.execute(
+                "UPDATE cards SET position=?1 WHERE id=?2",
+                params![i as i64, cid],
+            )?;
+        }
+        if old_column != target_column {
+            self.renumber_column_cards(old_column)?;
+        }
+        self.require_card(id)
+    }
+
+    fn renumber_column_cards(&self, column_id: i64) -> Result<()> {
+        let ids: Vec<i64> = self
+            .conn
+            .prepare("SELECT id FROM cards WHERE column_id=?1 ORDER BY position, id")?
+            .query_map(params![column_id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (i, cid) in ids.iter().enumerate() {
+            self.conn.execute(
+                "UPDATE cards SET position=?1 WHERE id=?2",
+                params![i as i64, cid],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn set_card_status(&self, id: i64, status: CardStatus) -> Result<Card> {
+        self.conn.execute(
+            "UPDATE cards SET status=?1, updated_at=datetime('now') WHERE id=?2",
+            params![status.as_str(), id],
+        )?;
+        self.require_card(id)
+    }
+
+    pub fn set_card_column(&self, id: i64, column_id: i64) -> Result<Card> {
+        self.move_card(id, column_id, None)
+    }
+
+    pub fn set_card_session(&self, id: i64, session_id: &str) -> Result<Card> {
+        self.conn.execute(
+            "UPDATE cards SET session_id=?1, updated_at=datetime('now') WHERE id=?2",
+            params![session_id, id],
+        )?;
+        self.require_card(id)
+    }
+
+    // -- comments ------------------------------------------------------------
+
+    pub fn add_comment(&self, card_id: i64, author: &str, body: &str) -> Result<Comment> {
+        self.require_card(card_id)?;
+        self.conn.execute(
+            "INSERT INTO comments (card_id, author, body) VALUES (?1, ?2, ?3)",
+            params![card_id, author, body],
+        )?;
+        let id = self.conn.last_insert_rowid();
+        opt(self.conn.query_row(
+            "SELECT * FROM comments WHERE id=?1",
+            params![id],
+            row_to_comment,
+        ))?
+        .ok_or_else(|| Error::NotFound(format!("comment {id}")))
+    }
+
+    pub fn list_comments(&self, card_id: i64) -> Result<Vec<Comment>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM comments WHERE card_id=?1 ORDER BY created_at, id")?;
+        let rows = stmt
+            .query_map(params![card_id], row_to_comment)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    // -- runs ----------------------------------------------------------------
+
+    /// Create a queued run (`started_at`/`outcome` NULL).
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_run(
+        &self,
+        card_id: i64,
+        column_id: i64,
+        harness: &str,
+        argv_json: &str,
+        prompt_snapshot: &str,
+        session_id: Option<&str>,
+    ) -> Result<Run> {
+        self.conn.execute(
+            "INSERT INTO runs (card_id,column_id,harness,argv_json,prompt_snapshot,session_id)
+             VALUES (?1,?2,?3,?4,?5,?6)",
+            params![
+                card_id,
+                column_id,
+                harness,
+                argv_json,
+                prompt_snapshot,
+                session_id
+            ],
+        )?;
+        self.get_run(self.conn.last_insert_rowid())
+    }
+
+    /// Mark a run started, recording herdr ids.
+    pub fn start_run(
+        &self,
+        run_id: i64,
+        workspace_id: Option<&str>,
+        pane_id: Option<&str>,
+    ) -> Result<Run> {
+        self.conn.execute(
+            "UPDATE runs SET started_at=datetime('now'), herdr_workspace_id=?1, herdr_pane_id=?2
+             WHERE id=?3",
+            params![workspace_id, pane_id, run_id],
+        )?;
+        self.get_run(run_id)
+    }
+
+    /// Close a run with an outcome + summary.
+    pub fn finish_run(
+        &self,
+        run_id: i64,
+        outcome: RunOutcome,
+        summary: Option<&str>,
+    ) -> Result<Run> {
+        self.conn.execute(
+            "UPDATE runs SET ended_at=datetime('now'), outcome=?1, result_summary=?2 WHERE id=?3",
+            params![outcome.as_str(), summary, run_id],
+        )?;
+        self.get_run(run_id)
+    }
+
+    pub fn get_run(&self, id: i64) -> Result<Run> {
+        opt(self
+            .conn
+            .query_row("SELECT * FROM runs WHERE id=?1", params![id], row_to_run))?
+        .ok_or_else(|| Error::NotFound(format!("run {id}")))
+    }
+
+    pub fn list_runs(&self, card_id: i64) -> Result<Vec<Run>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM runs WHERE card_id=?1 ORDER BY id")?;
+        let rows = stmt
+            .query_map(params![card_id], row_to_run)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// The card's active (started, not ended) run, if any.
+    pub fn active_run_for_card(&self, card_id: i64) -> Result<Option<Run>> {
+        opt(self.conn.query_row(
+            "SELECT * FROM runs WHERE card_id=?1 AND started_at IS NOT NULL AND ended_at IS NULL
+             ORDER BY id DESC LIMIT 1",
+            params![card_id],
+            row_to_run,
+        ))
+    }
+
+    /// Queued runs for a space key `(space_kind, space_ref)`, FIFO by run id.
+    pub fn queued_runs_by_space(
+        &self,
+        space_kind: SpaceKind,
+        space_ref: Option<&str>,
+    ) -> Result<Vec<Run>> {
+        let base = "SELECT r.* FROM runs r JOIN cards c ON c.id=r.card_id
+                    WHERE r.started_at IS NULL AND r.ended_at IS NULL AND c.space_kind=?1";
+        let rows = match space_ref {
+            Some(sr) => {
+                let sql = format!("{base} AND c.space_ref=?2 ORDER BY r.id");
+                self.conn
+                    .prepare(&sql)?
+                    .query_map(params![space_kind.as_str(), sr], row_to_run)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            }
+            None => {
+                let sql = format!("{base} AND c.space_ref IS NULL ORDER BY r.id");
+                self.conn
+                    .prepare(&sql)?
+                    .query_map(params![space_kind.as_str()], row_to_run)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            }
+        };
+        Ok(rows)
+    }
+
+    pub fn count_active_runs(&self) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM runs WHERE started_at IS NOT NULL AND ended_at IS NULL",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    pub fn count_queued_runs(&self) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM runs WHERE started_at IS NULL AND ended_at IS NULL",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+}
+
+// -- row mappers -------------------------------------------------------------
+
+fn opt<T>(r: rusqlite::Result<T>) -> Result<Option<T>> {
+    match r {
+        Ok(v) => Ok(Some(v)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(Error::Sqlite(e)),
+    }
+}
+
+fn row_to_column(row: &Row) -> rusqlite::Result<Column> {
+    let trigger_s: String = row.get("trigger")?;
+    let fresh: i64 = row.get("fresh_session")?;
+    Ok(Column {
+        id: row.get("id")?,
+        board_id: row.get("board_id")?,
+        name: row.get("name")?,
+        position: row.get("position")?,
+        system_prompt: row.get("system_prompt")?,
+        trigger: Trigger::parse_str(&trigger_s).ok_or_else(|| conv_err("trigger"))?,
+        on_success_column_id: row.get("on_success_column_id")?,
+        on_fail_column_id: row.get("on_fail_column_id")?,
+        fresh_session: fresh != 0,
+        harness_override: row.get("harness_override")?,
+        model_override: row.get("model_override")?,
+        effort_override: row.get("effort_override")?,
+        permission_override: row.get("permission_override")?,
+        timeout_minutes: row.get("timeout_minutes")?,
+    })
+}
+
+fn row_to_card(row: &Row) -> rusqlite::Result<Card> {
+    let effort_s: Option<String> = row.get("effort")?;
+    let effort = match effort_s {
+        Some(s) => Some(Effort::parse_str(&s).ok_or_else(|| conv_err("effort"))?),
+        None => None,
+    };
+    let space_s: String = row.get("space_kind")?;
+    let status_s: String = row.get("status")?;
+    Ok(Card {
+        id: row.get("id")?,
+        board_id: row.get("board_id")?,
+        column_id: row.get("column_id")?,
+        position: row.get("position")?,
+        title: row.get("title")?,
+        description: row.get("description")?,
+        harness: row.get("harness")?,
+        model: row.get("model")?,
+        effort,
+        permission_mode: row.get("permission_mode")?,
+        space_kind: SpaceKind::parse_str(&space_s).ok_or_else(|| conv_err("space_kind"))?,
+        space_ref: row.get("space_ref")?,
+        worktree_base: row.get("worktree_base")?,
+        status: CardStatus::parse_str(&status_s).ok_or_else(|| conv_err("status"))?,
+        session_id: row.get("session_id")?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+    })
+}
+
+fn row_to_comment(row: &Row) -> rusqlite::Result<Comment> {
+    Ok(Comment {
+        id: row.get("id")?,
+        card_id: row.get("card_id")?,
+        author: row.get("author")?,
+        body: row.get("body")?,
+        created_at: row.get("created_at")?,
+    })
+}
+
+fn row_to_run(row: &Row) -> rusqlite::Result<Run> {
+    let outcome_s: Option<String> = row.get("outcome")?;
+    let outcome = match outcome_s {
+        Some(s) => Some(RunOutcome::parse_str(&s).ok_or_else(|| conv_err("outcome"))?),
+        None => None,
+    };
+    Ok(Run {
+        id: row.get("id")?,
+        card_id: row.get("card_id")?,
+        column_id: row.get("column_id")?,
+        harness: row.get("harness")?,
+        argv_json: row.get("argv_json")?,
+        prompt_snapshot: row.get("prompt_snapshot")?,
+        herdr_workspace_id: row.get("herdr_workspace_id")?,
+        herdr_pane_id: row.get("herdr_pane_id")?,
+        session_id: row.get("session_id")?,
+        started_at: row.get("started_at")?,
+        ended_at: row.get("ended_at")?,
+        outcome,
+        result_summary: row.get("result_summary")?,
+        log_path: row.get("log_path")?,
+    })
+}

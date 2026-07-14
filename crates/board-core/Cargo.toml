@@ -1,0 +1,22 @@
+[package]
+name = "board-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# In-memory FakeBoardClient for TUI tests (no daemon, no herdr).
+fake-client = []
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+rusqlite = { workspace = true }
+uuid = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+directories = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
