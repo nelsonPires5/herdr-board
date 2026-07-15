@@ -28,9 +28,10 @@ cargo fmt --all --check                      # formatted
 
 - `#[ignore]`'d tests hit a live herdr (run only when `HERDR_SOCK`/`HERDR_SOCKET_PATH` exists).
 - End-to-end: `e2e/run-all.sh` (compat: `scripts/e2e.sh`) drives a REAL herdr with a scenario
-  suite — each scenario uses an isolated temp DB + socket, creates **disposable** workspaces, prefixes
-  every herdr mutation `HERDR MUTATION:`, and tears everything down on exit. Never point it at a
-  workspace you care about. See [`docs/testing.md`](docs/testing.md) for the layers and how to add one.
+  suite. It boots its own **ephemeral** herdr session (`hb-e2e-<pid>`) per run and never touches your
+  real sessions; each scenario uses an isolated temp DB + socket, creates **disposable** workspaces,
+  prefixes every herdr mutation `HERDR MUTATION:`, and tears everything down on exit (`--keep` leaves
+  sessions/workspaces for review). See [`docs/testing.md`](docs/testing.md) for the layers and how to add one.
 
 ## Testing policy (pragmatic)
 
@@ -42,8 +43,9 @@ Full layering, harness details, and how to add tests live in [`docs/testing.md`]
   it has a use case documented and a live scenario under `e2e/` (per `docs/testing.md` and
   `e2e/README.md`).
 - **Trivial changes are exempt** — docs, comments, typos, pure renames need no new test.
-- **Green before handoff.** The gates above **and** `e2e/run-all.sh` must pass (e2e SKIPs
-  are fine when a precondition like a second session is absent) before handing a change off.
+- **Green before handoff.** The gates above **and** `e2e/run-all.sh` must pass (all scenarios
+  PASS — the suite boots its own ephemeral session(s), so 03-sessions no longer skips) before
+  handing a change off.
 
 ## Conventions
 

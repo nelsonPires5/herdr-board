@@ -6,16 +6,26 @@
 #   - logging (step / mut / fail / ok / skip),
 #   - path + tool resolution and preconditions (e2e_require),
 #   - an idempotent release build (e2e_build),
+#   - an EPHEMERAL herdr session per run (never your real sessions — see below),
 #   - an ISOLATED stack (short /tmp DB + socket + config with the fake harness),
 #   - trap-based cleanup you register as you go (e2e_defer),
 #   - daemon start/stop by pid, disposable workspace create (auto-closed),
 #   - a card-outcome poller (wait_ok) and JSON helpers (jget),
 #   - raw herdr RPC via e2e/hrpc.py (hrpc), honoring HERDR_SOCKET_PATH.
 #
+# EPHEMERAL SESSION MODEL: the suite NEVER touches your real herdr sessions. Each
+# run gets its own throwaway session named `hb-e2e-<pid>` (started via
+# `herdr --session <name> server &`). The isolated boardd binds to it
+# (HERDR_SOCKET_PATH=<its socket>), so its "default session" IS the ephemeral one,
+# and every herdr CLI call + hrpc assert targets it too. run-all boots ONE session
+# and exports E2E_SESSION / E2E_SESSION_SOCKET for all scenarios; a scenario run
+# standalone boots (and tears down) its own. Teardown stops+deletes the session
+# unless keep mode is on (--keep / E2E_KEEP=1), which also skips workspace close.
+#
 # Conventions kept from the original scripts/e2e.sh (now e2e/): `set -euo pipefail` in the
 # scenario, `step`/`mut` echo narration, every herdr MUTATION prefixed
 # "HERDR MUTATION:". Mutations only ever hit disposable workspaces this suite
-# created; never a workspace/session you care about.
+# created inside the ephemeral session; never a workspace/session you care about.
 
 # --- logging ----------------------------------------------------------------
 step() { printf '\n=== %s\n' "$*"; }
@@ -181,6 +191,78 @@ e2e_cleanup() {
 e2e_init() {
   e2e_require
   trap e2e_cleanup EXIT
+  e2e_session_ensure
+}
+
+# --- ephemeral herdr session ------------------------------------------------
+# e2e_session_boot <name> <sockvar> <pidvar> — start an ephemeral herdr server
+# for session <name> (`herdr --session <name> server &`), wait (~15s) for its
+# socket to accept a tab-less workspace.list, then assign the socket path to
+# $sockvar and the server pid to $pidvar in the CALLER's scope. Do NOT call via
+# $(...) — a command-substitution subshell would drop the pid and thus its
+# teardown (same gotcha as e2e_ws_create).
+e2e_session_boot() {
+  local name="$1" sockvar="$2" pidvar="$3" sock="" i _pid
+  mut "session boot '$name' (herdr --session $name server &)"
+  "$HERDR_BIN" --session "$name" server >/dev/null 2>&1 &
+  _pid=$!
+  printf -v "$pidvar" '%s' "$_pid"
+  for (( i=0; i<75; i++ )); do   # 75 * 0.2s = ~15s
+    sock="$("$HERDR_BIN" session list --json 2>/dev/null | python3 -c "
+import json, sys
+for s in json.load(sys.stdin).get('sessions', []):
+    if s.get('name') == '$name':
+        print(s.get('socket_path', '')); break
+" 2>/dev/null)"
+    if [ -n "$sock" ] && [ -S "$sock" ] \
+       && HERDR_SOCKET_PATH="$sock" python3 "$HRPC" workspace.list '{}' >/dev/null 2>&1; then
+      printf -v "$sockvar" '%s' "$sock"
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "ephemeral session '$name' did not answer within ~15s (server pid $_pid)"
+}
+
+# e2e_session_teardown <name> [pid] — stop + delete the ephemeral session and,
+# as a backstop, kill the server pid we started (session stop normally exits it).
+# Under keep mode (E2E_KEEP=1) this is a NO-OP: the session is left running for
+# review (run-all / the standalone review block prints the cleanup one-liner).
+e2e_session_teardown() {
+  local name="$1" pid="${2:-}"
+  if [ "${E2E_KEEP:-0}" = "1" ]; then
+    echo "  keep: leaving ephemeral session '$name' running (pid ${pid:-?})"
+    return 0
+  fi
+  mut "session stop+delete '$name'"
+  "$HERDR_BIN" session stop "$name" >/dev/null 2>&1 || true
+  "$HERDR_BIN" session delete "$name" >/dev/null 2>&1 || true
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  fi
+}
+
+# e2e_session_ensure — guarantee HERDR_SOCKET_PATH points at an ephemeral herdr
+# session for this scenario. If run-all exported E2E_SESSION/E2E_SESSION_SOCKET,
+# adopt it (run-all owns its teardown). Otherwise boot our own hb-e2e-<pid> and
+# register teardown (LIFO: runs AFTER workspaces close + daemon stop). Called by
+# e2e_init, BEFORE e2e_daemon_start, so the isolated daemon, herdr CLI, and hrpc
+# all treat the ephemeral session as "default".
+e2e_session_ensure() {
+  if [ -n "${E2E_SESSION:-}" ] && [ -n "${E2E_SESSION_SOCKET:-}" ]; then
+    export HERDR_SOCKET_PATH="$E2E_SESSION_SOCKET"
+    echo "  ephemeral session (from run-all): $E2E_SESSION"
+    echo "  session socket: $E2E_SESSION_SOCKET"
+    return 0
+  fi
+  local name="hb-e2e-$$"
+  step "Booting ephemeral herdr session '$name' (standalone, ~2s)"
+  e2e_session_boot "$name" E2E_SESSION_SOCKET E2E_SESSION_PID
+  export E2E_SESSION="$name"
+  export E2E_SESSION_SOCKET HERDR_SOCKET_PATH="$E2E_SESSION_SOCKET"
+  e2e_defer "e2e_session_teardown '$name' '${E2E_SESSION_PID:-}'"
+  echo "  session socket: $E2E_SESSION_SOCKET (server pid ${E2E_SESSION_PID:-?})"
 }
 
 # --- isolated stack ---------------------------------------------------------
@@ -251,7 +333,8 @@ e2e_daemon_stop() {
 # --- disposable workspace ---------------------------------------------------
 # e2e_ws_create <label> [session_socket] — create a disposable herdr workspace
 # and register its close. If session_socket is given the create/close target
-# THAT session (via HERDR_SOCKET_PATH); otherwise the default session. Sets the
+# THAT session (via HERDR_SOCKET_PATH); otherwise the ephemeral session
+# HERDR_SOCKET_PATH already points at (the daemon's "default"). Sets the
 # new id in the global E2E_WS (NOT stdout — capturing via $(...) would run this
 # in a subshell and lose the cleanup registration). Use as:
 #     e2e_ws_create board-e2e; WS="$E2E_WS"
@@ -267,10 +350,12 @@ e2e_ws_create() {
 }
 
 # e2e_ws_defer_close <workspace_id> [session_socket] — register a workspace close
-# to run at cleanup (targets the given session socket, else the default session).
+# to run at cleanup (targets the given session socket, else the ephemeral session
+# HERDR_SOCKET_PATH points at). Under keep mode (E2E_KEEP=1) the close is SKIPPED
+# so the workspace stays for review; the review block prints how to clean up.
 e2e_ws_defer_close() {
   local ws="$1" sock="${2:-}"
-  e2e_defer "mut 'workspace close $ws'; env ${sock:+HERDR_SOCKET_PATH=\"$sock\"} \"$HERDR_BIN\" workspace close '$ws' >/dev/null 2>&1 || true"
+  e2e_defer "if [ \"\${E2E_KEEP:-0}\" = 1 ]; then echo '  keep: leaving workspace $ws for review'; else mut 'workspace close $ws'; env ${sock:+HERDR_SOCKET_PATH=\"$sock\"} \"$HERDR_BIN\" workspace close '$ws' >/dev/null 2>&1 || true; fi"
 }
 
 # --- card outcome poller ----------------------------------------------------

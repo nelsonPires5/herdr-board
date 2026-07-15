@@ -96,7 +96,7 @@ case ↔ scenario ↔ status catalog):
 | `hrpc.py` | One-shot raw herdr socket RPC (honours `HERDR_SOCKET_PATH`) for structural assertions (`tab.list`/`pane.list`/`pane.layout`). |
 | `01-core.sh` | CLI path (dispatch → run → outcome/comment) + TUI path (drive the new-card form via send-keys). |
 | `02-kanban-grid.sh` | Several cards → one auto column → asserts the mesh grid (one `kanban` tab, one pane per card, tiled rects). |
-| `03-sessions.sh` | Multi-session behaviour against a **second running session** (skips if none). |
+| `03-sessions.sh` | Multi-session behaviour against a **second ephemeral session it boots itself** (`hb-e2e-b-<pid>`). |
 | `04-fail-on-fail.sh` | `board done --outcome fail` → card follows the column's `on_fail_column_id`. |
 | `05-retry.sh` | `board retry` spawns a NEW run row for a finished card (run count grows). |
 | `06-silent-exit.sh` | Agent pane exits without `board done` → run failed, **no** auto-transition. |
@@ -115,6 +115,18 @@ scenario ↔ status catalog, including that gap.
 
 ### How it stays isolated and safe
 
+- **Ephemeral herdr session.** The suite **never** touches your real sessions.
+  Each run boots a throwaway session `hb-e2e-<pid>` (`herdr --session <name>
+  server &`, ~2s) and binds the isolated boardd to it (`HERDR_SOCKET_PATH`), so it
+  is the daemon's "default" and every herdr CLI + `hrpc` call targets it.
+  `run-all.sh` boots ONE session for the whole run (exports
+  `E2E_SESSION`/`E2E_SESSION_SOCKET` to scenarios) and tears it down after,
+  verifying no `hb-e2e-*` session lingers; a scenario run **standalone** boots and
+  tears down its own via `e2e_session_ensure` (called by `e2e_init`).
+  `03-sessions.sh` additionally boots a *second* ephemeral session to exercise the
+  cross-session paths. **Keep mode** (`--keep` / `E2E_KEEP=1`) skips session
+  stop/delete and workspace close so a run can be inspected; `run-all.sh` then
+  prints an attach + cleanup one-liner per kept session.
 - **Isolated stack.** `e2e_isolate` makes a short `/tmp/hb-e2e.XXXXXX` dir and
   points `BOARD_DB`/`BOARD_SOCKET`/`HERDR_BOARD_CONFIG` there, with
   `BOARD_SPAWNER=herdr`. The daemon it starts is entirely separate from your real
@@ -151,7 +163,7 @@ set -euo pipefail
 
 # export E2E_FAKE_ENV="FAKE_AGENT_HOLD=300"   # only if you inspect live panes
 
-e2e_init          # preconditions + install the cleanup trap  (FIRST)
+e2e_init          # preconditions + cleanup trap + ephemeral session  (FIRST)
 e2e_build         # idempotent release build
 e2e_isolate       # temp db/socket/config with the fake harness
 e2e_daemon_start  # isolated boardd, stopped on cleanup
@@ -178,8 +190,8 @@ Then add the filename to the `SCENARIOS` array in `run-all.sh`.
 Checklist:
 
 - [ ] `set -euo pipefail`; source `lib.sh`.
-- [ ] `e2e_init` **before** creating anything (it installs the cleanup trap so
-      partial runs still tear down).
+- [ ] `e2e_init` **before** creating anything (it installs the cleanup trap and
+      boots/adopts the ephemeral session, so partial runs still tear down).
 - [ ] Use `e2e_isolate` — never the real board db/socket.
 - [ ] Own every workspace you touch. Create with `e2e_ws_create` (auto-registers
       close). For a workspace the **daemon** creates, discover its id and register
@@ -207,34 +219,31 @@ Checklist:
 | **The agent name is the pane `label`** | In `pane.list`, the daemon-assigned agent name shows up as the pane's `label`, not the `agent` field (which only fills when a herdr integration reports status). |
 | **`pane.layout` nests under `layout`** | `hrpc pane.layout …` returns `{"type":"pane_layout","layout":{…panes,splits…}}`; read `.layout.panes`. |
 | **Never `pkill` by "board daemon"** | That pattern matches your own shell too. Stop only the daemon you started, by pid (`e2e_daemon_stop`). To find leaked daemons from an aborted run: `ps -C board -o pid=,args=`. |
-| **Leaked workspaces from an aborted run** | If a scenario is killed before cleanup, close its workspaces by hand (labels `board-e2e`/`bgrid`/`bsess-*`): `herdr workspace close <id>` (add `HERDR_SOCKET_PATH=<session.sock>` for another session). |
+| **Leaked ephemeral session from an aborted run** | If a run is killed before cleanup, an `hb-e2e-*` session may linger. Remove it wholesale: `herdr session stop <name> && herdr session delete <name>` (this closes its workspaces too). List leftovers with `herdr session list`. |
 
 ## Running
 
 ```bash
 e2e/run-all.sh                  # build once, run all scenarios, print a summary
+e2e/run-all.sh --keep           # keep sessions + workspaces for review
+e2e/run-all.sh 04 07            # only scenarios matching a filename filter
 scripts/e2e.sh                  # compat wrapper -> run-all.sh
-bash e2e/01-core.sh             # a single scenario
+bash e2e/01-core.sh             # a single scenario (boots its own ephemeral session)
 ```
 
 - Requires a **running herdr** (`herdr 0.7.3+`) and `python3`. `run-all.sh` builds
-  the release binary once; scenarios reuse it.
+  the release binary once; scenarios reuse it. **No second session** is needed —
+  the suite boots its own ephemeral session(s) and cleans them up.
 - Exit codes: scenario `0` = PASS, `3` = SKIP, other = FAIL; `run-all.sh` exits
   non-zero if any scenario FAILED.
 - **Not in CI.** CI runs `cargo fmt`/`clippy`/`test` (layers 1–3); the live e2e
-  suite needs a herdr session and is run by a human/orchestrator.
+  suite needs a herdr and is run by a human/orchestrator.
 
-### Multi-session prerequisite (`03-sessions.sh`)
+### Multi-session (`03-sessions.sh`)
 
-`03-sessions.sh` needs a **second running herdr session** (non-default). It
-discovers one from `board session list --json` and **skips** if none is running.
-Start one first:
-
-```bash
-herdr session attach <name>        # interactive: opens the session's UI
-herdr --session <name> server &    # headless: just runs the session's server
-```
-
-Confirm it is up with `herdr session list` (status `running`), then run the
-suite. The scenario creates its own disposable workspaces in that session and
-closes them on cleanup; it never touches the session's existing workspaces.
+`03-sessions.sh` no longer needs a pre-existing second session. It boots its own
+second ephemeral session `hb-e2e-b-<pid>` (`herdr --session <name> server &`), runs
+the cross-session assertions against it, and stops+deletes it on cleanup (kept for
+review under `--keep`/`E2E_KEEP=1`). The daemon reaches that session by name — session
+enumeration shells out to `herdr session list --json` (`board-daemon/src/session.rs`),
+so it is visible even though the daemon is bound to the primary ephemeral session.

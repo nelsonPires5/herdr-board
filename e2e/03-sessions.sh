@@ -1,55 +1,39 @@
 #!/usr/bin/env bash
-# 03-sessions.sh — multi-session behavior against a SECOND running herdr session.
+# 03-sessions.sh — multi-session behavior against a SECOND ephemeral herdr session.
 #
-# One boardd drives every herdr session. This scenario discovers a non-default
-# RUNNING session and exercises the session/space-scoped paths against it:
-#   - session list  (the discovered session shows running, non-default),
-#   - space list scoped per session (default vs the other session differ),
-#   - a `workspace` card dispatched into the other session (pane lands in that
-#     session's kanban tab),
-#   - a `new-workspace` card (label + cwd) the daemon creates in that session,
+# One boardd drives every herdr session. The primary ephemeral session (the one
+# e2e_init binds the daemon to = its "default") is session A; this scenario BOOTS
+# its OWN second ephemeral session B (`hb-e2e-b-<pid>`) and exercises the
+# session/space-scoped paths against it:
+#   - space list scoped per session (A/default vs B differ),
+#   - a `workspace` card dispatched into B (pane lands in B's kanban tab),
+#   - a `new-workspace` card (label + cwd) the daemon creates in B,
 #   - validation error when --space-cwd is missing for new-workspace,
 #   - unknown-session error.
-# Cleanup closes BOTH disposable workspaces in the other session.
-#
-# PRECONDITION: a second running session. If none, this SKIPS (exit 3), it does
-# NOT fail — start one with `herdr --session <name> server &` (headless) or
-# `herdr session attach <name>` (interactive).
+# The daemon reaches B by name (`--session B`): session enumeration shells out to
+# `herdr session list --json` (board-daemon/src/session.rs), so B is visible even
+# though the daemon is bound to A. Cleanup closes both disposable workspaces in B
+# and tears B down (kept for review under E2E_KEEP=1). No pre-existing second
+# session is required anymore — this boots one itself.
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/lib.sh"
 
 BOARD_RPC="$REPO_ROOT/scripts/board-rpc.py"
 export E2E_FAKE_ENV="FAKE_AGENT_HOLD=300"   # keep panes alive for the assertions
 
-e2e_init
+e2e_init          # boots/adopts session A, binds the daemon's HERDR_SOCKET_PATH to it
 e2e_build
 e2e_isolate
 e2e_daemon_start
 
-# --- discover a non-default running session ---------------------------------
-step "Discover a non-default RUNNING session (board session list --json)"
-sess_json="$("$BOARD_BIN" session list --json)"
-echo "$sess_json"
-SESS="$(printf '%s' "$sess_json" | python3 -c '
-import json, sys
-data = json.load(sys.stdin)
-for s in data.get("sessions", []):
-    if s.get("running") and not s.get("default"):
-        print(s["name"]); break
-')"
-[ -n "$SESS" ] || skip "needs a second running herdr session (herdr session attach <name>)"
-echo "  using session: $SESS"
-
-# Its socket path comes from herdr itself (not board) — needed for raw hrpc and
-# for creating the disposable workspace in that session.
-SESS_SOCK="$("$HERDR_BIN" session list --json | python3 -c "
-import json, sys
-for s in json.load(sys.stdin)['sessions']:
-    if s['name'] == '$SESS':
-        print(s['socket_path']); break
-")"
+# --- boot a SECOND ephemeral session B --------------------------------------
+SESS="hb-e2e-b-$$"
+step "Booting a second ephemeral herdr session '$SESS' (~2s)"
+e2e_session_boot "$SESS" SESS_SOCK SESS_B_PID
+e2e_defer "e2e_session_teardown '$SESS' '${SESS_B_PID:-}'"
 [ -n "$SESS_SOCK" ] || fail "could not resolve socket path for session '$SESS'"
-echo "  session socket: $SESS_SOCK"
+echo "  session B: $SESS"
+echo "  session B socket: $SESS_SOCK (server pid ${SESS_B_PID:-?})"
 hrpc_sess() { HERDR_SOCKET_PATH="$SESS_SOCK" python3 "$HRPC" "$@"; }
 
 # assert_kanban_pane <ws_id> <card_id> — the workspace in SESS has a single

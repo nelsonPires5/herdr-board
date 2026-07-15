@@ -16,7 +16,7 @@ isolation/safety design, and the **how-to-write-a-scenario** guide, see
 |---|---|---|
 | Happy path: dispatch → run → outcome/comment (CLI) **and** create-a-card via the TUI | `01-core.sh` | live |
 | Mesh grid: several cards in one auto column tile into one `kanban` tab (one pane per card) | `02-kanban-grid.sh` | live |
-| Multi-session: session/space scoping + cross-session dispatch against a **second** running session | `03-sessions.sh` | live (skips if no second session) |
+| Multi-session: session/space scoping + cross-session dispatch against a **second** session the scenario boots itself | `03-sessions.sh` | live |
 | `board done --outcome fail` → card follows the column's `on_fail_column_id` | `04-fail-on-fail.sh` | live |
 | `board retry` re-runs a finished card as a NEW run row | `05-retry.sh` | live |
 | Agent pane exits without `board done` → run failed, **no** auto-transition | `06-silent-exit.sh` | live |
@@ -48,22 +48,39 @@ scenario to add.
 
 ## Prerequisites
 
-- A **running herdr** (`herdr 0.7.3+`) reachable on its default session socket, and
-  `python3`.
+- A **running herdr** (`herdr 0.7.3+`) and `python3`. Your real sessions are never
+  touched — the suite runs everything inside an **ephemeral** session it creates.
 - `cargo` on `PATH` — `run-all.sh` builds the release `board` binary once
   (`scripts/build.sh`); scenarios reuse it.
-- `03-sessions.sh` additionally needs a **second running herdr session**
-  (non-default). It discovers one and **skips** (does not fail) if none is running.
-  Start one with `herdr session attach <name>` (interactive) or
-  `herdr --session <name> server &` (headless), confirm with `herdr session list`.
+- **No second session needed.** `03-sessions.sh` boots its own second ephemeral
+  session (`hb-e2e-b-<pid>`) and tears it down; it no longer discovers or skips.
+
+## Ephemeral session model
+
+Each run gets its own throwaway herdr session `hb-e2e-<pid>` (booted via
+`herdr --session <name> server &`, ~2s). The isolated boardd binds to it
+(`HERDR_SOCKET_PATH`), so that session is the daemon's "default", and every herdr
+CLI call + `hrpc` assert targets it. `run-all.sh` boots ONE session for the whole
+run and exports `E2E_SESSION`/`E2E_SESSION_SOCKET` to each scenario; a scenario run
+**standalone** boots (and tears down) its own. Teardown stops+deletes the session;
+`run-all.sh` then verifies no `hb-e2e-*` sessions remain.
 
 ## Running
 
 ```bash
 e2e/run-all.sh              # build once, run every scenario, print a PASS/FAIL/SKIP summary
+e2e/run-all.sh --keep       # keep sessions + each scenario's workspace for review
+e2e/run-all.sh 04 07        # only scenarios whose filename matches a filter
 scripts/e2e.sh              # compat wrapper -> e2e/run-all.sh
-bash e2e/04-fail-on-fail.sh # run a single scenario standalone
+bash e2e/04-fail-on-fail.sh # run a single scenario standalone (boots its own session)
 ```
+
+**Keep mode** (`--keep`, or `E2E_KEEP=1`): skips session stop/delete **and**
+workspace close, so each scenario's disposable workspace stays inside its kept
+session for inspection. Scenario-level daemons/temp dirs are still cleaned up (only
+herdr-side artifacts are kept). At the end `run-all.sh` prints a review block per
+kept session — the `herdr session attach <name>` line and the
+`herdr session stop <n> && herdr session delete <n>` cleanup one-liner.
 
 Exit codes: scenario `0` = PASS, `3` = SKIP (missing precondition), anything else =
 FAIL. `run-all.sh` exits non-zero if any scenario FAILED. The suite is **not** part
