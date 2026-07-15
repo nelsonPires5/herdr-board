@@ -1,15 +1,19 @@
 name: Release
 
-# Manual only (USER REQUIREMENT): never fires on push to main. You pick the
-# version explicitly; the job verifies it against the source, tags, builds and
-# publishes.
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Version to release, without the leading v (e.g. 0.1.0). Must already match the workspace Cargo.toml and herdr-plugin.toml."
-        required: true
-        type: string
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+    branches:
+      - main
+
+# Serialize retries for the same CI commit without dropping a pending release
+# when a later main commit completes CI.
+concurrency:
+  group: release-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -19,76 +23,151 @@ env:
 
 jobs:
   release:
-    name: build + publish v${{ inputs.version }}
+    name: release from green main CI
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
 
-      # Fail fast if the requested version disagrees with the workspace crate
-      # version OR the herdr manifest version, so we never publish a release whose
-      # assets/manifest don't match the source. Version is workspace-inherited
-      # ([workspace.package] in the root Cargo.toml); every crate uses
-      # version.workspace = true, so this single check covers all 5 crates.
-      - name: Verify version matches Cargo.toml and herdr-plugin.toml
+      - name: Inspect version and GitHub release state
+        id: state
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
-          want="${{ inputs.version }}"
-          crate="$(grep -E '^version *= *"' Cargo.toml | head -n1 | sed -E 's/^version *= *"([^"]+)".*/\1/')"
-          manifest="$(grep -E '^version *= *"' herdr-plugin.toml | head -n1 | sed -E 's/^version *= *"([^"]+)".*/\1/')"
-          echo "requested=$want  Cargo.toml=$crate  herdr-plugin.toml=$manifest"
-          if [ "$want" != "$crate" ]; then
-            echo "::error::requested version ($want) != workspace Cargo.toml version ($crate). Bump [workspace.package] version first." >&2
-            exit 1
-          fi
-          if [ "$want" != "$manifest" ]; then
-            echo "::error::requested version ($want) != herdr-plugin.toml version ($manifest). Bump the manifest version first." >&2
-            exit 1
-          fi
+          set -euo pipefail
 
-      # Idempotency: refuse to clobber an existing release. A tag v$version
-      # already on the remote means this version was released (or half-released)
-      # before — stop rather than overwrite.
-      - name: Ensure tag v${{ inputs.version }} does not already exist
-        shell: bash
-        run: |
-          tag="v${{ inputs.version }}"
-          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
-            echo "::error::tag $tag already exists on origin — nothing to do. Bump the version to cut a new release." >&2
-            exit 1
+          set_state() {
+            echo "release_needed=$1" >> "$GITHUB_OUTPUT"
+            echo "version=${2:-}" >> "$GITHUB_OUTPUT"
+            echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+            echo "tag_needed=${3:-false}" >> "$GITHUB_OUTPUT"
+            echo "release_exists=${4:-false}" >> "$GITHUB_OUTPUT"
+            echo "release_draft=${5:-false}" >> "$GITHUB_OUTPUT"
+            echo "release_has_assets=${6:-false}" >> "$GITHUB_OUTPUT"
+            echo "release_complete=${7:-false}" >> "$GITHUB_OUTPUT"
+          }
+
+          # A root commit has no first parent and cannot be a release merge.
+          if ! git rev-parse --verify --quiet "$HEAD_SHA^1^{commit}" >/dev/null; then
+            echo "No first parent; release is a no-op."
+            set_state false
+            exit 0
           fi
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+          cargo_version() {
+            git show "$1" | python3 -c 'import sys,tomllib; print(tomllib.loads(sys.stdin.read())["workspace"]["package"]["version"])'
+          }
 
-      - uses: Swatinem/rust-cache@v2
+          head_version="$(cargo_version "$HEAD_SHA:Cargo.toml")"
+          parent_version="$(cargo_version "$HEAD_SHA^1:Cargo.toml")"
+          echo "Cargo.toml version: $parent_version -> $head_version"
 
-      # Same three gates as CI — a release must be green on its own.
-      - name: rustfmt
-        run: cargo fmt --all --check
+          if [ "$head_version" = "$parent_version" ]; then
+            echo "No release version bump; release is a no-op."
+            set_state false "$head_version"
+            exit 0
+          fi
 
-      - name: clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+          version="$head_version"
+          tag="v$version"
+          tarball_name="board-$version-x86_64-unknown-linux-gnu.tar.gz"
+          checksum_name="$tarball_name.sha256"
+          remote_tag_sha="$(git ls-remote --tags "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "refs/tags/$tag" "refs/tags/$tag^{}" | awk -v tag="$tag" '
+            $2 == "refs/tags/" tag "^{}" { peeled = $1 }
+            $2 == "refs/tags/" tag { direct = $1 }
+            END { if (peeled != "") print peeled; else if (direct != "") print direct }
+          ')"
 
-      - name: test
-        run: cargo test --workspace --all-features
+          if [ -n "$remote_tag_sha" ] && [ "$remote_tag_sha" != "$HEAD_SHA" ]; then
+            echo "::error::tag $tag points to $remote_tag_sha, not $HEAD_SHA" >&2
+            exit 1
+          fi
 
-      - name: Build board (release)
-        run: cargo build --release -p board-cli
+          release_exists=false
+          release_draft=false
+          release_has_assets=false
+          release_json=""
+          if release_json="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft,tagName,assets 2>/dev/null)"; then
+            release_exists=true
+            release_draft="$(printf '%s' "$release_json" | jq -r '.isDraft')"
+            release_tag_name="$(printf '%s' "$release_json" | jq -r '.tagName')"
+            release_has_assets="$(printf '%s' "$release_json" | jq -r --arg tarball "$tarball_name" --arg checksum "$checksum_name" '[.assets[].name] | (index($tarball) != null and index($checksum) != null)')"
+            echo "Found release $release_tag_name (draft=$release_draft, assets=$release_has_assets)."
+          fi
 
-      # Package everything a `herdr plugin link <extracted-dir>` needs: the prebuilt
-      # binary at its manifest path (target/release/board), the manifest, the agent
-      # skill, the scripts the manifest's [[build]]/[[actions]] reference, README, and
-      # LICENSE if one exists at run time.
-      - name: Package tarball
+          # GitHub can retain a release object after its tag was deleted. Never
+          # recreate that tag from the current CI run: fail closed instead.
+          if [ "$release_exists" = true ] && [ -z "$remote_tag_sha" ]; then
+            echo "::error::release $tag exists but its tag is missing; repair it manually, refusing to create a tag" >&2
+            exit 1
+          fi
+
+          release_complete=false
+          if [ "$release_exists" = true ] && [ "$release_draft" = false ] && [ "$release_has_assets" = true ]; then
+            release_complete=true
+          fi
+          tag_needed=false
+          if [ -z "$remote_tag_sha" ]; then
+            tag_needed=true
+          fi
+
+          release_needed=true
+          if [ "$release_complete" = true ]; then
+            release_needed=false
+          fi
+          echo "release_needed=$release_needed" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "tag_needed=$tag_needed" >> "$GITHUB_OUTPUT"
+          echo "release_exists=$release_exists" >> "$GITHUB_OUTPUT"
+          echo "release_draft=$release_draft" >> "$GITHUB_OUTPUT"
+          echo "release_has_assets=$release_has_assets" >> "$GITHUB_OUTPUT"
+          echo "release_complete=$release_complete" >> "$GITHUB_OUTPUT"
+
+          if [ "$release_complete" = true ]; then
+            echo "Release $tag is published with both expected assets; no-op."
+          else
+            echo "Release $tag needs creation or recovery."
+          fi
+
+      - name: Install stable Rust
+        if: steps.state.outputs.release_needed == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        if: steps.state.outputs.release_needed == 'true'
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify release files
+        if: steps.state.outputs.release_needed == 'true'
+        env:
+          REPO_URL: https://github.com/${{ github.repository }}
+        run: python3 scripts/prepare-release.py --repo . verify --repo-url "$REPO_URL"
+
+      - name: Build release binary
+        if: steps.state.outputs.release_needed == 'true'
+        run: cargo build --locked --release -p board-cli
+
+      - name: Package release tarball
+        if: steps.state.outputs.release_needed == 'true'
         id: package
         shell: bash
+        env:
+          VERSION: ${{ steps.state.outputs.version }}
         run: |
-          version="${{ inputs.version }}"
+          set -euo pipefail
           triple="x86_64-unknown-linux-gnu"
-          name="board-$version-$triple"
+          name="board-$VERSION-$triple"
           stage="dist/$name"
           mkdir -p "$stage/target/release" "$stage/scripts"
 
@@ -96,67 +175,82 @@ jobs:
           cp herdr-plugin.toml "$stage/herdr-plugin.toml"
           cp -r skill "$stage/skill"
           cp scripts/build.sh scripts/open-board.sh scripts/install.sh "$stage/scripts/"
-          [ -f README.md ] && cp README.md "$stage/README.md" || echo "no README.md — skipping"
+          [ -f README.md ] && cp README.md "$stage/README.md"
           for lic in LICENSE LICENSE.md LICENSE-MIT LICENSE.txt; do
-            [ -f "$lic" ] && cp "$lic" "$stage/$lic" && echo "bundled $lic"
+            [ -f "$lic" ] && cp "$lic" "$stage/$lic"
           done
 
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           ( cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256" )
           echo "tarball=dist/$name.tar.gz" >> "$GITHUB_OUTPUT"
           echo "checksum=dist/$name.tar.gz.sha256" >> "$GITHUB_OUTPUT"
-          echo "--- packaged ---"; tar -tzf "dist/$name.tar.gz"; cat "dist/$name.tar.gz.sha256"
+          tar -tzf "dist/$name.tar.gz"
+          cat "dist/$name.tar.gz.sha256"
 
-      # Best-effort release notes: the matching CHANGELOG.md section if present
-      # (another tool may still be authoring CHANGELOG.md — absence is not an error;
-      # --generate-notes below always runs regardless).
-      - name: Extract CHANGELOG section
+      - name: Extract release notes
+        if: steps.state.outputs.release_needed == 'true'
         id: notes
         shell: bash
+        env:
+          VERSION: ${{ steps.state.outputs.version }}
         run: |
-          version="${{ inputs.version }}"
-          out="release-notes.md"
-          if [ -f CHANGELOG.md ]; then
-            awk -v v="$version" '
-              /^## / {
-                if (found) exit
-                if (index($0, v) > 0) { found=1; print; next }
-              }
-              found { print }
-            ' CHANGELOG.md > "$out"
-            if [ -s "$out" ]; then
-              echo "found CHANGELOG section for $version"
-            else
-              echo "_See the auto-generated notes below._" > "$out"
-              echo "no CHANGELOG.md section matched $version"
-            fi
-          else
+          set -euo pipefail
+          out=release-notes.md
+          awk -v v="$VERSION" '
+            /^## / {
+              if (found) exit
+              if (index($0, "[" v "]") > 0) { found = 1; print; next }
+            }
+            found { print }
+          ' CHANGELOG.md > "$out"
+          if [ ! -s "$out" ]; then
             echo "_See the auto-generated notes below._" > "$out"
-            echo "no CHANGELOG.md present"
           fi
           echo "file=$out" >> "$GITHUB_OUTPUT"
 
-      # Create the annotated tag on this commit and push it. gh release create then
-      # attaches to that tag. Using the gh CLI (not a third-party action) keeps the
-      # release step dependency-free and mirrors the reference repo's approach.
       - name: Create annotated tag
+        if: steps.state.outputs.release_needed == 'true' && steps.state.outputs.tag_needed == 'true'
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ steps.state.outputs.version }}
+          HEAD_SHA: ${{ steps.state.outputs.head_sha }}
         run: |
-          tag="v${{ inputs.version }}"
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$tag" -m "$tag"
-          git push origin "$tag"
+          git tag -a "$TAG" "$HEAD_SHA" -m "$TAG"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$TAG"
 
-      - name: Create GitHub Release
+      - name: Create draft GitHub Release
+        if: steps.state.outputs.release_needed == 'true' && steps.state.outputs.release_exists == 'false'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ steps.state.outputs.version }}
+        run: |
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" \
+            --notes-file "${{ steps.notes.outputs.file }}" \
+            --draft \
+            --verify-tag
+
+      - name: Upload release assets (recoverable)
+        if: steps.state.outputs.release_needed == 'true'
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="v${{ inputs.version }}"
-          gh release create "$tag" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "$tag" \
-            --notes-file "${{ steps.notes.outputs.file }}" \
-            --generate-notes \
+          gh release upload "v${{ steps.state.outputs.version }}" \
             "${{ steps.package.outputs.tarball }}" \
-            "${{ steps.package.outputs.checksum }}"
+            "${{ steps.package.outputs.checksum }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+
+      - name: Publish draft release
+        if: steps.state.outputs.release_needed == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "v${{ steps.state.outputs.version }}" --repo "$GITHUB_REPOSITORY" --draft=false

@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- Documented the release contract in [`docs/releasing.md`](docs/releasing.md): Prepare Release bump choice, bot-opened PRs, explicit CI dispatch, CI-green `main` publishing, artifacts, reruns, and tag immutability.
+
+### Changed
+- The release helper now verifies synchronized release files and uses atomic, rerunnable writes after partial failure.
+- Release publication is gated on a version bump in the green `main` CI commit, with draft/asset recovery and immutable tags.
+- CI is split into `fmt`, `clippy`, and `test` jobs, with clippy warnings annotated on pull requests.
+- The end-to-end suite runs against an ephemeral herdr session per invocation and supports `--keep` for review.
+- `scripts/install.sh --yes` now applies the `open-board` keybinding during install.
+
 ## [0.1.0] - 2026-07-15
 
 First release: a kanban board that sits above herdr spaces. Cards are prompts, columns are
