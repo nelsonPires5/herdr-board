@@ -181,8 +181,9 @@ argv = ["mytool", "--model", "{model}"]   # {model}/{effort}/{permission_mode} p
 - `scripts/build.sh` — release build of the `board` binary (plugin `[[build]]` step; idempotent).
 - `scripts/install.sh` — build + link plugin + copy skill (mutating steps guarded behind `--yes`).
 - `scripts/open-board.sh` — the `open-board` action launcher (open-or-focus, toggle off on repeat).
-- `scripts/e2e/` — live end-to-end scenario suite against a REAL herdr; run `scripts/e2e/run-all.sh`
-  (`scripts/e2e.sh` is a compat wrapper). See [`docs/testing.md`](docs/testing.md).
+- `e2e/` — live end-to-end scenario suite against a REAL herdr; run `e2e/run-all.sh`
+  (`scripts/e2e.sh` is a compat wrapper). See [`e2e/README.md`](e2e/README.md) and
+  [`docs/testing.md`](docs/testing.md).
 - `scripts/board-rpc.py` — raw boardd protocol client (e.g. `column.create`, which has no CLI verb).
 
 ## Architecture
@@ -201,7 +202,7 @@ argv = ["mytool", "--model", "{model}"]   # {model}/{effort}/{permission_mode} p
 cargo test --workspace --all-features      # unit + integration tests (no live herdr needed)
 cargo clippy --all-targets -- -D warnings   # no warnings
 cargo fmt --all --check                     # formatted
-./scripts/e2e/run-all.sh                    # live e2e scenario suite vs a REAL herdr (disposable workspaces)
+./e2e/run-all.sh                            # live e2e scenario suite vs a REAL herdr (disposable workspaces)
 ```
 
 Testing pyramid and how to add a test: [`docs/testing.md`](docs/testing.md). Contributing guide:

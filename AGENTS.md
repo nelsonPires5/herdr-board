@@ -27,7 +27,7 @@ cargo fmt --all --check                      # formatted
 ```
 
 - `#[ignore]`'d tests hit a live herdr (run only when `HERDR_SOCK`/`HERDR_SOCKET_PATH` exists).
-- End-to-end: `scripts/e2e/run-all.sh` (compat: `scripts/e2e.sh`) drives a REAL herdr with a scenario
+- End-to-end: `e2e/run-all.sh` (compat: `scripts/e2e.sh`) drives a REAL herdr with a scenario
   suite — each scenario uses an isolated temp DB + socket, creates **disposable** workspaces, prefixes
   every herdr mutation `HERDR MUTATION:`, and tears everything down on exit. Never point it at a
   workspace you care about. See [`docs/testing.md`](docs/testing.md) for the layers and how to add one.
@@ -39,9 +39,10 @@ Full layering, harness details, and how to add tests live in [`docs/testing.md`]
 - **Test-first for behavior.** For any behavior change, write the failing unit test first
   (red→green) in the owning crate's existing test style (`crates/<crate>/tests/`).
 - **New herdr-touching flow ⇒ e2e.** Any new user-visible flow that reaches herdr isn't done until
-  it has a use case documented and a live scenario under `scripts/e2e/` (per `docs/testing.md`).
+  it has a use case documented and a live scenario under `e2e/` (per `docs/testing.md` and
+  `e2e/README.md`).
 - **Trivial changes are exempt** — docs, comments, typos, pure renames need no new test.
-- **Green before handoff.** The gates above **and** `scripts/e2e/run-all.sh` must pass (e2e SKIPs
+- **Green before handoff.** The gates above **and** `e2e/run-all.sh` must pass (e2e SKIPs
   are fine when a precondition like a second session is absent) before handing a change off.
 
 ## Conventions
@@ -56,12 +57,17 @@ Full layering, harness details, and how to add tests live in [`docs/testing.md`]
   streaming lives on its own connection.
 - Definition of done for a user-facing change: update the docs and `CHANGELOG.md` in the same change.
 
-## herdr gotchas (field-tested, verified locally against herdr 0.7.3 / protocol 16)
+## herdr gotchas (field-tested)
+
+**Learning/verifying herdr is its own page.** herdr has no man page; the authoritative
+sources are the installed binary itself — `herdr api schema --json` (methods/types/events +
+protocol number), `herdr <cmd> --help`, `herdr api snapshot`. Never assume a herdr command,
+flag, or JSON shape from memory, and pin the argv you verified in a test comment. Repo herdr
+facts are pinned to **herdr 0.7.3 / protocol 16**; on a newer herdr, re-verify against
+`api schema` **before** patching code. **See [`docs/herdr.md`](docs/herdr.md).**
 
 - **Never run destructive herdr commands against a user's workspaces/sessions.** Mutations only
-  against disposable workspaces you created (see e2e.sh). Read-only probes otherwise.
-- **Never assume a herdr command/flag/JSON shape from memory** — verify against the installed herdr
-  (`herdr api schema --json`, `herdr <cmd> --help`) and pin the argv you verified in a test comment.
+  against disposable workspaces you created (see `e2e/`). Read-only probes otherwise.
 - **Agent names are exclusive** while a pane is open. Names are `card-<id>-<column-slug>`; on an
   `agent_name_taken` collision the daemon retries with the `-r<run>` fallback.
 - **Panes don't inherit the workspace's env/cwd.** `agent.start` needs cwd + env passed explicitly;

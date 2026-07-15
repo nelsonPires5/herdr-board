@@ -39,11 +39,11 @@ git log: `feat(core): …`, `feat(daemon,cli): …`, `feat(tui): …`, `docs: �
 See [`docs/testing.md`](docs/testing.md) for the full pyramid (unit → daemon/CLI integration → TUI
 snapshots → live e2e) and how to add a test. **Policy:** write the failing unit test first for a
 behavior change, and add a live e2e scenario for any new herdr-touching flow (trivial doc/typo
-changes are exempt); keep the gates and `scripts/e2e/run-all.sh` green.
+changes are exempt); keep the gates and `e2e/run-all.sh` green.
 
 - **Unit + integration:** `cargo test --workspace --all-features`. The daemon integration tests use
   `LocalSpawner` + a fake harness script, so they run without a live herdr.
-- **End-to-end:** `scripts/e2e/run-all.sh` (compat wrapper: `scripts/e2e.sh`) drives a REAL herdr
+- **End-to-end:** `e2e/run-all.sh` (compat wrapper: `scripts/e2e.sh`) drives a REAL herdr
   with a scenario suite on **disposable** workspaces and an isolated temp DB + socket, tearing down
   on exit. Not part of CI. Read `docs/testing.md` first; never aim it at a workspace you care about.
 
