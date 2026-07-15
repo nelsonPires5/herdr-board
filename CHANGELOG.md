@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-15
+
 ### Added
 - Documented the release contract in [`docs/releasing.md`](docs/releasing.md): Prepare Release bump choice, bot-opened PRs, explicit CI dispatch, CI-green `main` publishing, artifacts, reruns, and tag immutability.
 
@@ -58,5 +60,6 @@ a visible herdr pane. Ships as a single `board` binary (TUI + daemon + CLI) and 
 - **Packaging.** `herdr-plugin.toml` manifest, and `scripts/` for build, install (guarded behind
   `--yes`), the open-or-focus launcher, a raw protocol client, and a live-herdr e2e smoke test.
 
-[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.1.1
 [0.1.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.1.0
