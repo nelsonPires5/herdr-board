@@ -5,30 +5,67 @@ on:
     branches: [main]
   pull_request:
 
-permissions:
-  contents: read
-
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
-    name: fmt + clippy + test
+  fmt:
+    name: fmt
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
-
-      - uses: Swatinem/rust-cache@v2
+          components: rustfmt
 
       - name: rustfmt
         run: cargo fmt --all --check
 
-      - name: clippy
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # rs-clippy-check posts warnings as annotations via the Checks API.
+      checks: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # On pull requests, surface clippy warnings as annotations on the diff.
+      # The action runs cargo clippy with the given args; `-- -D warnings`
+      # makes clippy exit non-zero on any warning, which fails the check.
+      - name: clippy (PR annotations)
+        if: github.event_name == 'pull_request'
+        uses: clechasseur/rs-clippy-check@v6.0.5
+        with:
+          args: --workspace --all-targets --all-features -- -D warnings
+
+      # On push to main there is no PR context for annotations, so gate with a
+      # plain clippy run that still fails the job on any warning.
+      - name: clippy (push gate)
+        if: github.event_name != 'pull_request'
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
 
       # Unit / integration tests are hermetic: live-herdr tests are #[ignore]d and
       # the e2e script (scripts/e2e.sh) is run out-of-band, so no live herdr is needed.
