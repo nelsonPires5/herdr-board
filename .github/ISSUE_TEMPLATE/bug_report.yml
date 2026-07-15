@@ -1,0 +1,73 @@
+name: Bug report
+description: Report a problem with herdr-board
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report! Please fill in what you can — even a partial report helps.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: A clear description of the bug, and what you expected instead.
+      placeholder: Moving a card into an auto column did nothing; I expected an agent pane to spawn.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps that trigger the bug.
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: input
+    id: herdr-version
+    attributes:
+      label: herdr version
+      description: Output of `herdr -v`.
+      placeholder: "0.7.3"
+    validations:
+      required: true
+  - type: input
+    id: board-version
+    attributes:
+      label: board version
+      description: Output of `board --version` (or the version shown in the TUI).
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS + version
+      description: Operating system and version.
+      placeholder: Ubuntu 24.04 / macOS 14.5
+    validations:
+      required: true
+  - type: input
+    id: terminal
+    attributes:
+      label: Terminal (and multiplexer, if any)
+      placeholder: WezTerm inside herdr
+    validations:
+      required: false
+  - type: textarea
+    id: daemon-log
+    attributes:
+      label: Daemon log excerpt
+      description: Relevant lines from the boardd log (`daemon.log`, or run `board daemon --foreground` to see live output). Redact anything sensitive.
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: extra
+    attributes:
+      label: Logs / screenshots / other context
+      description: Any error notice shown in the board, terminal output, or a screenshot.
+    validations:
+      required: false

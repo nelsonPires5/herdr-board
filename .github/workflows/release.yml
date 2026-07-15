@@ -1,0 +1,162 @@
+name: Release
+
+# Manual only (USER REQUIREMENT): never fires on push to main. You pick the
+# version explicitly; the job verifies it against the source, tags, builds and
+# publishes.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, without the leading v (e.g. 0.1.0). Must already match the workspace Cargo.toml and herdr-plugin.toml."
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: build + publish v${{ inputs.version }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Fail fast if the requested version disagrees with the workspace crate
+      # version OR the herdr manifest version, so we never publish a release whose
+      # assets/manifest don't match the source. Version is workspace-inherited
+      # ([workspace.package] in the root Cargo.toml); every crate uses
+      # version.workspace = true, so this single check covers all 5 crates.
+      - name: Verify version matches Cargo.toml and herdr-plugin.toml
+        shell: bash
+        run: |
+          want="${{ inputs.version }}"
+          crate="$(grep -E '^version *= *"' Cargo.toml | head -n1 | sed -E 's/^version *= *"([^"]+)".*/\1/')"
+          manifest="$(grep -E '^version *= *"' herdr-plugin.toml | head -n1 | sed -E 's/^version *= *"([^"]+)".*/\1/')"
+          echo "requested=$want  Cargo.toml=$crate  herdr-plugin.toml=$manifest"
+          if [ "$want" != "$crate" ]; then
+            echo "::error::requested version ($want) != workspace Cargo.toml version ($crate). Bump [workspace.package] version first." >&2
+            exit 1
+          fi
+          if [ "$want" != "$manifest" ]; then
+            echo "::error::requested version ($want) != herdr-plugin.toml version ($manifest). Bump the manifest version first." >&2
+            exit 1
+          fi
+
+      # Idempotency: refuse to clobber an existing release. A tag v$version
+      # already on the remote means this version was released (or half-released)
+      # before — stop rather than overwrite.
+      - name: Ensure tag v${{ inputs.version }} does not already exist
+        shell: bash
+        run: |
+          tag="v${{ inputs.version }}"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "::error::tag $tag already exists on origin — nothing to do. Bump the version to cut a new release." >&2
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Same three gates as CI — a release must be green on its own.
+      - name: rustfmt
+        run: cargo fmt --all --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: test
+        run: cargo test --workspace --all-features
+
+      - name: Build board (release)
+        run: cargo build --release -p board-cli
+
+      # Package everything a `herdr plugin link <extracted-dir>` needs: the prebuilt
+      # binary at its manifest path (target/release/board), the manifest, the agent
+      # skill, the scripts the manifest's [[build]]/[[actions]] reference, README, and
+      # LICENSE if one exists at run time.
+      - name: Package tarball
+        id: package
+        shell: bash
+        run: |
+          version="${{ inputs.version }}"
+          triple="x86_64-unknown-linux-gnu"
+          name="board-$version-$triple"
+          stage="dist/$name"
+          mkdir -p "$stage/target/release" "$stage/scripts"
+
+          cp target/release/board "$stage/target/release/board"
+          cp herdr-plugin.toml "$stage/herdr-plugin.toml"
+          cp -r skill "$stage/skill"
+          cp scripts/build.sh scripts/open-board.sh scripts/install.sh "$stage/scripts/"
+          [ -f README.md ] && cp README.md "$stage/README.md" || echo "no README.md — skipping"
+          for lic in LICENSE LICENSE.md LICENSE-MIT LICENSE.txt; do
+            [ -f "$lic" ] && cp "$lic" "$stage/$lic" && echo "bundled $lic"
+          done
+
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          ( cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256" )
+          echo "tarball=dist/$name.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "checksum=dist/$name.tar.gz.sha256" >> "$GITHUB_OUTPUT"
+          echo "--- packaged ---"; tar -tzf "dist/$name.tar.gz"; cat "dist/$name.tar.gz.sha256"
+
+      # Best-effort release notes: the matching CHANGELOG.md section if present
+      # (another tool may still be authoring CHANGELOG.md — absence is not an error;
+      # --generate-notes below always runs regardless).
+      - name: Extract CHANGELOG section
+        id: notes
+        shell: bash
+        run: |
+          version="${{ inputs.version }}"
+          out="release-notes.md"
+          if [ -f CHANGELOG.md ]; then
+            awk -v v="$version" '
+              /^## / {
+                if (found) exit
+                if (index($0, v) > 0) { found=1; print; next }
+              }
+              found { print }
+            ' CHANGELOG.md > "$out"
+            if [ -s "$out" ]; then
+              echo "found CHANGELOG section for $version"
+            else
+              echo "_See the auto-generated notes below._" > "$out"
+              echo "no CHANGELOG.md section matched $version"
+            fi
+          else
+            echo "_See the auto-generated notes below._" > "$out"
+            echo "no CHANGELOG.md present"
+          fi
+          echo "file=$out" >> "$GITHUB_OUTPUT"
+
+      # Create the annotated tag on this commit and push it. gh release create then
+      # attaches to that tag. Using the gh CLI (not a third-party action) keeps the
+      # release step dependency-free and mirrors the reference repo's approach.
+      - name: Create annotated tag
+        shell: bash
+        run: |
+          tag="v${{ inputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "$tag"
+          git push origin "$tag"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v${{ inputs.version }}"
+          gh release create "$tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$tag" \
+            --notes-file "${{ steps.notes.outputs.file }}" \
+            --generate-notes \
+            "${{ steps.package.outputs.tarball }}" \
+            "${{ steps.package.outputs.checksum }}"
