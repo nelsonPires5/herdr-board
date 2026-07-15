@@ -10,9 +10,9 @@
 #   - trap-based cleanup you register as you go (e2e_defer),
 #   - daemon start/stop by pid, disposable workspace create (auto-closed),
 #   - a card-outcome poller (wait_ok) and JSON helpers (jget),
-#   - raw herdr RPC via scripts/e2e/hrpc.py (hrpc), honoring HERDR_SOCKET_PATH.
+#   - raw herdr RPC via e2e/hrpc.py (hrpc), honoring HERDR_SOCKET_PATH.
 #
-# Conventions kept from the original scripts/e2e.sh: `set -euo pipefail` in the
+# Conventions kept from the original scripts/e2e.sh (now e2e/): `set -euo pipefail` in the
 # scenario, `step`/`mut` echo narration, every herdr MUTATION prefixed
 # "HERDR MUTATION:". Mutations only ever hit disposable workspaces this suite
 # created; never a workspace/session you care about.
@@ -28,7 +28,7 @@ skip() { printf 'SKIP: %s\n' "$*" >&2; exit 3; }
 
 # --- paths & tools ----------------------------------------------------------
 E2E_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-REPO_ROOT="$(cd "$E2E_LIB_DIR/../.." && pwd)"
+REPO_ROOT="$(cd "$E2E_LIB_DIR/.." && pwd)"
 HERDR_BIN="${HERDR_BIN_PATH:-herdr}"
 BOARD_BIN="${BOARD_BIN:-$REPO_ROOT/target/release/board}"
 E2E_FAKE_AGENT="${E2E_FAKE_AGENT:-$E2E_LIB_DIR/fake-agent.sh}"
@@ -88,6 +88,79 @@ jget() { python3 -c "$_JGET_PY" "$1"; }
 # hrpc <method> [json-params] — one-shot herdr RPC (honors HERDR_SOCKET_PATH).
 # Prints the raw `result` JSON on stdout.
 hrpc() { python3 "$HRPC" "$@"; }
+
+# --- boardd RPC (columns have no CLI verb) ----------------------------------
+# brpc <method> [json-params] — one-shot boardd RPC via scripts/board-rpc.py,
+# with the protocol ENVELOPE stripped: prints just the `result` payload as one
+# JSON line (board-rpc.py otherwise prints the whole {"id":..,"result":..} line,
+# whose top-level "id" is the request id "rpc", not the column's numeric id).
+BOARD_RPC_BIN="$REPO_ROOT/scripts/board-rpc.py"
+brpc() {
+  python3 "$BOARD_RPC_BIN" "$@" | python3 -c '
+import json, sys
+line = sys.stdin.readline()
+try:
+    r = json.loads(line)
+except Exception:
+    sys.stdout.write(line); sys.exit(0)
+print(json.dumps(r.get("result", r) if isinstance(r, dict) else r))'
+}
+
+# col_create <json-params> — create a column via column.create and print its
+# numeric id. Pass the full params object, e.g.
+#   FAIL=$(col_create '{"name":"Backlog","trigger":"manual"}')
+#   col_create "{\"name\":\"Execute\",\"trigger\":\"auto\",\"on_fail_column_id\":$FAIL}"
+col_create() {
+  brpc column.create "$1" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])'
+}
+
+# --- chained-run poller -----------------------------------------------------
+# wait_runs <card_id> <min_runs> [max_halfsecs] — poll `board card show --json`
+# until the card has at least <min_runs> run rows AND the LAST run has ended
+# (outcome set). Prints the last run's outcome; returns 0 regardless of outcome
+# (callers assert the specific outcome themselves). Use for chained auto columns
+# or retries where more than one run row is expected (wait_ok only sees the first
+# run's outcome via jget).
+wait_runs() {
+  local card="$1" min="$2" tries="${3:-80}" i
+  for (( i=0; i<tries; i++ )); do
+    "$BOARD_BIN" card show "$card" --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    runs = json.load(sys.stdin).get("runs", [])
+except Exception:
+    sys.exit(1)
+need = int(sys.argv[1])
+if len(runs) >= need and runs[-1].get("outcome") not in (None, "null"):
+    print(runs[-1]["outcome"]); sys.exit(0)
+sys.exit(1)
+' "$min" && return 0
+    sleep 0.5
+  done
+  printf '<timeout>'
+  return 1
+}
+
+# card_field <card_id> <dotted.path> — print a scalar from `card card show --json`.
+# Supports card.* (e.g. status, column_id) and runs[-1].* (last run). Returns
+# non-zero if absent.
+card_field() {
+  "$BOARD_BIN" card show "$1" --json 2>/dev/null | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+path = sys.argv[1]
+if path.startswith("runs[-1]."):
+    runs = d.get("runs", [])
+    if not runs: sys.exit(1)
+    v = runs[-1].get(path.split(".",1)[1])
+elif path.startswith("card."):
+    v = d.get("card", {}).get(path.split(".",1)[1])
+else:
+    v = d.get(path)
+if v is None: sys.exit(1)
+print(v)
+' "$2"
+}
 
 # --- cleanup registry -------------------------------------------------------
 # Register teardown commands as you create things; e2e_cleanup runs them in

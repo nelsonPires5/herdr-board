@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 01-core.sh — the original end-to-end smoke test, rebased onto lib.sh.
 #
-# Behavior-identical to the pre-split scripts/e2e.sh:
+# Behavior-identical to the pre-split scripts/e2e.sh (suite now lives at e2e/):
 #   CLI PATH  — create an auto column, create a card on the fake harness targeting
 #               a disposable workspace, move it into the auto column (dispatches a
 #               real herdr agent pane), poll until the run ends, assert outcome=ok
@@ -9,7 +9,7 @@
 #   TUI PATH  — open a tab, launch `board tui` in it, drive the new-card form via
 #               send-keys, and assert the new card shows (pane + CLI).
 #
-# Runnable standalone (`bash scripts/e2e/01-core.sh`) or via run-all.sh.
+# Runnable standalone (`bash e2e/01-core.sh`) or via run-all.sh.
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/lib.sh"
 

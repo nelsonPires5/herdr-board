@@ -1,3 +1,4 @@
 /target/
 *.snap.new
 daemon.log
+__pycache__/

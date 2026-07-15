@@ -9,7 +9,7 @@ unit / pure (per crate)                 no I/O, no daemon        — cargo test
         over a LocalSpawner                fake harness, no herdr
      └─ TUI fake-client + snapshots      ratatui TestBackend,     — cargo test
                                            in-memory client
-        └─ live e2e scenarios           REAL herdr, disposable   — scripts/e2e/
+        └─ live e2e scenarios           REAL herdr, disposable   — e2e/
                                            workspaces
 ```
 
@@ -80,13 +80,14 @@ the `fake-client` feature.
 
 ### 4. Live e2e scenarios (real herdr)
 
-`scripts/e2e/` drives a **real** herdr with the **`HerdrSpawner`**, dispatching a
+`e2e/` drives a **real** herdr with the **`HerdrSpawner`**, dispatching a
 fake harness into **disposable** workspaces. This is the only layer that proves
 the herdr wire integration end to end. It is covered in depth below.
 
 ## The live e2e harness
 
-Layout under `scripts/e2e/`:
+Layout under `e2e/` (see [`e2e/README.md`](../e2e/README.md) for the full use
+case ↔ scenario ↔ status catalog):
 
 | File | Role |
 |---|---|
@@ -96,7 +97,19 @@ Layout under `scripts/e2e/`:
 | `01-core.sh` | CLI path (dispatch → run → outcome/comment) + TUI path (drive the new-card form via send-keys). |
 | `02-kanban-grid.sh` | Several cards → one auto column → asserts the mesh grid (one `kanban` tab, one pane per card, tiled rects). |
 | `03-sessions.sh` | Multi-session behaviour against a **second running session** (skips if none). |
+| `04-fail-on-fail.sh` | `board done --outcome fail` → card follows the column's `on_fail_column_id`. |
+| `05-retry.sh` | `board retry` spawns a NEW run row for a finished card (run count grows). |
+| `06-silent-exit.sh` | Agent pane exits without `board done` → run failed, **no** auto-transition. |
+| `07-cancel.sh` | `board cancel` on a live run kills the herdr pane; run `cancelled`, card `failed`. |
+| `08-column-timeout.sh` | A run past its column `timeout_minutes` is killed and follows `on_fail`. |
+| `09-comment-context.sh` | A stage-1 comment flows into the stage-2 run's `prompt_snapshot` (`## Card comments`). |
 | `run-all.sh` | Builds once, runs every scenario, prints a PASS/FAIL/SKIP summary. |
+
+The `idle-lost` watchdog has **no** live scenario — it keys off herdr
+`pane.agent_status_changed`, which a bash fake harness never emits (panes report
+`agent_status "unknown"`), so it cannot fire without a real harness status
+integration. See [`e2e/README.md`](../e2e/README.md) for the full use case ↔
+scenario ↔ status catalog, including that gap.
 
 `scripts/e2e.sh` is a thin compat wrapper that `exec`s `run-all.sh`.
 
@@ -127,7 +140,7 @@ Layout under `scripts/e2e/`:
 
 ## Writing a new scenario
 
-Add a numbered file `scripts/e2e/NN-name.sh`, source `lib.sh`, and follow this
+Add a numbered file `e2e/NN-name.sh`, source `lib.sh`, and follow this
 skeleton:
 
 ```bash
@@ -199,9 +212,9 @@ Checklist:
 ## Running
 
 ```bash
-scripts/e2e/run-all.sh          # build once, run all scenarios, print a summary
+e2e/run-all.sh                  # build once, run all scenarios, print a summary
 scripts/e2e.sh                  # compat wrapper -> run-all.sh
-bash scripts/e2e/01-core.sh     # a single scenario
+bash e2e/01-core.sh             # a single scenario
 ```
 
 - Requires a **running herdr** (`herdr 0.7.3+`) and `python3`. `run-all.sh` builds

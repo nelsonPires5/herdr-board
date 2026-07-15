@@ -14,7 +14,17 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 e2e_require
 e2e_build   # build once; scenarios' own e2e_build is then a no-op
 
-SCENARIOS=(01-core.sh 02-kanban-grid.sh 03-sessions.sh)
+SCENARIOS=(
+  01-core.sh
+  02-kanban-grid.sh
+  03-sessions.sh
+  04-fail-on-fail.sh
+  05-retry.sh
+  06-silent-exit.sh
+  07-cancel.sh
+  08-column-timeout.sh
+  09-comment-context.sh
+)
 
 declare -a NAMES RESULTS
 rc_any_fail=0
