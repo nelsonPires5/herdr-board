@@ -1,6 +1,14 @@
 # herdr-board
 
-Kanban board that sits **above** herdr spaces: cards are prompts, columns are pipeline stages, and moving a card dispatches a real AI coding agent into a visible herdr pane.
+![Rust](https://img.shields.io/badge/rust-edition%202021-orange.svg)
+![herdr 0.7+](https://img.shields.io/badge/herdr-0.7%2B-8a2be2)
+![platforms: linux](https://img.shields.io/badge/platforms-linux-informational)
+![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
+
+**A kanban board that sits above herdr spaces: cards are prompts, columns are pipeline stages, and
+moving a card dispatches a real AI coding agent into a visible herdr pane.** The board runs as an
+overlay TUI you summon with a keypress; the daemon behind it queues runs, spawns agents, watches
+their status, and walks each card down the pipeline until a human-gated column stops it.
 
 ```
 Todo ──► Plan ──► Execute ──► Review ──► Human Review ──► Done
@@ -8,13 +16,37 @@ Todo ──► Plan ──► Execute ──► Review ──► Human Review �
         └─────────── example pipeline — columns are fully user-defined ──────────┘
 ```
 
-- A **card** = title + description (the prompt) + harness/model/effort/permission-mode + target space.
-- A **column** can carry a *system prompt* (prepended to the card prompt) and *auto-transition* rules (on success move card to next column, which may auto-trigger the next agent run). Columns are created/renamed/configured freely in the TUI (mouse or keyboard); a new board starts with only `Todo`.
-- Agents report back by **commenting on the card** via the `board` CLI, and the daemon moves the card along the pipeline until a human-gated column stops it.
+- A **card** = title + description (the prompt) + harness/model/effort/permission-mode + a target
+  herdr session and space.
+- A **column** can carry a *system prompt* (prepended to the card prompt) and *auto-transition*
+  rules (on success move to the next column, which may auto-trigger the next run). Columns are
+  created/renamed/configured freely in the TUI (mouse or keyboard); a new board starts with only
+  `Todo`.
+- Agents report back by **commenting on the card** via the `board` CLI, and the daemon moves the
+  card along the pipeline until a human-gated column stops it.
+
+## Features
+
+- **One binary, three roles.** The single `board` binary is the TUI, the daemon (boardd), and the
+  CLI (subcommands the agents call). No separate services to install.
+- **Runs land in visible herdr panes.** Agents run where you can watch them, in the workspace's
+  `kanban` tab, tiled roughly square.
+- **Pipelines, not just a queue.** Per-column system prompts and success/fail transitions turn a
+  board into a Plan → Execute → Review flow with human gates where you want them.
+- **Session- and space-aware.** A single daemon drives every herdr session; a card resolves to its
+  session's socket at dispatch and runs in an existing workspace or one the daemon opens for it.
+- **Pluggable harnesses.** Claude Code is built in; config-defined harnesses (and codex/gemini/
+  opencode later) plug in behind a `HarnessAdapter`.
+- **Agent-legible.** Ships a Claude Code skill so a dispatched agent knows exactly how to comment,
+  close its run, and (from an interactive session) queue new work.
+- **Extension-owned state.** All state lives under `~/.local/share/herdr-board/`; herdr's own state
+  is never touched.
 
 ## Components (one binary)
 
-The single `board` binary is TUI, daemon, and CLI (subcommands). Crates: `board-core` (state/protocol/engine), `board-daemon` (orchestration), `board-herdr` (herdr socket client), `board-tui` (ratatui view), `board-cli` (the `board` binary).
+The single `board` binary is TUI, daemon, and CLI (subcommands). Crates: `board-core`
+(state/protocol/engine), `board-daemon` (orchestration), `board-herdr` (herdr socket client),
+`board-tui` (ratatui view), `board-cli` (the `board` binary).
 
 | Role | What |
 |---|---|
@@ -22,15 +54,19 @@ The single `board` binary is TUI, daemon, and CLI (subcommands). Crates: `board-
 | `board tui` | The kanban board, run **inside a herdr overlay pane** as a plugin (`herdr-plugin.toml`). Talks to the daemon; auto-starts it if absent. |
 | `board <verb>` (CLI) | Same binary; the verbs agents call from inside a run (`comment`, `done`, `move`, …). |
 
-## Quick start
+## Install
+
+herdr-board is a herdr plugin distributed from source (topic: `herdr-plugin`).
 
 ```bash
-# 1. Build the release binary.
-./scripts/build.sh                       # -> target/release/board
+# 1. Clone.
+git clone https://github.com/nelsonPires5/herdr-board
+cd herdr-board
 
-# 2. Install: link the plugin + copy the agent skill (prints the exact commands).
-./scripts/install.sh                     # dry run: prints mutating steps
-./scripts/install.sh --yes               # actually links plugin + copies skill
+# 2. Build + link the plugin + copy the agent skill. install.sh is SAFE by default:
+#    it builds and PRINTS the mutating steps. --yes actually applies them.
+./scripts/install.sh            # dry run: prints the plugin-link / skill-copy / PATH-symlink steps
+./scripts/install.sh --yes      # build + `herdr plugin link` + copy skill + symlink ~/.local/bin/board
 
 # 3. Bind a key to summon the board (add to ~/.config/herdr/config.toml):
 #    [[keys.command]]
@@ -45,16 +81,37 @@ herdr integration install claude
 If `overlay` placement is unavailable in your herdr, open the board on demand with:
 `herdr plugin pane open --plugin herdr-board --entrypoint board --placement overlay --focus`.
 
-**Named sessions**: herdr keeps a plugin registry *per session* (keybindings/config are global, plugins are not). In each named session run once, from inside it:
-`herdr plugin link /path/to/herdr-board`. A single boardd runs one board across
-**every** herdr session: a card carries a `session` (the default session when
-unset), and the daemon resolves it to that session's socket at dispatch (via
-`herdr session list`) to create/resolve the workspace and spawn the pane there.
-Use a second stack with `BOARD_SOCKET`/`BOARD_DB` overrides only for a fully
-separate *board*. Don't bind keys herdr already uses by default
-(`prefix+k` is `focus_pane_up`; check `herdr --default-config`).
+**Named sessions**: herdr keeps a plugin registry *per session* (keybindings/config are global,
+plugins are not). In each named session run once, from inside it:
+`herdr plugin link /path/to/herdr-board`. A single boardd runs one board across **every** herdr
+session: a card carries a `session` (the default session when unset), and the daemon resolves it
+to that session's socket at dispatch (via `herdr session list`) to create/resolve the workspace and
+spawn the pane there. Use a second stack with `BOARD_SOCKET`/`BOARD_DB` overrides only for a fully
+separate *board*. Don't bind keys herdr already uses by default (`prefix+k` is `focus_pane_up`;
+check `herdr --default-config`).
 
-The **agent skill** (`skill/SKILL.md`, copied to `~/.claude/skills/herdr-board/` by `install.sh`) teaches Claude Code sessions how to drive the board from inside a run.
+The **agent skill** (`skill/SKILL.md`, copied to `~/.claude/skills/herdr-board/` by `install.sh`)
+teaches Claude Code sessions how to drive the board from inside a run.
+
+## Quickstart
+
+1. Press your keybinding (e.g. `prefix+shift+k`) to open the board overlay.
+2. On the empty board press `T` to apply the example pipeline (or `N` to add your own columns), then
+   `n` to create a card — the guided form picks harness/model/effort/permission, session, and space.
+3. Move the card into an `auto` column (`m` for the column picker, or drag it) — the move dispatches
+   the agent into a herdr pane in the workspace's `kanban` tab.
+4. Watch the run land; the agent comments and calls `board done`, and the daemon advances the card
+   until it reaches a manual gate. Follow along with `Enter` (card detail) or `board card show <id>`.
+
+Same flow from the shell:
+
+```bash
+board card new --title "Add retry to the uploader" \
+  -d "In src/upload.rs, retry failed PUTs 3x with backoff. Add a unit test." \
+  --harness claude --effort high \
+  --space-kind new-workspace --space-ref uploader --space-cwd /path/to/repo
+board move <new-card-id> Execute        # Execute is an auto column -> run starts
+```
 
 ## Keybindings (the `?` overlay)
 
@@ -76,7 +133,7 @@ The **agent skill** (`skill/SKILL.md`, copied to `~/.claude/skills/herdr-board/`
 | `Ctrl+E` | edit textarea in `$EDITOR` | | `drag` | move card / reorder column |
 | `Enter` / `Esc` | submit / cancel | | `wheel` | scroll cards |
 
-## CLI synopsis
+## CLI reference
 
 ```
 board tui | daemon [--foreground] | status [--json]
@@ -129,12 +186,34 @@ argv = ["mytool", "--model", "{model}"]   # {model}/{effort}/{permission_mode} p
 
 ## Architecture
 
+- [`docs/`](docs/README.md) — the documentation index (start here).
 - [`docs/design.md`](docs/design.md) — architecture, data model, column config, full data flow.
 - [`docs/protocol.md`](docs/protocol.md) — the boardd socket protocol contract (single source of truth).
 - [`docs/research.md`](docs/research.md) — herdr API capability map, prior art, verified harness flags.
-- [`docs/implementation.md`](docs/implementation.md) — build phases.
+- [`docs/implementation.md`](docs/implementation.md) — crate layout and build phases.
 - [`schema.sql`](schema.sql) — SQLite schema.
+
+## Development
+
+```bash
+cargo test --workspace --all-features      # unit + integration tests (no live herdr needed)
+cargo clippy --all-targets -- -D warnings   # no warnings
+cargo fmt --all --check                     # formatted
+./scripts/e2e.sh                            # end-to-end against a REAL herdr session (disposable workspace)
+```
+
+Contributing guide: [`CONTRIBUTING.md`](CONTRIBUTING.md). Cross-agent contributor notes:
+[`AGENTS.md`](AGENTS.md).
 
 ## Status
 
-**v1.** Rust (ratatui + rusqlite + tokio), one `board` binary. Harness: **Claude Code** builtin (`claude`) plus config-defined harnesses, behind a `HarnessAdapter` so codex/gemini/opencode plug in later. Execution: **visible herdr panes**. UI: **overlay TUI** summoned by a herdr keybinding (`?` = help). DB is extension-owned (`~/.local/share/herdr-board/`); herdr's own state is untouched. Core is fully tested.
+**v1.** Rust (ratatui + rusqlite + tokio), one `board` binary. Harness: **Claude Code** builtin
+(`claude`) plus config-defined harnesses, behind a `HarnessAdapter` so codex/gemini/opencode plug in
+later. Execution: **visible herdr panes**. UI: **overlay TUI** summoned by a herdr keybinding
+(`?` = help). DB is extension-owned (`~/.local/share/herdr-board/`); herdr's own state is untouched.
+Core is fully tested.
+
+## License
+
+MIT (see `license` in `Cargo.toml`). No `LICENSE` file ships yet — add one to make the terms
+explicit for users and the marketplace.
