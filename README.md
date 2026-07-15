@@ -63,18 +63,16 @@ herdr-board is a herdr plugin distributed from source (topic: `herdr-plugin`).
 git clone https://github.com/nelsonPires5/herdr-board
 cd herdr-board
 
-# 2. Build + link the plugin + copy the agent skill. install.sh is SAFE by default:
-#    it builds and PRINTS the mutating steps. --yes actually applies them.
-./scripts/install.sh            # dry run: prints the plugin-link / skill-copy / PATH-symlink steps
+# 2. Build + link the plugin + copy the agent skill + add the keybinding. install.sh
+#    is SAFE by default: it builds and PRINTS the mutating steps. --yes applies them.
+./scripts/install.sh            # dry run: prints plugin-link / skill-copy / symlink / keybinding
 ./scripts/install.sh --yes      # build + `herdr plugin link` + copy skill + symlink ~/.local/bin/board
+                                #   + add the [[keys.command]] keybinding to ~/.config/herdr/config.toml
+                                #   (idempotent: skipped if a binding already invokes open-board;
+                                #    backs the config up to config.toml.bak.<epoch> before appending)
+./scripts/install.sh --yes --key prefix+shift+b   # same, custom key combo (default: prefix+shift+k)
 
-# 3. Bind a key to summon the board (add to ~/.config/herdr/config.toml):
-#    [[keys.command]]
-#    key = "prefix+shift+k"
-#    type = "shell"
-#    command = "herdr plugin action invoke open-board --plugin herdr-board"
-
-# 4. Recommended — precise agent status (idle/working/blocked) + session refs:
+# 3. Recommended — precise agent status (idle/working/blocked) + session refs:
 herdr integration install claude
 ```
 
