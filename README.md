@@ -181,7 +181,8 @@ argv = ["mytool", "--model", "{model}"]   # {model}/{effort}/{permission_mode} p
 - `scripts/build.sh` — release build of the `board` binary (plugin `[[build]]` step; idempotent).
 - `scripts/install.sh` — build + link plugin + copy skill (mutating steps guarded behind `--yes`).
 - `scripts/open-board.sh` — the `open-board` action launcher (open-or-focus, toggle off on repeat).
-- `scripts/e2e.sh` — end-to-end test against a live herdr session (see the file header).
+- `scripts/e2e/` — live end-to-end scenario suite against a REAL herdr; run `scripts/e2e/run-all.sh`
+  (`scripts/e2e.sh` is a compat wrapper). See [`docs/testing.md`](docs/testing.md).
 - `scripts/board-rpc.py` — raw boardd protocol client (e.g. `column.create`, which has no CLI verb).
 
 ## Architecture
@@ -191,6 +192,7 @@ argv = ["mytool", "--model", "{model}"]   # {model}/{effort}/{permission_mode} p
 - [`docs/protocol.md`](docs/protocol.md) — the boardd socket protocol contract (single source of truth).
 - [`docs/research.md`](docs/research.md) — herdr API capability map, prior art, verified harness flags.
 - [`docs/implementation.md`](docs/implementation.md) — crate layout and build phases.
+- [`docs/testing.md`](docs/testing.md) — the testing pyramid and the live e2e scenario suite.
 - [`schema.sql`](schema.sql) — SQLite schema.
 
 ## Development
@@ -199,11 +201,11 @@ argv = ["mytool", "--model", "{model}"]   # {model}/{effort}/{permission_mode} p
 cargo test --workspace --all-features      # unit + integration tests (no live herdr needed)
 cargo clippy --all-targets -- -D warnings   # no warnings
 cargo fmt --all --check                     # formatted
-./scripts/e2e.sh                            # end-to-end against a REAL herdr session (disposable workspace)
+./scripts/e2e/run-all.sh                    # live e2e scenario suite vs a REAL herdr (disposable workspaces)
 ```
 
-Contributing guide: [`CONTRIBUTING.md`](CONTRIBUTING.md). Cross-agent contributor notes:
-[`AGENTS.md`](AGENTS.md).
+Testing pyramid and how to add a test: [`docs/testing.md`](docs/testing.md). Contributing guide:
+[`CONTRIBUTING.md`](CONTRIBUTING.md). Cross-agent contributor notes: [`AGENTS.md`](AGENTS.md).
 
 ## Status
 

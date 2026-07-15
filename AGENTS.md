@@ -27,9 +27,22 @@ cargo fmt --all --check                      # formatted
 ```
 
 - `#[ignore]`'d tests hit a live herdr (run only when `HERDR_SOCK`/`HERDR_SOCKET_PATH` exists).
-- End-to-end: `./scripts/e2e.sh` drives a REAL herdr session — it creates a **disposable** workspace,
-  uses an isolated temp DB + socket, prefixes every herdr mutation `HERDR MUTATION:`, and tears
-  everything down on exit. Never point it at a workspace you care about.
+- End-to-end: `scripts/e2e/run-all.sh` (compat: `scripts/e2e.sh`) drives a REAL herdr with a scenario
+  suite — each scenario uses an isolated temp DB + socket, creates **disposable** workspaces, prefixes
+  every herdr mutation `HERDR MUTATION:`, and tears everything down on exit. Never point it at a
+  workspace you care about. See [`docs/testing.md`](docs/testing.md) for the layers and how to add one.
+
+## Testing policy (pragmatic)
+
+Full layering, harness details, and how to add tests live in [`docs/testing.md`](docs/testing.md).
+
+- **Test-first for behavior.** For any behavior change, write the failing unit test first
+  (red→green) in the owning crate's existing test style (`crates/<crate>/tests/`).
+- **New herdr-touching flow ⇒ e2e.** Any new user-visible flow that reaches herdr isn't done until
+  it has a use case documented and a live scenario under `scripts/e2e/` (per `docs/testing.md`).
+- **Trivial changes are exempt** — docs, comments, typos, pure renames need no new test.
+- **Green before handoff.** The gates above **and** `scripts/e2e/run-all.sh` must pass (e2e SKIPs
+  are fine when a precondition like a second session is absent) before handing a change off.
 
 ## Conventions
 

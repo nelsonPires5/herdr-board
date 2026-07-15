@@ -8,5 +8,6 @@ The reference detail behind the [root README](../README.md). Start here to find 
 | [protocol.md](protocol.md) | The boardd unix-socket protocol (v1) — transport (NDJSON), auto-start, every method and event, error codes. **The single source of truth** for the daemon⇄client contract; serde types live in `board-core::protocol`. | are writing a client, adding a method, or debugging the wire. |
 | [implementation.md](implementation.md) | The cargo workspace crate layout, crate ownership, shared dependencies, key traits (`BoardClient`, `Spawner`), and the build phases with their tests. | are navigating the codebase or picking up a build task. |
 | [research.md](research.md) | The verified herdr capability map (commands/events/IDs), prior-art survey of agent-kanban tools, and verified harness invocation flags (claude/codex/gemini/opencode). | are scoping a feature that touches herdr or a new harness, and want the background that grounded the design. |
+| [testing.md](testing.md) | The testing pyramid in this repo (unit/pure → daemon+CLI integration → TUI snapshots → live e2e scenarios), how the live e2e harness (`scripts/e2e/`) works, and how to write a new scenario. | are adding a feature and need to test it, or are writing/running the live e2e suite. |
 
 The [`schema.sql`](../schema.sql) at the repo root is the SQLite schema (migration source of truth).
