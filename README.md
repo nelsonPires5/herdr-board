@@ -190,6 +190,7 @@ argv = ["mytool", "--model", "{model}"]   # {model}/{effort}/{permission_mode} p
 - [`docs/design.md`](docs/design.md) — architecture, data model, column config, full data flow.
 - [`docs/protocol.md`](docs/protocol.md) — the boardd socket protocol contract (single source of truth).
 - [`docs/research.md`](docs/research.md) — herdr API capability map, prior art, verified harness flags.
+- [`docs/releasing.md`](docs/releasing.md) — release policy and the Prepare Release → CI-gated publish flow.
 - [`docs/implementation.md`](docs/implementation.md) — crate layout and build phases.
 - [`docs/testing.md`](docs/testing.md) — the testing pyramid and the live e2e scenario suite.
 - [`schema.sql`](schema.sql) — SQLite schema.

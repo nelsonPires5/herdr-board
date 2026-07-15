@@ -1,0 +1,155 @@
+name: Prepare Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Semver bump kind.
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+concurrency:
+  group: prepare-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  prepare:
+    name: prepare release
+    runs-on: ubuntu-latest
+    outputs:
+      target_version: ${{ steps.plan.outputs.target }}
+      pr_url: ${{ steps.pr.outputs.pr_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test Python release helper
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+
+      - name: Plan release bump
+        id: plan
+        shell: bash
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+          plan="$(python3 scripts/prepare-release.py --repo . plan --bump "$BUMP")"
+          target="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["target"])' "$plan")"
+          current="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["current"])' "$plan")"
+          branch="release/v$target"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "Preparing release bump: $current -> $target"
+
+      - name: Create release branch
+        shell: bash
+        env:
+          BRANCH: ${{ steps.plan.outputs.branch }}
+        run: git checkout -B "$BRANCH"
+
+      - name: Apply release files
+        shell: bash
+        env:
+          TARGET: ${{ steps.plan.outputs.target }}
+          REPO_URL: https://github.com/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python3 scripts/prepare-release.py --repo . apply \
+            --target-version "$TARGET" \
+            --date "$(date -u +%F)" \
+            --repo-url "$REPO_URL"
+          python3 scripts/prepare-release.py --repo . verify --repo-url "$REPO_URL"
+
+      - name: fmt
+        run: cargo fmt --all --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: test Rust
+        run: cargo test --workspace --all-features
+
+      - name: Commit and push release branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ steps.plan.outputs.target }}
+          BRANCH: ${{ steps.plan.outputs.branch }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if [ -n "$(git status --porcelain)" ]; then
+            git add Cargo.toml herdr-plugin.toml Cargo.lock CHANGELOG.md
+            git commit -m "chore(release): v$TARGET"
+          else
+            echo "prepare-release.py made no file changes"
+          fi
+
+          remote_url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          remote_sha="$(git ls-remote --heads "$remote_url" "$BRANCH" | awk '{print $1}')"
+          if [ -n "$remote_sha" ]; then
+            git push --force-with-lease="refs/heads/$BRANCH:$remote_sha" "$remote_url" HEAD:"$BRANCH"
+          else
+            git push "$remote_url" HEAD:"$BRANCH"
+          fi
+
+      - name: Create or update PR
+        id: pr
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ steps.plan.outputs.target }}
+          BRANCH: ${{ steps.plan.outputs.branch }}
+        run: |
+          set -euo pipefail
+          title="chore(release): v$TARGET"
+          body="$(printf '%s\n' \
+            "Prepare release branch for v$TARGET." \
+            "" \
+            "- release files synced by scripts/prepare-release.py" \
+            "- CI is dispatched explicitly from this workflow" \
+            "- release workflow waits for CI green on main")"
+
+          pr_json="$(gh pr list --head "$BRANCH" --state open --json number,url)"
+          if [ "$(printf '%s' "$pr_json" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')" -gt 0 ]; then
+            pr_number="$(printf '%s' "$pr_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["number"])')"
+            pr_url="$(printf '%s' "$pr_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["url"])')"
+            gh pr edit "$pr_number" --title "$title" --body "$body"
+          else
+            pr_url="$(gh pr create --head "$BRANCH" --base main --title "$title" --body "$body")"
+          fi
+          echo "pr_url=$pr_url" >> "$GITHUB_OUTPUT"
+          echo "PR: $pr_url"
+
+      - name: Dispatch CI explicitly
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.plan.outputs.branch }}
+        run: |
+          gh api -X POST "repos/${{ github.repository }}/actions/workflows/ci.yml/dispatches" -f ref="$BRANCH"
+          echo "Dispatched CI on $BRANCH"

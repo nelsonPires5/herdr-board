@@ -2,7 +2,7 @@
 
 Cross-agent contributor guide for herdr-board. Read this before touching the repo. herdr-board is a
 kanban board that dispatches AI coding agents into visible herdr panes; the single `board` binary is
-TUI + daemon + CLI. Rust, cargo workspace, edition 2021, all crates `0.1.0`.
+TUI + daemon + CLI. Rust, cargo workspace, edition 2021, all crates share the workspace version.
 
 ## Workspace layout & crate ownership
 
@@ -58,6 +58,10 @@ Full layering, harness details, and how to add tests live in [`docs/testing.md`]
   `dispatch.rs`/`ops.rs`/`spawner.rs`); one `HerdrClient` = one request/response connection, event
   streaming lives on its own connection.
 - Definition of done for a user-facing change: update the docs and `CHANGELOG.md` in the same change.
+- Release/version changes follow [`docs/releasing.md`](docs/releasing.md). Agents must never create,
+  push, move, or delete release tags manually: a maintainer starts **Prepare Release**, merges its PR,
+  and the **Release** workflow creates the tag only after `main` CI is green. No tag ruleset currently
+  enforces this; it is repository policy.
 
 ## herdr gotchas (field-tested)
 

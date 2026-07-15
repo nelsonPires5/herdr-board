@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -16,6 +17,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -33,6 +36,8 @@ jobs:
       checks: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -62,12 +67,18 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
 
+      # The release helper is stdlib-only and is part of the release gate.
+      - name: Python tests
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+
       # Unit / integration tests are hermetic: live-herdr tests are #[ignore]d and
       # the e2e script (scripts/e2e.sh) is run out-of-band, so no live herdr is needed.
-      - name: test
+      - name: Rust tests
         run: cargo test --workspace --all-features
