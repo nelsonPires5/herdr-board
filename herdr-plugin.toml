@@ -19,6 +19,12 @@ platforms = ["linux"]
 [[build]]
 command = ["./scripts/build.sh"]
 
+# Copy the built CLI to a stable user PATH location. This must remain separate
+# from install.sh, whose plugin-link, skill, and keybinding changes are intended
+# only for explicit local-development installs.
+[[build]]
+command = ["./scripts/install-cli.sh"]
+
 # The kanban TUI, spawned by herdr in an overlay pane. `overlay` is an accepted
 # placement (herdr 0.7.3: overlay|split|tab|zoomed). The same binary auto-starts
 # the boardd daemon if it is not already running.
