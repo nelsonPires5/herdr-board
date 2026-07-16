@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-16
+
 ### Changed
 - GitHub plugin installation now builds herdr-board and copies the `board` CLI to `~/.local/bin/board` as part of the trusted plugin build, with an install-directory override for custom setups. A per-directory marker records the installed binary's SHA-256 checksum; managed updates validate matching regular-file contents and refuse to overwrite an unrelated or subsequently replaced `board` command.
 
@@ -63,6 +65,7 @@ a visible herdr pane. Ships as a single `board` binary (TUI + daemon + CLI) and 
 - **Packaging.** `herdr-plugin.toml` manifest, and `scripts/` for build, install (guarded behind
   `--yes`), the open-or-focus launcher, a raw protocol client, and a live-herdr e2e smoke test.
 
-[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.2.0
 [0.1.1]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.1.1
 [0.1.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.1.0
