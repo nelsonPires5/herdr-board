@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- Flaky Stage1→Stage2 pane placement race: when a chained auto-column Stage1
+  finishes and its agent pane closes, the Stage2 placement could pick up the
+  now-closing pane, focus it, and fail `agent.start` with `pane_not_found`.
+  The placement now retries once on `pane_not_found`, rediscovering the
+  `kanban` tab; and existing-but-empty tabs land unsplit instead of querying
+  `pane.layout(null)` which may return a different tab's layout.
+
 ## [0.2.0] - 2026-07-16
 
 ### Changed
