@@ -56,44 +56,127 @@ The single `board` binary is TUI, daemon, and CLI (subcommands). Crates: `board-
 
 ## Install
 
-herdr-board is a herdr plugin distributed from source (topic: `herdr-plugin`).
+herdr-board is a Linux herdr plugin distributed from source (topic: `herdr-plugin`). It requires
+herdr 0.7+, Git, and a Rust toolchain with `cargo`. Ensure `~/.local/bin` is on your `PATH` (for
+example, add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile).
 
 ```bash
-# 1. Clone.
-git clone https://github.com/nelsonPires5/herdr-board
-cd herdr-board
+herdr plugin install nelsonPires5/herdr-board
+```
 
-# 2. Build + link the plugin + copy the agent skill + add the keybinding. install.sh
-#    is SAFE by default: it builds and PRINTS the mutating steps. --yes applies them.
-./scripts/install.sh            # dry run: prints plugin-link / skill-copy / symlink / keybinding
-./scripts/install.sh --yes      # build + `herdr plugin link` + copy skill + symlink ~/.local/bin/board
-                                #   + add the [[keys.command]] keybinding to ~/.config/herdr/config.toml
-                                #   (idempotent: skipped if a binding already invokes open-board;
-                                #    backs the config up to config.toml.bak.<epoch> before appending)
-./scripts/install.sh --yes --key prefix+shift+b   # same, custom key combo (default: prefix+shift+k)
+herdr first shows an interactive trust preview of the plugin's build commands. After approval it
+checks out the source, builds the release binary, registers the plugin, and copies the CLI to
+`~/.local/bin/board` as a regular executable (not a symlink into Herdr's managed checkout). For a
+noninteractive install after reviewing the manifest and scripts:
 
-# 3. Recommended — precise agent status (idle/working/blocked) + session refs:
+```bash
+herdr plugin install nelsonPires5/herdr-board --yes
+```
+
+Set `HERDR_BOARD_CLI_INSTALL_DIR` to an absolute user bin directory before installing to override
+`~/.local/bin`; the installed command is `<that-directory>/board`. The installer records the
+installed binary's SHA-256 checksum in `<that-directory>/.herdr-board-cli-managed`. Updates require
+that `board` remain a regular, non-symlink file with matching contents, and refuse to overwrite a
+pre-existing or subsequently replaced command.
+
+Open the board overlay with:
+
+```bash
+herdr plugin action invoke open-board --plugin herdr-board
+```
+
+If `overlay` placement is unavailable in your herdr, open it as a tab instead:
+
+```bash
+herdr plugin pane open --plugin herdr-board --entrypoint board --placement tab --focus
+```
+
+The `board` command is also now available directly for CLI operations.
+
+Plugin installation deliberately does **not** edit `~/.config/herdr/config.toml` or copy the Claude
+skill. To add a keybinding, put a command such as this in that config (do not reuse a herdr default;
+`prefix+k` is `focus_pane_up`, so check `herdr --default-config`):
+
+```toml
+[[keys.command]]
+key = "prefix+shift+k"
+type = "shell"
+command = "herdr plugin action invoke open-board --plugin herdr-board"
+```
+
+The repository's optional **agent skill** (`skill/SKILL.md`) teaches Claude Code sessions how to
+comment and call `board done`, but is only copied automatically by the local-development installer
+below.
+
+For more precise Claude agent status (idle/working/blocked) and session refs, optionally install
+herdr's integration; the board otherwise still works:
+
+```bash
 herdr integration install claude
 ```
 
-If `overlay` placement is unavailable in your herdr, open the board on demand with:
-`herdr plugin pane open --plugin herdr-board --entrypoint board --placement overlay --focus`.
-
 **Named sessions**: herdr keeps a plugin registry *per session* (keybindings/config are global,
-plugins are not). In each named session run once, from inside it:
-`herdr plugin link /path/to/herdr-board`. A single boardd runs one board across **every** herdr
-session: a card carries a `session` (the default session when unset), and the daemon resolves it
-to that session's socket at dispatch (via `herdr session list`) to create/resolve the workspace and
-spawn the pane there. Use a second stack with `BOARD_SOCKET`/`BOARD_DB` overrides only for a fully
-separate *board*. Don't bind keys herdr already uses by default (`prefix+k` is `focus_pane_up`;
-check `herdr --default-config`).
+plugins are not). Run the GitHub install command once from each named session where you want the
+plugin registered. A single boardd runs one board across **every** herdr session: a card carries a
+`session` (the default session when unset), and the daemon resolves it to that session's socket at
+dispatch (via `herdr session list`) to create/resolve the workspace and spawn the pane there. Use a
+second stack with `BOARD_SOCKET`/`BOARD_DB` overrides only for a fully separate *board*.
 
-The **agent skill** (`skill/SKILL.md`, copied to `~/.claude/skills/herdr-board/` by `install.sh`)
-teaches Claude Code sessions how to drive the board from inside a run.
+### Uninstall
+
+Herdr's plugin uninstall cannot remove the CLI copied outside its managed checkout. Remove the CLI
+only if it is still the managed binary, then unregister the plugin:
+
+```bash
+(
+  if [ "${HERDR_BOARD_CLI_INSTALL_DIR+x}" = x ]; then
+    install_dir="$HERDR_BOARD_CLI_INSTALL_DIR"
+  else
+    install_dir="${HOME:?HOME must be set}/.local/bin"
+  fi
+  case "$install_dir" in /*) ;; *) echo "Install directory must be absolute" >&2; exit 1;; esac
+
+  board="$install_dir/board"
+  marker="$install_dir/.herdr-board-cli-managed"
+  prefix="herdr-board install-cli.sh managed board sha256:"
+  if [ -f "$board" ] && [ ! -L "$board" ] && [ -f "$marker" ] && [ ! -L "$marker" ]; then
+    checksum=""
+    checksum_output="$(sha256sum <"$board")" && checksum="${checksum_output%% *}"
+    if [[ "$checksum" =~ ^[0-9a-f]{64}$ ]] && printf '%s\n' "$prefix$checksum" | cmp -s - "$marker"; then
+      rm -- "$board" "$marker"
+    else
+      echo "board CLI was changed or is unrecognized; retaining $board and $marker" >&2
+    fi
+  else
+    echo "board CLI was changed or is unrecognized; retaining $board and $marker" >&2
+  fi
+)
+herdr plugin uninstall herdr-board
+```
+
+If you used `HERDR_BOARD_CLI_INSTALL_DIR`, use the **same directory** for every plugin update and
+for cleanup. Changing or omitting it later can leave a second installed copy behind. Uninstall the
+plugin from each named session where it was registered.
+
+### Local development / source install
+
+For a checkout you plan to edit, clone the repository and use `scripts/install.sh` instead. It
+builds and prints its proposed plugin link, skill copy, PATH symlink, and keybinding changes by
+default; `--yes` applies those broader development-only changes. It is intentionally not called by
+the GitHub plugin install flow.
+
+```bash
+git clone https://github.com/nelsonPires5/herdr-board
+cd herdr-board
+./scripts/install.sh                         # dry run
+./scripts/install.sh --yes                   # apply, default key: prefix+shift+k
+./scripts/install.sh --yes --key prefix+shift+b
+```
 
 ## Quickstart
 
-1. Press your keybinding (e.g. `prefix+shift+k`) to open the board overlay.
+1. Run `herdr plugin action invoke open-board --plugin herdr-board` to open the overlay (or press
+   the optional keybinding if you configured one).
 2. On the empty board press `T` to apply the example pipeline (or `N` to add your own columns), then
    `n` to create a card — the guided form picks harness/model/effort/permission, session, and space.
 3. Move the card into an `auto` column (`m` for the column picker, or drag it) — the move dispatches
@@ -176,8 +259,11 @@ argv = ["mytool", "--model", "{model}"]   # {model}/{effort}/{permission_mode} p
 
 ## Scripts
 
-- `scripts/build.sh` — release build of the `board` binary (plugin `[[build]]` step; idempotent).
-- `scripts/install.sh` — build + link plugin + copy skill (mutating steps guarded behind `--yes`).
+- `scripts/build.sh` — release build of the `board` binary (first plugin `[[build]]` step; idempotent).
+- `scripts/install-cli.sh` — copy the built CLI to `~/.local/bin/board` (second plugin `[[build]]`
+  step; override the directory with `HERDR_BOARD_CLI_INSTALL_DIR`).
+- `scripts/install.sh` — local-development build + link + skill/keybinding setup (mutations guarded
+  behind `--yes`; not called by GitHub plugin installation).
 - `scripts/open-board.sh` — the `open-board` action launcher (open-or-focus, toggle off on repeat).
 - `e2e/` — live end-to-end scenario suite against a REAL herdr; run `e2e/run-all.sh`
   (`scripts/e2e.sh` is a compat wrapper). See [`e2e/README.md`](e2e/README.md) and

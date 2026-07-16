@@ -174,7 +174,7 @@ jobs:
           cp target/release/board "$stage/target/release/board"
           cp herdr-plugin.toml "$stage/herdr-plugin.toml"
           cp -r skill "$stage/skill"
-          cp scripts/build.sh scripts/open-board.sh scripts/install.sh "$stage/scripts/"
+          cp scripts/build.sh scripts/install-cli.sh scripts/open-board.sh scripts/install.sh "$stage/scripts/"
           [ -f README.md ] && cp README.md "$stage/README.md"
           for lic in LICENSE LICENSE.md LICENSE-MIT LICENSE.txt; do
             [ -f "$lic" ] && cp "$lic" "$stage/$lic"
