@@ -2,7 +2,7 @@
 
 ![Rust](https://img.shields.io/badge/rust-edition%202021-orange.svg)
 ![herdr 0.7+](https://img.shields.io/badge/herdr-0.7%2B-8a2be2)
-![platforms: linux](https://img.shields.io/badge/platforms-linux-informational)
+![platforms: linux, macOS](https://img.shields.io/badge/platforms-linux%2C%20macOS-informational)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 
 **A kanban board that sits above herdr spaces: cards are prompts, columns are pipeline stages, and
@@ -56,9 +56,10 @@ The single `board` binary is TUI, daemon, and CLI (subcommands). Crates: `board-
 
 ## Install
 
-herdr-board is a Linux herdr plugin distributed from source (topic: `herdr-plugin`). It requires
-herdr 0.7+, Git, and a Rust toolchain with `cargo`. Ensure `~/.local/bin` is on your `PATH` (for
-example, add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile).
+herdr-board is a herdr plugin distributed from source (topic: `herdr-plugin`). It requires
+herdr 0.7+, Git, and a Rust toolchain with `cargo`, and supports Linux and macOS. Ensure
+`~/.local/bin` is on your `PATH` (for example, add `export PATH="$HOME/.local/bin:$PATH"`
+to your shell profile).
 
 ```bash
 herdr plugin install nelsonPires5/herdr-board
@@ -141,7 +142,11 @@ only if it is still the managed binary, then unregister the plugin:
   prefix="herdr-board install-cli.sh managed board sha256:"
   if [ -f "$board" ] && [ ! -L "$board" ] && [ -f "$marker" ] && [ ! -L "$marker" ]; then
     checksum=""
-    checksum_output="$(sha256sum <"$board")" && checksum="${checksum_output%% *}"
+    if command -v sha256sum >/dev/null 2>&1; then
+      checksum_output="$(sha256sum <"$board")" && checksum="${checksum_output%% *}"
+    elif command -v shasum >/dev/null 2>&1; then
+      checksum_output="$(shasum -a 256 <"$board")" && checksum="${checksum_output%% *}"
+    fi
     if [[ "$checksum" =~ ^[0-9a-f]{64}$ ]] && printf '%s\n' "$prefix$checksum" | cmp -s - "$marker"; then
       rm -- "$board" "$marker"
     else

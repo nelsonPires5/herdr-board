@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- macOS platform support in `herdr-plugin.toml` (`platforms = ["linux", "macos"]`), enabling
+  `herdr plugin install` on macOS. The uninstall snippet in README now uses `sha256sum` with a
+  `shasum -a 256` fallback for stock macOS compatibility.
+
+### Changed
+- `scripts/install-cli.sh` now uses portable checksum selection (`sha256sum` / `shasum -a 256`)
+  and avoids GNU-only `ln -T` / `mv -T`, preserving managed checksum and collision safety.
+
 ### Fixed
 - Flaky Stage1→Stage2 pane placement race: when a chained auto-column Stage1
   finishes and its agent pane closes, the Stage2 placement could pick up the

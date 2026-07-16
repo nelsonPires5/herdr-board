@@ -37,21 +37,30 @@ if [ ! -f "$source_bin" ] || [ ! -x "$source_bin" ]; then
   echo "install-cli.sh: expected executable source binary at $source_bin; run scripts/build.sh first" >&2
   exit 1
 fi
-if ! command -v sha256sum >/dev/null 2>&1; then
-  echo "install-cli.sh: GNU sha256sum is required to validate managed CLI contents" >&2
-  exit 1
-fi
-
 sha256_file() {
   local path="$1"
-  local output checksum
-  if ! output="$(sha256sum <"$path")"; then
-    echo "install-cli.sh: failed to calculate SHA-256 checksum for $path" >&2
+  local output checksum tool_name
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    tool_name="sha256sum"
+    if ! output="$(sha256sum <"$path")"; then
+      echo "install-cli.sh: failed to calculate SHA-256 checksum for $path" >&2
+      return 1
+    fi
+  elif command -v shasum >/dev/null 2>&1; then
+    tool_name="shasum -a 256"
+    if ! output="$(shasum -a 256 <"$path")"; then
+      echo "install-cli.sh: failed to calculate SHA-256 checksum for $path" >&2
+      return 1
+    fi
+  else
+    echo "install-cli.sh: sha256sum or shasum is required to validate managed CLI contents" >&2
     return 1
   fi
+
   checksum="${output%% *}"
   if [[ ! "$checksum" =~ ^[0-9a-f]{64}$ ]]; then
-    echo "install-cli.sh: sha256sum returned an invalid checksum for $path" >&2
+    echo "install-cli.sh: $tool_name returned an invalid checksum for $path" >&2
     return 1
   fi
   printf '%s\n' "$checksum"
@@ -78,9 +87,12 @@ managed=false
 managed_checksum=""
 if [ -f "$marker" ]; then
   marker_value="$(<"$marker")"
-  if [[ "$marker_value" =~ ^${marker_prefix}([0-9a-f]{64})$ ]]; then
-    managed=true
-    managed_checksum="${BASH_REMATCH[1]}"
+  if [[ "$marker_value" == "${marker_prefix}"* ]]; then
+    marker_checksum="${marker_value#"$marker_prefix"}"
+    if [[ "$marker_checksum" =~ ^[0-9a-f]{64}$ ]]; then
+      managed=true
+      managed_checksum="$marker_checksum"
+    fi
   fi
 fi
 
@@ -125,19 +137,109 @@ marker_value="${marker_prefix}${installed_checksum}"
 printf '%s\n' "$marker_value" >"$marker_temporary"
 chmod 0644 "$marker_temporary"
 if [ "$managed" = true ]; then
-  mv -fT -- "$temporary" "$destination"
-  mv -fT -- "$marker_temporary" "$marker"
+  # Portable replacement for mv -T: the destination was already verified as a
+  # regular file with the expected checksum.  Replace it and verify the result;
+  # clean up leaks when a raced directory swallowed the move.
+  mv -f -- "$temporary" "$destination"
+
+  # Postcondition: destination must be a regular non-symlink file whose
+  # content matches the expected checksum.
+  if [ ! -f "$destination" ] || [ -L "$destination" ]; then
+    leaked="$destination/${temporary##*/}"
+    if [ -f "$leaked" ]; then
+      if leaked_checksum="$(sha256_file "$leaked")" && [ "$leaked_checksum" = "$installed_checksum" ]; then
+        rm -f -- "$leaked"
+      fi
+    fi
+    echo "install-cli.sh: managed destination unexpectedly became a directory: $destination" >&2
+    exit 1
+  fi
+  if ! actual_checksum="$(sha256_file "$destination")"; then
+    exit 1
+  fi
+  if [ "$actual_checksum" != "$installed_checksum" ]; then
+    echo "install-cli.sh: managed destination checksum mismatch after update" >&2
+    exit 1
+  fi
+
+  mv -f -- "$marker_temporary" "$marker"
+  # Postcondition: marker must be a regular non-symlink file whose
+  # content matches the expected value exactly.
+  if [ ! -f "$marker" ] || [ -L "$marker" ]; then
+    leaked_marker="$marker/${marker_temporary##*/}"
+    if [ -f "$leaked_marker" ]; then
+      leaked_value="$(<"$leaked_marker")"
+      if [ "$leaked_value" = "$marker_value" ]; then
+        rm -f -- "$leaked_marker"
+      fi
+    fi
+    echo "install-cli.sh: ownership marker path unexpectedly became a directory: $marker" >&2
+    exit 1
+  fi
+  actual_marker_value="$(<"$marker")"
+  if [ "$actual_marker_value" != "$marker_value" ]; then
+    echo "install-cli.sh: ownership marker content mismatch after placement" >&2
+    exit 1
+  fi
 else
-  if ! ln -T -- "$temporary" "$destination"; then
+  # Hard-link is a no-clobber atomic creation on first install.  After ln
+  # succeeds, verify the destination is a regular non-symlink hard link to
+  # the temporary file.  If ln interpreted a raced directory it silently
+  # linked inside it; detect and clean up the leaked candidate.
+  if ! ln -- "$temporary" "$destination"; then
     echo "install-cli.sh: refusing to overwrite destination created during install: $destination" >&2
     exit 1
   fi
-  rm -f -- "$temporary"
-  if ! mv -fT -- "$marker_temporary" "$marker"; then
-    rm -f -- "$destination"
+
+  if [ ! -f "$destination" ] || [ -L "$destination" ]; then
+    leaked="$destination/${temporary##*/}"
+    if [ -f "$leaked" ] && [ "$leaked" -ef "$temporary" ]; then
+      rm -f -- "$leaked"
+    fi
+    rm -f -- "$temporary"
+    echo "install-cli.sh: destination unexpectedly became a directory during install: $destination" >&2
+    exit 1
+  fi
+  if [ ! "$destination" -ef "$temporary" ]; then
+    rm -f -- "$temporary"
+    echo "install-cli.sh: installed file is not a link to the staged temporary: $destination" >&2
+    exit 1
+  fi
+
+  # Keep the staged temporary hardlink alive until ownership marker
+  # placement and postcondition succeed so we can safely roll back.
+  if ! mv -f -- "$marker_temporary" "$marker"; then
+    if [ -f "$destination" ] && [ ! -L "$destination" ] && [ "$destination" -ef "$temporary" ]; then
+      rm -f -- "$destination"
+    fi
     echo "install-cli.sh: could not create ownership marker: $marker" >&2
     exit 1
   fi
+  # Postcondition: marker must be a regular non-symlink file whose
+  # content matches the expected value exactly.
+  if [ ! -f "$marker" ] || [ -L "$marker" ]; then
+    leaked_marker="$marker/${marker_temporary##*/}"
+    if [ -f "$leaked_marker" ]; then
+      leaked_value="$(<"$leaked_marker")"
+      if [ "$leaked_value" = "$marker_value" ]; then
+        rm -f -- "$leaked_marker"
+      fi
+    fi
+    if [ -f "$destination" ] && [ ! -L "$destination" ] && [ "$destination" -ef "$temporary" ]; then
+      rm -f -- "$destination"
+    fi
+    echo "install-cli.sh: ownership marker path unexpectedly became a directory: $marker" >&2
+    exit 1
+  fi
+  actual_marker_value="$(<"$marker")"
+  if [ "$actual_marker_value" != "$marker_value" ]; then
+    if [ -f "$destination" ] && [ ! -L "$destination" ] && [ "$destination" -ef "$temporary" ]; then
+      rm -f -- "$destination"
+    fi
+    echo "install-cli.sh: ownership marker content mismatch after placement" >&2
+    exit 1
+  fi
+  rm -f -- "$temporary"
 fi
 trap - EXIT HUP INT TERM
 
