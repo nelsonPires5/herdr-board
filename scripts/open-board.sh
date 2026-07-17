@@ -11,8 +11,9 @@
 #
 # herdr actions/keybindings run a command (no declarative "open this pane" field),
 # so this shells out to the herdr CLI via $HERDR_BIN_PATH (herdr injects it; fall
-# back to `herdr` on PATH). The pane is identified by title (the [[panes]] title
-# "Board"). Any failure degrades to OPEN, preserving always-open behavior.
+# back to `herdr` on PATH). The pane is identified by its static title (`Board`)
+# or the dynamic filter title (`Board [ACTIVE|ALL|ARCHIVED]`). Any failure
+# degrades to OPEN, preserving always-open behavior.
 set -uo pipefail
 
 herdr_bin="${HERDR_BIN_PATH:-herdr}"
@@ -32,7 +33,7 @@ if command -v python3 >/dev/null 2>&1; then
   panes="$("$herdr_bin" pane list 2>/dev/null || true)"   # outputs JSON (no --json flag)
   if [ -n "$panes" ]; then
     decision="$(printf '%s' "$panes" | python3 -c '
-import json, sys
+import json, re, sys
 try:
     data = json.load(sys.stdin)
 except Exception:
@@ -41,9 +42,9 @@ res = data.get("result", data)
 panes = res.get("panes", []) if isinstance(res, dict) else []
 board = None
 for p in panes:
-    # herdr reports the [[panes]] title as the pane label.
+    # The TUI appends its active archive filter via `pane rename`.
     name = (p.get("label") or p.get("title") or "")
-    if name == "Board":
+    if name == "Board" or re.fullmatch(r"Board \[(ACTIVE|ALL|ARCHIVED)\]", name):
         board = p
         break
 if not board:

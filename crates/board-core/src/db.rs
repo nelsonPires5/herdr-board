@@ -18,7 +18,7 @@ use crate::{Error, Result};
 const SCHEMA_SQL: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../schema.sql"));
 
 /// The latest schema version embedded in [`SCHEMA_SQL`].
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// v1 → v2 migration. SQLite cannot alter a CHECK constraint or drop a column
 /// in place, so `cards` is rebuilt. Legacy `space_kind` values `cwd`/`worktree`
@@ -66,6 +66,10 @@ ALTER TABLE cards_v2 RENAME TO cards;
 CREATE INDEX idx_cards_column ON cards(column_id, position);
 ALTER TABLE runs ADD COLUMN session TEXT;
 ";
+
+/// v2 → v3 migration: archived cards remain in their column and preserve all
+/// history; a NULL timestamp means the card is active.
+const V3_MIGRATION_SQL: &str = "ALTER TABLE cards ADD COLUMN archived_at TEXT;";
 
 /// The single global board id.
 pub const BOARD_ID: i64 = 1;
@@ -117,13 +121,13 @@ impl Db {
     /// - A fresh DB (`version 0`) is built straight from [`SCHEMA_SQL`] (the
     ///   current shape) plus the seed (`board id=1 'main'`, column `Todo` manual
     ///   position 0) and stamped [`SCHEMA_VERSION`] — no per-version replay.
-    /// - An existing v1 DB is upgraded in place by [`V2_MIGRATION_SQL`].
+    /// - Existing DBs replay the required v2/v3 migrations in order.
     fn migrate(&self) -> Result<()> {
         let version: i64 = self
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if version < 1 {
-            // Fresh DB: schema.sql already reflects the latest (v2) shape.
+            // Fresh DB: schema.sql already reflects the latest (v3) shape.
             self.conn.execute_batch(SCHEMA_SQL)?;
             self.conn.execute(
                 "INSERT INTO boards (id, name) VALUES (?1, 'main')",
@@ -136,10 +140,16 @@ impl Db {
             )?;
             self.conn
                 .execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
-        } else if version < 2 {
-            // Existing v1 DB: upgrade the space model in place.
-            self.conn.execute_batch(V2_MIGRATION_SQL)?;
-            self.conn.execute_batch("PRAGMA user_version = 2;")?;
+        } else if version < SCHEMA_VERSION {
+            if version < 2 {
+                // Existing v1 DB: upgrade the space model in place.
+                self.conn.execute_batch(V2_MIGRATION_SQL)?;
+            }
+            if version < 3 {
+                self.conn.execute_batch(V3_MIGRATION_SQL)?;
+            }
+            self.conn
+                .execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
         }
         Ok(())
     }
@@ -487,6 +497,22 @@ impl Db {
         self.require_card(c.id)
     }
 
+    pub fn set_card_archived(&self, id: i64, archived: bool) -> Result<Card> {
+        self.require_card(id)?;
+        if archived {
+            self.conn.execute(
+                "UPDATE cards SET archived_at=datetime('now'), updated_at=datetime('now') WHERE id=?1",
+                params![id],
+            )?;
+        } else {
+            self.conn.execute(
+                "UPDATE cards SET archived_at=NULL, updated_at=datetime('now') WHERE id=?1",
+                params![id],
+            )?;
+        }
+        self.require_card(id)
+    }
+
     pub fn delete_card(&self, id: i64) -> Result<()> {
         let card = self.require_card(id)?;
         self.conn
@@ -777,6 +803,7 @@ fn row_to_card(row: &Row) -> rusqlite::Result<Card> {
         session_id: row.get("session_id")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
+        archived_at: row.get("archived_at")?,
     })
 }
 

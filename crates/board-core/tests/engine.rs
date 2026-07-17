@@ -1,8 +1,9 @@
 //! Column-engine transition, entry, and validation tests.
 
 use board_core::engine::{
-    decide_entry, decide_transition, format_duration, validate_card_edit, validate_card_space,
-    validate_column_delete, validate_column_permission_override, ValidationError,
+    decide_entry, decide_transition, format_duration, validate_card_archive, validate_card_edit,
+    validate_card_space, validate_column_delete, validate_column_permission_override,
+    ValidationError,
 };
 use board_core::model::Column;
 use board_core::protocol::{CardStatus, RunOutcome, SpaceKind, Trigger};
@@ -145,6 +146,18 @@ fn validate_card_edit_rules() {
         validate_card_edit(CardStatus::Queued, true),
         Err(ValidationError::CardBusy)
     );
+}
+
+#[test]
+fn validate_card_archive_rules() {
+    assert!(validate_card_archive(CardStatus::Idle).is_ok());
+    assert!(validate_card_archive(CardStatus::Failed).is_ok());
+    for status in [CardStatus::Queued, CardStatus::Running, CardStatus::Blocked] {
+        assert_eq!(
+            validate_card_archive(status),
+            Err(ValidationError::CardHasActiveRun)
+        );
+    }
 }
 
 #[test]

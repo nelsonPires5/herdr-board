@@ -75,6 +75,7 @@ fn base_card() -> Card {
         session_id: None,
         created_at: "t".into(),
         updated_at: "t".into(),
+        archived_at: None,
     }
 }
 

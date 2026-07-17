@@ -7,9 +7,14 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- Cards can be archived/restored without losing comments or run history. The TUI uses `a` to
+  toggle archive state and `v` to cycle `ACTIVE` / `ALL` / `ARCHIVED`; the current filter appears
+  in the Herdr pane title, the board footer stays minimal (`? help`), and archived cards are dimmed
+  and marked `▣ ARCHIVED`. The CLI exposes `board card archive|restore <ID>`.
 - Card detail now opens as a contextual popup with a clickable/`f` fullscreen toggle, `e` editing
   that returns to detail, and independent keyboard/mouse scrolling for comments and run history.
-  Histories open at their latest item and indicate hidden content with directional arrows.
+  The focused history uses a blue divider; histories open at their latest item and show only
+  directional arrows (no counts) when content is hidden.
 
 ### Changed
 - The board now distributes visible columns across the full viewport, uses higher-contrast

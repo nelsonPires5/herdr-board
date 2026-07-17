@@ -70,6 +70,31 @@ fn seeded_board_glyphs_120x35() {
 }
 
 #[test]
+fn archived_cards_all_and_archived_only() {
+    let mut client = demo_client().unwrap();
+    let board = client.board_get().unwrap();
+    let done = board
+        .columns
+        .iter()
+        .find(|column| column.name == "Done")
+        .unwrap();
+    let card = board
+        .cards
+        .iter()
+        .find(|card| card.column_id == done.id)
+        .unwrap();
+    client.card_archive(card.id, true).unwrap();
+
+    let mut d = driver(client);
+    d.app.sel_col = d.app.board.columns.len() - 1;
+    key(&mut d, KeyCode::Char('v')); // all
+    insta::assert_snapshot!("archived_cards_all", render(&mut d, 120, 35));
+
+    key(&mut d, KeyCode::Char('v')); // archived only
+    insta::assert_snapshot!("archived_cards_only", render(&mut d, 120, 35));
+}
+
+#[test]
 fn new_card_modal() {
     let mut d = driver(demo_client().unwrap());
     key(&mut d, KeyCode::Char('n'));

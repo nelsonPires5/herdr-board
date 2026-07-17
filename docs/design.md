@@ -6,7 +6,7 @@
 |---|---|
 | **Board** | A pipeline definition: an ordered set of columns. One default board; more allowed (e.g. "features", "ops"). A fresh board contains **only a `Todo` column** — everything else is user-created. |
 | **Column** | A stage, entirely user-defined: create/rename/reorder/delete from the TUI (keyboard or mouse). Config: `system_prompt`, `trigger` (`auto` = entering the column starts a run; `manual` = waits for human), `on_success` / `on_fail` (move card to column X, or stay), optional overrides (model/effort/harness) applied to every card passing through. Nothing about column names or count is hardcoded. |
-| **Card** | A unit of work. Title, **description = the base prompt**, harness, model, effort, permission mode, a **herdr session** (`session`, null = daemon default) AND a **space** within it (`workspace` = an already-open workspace id; `new_workspace` = a label + cwd the daemon opens on first dispatch), position, live status (`idle · queued · running · blocked · failed`), and the harness `session_id` for resume. |
+| **Card** | A unit of work. Title, **description = the base prompt**, harness, model, effort, permission mode, a **herdr session** (`session`, null = daemon default) AND a **space** within it (`workspace` = an already-open workspace id; `new_workspace` = a label + cwd the daemon opens on first dispatch), position, live status (`idle · queued · running · blocked · failed`), the harness `session_id` for resume, and an optional `archived_at` timestamp. Archiving is reversible and preserves comments/run history. |
 | **Comment** | Timestamped note on a card. Author = `user`, `agent` (from a run), or `system` (daemon transitions). Comments are both the audit log **and** context for the next run. |
 | **Run** | One agent execution of a card in a column: argv, herdr pane/workspace ids, session id, started/ended, exit status, result summary. Cards keep full run history (retries = new runs). |
 
@@ -51,7 +51,7 @@ cards(id, board_id, column_id, position, title, description,
       harness, model, effort, permission_mode,
       session,                                   -- herdr session name (NULL = default)
       space_kind ('workspace'|'new_workspace'), space_ref, space_cwd,
-      status, session_id, created_at, updated_at)
+      status, session_id, created_at, updated_at, archived_at)
 comments(id, card_id, author, body, created_at)
 runs(id, card_id, column_id, harness, argv_json, prompt_snapshot,
      herdr_workspace_id, herdr_pane_id, session_id,
@@ -60,7 +60,9 @@ runs(id, card_id, column_id, harness, argv_json, prompt_snapshot,
      result_summary, log_path)
 ```
 
-Schema is versioned via `PRAGMA user_version` (current = **v2**). A fresh DB is built straight from `schema.sql` (the latest shape) and stamped v2; an existing v1 DB is upgraded in place by the v2 migration in `board-core/src/db.rs` (rebuilds `cards` for the new CHECK, converts legacy `cwd`/`worktree` kinds → `workspace` best-effort, drops `worktree_base`, adds `cards.session`/`cards.space_cwd`/`runs.session`).
+Schema is versioned via `PRAGMA user_version` (current = **v3**). A fresh DB is built straight from
+`schema.sql` and stamped v3. Existing v1 DBs first receive the v2 space/session migration; v2 DBs
+receive the v3 `cards.archived_at` column.
 
 ### Session model
 
@@ -142,8 +144,19 @@ Notes:
 
 - **Access: overlay only** — `[[keys.command]]` keybinding (e.g. `prefix+k`) → `plugin pane open --plugin herdr-board --placement overlay`; the board floats over the current workspace from anywhere, dismiss to drop back. No pinned workspace, no sidebar entry (herdr has no sidebar extension point — verified against api schema/config).
 - **Responsive board view:** visible columns divide the entire viewport while preserving a readable minimum width; when not all columns fit, the selected column drives a full-width sliding window. Cards use a status-colored marker, readable selected background, harness/model metadata, status glyphs (▶ running, ⏸ blocked, ✗ failed), and a live run timer.
-- **Card detail:** opens as a contextual popup and toggles fullscreen with `f` or its clickable title action. Status fields use blue labels and white values. Description, comments, and runs size to their content; comments and runs scroll independently (`Tab` selects, arrows/`k`/`j` or mouse wheel scroll), open at the latest item, and mark hidden history with directional arrows. `e` edits the card and returns to detail after save/cancel.
-- Mouse **and** keyboard for everything: drag card between columns / `m` move; `n` new card, `N` new column; `e` edit card; `c` comment; `Enter` card detail; `o` jump to the card's herdr pane; `r` refresh board (re-fetch state on demand); `?` help overlay listing **all** keybinds; column config form (rename, system prompt, trigger, on_success/on_fail, overrides, reorder, delete).
+- **Card detail:** opens as a contextual popup and toggles fullscreen with `f` or its clickable title
+  action. Status fields use blue labels and white values. Description, comments, and runs size to
+  their content; comments and runs scroll independently (`Tab` selects, arrows/`k`/`j` or mouse
+  wheel scroll), with a blue divider for the focused history. Histories open at the latest item and
+  show only directional arrows (no counts) when content is hidden. `e` edits the card and returns to
+  detail after save/cancel.
+- Mouse **and** keyboard for everything: drag card between columns / `m` move; `n` new card, `N`
+  new column; `e` edit card; `a` archive/restore; `v` cycles `ACTIVE` / `ALL` / `ARCHIVED`; `c`
+  comment; `Enter` card detail; `o` jump to the card's herdr pane; `r` refresh board (re-fetch state
+  on demand); `?` help overlay listing **all** keybinds; column config form (rename, system prompt,
+  trigger, on_success/on_fail, overrides, reorder, delete). The filter is rendered in the Herdr pane
+  title (`Board [ACTIVE|ALL|ARCHIVED]`) while the footer contains only `? help`. Archived cards are
+  inert until restored and render dimmed with `▣ ARCHIVED` when visible.
 - **Content-sized overlays:** card/column forms, move pickers, and help panels shrink to their content on large terminals and clamp to the available viewport on small terminals.
 - **Guided card form**: on open the form fetches `harness.capabilities` (for the current harness) and `space.list` from the daemon, turning model / effort / permission / space-ref into live selectors — model cycles the catalog aliases plus a `(custom)` free-text escape (harnesses with `model_freeform`); effort lists the selected model's efforts (`(default)` = unset); permission lists the harness's modes; the space selector shows each workspace `label (id)` but persists the **id**, with a `(custom)` escape for not-yet-open workspaces. Effort resets only when the current value isn't valid for a newly chosen model. If either fetch fails the affected fields fall back to free-text with a status-line warning, so the form never blocks.
 - Long text (card description, column system prompt): modal textarea, `Ctrl+E` suspends the TUI into `$EDITOR`.

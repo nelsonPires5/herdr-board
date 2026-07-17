@@ -30,6 +30,32 @@ pub enum DetailScrollTarget {
     Runs,
 }
 
+/// Which cards are visible on the board. Archiving never deletes history.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CardFilter {
+    Active,
+    All,
+    Archived,
+}
+
+impl CardFilter {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Active => Self::All,
+            Self::All => Self::Archived,
+            Self::Archived => Self::Active,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Active => "ACTIVE",
+            Self::All => "ALL",
+            Self::Archived => "ARCHIVED",
+        }
+    }
+}
+
 /// A synthetic event fed to [`update`].
 pub enum Msg {
     Key(KeyEvent),
@@ -45,6 +71,10 @@ pub enum Effect {
     CardCreate(board_core::protocol::CardCreateParams),
     CardUpdate(board_core::protocol::CardUpdateParams),
     CardDelete(i64),
+    CardArchive {
+        id: i64,
+        archived: bool,
+    },
     CardMove(CardMoveParams),
     ColumnCreate(board_core::protocol::ColumnCreateParams),
     ColumnUpdate(board_core::protocol::ColumnUpdateParams),
@@ -70,6 +100,8 @@ pub enum Effect {
     /// card form and populate its guided selectors. Emitted on form open and on
     /// harness/session change (the latter re-scopes the workspace list).
     LoadFormOptions,
+    /// Keep the Herdr pane border title in sync with the archive filter.
+    SetPaneTitle(CardFilter),
     Quit,
 }
 
@@ -127,6 +159,7 @@ pub struct App {
     pub screen: Screen,
     pub sel_col: usize,
     pub sel_card: usize,
+    pub card_filter: CardFilter,
     pub detail: Option<CardDetail>,
     /// Card detail opens as a contextual popup; users can expand it in place.
     pub detail_fullscreen: bool,
@@ -157,6 +190,7 @@ impl App {
             screen: Screen::Board,
             sel_col: 0,
             sel_card: 0,
+            card_filter: CardFilter::Active,
             detail: None,
             detail_fullscreen: false,
             detail_scroll_target: DetailScrollTarget::Comments,
@@ -188,6 +222,11 @@ impl App {
             .cards
             .iter()
             .filter(|c| c.column_id == col_id)
+            .filter(|c| match self.card_filter {
+                CardFilter::Active => c.archived_at.is_none(),
+                CardFilter::All => true,
+                CardFilter::Archived => c.archived_at.is_some(),
+            })
             .collect()
     }
 
@@ -376,6 +415,13 @@ fn board_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
                 app.screen = Screen::ColumnForm;
             }
         }
+        KeyCode::Char('a') => return archive_selected_card(app),
+        KeyCode::Char('v') => {
+            app.card_filter = app.card_filter.next();
+            app.sel_card = 0;
+            app.clamp_card();
+            return vec![Effect::SetPaneTitle(app.card_filter)];
+        }
         KeyCode::Char('d') => {
             if let Some(id) = app.selected_card_id() {
                 app.confirm = Some(Confirm {
@@ -416,11 +462,32 @@ fn board_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
     vec![]
 }
 
+fn archive_selected_card(app: &mut App) -> Vec<Effect> {
+    let Some(card) = app.selected_card() else {
+        return vec![];
+    };
+    if card.archived_at.is_none()
+        && matches!(
+            card.status,
+            CardStatus::Queued | CardStatus::Running | CardStatus::Blocked
+        )
+    {
+        app.set_toast("card has an active run; cancel it before archiving", true);
+        return vec![];
+    }
+    vec![Effect::CardArchive {
+        id: card.id,
+        archived: card.archived_at.is_none(),
+    }]
+}
+
 fn delete_column(app: &mut App) -> Vec<Effect> {
     let Some(col_id) = app.col_id_at(app.sel_col) else {
         return vec![];
     };
-    let has_cards = !app.cards_of(col_id).is_empty();
+    // Column deletion must account for cards hidden by the current archive
+    // filter; the daemon still needs a destination for every persisted card.
+    let has_cards = app.board.cards.iter().any(|card| card.column_id == col_id);
     if has_cards {
         // Ask where to move them (daemon still refuses if a card is running).
         let options: Vec<(String, i64)> = app
@@ -452,9 +519,14 @@ fn delete_column(app: &mut App) -> Vec<Effect> {
 }
 
 fn open_move_picker(app: &mut App) -> Vec<Effect> {
-    let Some(card_id) = app.selected_card_id() else {
+    let Some(card) = app.selected_card() else {
         return vec![];
     };
+    if card.archived_at.is_some() {
+        app.set_toast("restore archived card before moving", true);
+        return vec![];
+    }
+    let card_id = card.id;
     let cur = app.col_id_at(app.sel_col);
     let options: Vec<(String, i64)> = app
         .board
@@ -477,9 +549,14 @@ fn open_move_picker(app: &mut App) -> Vec<Effect> {
 }
 
 fn shove_card(app: &mut App, delta: isize) -> Vec<Effect> {
-    let Some(card_id) = app.selected_card_id() else {
+    let Some(card) = app.selected_card() else {
         return vec![];
     };
+    if card.archived_at.is_some() {
+        app.set_toast("restore archived card before moving", true);
+        return vec![];
+    }
+    let card_id = card.id;
     let n = app.board.columns.len() as isize;
     if n == 0 {
         return vec![];
@@ -525,6 +602,24 @@ fn detail_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
                 app.form = Some(Form::card_edit(&card));
                 app.screen = Screen::CardForm;
                 return vec![Effect::LoadFormOptions];
+            }
+        }
+        KeyCode::Char('a') => {
+            let Some(card) = app.detail.as_ref().map(|detail| &detail.card) else {
+                return vec![];
+            };
+            if card.archived_at.is_none()
+                && matches!(
+                    card.status,
+                    CardStatus::Queued | CardStatus::Running | CardStatus::Blocked
+                )
+            {
+                app.set_toast("card has an active run; cancel it before archiving", true);
+            } else {
+                return vec![Effect::CardArchive {
+                    id: card.id,
+                    archived: card.archived_at.is_none(),
+                }];
             }
         }
         KeyCode::Char('c') => {
@@ -819,8 +914,12 @@ fn on_mouse(app: &mut App, m: MouseEvent) -> Vec<Effect> {
                         return vec![Effect::LoadDetail(id)];
                     }
                 }
-                if let Some(id) = app.selected_card_id() {
-                    app.begin_card_drag(id, col_idx);
+                if let Some(card) = app.selected_card() {
+                    if card.archived_at.is_some() {
+                        app.set_toast("restore archived card before moving", true);
+                    } else {
+                        app.begin_card_drag(card.id, col_idx);
+                    }
                 }
             } else if let Some(col_idx) = layout.hit_header(m.column, m.row) {
                 app.sel_col = col_idx;

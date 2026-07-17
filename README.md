@@ -32,8 +32,9 @@ Todo ──► Plan ──► Execute ──► Review ──► Human Review �
 - **Runs land in visible herdr panes.** Agents run where you can watch them, in the workspace's
   `kanban` tab, tiled roughly square.
 - **Responsive, status-rich board.** Visible columns always divide the full viewport; cards retain
-  readable status colors, harness/model metadata, and a clear selected state. Forms and pickers size
-  to their content instead of expanding across the terminal.
+  readable status colors, harness/model metadata, and a clear selected state. Archive finished cards
+  without losing history, then cycle `ACTIVE` / `ALL` / `ARCHIVED` in the Herdr pane title. The
+  board footer stays minimal (`? help`); forms and pickers size to their content.
 - **Pipelines, not just a queue.** Per-column system prompts and success/fail transitions turn a
   board into a Plan → Execute → Review flow with human gates where you want them.
 - **Session- and space-aware.** A single daemon drives every herdr session; a card resolves to its
@@ -212,8 +213,10 @@ board move <new-card-id> Execute        # Execute is an auto column -> run start
 | `N` | new column | | `?` | this help |
 | `e` | edit card | | `q / Esc` | back / quit |
 | `E` | edit focused column | | **card detail** | |
-| `d` | delete card | | `e` | edit card |
-| `D` | delete column (move cards / refuse if running) | | `c` | add comment |
+| `a` | archive / restore card | | `a` | archive / restore card |
+| `v` | active / all / archived view | | `e` | edit card |
+| `d` | delete card | | `c` | add comment |
+| `D` | delete column (move cards / refuse if running) | | | |
 | `m` | move card (column picker) | | `f` / click title | popup / fullscreen |
 | `H / L` | shove card left / right | | `Tab` | focus comments / runs |
 | **forms** | | | `↑/↓ k/j` | scroll focused detail section |
@@ -230,7 +233,7 @@ board tui | daemon [--foreground] | status [--json]
 board card new --title T [-d D] [--column C] [--harness H] [--model M] [--effort E] \
    [--permission P] [--session S] [--space-kind workspace|new-workspace] \
    [--space-ref R] [--space-cwd DIR]      # space-cwd required for new-workspace
-board card show <ID> | card list [--column C] | column list
+board card show <ID> | card list [--column C] | card archive|restore <ID> | column list
 board comment [CARD_ID] <BODY>            # CARD_ID defaults to $BOARD_CARD_ID
 board done [CARD_ID] --outcome ok|fail [--summary S]
 board move <CARD_ID> <COLUMN> | cancel <CARD_ID> | retry <CARD_ID>
@@ -238,7 +241,13 @@ board harness models [HARNESS] | efforts [HARNESS] --model M | permissions [HARN
 board space list [--session S] | session list    # HARNESS defaults to "claude"
 ```
 
-`--json` is accepted everywhere. Agent lifecycle rules and examples live in `skill/SKILL.md`.
+`--json` is accepted everywhere. In the TUI, `d` permanently deletes a card after confirmation;
+`D` deletes a column (asking where to move its cards, and refusing while a card is active).
+Archiving is the safer reversible action: `a` in the TUI or `board card archive <ID>`; restore with
+`a` from an archived view or `board card restore <ID>`. The active filter is shown as
+`Board [ACTIVE|ALL|ARCHIVED]`. In card detail, blue selects comments/runs and directional arrows
+appear only when history is hidden (counts are omitted). Agent lifecycle rules and examples live in
+`skill/SKILL.md`.
 
 ## Configuration
 

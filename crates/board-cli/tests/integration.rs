@@ -692,6 +692,33 @@ fn card_new_new_workspace_missing_cwd_is_validation_error() {
 }
 
 #[test]
+fn card_archive_and_restore_cli_roundtrip() {
+    let td = TestDaemon::start(&[]);
+    let out = td.board(&[
+        "card",
+        "new",
+        "--title",
+        "archive me",
+        "--harness",
+        "fake",
+        "--json",
+    ]);
+    assert!(out.status.success());
+    let card: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let id = card["id"].as_i64().unwrap().to_string();
+
+    let out = td.board(&["card", "archive", &id, "--json"]);
+    assert!(out.status.success(), "archive failed: {:?}", out.stderr);
+    let archived: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(archived["archived_at"].is_string());
+
+    let out = td.board(&["card", "restore", &id, "--json"]);
+    assert!(out.status.success(), "restore failed: {:?}", out.stderr);
+    let restored: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(restored["archived_at"].is_null());
+}
+
+#[test]
 fn card_new_with_session_persists_and_shows() {
     let td = TestDaemon::start(&[]);
     // Create a card with an explicit --session (into the manual Todo column, so

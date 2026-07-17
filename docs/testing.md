@@ -26,7 +26,7 @@ do no I/O beyond in-memory SQLite and never touch herdr.
 | File | Covers |
 |---|---|
 | `crates/board-core/tests/engine.rs` | The **pure column engine** — `decide_transition`, `decide_entry`, `validate_*`, `format_duration`. No wall clock: elapsed time is passed as an explicit seconds argument (e.g. `decide_transition(.., Some(252))` → `"4m12s"`), so results are deterministic. |
-| `crates/board-core/tests/db.rs` | SQLite migrations, seed, CRUD, position compaction, FIFO queued-runs — on an in-memory db (`mem()` helper). |
+| `crates/board-core/tests/db.rs` | SQLite migrations (including v3 archive state), seed, CRUD, position compaction, FIFO queued-runs — on an in-memory db (`mem()` helper). |
 | `crates/board-core/tests/{capability,config,prompt,harness,protocol,fake_client}.rs` | Harness catalog + pane-name slug rules; config defaults/parsing; prompt assembly + effective-settings; harness argv/session planning; protocol serde round-trips; the in-memory `FakeBoardClient`. |
 | `crates/board-herdr/tests/{events,socket}.rs` | herdr event decoding; socket client against an **in-process fake herdr server** on a temp unix socket (`serve_calls`/`serve_stream`), covering one-request-per-connection, error mapping, and mid-call disconnect. |
 
@@ -56,7 +56,7 @@ and a **fake harness script**.
 - `TestDaemon::board(&[..])` runs the `board` CLI against the test daemon and
   captures output. Covered flows: happy pipeline, fail path, exit-without-done,
   timeout, queue serialization, cancel, retry-forks-a-run, template apply/refuse,
-  the flock singleton, event subscription, and CLI-verb error surfacing.
+  archive/restore, the flock singleton, event subscription, and CLI-verb error surfacing.
 
 ### 3. TUI fake-client tests (snapshots + reducer)
 
@@ -73,7 +73,7 @@ the `fake-client` feature.
   Determinism comes from a fixed `now` (`NOW_STR = "2026-07-14 12:00:00"`) and a
   `pin()` helper that rewrites Running cards' `updated_at`, so timers don't drift.
 - `crates/board-tui/tests/update.rs` unit-tests the pure reducer
-  (`board_tui::app::update`) — navigation, form field cycling/visibility,
+  (`board_tui::app::update`) — navigation, archive filtering/toggling, form field cycling/visibility,
   selectors, drag state, template-only-on-empty-board.
 - `cargo run -p board-tui --example tui_fake --features fake-client` runs the
   full TUI against the seeded client for a manual look.
@@ -103,6 +103,7 @@ case ↔ scenario ↔ status catalog):
 | `07-cancel.sh` | `board cancel` on a live run kills the herdr pane; run `cancelled`, card `failed`. |
 | `08-column-timeout.sh` | A run past its column `timeout_minutes` is killed and follows `on_fail`. |
 | `09-comment-context.sh` | A stage-1 comment flows into the stage-2 run's `prompt_snapshot` (`## Card comments`). |
+| `10-archive-filter-title.sh` | Archive filter → dynamic Herdr pane title (`Board [ACTIVE/ALL/ARCHIVED]`) + minimal footer. |
 | `run-all.sh` | Builds once, runs every scenario, prints a PASS/FAIL/SKIP summary. |
 
 The `idle-lost` watchdog has **no** live scenario — it keys off herdr

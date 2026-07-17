@@ -23,6 +23,7 @@ isolation/safety design, and the **how-to-write-a-scenario** guide, see
 | `board cancel` on a live run kills the herdr pane; run `cancelled`, card `failed` | `07-cancel.sh` | live |
 | Run overruns its column `timeout_minutes` → killed and follows `on_fail` | `08-column-timeout.sh` | live |
 | A stage-1 comment flows into the stage-2 run's prompt (`## Card comments` section) | `09-comment-context.sh` | live |
+| Archive filter cycles `ACTIVE/ALL/ARCHIVED` in the Herdr pane title and keeps the footer minimal | `10-archive-filter-title.sh` | live |
 | **idle-lost watchdog**: an idle agent (no `board done`) is marked `lost` | — | **not reproducible in live e2e** (see below) |
 
 ### Why idle-lost has no live scenario

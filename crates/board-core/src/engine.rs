@@ -14,6 +14,8 @@ pub enum ValidationError {
     ColumnHasActiveCard,
     #[error("card is running or queued; cannot edit harness/space fields")]
     CardBusy,
+    #[error("card has an active run; cancel it before archiving")]
+    CardHasActiveRun,
     #[error("bypassPermissions is only allowed as an explicit per-card setting, never a column override")]
     BypassNotAllowed,
     #[error("new_workspace space requires a non-empty space_ref (label) and space_cwd")]
@@ -25,7 +27,8 @@ impl ValidationError {
         match self {
             ValidationError::ColumnHasCards
             | ValidationError::ColumnHasActiveCard
-            | ValidationError::CardBusy => 3,
+            | ValidationError::CardBusy
+            | ValidationError::CardHasActiveRun => 3,
             ValidationError::BypassNotAllowed | ValidationError::NewWorkspaceIncomplete => 1,
         }
     }
@@ -163,6 +166,17 @@ pub fn validate_card_edit(
 ) -> Result<(), ValidationError> {
     if edits_locked_fields && matches!(status, CardStatus::Running | CardStatus::Queued) {
         return Err(ValidationError::CardBusy);
+    }
+    Ok(())
+}
+
+/// Archive is allowed only when no run can still be active or waiting.
+pub fn validate_card_archive(status: CardStatus) -> Result<(), ValidationError> {
+    if matches!(
+        status,
+        CardStatus::Queued | CardStatus::Running | CardStatus::Blocked
+    ) {
+        return Err(ValidationError::CardHasActiveRun);
     }
     Ok(())
 }

@@ -9,10 +9,10 @@ use serde_json::{json, Value};
 
 use crate::model::{Card, Column, Comment};
 use crate::protocol::{
-    BoardSnapshot, CardCreateParams, CardDetail, CardListParams, CardMoveParams, CardUpdateParams,
-    ColumnCreateParams, ColumnDeleteParams, ColumnReorderParams, ColumnUpdateParams,
-    CommentAddParams, DaemonStatus, DeletedResult, Event, Request, Response, RunActionResult,
-    RunCardParams, RunDoneParams, RunOutcome, StopResult, TemplateApplyParams,
+    BoardSnapshot, CardArchiveParams, CardCreateParams, CardDetail, CardListParams, CardMoveParams,
+    CardUpdateParams, ColumnCreateParams, ColumnDeleteParams, ColumnReorderParams,
+    ColumnUpdateParams, CommentAddParams, DaemonStatus, DeletedResult, Event, Request, Response,
+    RunActionResult, RunCardParams, RunDoneParams, RunOutcome, StopResult, TemplateApplyParams,
 };
 
 /// Blocking client to boardd. Object-safe so the TUI can hold `Box<dyn BoardClient>`.
@@ -91,6 +91,12 @@ pub trait BoardClient {
     fn card_delete(&mut self, id: i64) -> anyhow::Result<DeletedResult> {
         Ok(serde_json::from_value(
             self.call("card.delete", json!({ "id": id }))?,
+        )?)
+    }
+    fn card_archive(&mut self, id: i64, archived: bool) -> anyhow::Result<Card> {
+        let p = CardArchiveParams { id, archived };
+        Ok(serde_json::from_value(
+            self.call("card.archive", serde_json::to_value(p)?)?,
         )?)
     }
     fn card_move(&mut self, p: &CardMoveParams) -> anyhow::Result<Card> {
@@ -334,8 +340,22 @@ mod fake {
                     db.delete_card(id)?;
                     serde_json::to_value(DeletedResult { deleted: true })?
                 }
+                "card.archive" => {
+                    let p: CardArchiveParams = serde_json::from_value(params)?;
+                    let card = db
+                        .get_card(p.id)?
+                        .ok_or_else(|| anyhow::anyhow!("card {} not found", p.id))?;
+                    engine::validate_card_archive(card.status)?;
+                    serde_json::to_value(db.set_card_archived(p.id, p.archived)?)?
+                }
                 "card.move" => {
                     let p: CardMoveParams = serde_json::from_value(params)?;
+                    let card = db
+                        .get_card(p.id)?
+                        .ok_or_else(|| anyhow::anyhow!("card {} not found", p.id))?;
+                    if card.archived_at.is_some() {
+                        anyhow::bail!("archived card must be restored before moving");
+                    }
                     serde_json::to_value(db.move_card(p.id, p.column_id, p.position)?)?
                 }
                 "card.get" => {
