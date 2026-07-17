@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- Card detail now opens as a contextual popup with a clickable/`f` fullscreen toggle, `e` editing
+  that returns to detail, and independent keyboard/mouse scrolling for comments and run history.
+  Histories open at their latest item and indicate hidden content with directional arrows.
+
+### Changed
+- The board now distributes visible columns across the full viewport, uses higher-contrast
+  status-rich cards, and shows card counts in column headers.
+- Detail sections and status metadata have clearer visual hierarchy; forms, pickers, and help size
+  to their content instead of occupying fixed percentages of large terminals.
+
 ## [0.3.0] - 2026-07-17
 
 ### Added

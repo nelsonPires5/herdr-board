@@ -4,17 +4,17 @@
 
 use board_core::engine::format_duration;
 use board_core::model::Card;
-use board_core::protocol::CardStatus;
+use board_core::protocol::{CardDetail, CardStatus};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, Screen};
+use crate::app::{App, DetailScrollTarget, Screen};
 use crate::forms::{FieldKind, Form};
 
-const COL_W: u16 = 26;
+const MIN_COL_W: u16 = 26;
 const CARD_H: u16 = 3;
 
 // -- layout / hit-testing ----------------------------------------------------
@@ -72,23 +72,24 @@ pub fn board_layout(app: &App, area: Rect) -> BoardLayout {
     if n == 0 || main.width == 0 {
         return BoardLayout { cols };
     }
-    let per_screen = (main.width / COL_W).max(1) as usize;
-    let start = if app.sel_col >= per_screen {
-        app.sel_col + 1 - per_screen
-    } else {
-        0
-    };
-    for i in 0..per_screen {
+    // Fill the entire viewport. Keep columns readable via a minimum width;
+    // when every column fits, distribute all remaining cells across them.
+    // When they do not all fit, the selected column drives a full-width window.
+    let capacity = (main.width / MIN_COL_W).max(1) as usize;
+    let visible = capacity.min(n);
+    let start = app
+        .sel_col
+        .saturating_add(1)
+        .saturating_sub(visible)
+        .min(n.saturating_sub(visible));
+    let base_w = main.width / visible as u16;
+    let remainder = main.width % visible as u16;
+    let mut x = main.x;
+    for i in 0..visible {
         let idx = start + i;
-        if idx >= n {
-            break;
-        }
-        let x = main.x + (i as u16) * COL_W;
-        if x >= main.x + main.width {
-            break;
-        }
-        let w = COL_W.min(main.x + main.width - x);
+        let w = base_w + u16::from((i as u16) < remainder);
         let rect = Rect::new(x, main.y, w, main.height);
+        x = x.saturating_add(w);
         let col = &app.board.columns[idx];
         let cards = app.cards_of(col.id);
         let mut card_rects = Vec::new();
@@ -118,11 +119,11 @@ pub fn board_layout(app: &App, area: Rect) -> BoardLayout {
 
 fn status_glyph(status: CardStatus) -> (char, Color) {
     match status {
-        CardStatus::Running => ('▶', Color::Green),
-        CardStatus::Blocked => ('⏸', Color::Yellow),
-        CardStatus::Failed => ('✗', Color::Red),
-        CardStatus::Queued => ('⧗', Color::Cyan),
-        CardStatus::Idle => ('·', Color::DarkGray),
+        CardStatus::Running => ('▶', Color::LightGreen),
+        CardStatus::Blocked => ('⏸', Color::LightYellow),
+        CardStatus::Failed => ('✗', Color::LightRed),
+        CardStatus::Queued => ('⧗', Color::LightCyan),
+        CardStatus::Idle => ('·', Color::Gray),
     }
 }
 
@@ -169,9 +170,15 @@ fn draw_board(app: &App, f: &mut Frame, area: Rect) {
                 .fg(Color::Blue)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(Color::Gray)
         };
-        let title = format!(" {} ({}) ", column.name, column.trigger.as_str());
+        let card_count = app.cards_of(column.id).len();
+        let title = format!(
+            " {} · {} · {} ",
+            column.name,
+            card_count,
+            column.trigger.as_str()
+        );
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(border_style)
@@ -203,13 +210,21 @@ fn draw_board(app: &App, f: &mut Frame, area: Rect) {
 
 fn draw_card(app: &App, f: &mut Frame, card: &Card, r: Rect, selected: bool) {
     let (glyph, color) = status_glyph(card.status);
+    // Selection gets its own background instead of REVERSED. This preserves
+    // status foreground colors (especially idle) and avoids color inversion.
     let base = if selected {
-        Style::default().add_modifier(Modifier::REVERSED)
+        Style::default().fg(Color::White).bg(Color::Rgb(30, 41, 59))
     } else {
         Style::default()
     };
+    let title_style = if selected {
+        base.add_modifier(Modifier::BOLD)
+    } else {
+        base
+    };
 
     let mut status_spans = vec![
+        Span::raw("  "),
         Span::styled(glyph.to_string(), Style::default().fg(color)),
         Span::raw(" "),
         Span::styled(card.status.as_str(), Style::default().fg(color)),
@@ -218,11 +233,27 @@ fn draw_card(app: &App, f: &mut Frame, card: &Card, r: Rect, selected: bool) {
         let elapsed = parse_epoch(&card.updated_at)
             .map(|s| (app.now - s).max(0))
             .unwrap_or(0);
-        status_spans.push(Span::raw(format!("  {}", format_duration(Some(elapsed)))));
+        status_spans.push(Span::raw(format!(" · {}", format_duration(Some(elapsed)))));
+    }
+    status_spans.push(Span::styled(
+        format!(" · {}", card.harness),
+        Style::default().fg(Color::Gray),
+    ));
+    if let Some(model) = &card.model {
+        status_spans.push(Span::styled(
+            format!("/{}", model),
+            Style::default().fg(Color::Gray),
+        ));
     }
 
+    let title_width = r.width.saturating_sub(2) as usize;
     let lines = vec![
-        Line::from(Span::styled(truncate(&card.title, r.width as usize), base)),
+        Line::from(vec![
+            Span::styled("▌", Style::default().fg(color).add_modifier(Modifier::BOLD)),
+            Span::raw(" "),
+            Span::styled(truncate(&card.title, title_width), title_style),
+        ])
+        .style(base),
         Line::from(status_spans).style(base),
     ];
     let p = Paragraph::new(Text::from(lines)).style(base);
@@ -231,100 +262,280 @@ fn draw_card(app: &App, f: &mut Frame, card: &Card, r: Rect, selected: bool) {
 
 // -- detail ------------------------------------------------------------------
 
-fn draw_detail(app: &App, f: &mut Frame, area: Rect) {
-    let Some(detail) = &app.detail else { return };
+fn detail_panel_area(app: &App, area: Rect) -> Rect {
     let m = main_area(area);
-    f.render_widget(Clear, m);
-    let card = &detail.card;
+    if app.detail_fullscreen {
+        m
+    } else {
+        centered_rect_abs(120, 30, m)
+    }
+}
 
-    let block = Block::default().borders(Borders::ALL).title(format!(
-        " Card #{}: {} ",
-        card.id,
-        truncate(&card.title, 40)
-    ));
-    let inner = block.inner(m);
-    f.render_widget(block, m);
+/// Click target for the popup/fullscreen action rendered in the detail title.
+pub fn detail_toggle_rect(app: &App, area: Rect) -> Rect {
+    let panel = detail_panel_area(app, area);
+    let label_w = if app.detail_fullscreen { 11 } else { 16 };
+    Rect::new(
+        panel.x + panel.width.saturating_sub(label_w + 1),
+        panel.y,
+        label_w,
+        1,
+    )
+}
 
+fn wrapped_line_count(text: &str, width: u16) -> u16 {
+    let width = width.max(1) as usize;
+    text.lines()
+        .map(|line| line.chars().count().max(1).div_ceil(width) as u16)
+        .sum::<u16>()
+        .max(1)
+}
+
+/// Size sections by content. Surplus height stays outside their borders; when
+/// content exceeds the viewport, rows go to the greatest unmet demand first.
+fn detail_section_heights(detail: &CardDetail, width: u16, available: u16) -> ([u16; 3], u16) {
+    let desc_lines = wrapped_line_count(&detail.card.description, width);
+    // Comments currently render as one truncated row each; size the section by
+    // visible list rows so long bodies do not create blank phantom height.
+    let comment_lines = (detail.comments.len() as u16).max(1);
+    let run_lines = (detail.runs.len() as u16).max(1);
+    // One additional row for each section's titled divider.
+    let needs = [desc_lines + 1, comment_lines + 1, run_lines + 1];
+
+    let minimum = if available >= 6 { 2 } else { available / 3 };
+    let mut heights = [minimum; 3];
+    let mut remaining = available.saturating_sub(minimum.saturating_mul(3));
+    while remaining > 0 {
+        let Some((idx, deficit)) = (0..3)
+            .map(|idx| (idx, needs[idx].saturating_sub(heights[idx])))
+            .max_by_key(|(_, deficit)| *deficit)
+        else {
+            break;
+        };
+        if deficit == 0 {
+            break;
+        }
+        heights[idx] += 1;
+        remaining -= 1;
+    }
+    (heights, remaining)
+}
+
+pub struct DetailLayout {
+    pub panel: Rect,
+    pub status: Rect,
+    pub description: Rect,
+    pub comments: Rect,
+    pub runs: Rect,
+}
+
+/// Geometry shared by rendering and independent comments/runs mouse scrolling.
+pub fn detail_layout(app: &App, area: Rect) -> DetailLayout {
+    let panel = detail_panel_area(app, area);
+    let inner = Block::default().borders(Borders::ALL).inner(panel);
+    let Some(detail) = &app.detail else {
+        return DetailLayout {
+            panel,
+            status: inner,
+            description: inner,
+            comments: inner,
+            runs: inner,
+        };
+    };
+    let content_budget = inner.height.saturating_sub(3);
+    let (section_h, spacer_h) =
+        detail_section_heights(detail, inner.width.saturating_sub(1), content_budget);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4), // config summary
-            Constraint::Min(4),    // description
-            Constraint::Min(4),    // comments
-            Constraint::Min(3),    // runs
+            Constraint::Length(3),
+            Constraint::Length(section_h[0]),
+            Constraint::Length(spacer_h),
+            Constraint::Length(section_h[1]),
+            Constraint::Length(section_h[2]),
         ])
         .split(inner);
+    DetailLayout {
+        panel,
+        status: chunks[0],
+        description: chunks[1],
+        comments: chunks[3],
+        runs: chunks[4],
+    }
+}
 
-    // config summary
+fn detail_section_title(name: &str, total: usize, offset: usize, visible: usize) -> String {
+    let hidden_above = offset > 0;
+    let hidden_below = offset.saturating_add(visible.max(1)) < total;
+    let arrows = match (hidden_above, hidden_below) {
+        (true, true) => " ↑↓",
+        (true, false) => " ↑",
+        (false, true) => " ↓",
+        (false, false) => "",
+    };
+    format!("{name} {total}{arrows}")
+}
+
+fn push_detail_field(
+    spans: &mut Vec<Span<'static>>,
+    label: &'static str,
+    value: String,
+    color: Color,
+) {
+    spans.push(Span::styled(
+        label,
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::styled(value, Style::default().fg(Color::White)));
+    spans.push(Span::raw("   "));
+}
+
+fn draw_detail(app: &App, f: &mut Frame, area: Rect) {
+    let Some(detail) = &app.detail else { return };
+    let layout = detail_layout(app, area);
+    let panel = layout.panel;
+    f.render_widget(Clear, panel);
+    let card = &detail.card;
+
+    let action = if app.detail_fullscreen {
+        "[f Popup]"
+    } else {
+        "[f Fullscreen]"
+    };
+    let title_width = panel.width.saturating_sub(2) as usize;
+    let left = format!(" Card #{}: {} ", card.id, truncate(&card.title, 48));
+    let left = truncate(&left, title_width.saturating_sub(action.len() + 1));
+    let gap = title_width.saturating_sub(left.chars().count() + action.len());
+    let title = format!("{}{}{}", left, " ".repeat(gap), action);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Blue))
+        .title(title);
+    f.render_widget(block, panel);
+
     let (gl, gc) = status_glyph(card.status);
-    let cfg = Paragraph::new(vec![
-        Line::from(vec![
-            Span::styled(gl.to_string(), Style::default().fg(gc)),
-            Span::raw(format!(" {}", card.status.as_str())),
-            Span::raw(format!("   harness={}", card.harness)),
-            Span::raw(format!("  model={}", card.model.as_deref().unwrap_or("-"))),
-            Span::raw(format!(
-                "  effort={}",
-                card.effort.map(|e| e.as_str()).unwrap_or("-")
-            )),
-        ]),
-        Line::from(vec![
-            Span::raw(format!(
-                "permission={}",
-                card.permission_mode.as_deref().unwrap_or("-")
-            )),
-            Span::raw(format!(
-                "   session={}",
-                card.session.as_deref().unwrap_or("(default)")
-            )),
-            Span::raw(format!(
-                "   space={}:{}",
-                card.space_kind.as_str(),
-                card.space_ref.as_deref().unwrap_or("-")
-            )),
-        ]),
-    ])
-    .block(Block::default().borders(Borders::BOTTOM).title("config"));
-    f.render_widget(cfg, chunks[0]);
+    let mut status_line = vec![
+        Span::styled(
+            format!("{} {}", gl, card.status.as_str()),
+            Style::default().fg(gc).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("   "),
+    ];
+    push_detail_field(
+        &mut status_line,
+        "harness: ",
+        card.harness.clone(),
+        Color::LightBlue,
+    );
+    push_detail_field(
+        &mut status_line,
+        "model: ",
+        card.model.clone().unwrap_or_else(|| "default".into()),
+        Color::LightBlue,
+    );
+    push_detail_field(
+        &mut status_line,
+        "effort: ",
+        card.effort
+            .map(|effort| effort.as_str().to_string())
+            .unwrap_or_else(|| "default".into()),
+        Color::LightBlue,
+    );
+    let mut config_line = Vec::new();
+    push_detail_field(
+        &mut config_line,
+        "permission: ",
+        card.permission_mode
+            .clone()
+            .unwrap_or_else(|| "default".into()),
+        Color::LightBlue,
+    );
+    push_detail_field(
+        &mut config_line,
+        "session: ",
+        card.session.clone().unwrap_or_else(|| "default".into()),
+        Color::LightBlue,
+    );
+    push_detail_field(
+        &mut config_line,
+        "space: ",
+        format!(
+            "{}:{}",
+            card.space_kind.as_str(),
+            card.space_ref.as_deref().unwrap_or("-")
+        ),
+        Color::LightBlue,
+    );
+    let status = Paragraph::new(vec![Line::from(status_line), Line::from(config_line)]).block(
+        Block::default()
+            .borders(Borders::TOP)
+            .border_style(Style::default().fg(Color::Gray))
+            .title("status"),
+    );
+    f.render_widget(status, layout.status);
 
     let desc = Paragraph::new(card.description.as_str())
         .wrap(Wrap { trim: false })
         .block(
             Block::default()
-                .borders(Borders::BOTTOM)
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(Color::Gray))
                 .title("description"),
         );
-    f.render_widget(desc, chunks[1]);
+    f.render_widget(desc, layout.description);
 
     let comments: Vec<ListItem> = detail
         .comments
         .iter()
+        .skip(app.detail_comments_scroll)
         .map(|c| {
             ListItem::new(Line::from(vec![
-                Span::styled(format!("[{}] ", c.author), Style::default().fg(Color::Cyan)),
+                Span::styled(
+                    format!("[{}] ", c.author),
+                    Style::default().fg(Color::LightCyan),
+                ),
                 Span::raw(truncate(
                     &c.body,
-                    chunks[2].width.saturating_sub(2) as usize,
+                    layout.comments.width.saturating_sub(2) as usize,
                 )),
             ]))
         })
         .collect();
-    let comments = if comments.is_empty() {
+    let comments = if detail.comments.is_empty() {
         vec![ListItem::new(Span::styled(
             "(no comments)",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(Color::Gray),
         ))]
     } else {
         comments
     };
+    let comments_active = app.detail_scroll_target == DetailScrollTarget::Comments;
+    let comments_total = detail.comments.len();
+    let comments_visible = layout.comments.height.saturating_sub(1) as usize;
+    let comments_title = detail_section_title(
+        "comments",
+        comments_total,
+        app.detail_comments_scroll,
+        comments_visible,
+    );
     f.render_widget(
-        List::new(comments).block(Block::default().borders(Borders::BOTTOM).title("comments")),
-        chunks[2],
+        List::new(comments).block(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(if comments_active {
+                    Color::Rgb(255, 158, 100)
+                } else {
+                    Color::Gray
+                }))
+                .title(comments_title),
+        ),
+        layout.comments,
     );
 
     let runs: Vec<ListItem> = detail
         .runs
         .iter()
+        .skip(app.detail_runs_scroll)
         .map(|run| {
             let outcome = run.outcome.map(|o| o.as_str()).unwrap_or("active");
             let dur = run_duration(app, run);
@@ -334,17 +545,30 @@ fn draw_detail(app: &App, f: &mut Frame, area: Rect) {
             )))
         })
         .collect();
-    let runs = if runs.is_empty() {
+    let runs = if detail.runs.is_empty() {
         vec![ListItem::new(Span::styled(
             "(no runs)",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(Color::Gray),
         ))]
     } else {
         runs
     };
+    let runs_active = app.detail_scroll_target == DetailScrollTarget::Runs;
+    let runs_total = detail.runs.len();
+    let runs_visible = layout.runs.height.saturating_sub(1) as usize;
+    let runs_title = detail_section_title("runs", runs_total, app.detail_runs_scroll, runs_visible);
     f.render_widget(
-        List::new(runs).block(Block::default().borders(Borders::TOP).title("runs")),
-        chunks[3],
+        List::new(runs).block(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(if runs_active {
+                    Color::Rgb(255, 158, 100)
+                } else {
+                    Color::Gray
+                }))
+                .title(runs_title),
+        ),
+        layout.runs,
     );
 }
 
@@ -361,7 +585,16 @@ fn run_duration(app: &App, run: &board_core::model::Run) -> String {
 // -- form --------------------------------------------------------------------
 
 fn draw_form(form: &Form, f: &mut Frame, area: Rect) {
-    let box_area = centered_rect(70, 90, area);
+    // Content-sized on large terminals, while still shrinking to small ones.
+    let visible: Vec<usize> = (0..form.fields.len())
+        .filter(|i| form.field_visible(*i))
+        .collect();
+    let content_h = visible
+        .iter()
+        .map(|i| if form.fields[*i].multiline { 4 } else { 2 })
+        .sum::<u16>()
+        .saturating_add(2);
+    let box_area = centered_rect_abs(96, content_h, area);
     f.render_widget(Clear, box_area);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -374,9 +607,6 @@ fn draw_form(form: &Form, f: &mut Frame, area: Rect) {
     f.render_widget(block, box_area);
 
     // Build per-field rows; multiline fields get more height.
-    let visible: Vec<usize> = (0..form.fields.len())
-        .filter(|i| form.field_visible(*i))
-        .collect();
     let constraints: Vec<Constraint> = visible
         .iter()
         .map(|i| {
@@ -439,7 +669,17 @@ fn draw_form(form: &Form, f: &mut Frame, area: Rect) {
 
 fn draw_picker(app: &App, f: &mut Frame, area: Rect) {
     let Some(picker) = &app.picker else { return };
-    let box_area = centered_rect(50, 50, area);
+    let content_w = picker
+        .options
+        .iter()
+        .map(|(name, _)| name.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(picker.title.chars().count() + 12)
+        .saturating_add(4)
+        .clamp(30, 60) as u16;
+    let content_h = (picker.options.len() as u16).saturating_add(2).max(5);
+    let box_area = centered_rect_abs(content_w, content_h, area);
     f.render_widget(Clear, box_area);
     let items: Vec<ListItem> = picker
         .options
@@ -486,8 +726,10 @@ fn draw_confirm(app: &App, f: &mut Frame, area: Rect) {
 }
 
 fn draw_help(f: &mut Frame, area: Rect) {
-    // Full-screen overlay in two columns so every keybind fits on a small screen.
-    let box_area = area;
+    // Keep help compact on wide terminals, but use all available space when
+    // necessary. Two columns need half the entries plus the border.
+    let content_h = HELP_KEYS.len().div_ceil(2) as u16 + 2;
+    let box_area = centered_rect_abs(110, content_h, area);
     f.render_widget(Clear, box_area);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -545,7 +787,11 @@ pub const HELP_KEYS: &[(&str, &str)] = &[
     ("?", "this help"),
     ("q / Esc", "back / quit"),
     ("--", "-- card detail --"),
+    ("e", "edit card"),
     ("c", "add comment"),
+    ("Tab", "focus comments / runs"),
+    ("↑/↓ k/j", "scroll focused section"),
+    ("f / click", "toggle popup / fullscreen"),
     ("o", "jump to pane (stub)"),
     ("x", "cancel run"),
     ("r", "retry run"),
@@ -582,20 +828,29 @@ fn draw_footer(app: &App, f: &mut Frame, area: Rect) {
         return;
     }
     let hint = match app.screen {
-        Screen::Board => {
-            "n new · N col · e edit · d del · D delcol · m move · Enter detail · ? help · q quit"
-        }
-        Screen::CardDetail => "c comment · o jump · x cancel · r retry · Esc back",
+        Screen::Board => format!(
+            "n new card · e edit card · N new column · E edit column · m move · Enter detail · ? help · q quit · column {}/{}",
+            app.sel_col.saturating_add(1),
+            app.board.columns.len()
+        ),
+        Screen::CardDetail => format!(
+            "e edit card · c comment · Tab comments/runs · ↑/↓ scroll · f {} · o jump · x cancel · r retry · Esc back",
+            if app.detail_fullscreen {
+                "popup"
+            } else {
+                "fullscreen"
+            }
+        ),
         Screen::CardForm | Screen::ColumnForm => {
-            "Tab field · Ctrl+E editor · Enter save · Esc cancel"
+            "Tab field · Ctrl+E editor · Enter save · Esc cancel".to_string()
         }
-        Screen::Picker => "↑/↓ select · Enter choose · Esc cancel",
-        Screen::Confirm => "y yes · n no",
-        Screen::Help => "any key to close",
+        Screen::Picker => "↑/↓ select · Enter choose · Esc cancel".to_string(),
+        Screen::Confirm => "y yes · n no".to_string(),
+        Screen::Help => "any key to close".to_string(),
     };
     f.render_widget(
         Paragraph::new(Span::styled(
-            truncate(hint, area.width as usize),
+            truncate(&hint, area.width as usize),
             Style::default().fg(Color::DarkGray),
         )),
         rect,
@@ -618,12 +873,6 @@ fn truncate(s: &str, max: usize) -> String {
         out.push('…');
         out
     }
-}
-
-fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
-    let w = area.width * percent_x / 100;
-    let h = area.height * percent_y / 100;
-    centered_rect_abs(w, h, area)
 }
 
 fn centered_rect_abs(w: u16, h: u16, area: Rect) -> Rect {

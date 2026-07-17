@@ -31,6 +31,9 @@ Todo ──► Plan ──► Execute ──► Review ──► Human Review �
   CLI (subcommands the agents call). No separate services to install.
 - **Runs land in visible herdr panes.** Agents run where you can watch them, in the workspace's
   `kanban` tab, tiled roughly square.
+- **Responsive, status-rich board.** Visible columns always divide the full viewport; cards retain
+  readable status colors, harness/model metadata, and a clear selected state. Forms and pickers size
+  to their content instead of expanding across the terminal.
 - **Pipelines, not just a queue.** Per-column system prompts and success/fail transitions turn a
   board into a Plan → Execute → Review flow with human gates where you want them.
 - **Session- and space-aware.** A single daemon drives every herdr session; a card resolves to its
@@ -209,15 +212,16 @@ board move <new-card-id> Execute        # Execute is an auto column -> run start
 | `N` | new column | | `?` | this help |
 | `e` | edit card | | `q / Esc` | back / quit |
 | `E` | edit focused column | | **card detail** | |
-| `d` | delete card | | `c` | add comment |
-| `D` | delete column (move cards / refuse if running) | | `o` | jump to pane (stub) |
-| `m` | move card (column picker) | | `x` | cancel run |
-| `H / L` | shove card left / right | | `r` | retry run |
-| **forms** | | | **mouse** | |
-| `Tab` / `Shift+Tab` | next / previous field | | `click` | focus card/column |
-| `←/→ Space` | cycle a picker field | | `dbl-click` | open card detail |
-| `Ctrl+E` | edit textarea in `$EDITOR` | | `drag` | move card / reorder column |
-| `Enter` / `Esc` | submit / cancel | | `wheel` | scroll cards |
+| `d` | delete card | | `e` | edit card |
+| `D` | delete column (move cards / refuse if running) | | `c` | add comment |
+| `m` | move card (column picker) | | `f` / click title | popup / fullscreen |
+| `H / L` | shove card left / right | | `Tab` | focus comments / runs |
+| **forms** | | | `↑/↓ k/j` | scroll focused detail section |
+| `Tab` / `Shift+Tab` | next / previous field | | `o` | jump to pane (stub) |
+| `←/→ Space` | cycle a picker field | | `x` / `r` | cancel / retry run |
+| `Ctrl+E` | edit textarea in `$EDITOR` | | **mouse** | |
+| `Enter` / `Esc` | submit / cancel | | `click` / `dbl-click` | focus / open card detail |
+| | | | `drag` / `wheel` | move card or column / scroll |
 
 ## CLI reference
 

@@ -3,7 +3,7 @@
 //! terminal sizes, and running-card timers pinned by rewriting `updated_at`.
 
 use board_core::client::{BoardClient, FakeBoardClient};
-use board_core::protocol::CardStatus;
+use board_core::protocol::{CardStatus, RunOutcome};
 use board_tui::app::{App, Msg};
 use board_tui::editor::FakeEditor;
 use board_tui::testkit::demo_client;
@@ -11,6 +11,7 @@ use board_tui::view::{parse_epoch, view};
 use board_tui::Driver;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::TestBackend;
+use ratatui::layout::Rect;
 use ratatui::Terminal;
 
 const NOW_STR: &str = "2026-07-14 12:00:00";
@@ -111,6 +112,62 @@ fn card_detail_with_comments_and_runs() {
     key(&mut d, KeyCode::Right);
     key(&mut d, KeyCode::Enter);
     insta::assert_snapshot!("card_detail", render(&mut d, 80, 24));
+}
+
+#[test]
+fn card_detail_popup_and_fullscreen_120x35() {
+    let mut d = driver(demo_client().unwrap());
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Enter);
+    insta::assert_snapshot!("card_detail_popup_120x35", render(&mut d, 120, 35));
+
+    key(&mut d, KeyCode::Char('f'));
+    insta::assert_snapshot!("card_detail_fullscreen_120x35", render(&mut d, 120, 35));
+}
+
+#[test]
+fn card_detail_history_overflow_starts_latest_and_scrolls_sections() {
+    let mut client = demo_client().unwrap();
+    let board = client.board_get().unwrap();
+    let card = board
+        .cards
+        .iter()
+        .find(|card| card.status == CardStatus::Failed)
+        .unwrap()
+        .clone();
+    for i in 0..15 {
+        client
+            .comment_add(card.id, &format!("overflow comment {i}"), Some("test"))
+            .unwrap();
+    }
+    for _ in 0..10 {
+        let run = client
+            .db()
+            .create_run(card.id, card.column_id, "claude", "[]", "p", None, None)
+            .unwrap();
+        client.db().start_run(run.id, None, None).unwrap();
+        client
+            .db()
+            .finish_run(run.id, RunOutcome::Ok, Some("done"))
+            .unwrap();
+    }
+
+    let mut d = driver(client);
+    d.app.last_area = Rect::new(0, 0, 120, 35);
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Enter);
+    insta::assert_snapshot!("card_detail_history_latest", render(&mut d, 120, 35));
+
+    key(&mut d, KeyCode::Up);
+    key(&mut d, KeyCode::Up);
+    key(&mut d, KeyCode::Tab);
+    key(&mut d, KeyCode::Up);
+    key(&mut d, KeyCode::Up);
+    insta::assert_snapshot!("card_detail_history_scrolled", render(&mut d, 120, 35));
 }
 
 #[test]
