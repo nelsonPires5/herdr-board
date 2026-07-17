@@ -9,7 +9,7 @@
 # herdr-file-viewer manifest (platforms use OS names, not target triples).
 id = "herdr-board"
 name = "Herdr Board"
-version = "0.2.0"
+version = "0.3.0"
 description = "Kanban board for AI coding agents: cards are prompts, columns are pipeline stages; moving a card dispatches an agent into a herdr pane."
 min_herdr_version = "0.7.0"
 platforms = ["linux", "macos"]
