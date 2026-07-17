@@ -35,7 +35,9 @@ daemon on the same DB must exit 0 silently (lost the race = someone else serves)
 ### board / columns
 One global board (`id=1`, created on first migration with a single `Todo` column, `trigger=manual`, position 0).
 
-- `board.get` → `{board:{id,name}, columns:[Column…ordered], cards:[Card…ordered by column,position]}`
+- `board.get` → `{board:{id,name}, columns:[Column…ordered], cards:[Card…ordered by column,position]}`.
+  Cards include `archived_at` (`null` = active); the full snapshot includes both active and archived
+  cards so clients can filter locally.
   (the TUI's one-shot fetch; it refetches on any event)
 - `column.create {name, position?, system_prompt?, trigger?, on_success_column_id?, on_fail_column_id?, fresh_session?, harness_override?, model_override?, effort_override?, permission_override?, timeout_minutes?}` → `Column`
 - `column.update {id, …any subset of the above}` → `Column` (name/trigger/etc.; unset a nullable by passing `null`)
@@ -53,6 +55,9 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
   - (v2 schema) the legacy `cwd`/`worktree` kinds and `worktree_base` are removed; worktree isolation is now the agent's job via prompt instructions, not a board concept. Existing DBs migrate `cwd`/`worktree` cards to `workspace` (best effort, `space_ref` kept).
 - `card.update {id, …subset}` → `Card` (error 3 while `running|queued` for harness/`session`/space fields)
 - `card.delete {id}` → `{deleted:true}` (error 3 while running; cancel first)
+- `card.archive {id, archived:true|false}` → `Card` — archives or restores without deleting
+  comments/runs. Archiving is refused while `queued|running|blocked`; archived cards must be restored
+  before move/retry.
 - `card.move {id, column_id, position?}` → `Card` — THE trigger: if target column `trigger=auto` and card idle/failed, a run is enqueued
 - `card.get {id}` → `{card, comments:[…], runs:[…]}`
 - `card.list {column_id?}` → `[Card…]`
@@ -79,7 +84,7 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
 
 Coarse by design — the TUI just refetches `board.get` on any of them; payload is for logs/toasts.
 
-- `{"event":"board_changed","reason":"card_moved|card_created|card_updated|card_deleted|column_changed|comment_added|run_started|run_ended|run_blocked","card_id"?:N,"column_id"?:N}`
+- `{"event":"board_changed","reason":"card_moved|card_created|card_updated|card_deleted|card_archived|column_changed|comment_added|run_started|run_ended|run_blocked","card_id"?:N,"column_id"?:N}`
 - `{"event":"run_ended","card_id":N,"run_id":N,"outcome":"ok|fail|cancelled|lost"}` (also emitted as board_changed)
 
 ## Dispatch semantics (column engine — lives in board-core, pure; daemon executes effects)

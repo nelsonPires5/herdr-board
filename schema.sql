@@ -1,7 +1,7 @@
 -- herdr-board SQLite schema (WAL mode; boardd is the only writer).
--- This file is the CURRENT (schema v2) shape: a fresh DB is created directly
--- from it and stamped `PRAGMA user_version = 2`. Existing v1 DBs are upgraded
--- by the v2 migration in board-core/src/db.rs (kept in sync with this file).
+-- This file is the CURRENT (schema v3) shape: a fresh DB is created directly
+-- from it and stamped `PRAGMA user_version = 3`. Existing databases are upgraded
+-- by migrations in board-core/src/db.rs (kept in sync with this file).
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 
@@ -52,7 +52,8 @@ CREATE TABLE cards (
                     CHECK (status IN ('idle','queued','running','blocked','failed')),
   session_id      TEXT,                        -- harness conversation id for --resume
   created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+  updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+  archived_at     TEXT                         -- NULL = active; timestamp = archived
 );
 
 CREATE TABLE comments (

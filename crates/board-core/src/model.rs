@@ -55,6 +55,8 @@ pub struct Card {
     pub session_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// When the card was archived; `None` means it is active on the board.
+    pub archived_at: Option<String>,
 }
 
 /// A timestamped note; author is `user`, `agent:<run_id>`, or `system`.

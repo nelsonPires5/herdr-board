@@ -45,6 +45,8 @@ board done --outcome fail --summary "2 integration tests still failing; needs a 
 ```
 board card show <ID> [--json]            # card + comments + run history
 board card list [--column C] [--json]    # cards, optionally one column
+board card archive <ID> [--json]          # reversible; preserves comments/runs
+board card restore <ID> [--json]
 board column list [--json]               # columns in order
 board comment [CARD_ID] <BODY> [--json]  # CARD_ID defaults to $BOARD_CARD_ID
 board done [CARD_ID] --outcome ok|fail [--summary S] [--json]
@@ -65,6 +67,9 @@ unset) and a **space** within it: `workspace` runs in an already-open workspace
 workspace on first dispatch (`--space-ref` = label, `--space-cwd` = its working
 dir — both required). There is no worktree space kind; run per-branch isolation
 from the agent prompt instead.
+
+Archiving is a human/interactive-session action. It is refused for cards with an active or queued
+run; cancel first if appropriate. Archived cards must be restored before move/retry.
 
 Examples:
 ```bash

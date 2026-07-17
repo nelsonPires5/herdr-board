@@ -161,6 +161,7 @@ pub enum BoardChangedReason {
     CardCreated,
     CardUpdated,
     CardDeleted,
+    CardArchived,
     ColumnChanged,
     CommentAdded,
     RunStarted,
@@ -366,6 +367,13 @@ pub struct CardUpdateParams {
     /// Working directory for a `new_workspace` space.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub space_cwd: Option<String>,
+}
+
+/// `card.archive` params — archive (`true`) or restore (`false`) a card.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CardArchiveParams {
+    pub id: i64,
+    pub archived: bool,
 }
 
 /// `card.move` params — the dispatch trigger.

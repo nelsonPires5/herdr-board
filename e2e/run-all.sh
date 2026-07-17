@@ -48,6 +48,7 @@ SCENARIOS=(
   07-cancel.sh
   08-column-timeout.sh
   09-comment-context.sh
+  10-archive-filter-title.sh
 )
 
 # apply filters (substring match on the filename); empty = run all

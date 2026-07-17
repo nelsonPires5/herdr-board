@@ -11,7 +11,7 @@ fn mem() -> Db {
 #[test]
 fn migration_seeds_board_and_todo_column() {
     let db = mem();
-    assert_eq!(db.user_version().unwrap(), 2);
+    assert_eq!(db.user_version().unwrap(), 3);
     let board = db.get_board(BOARD_ID).unwrap();
     assert_eq!(board.name, "main");
     let cols = db.list_columns(BOARD_ID).unwrap();
@@ -32,7 +32,7 @@ fn migration_idempotent_on_reopen() {
     // Reopen: must not re-seed (still exactly one board, one column).
     {
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.user_version().unwrap(), 2);
+        assert_eq!(db.user_version().unwrap(), 3);
         assert_eq!(db.list_columns(BOARD_ID).unwrap().len(), 1);
         assert_eq!(db.get_board(BOARD_ID).unwrap().name, "main");
     }
@@ -100,9 +100,9 @@ fn migration_v2_upgrades_v1_database() {
         .unwrap();
         conn.execute_batch("PRAGMA user_version = 1;").unwrap();
     }
-    // Open via Db → runs the v2 migration.
+    // Open via Db → runs the v2 and v3 migrations.
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 2);
+    assert_eq!(db.user_version().unwrap(), 3);
     let cards = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(cards.len(), 2);
     for c in &cards {
@@ -238,6 +238,63 @@ fn card_defaults_go_into_todo() {
     assert_eq!(card.column_id, db.default_column_id(BOARD_ID).unwrap());
     assert_eq!(card.harness, "claude");
     assert_eq!(card.space_kind, SpaceKind::Workspace);
+}
+
+#[test]
+fn card_archive_and_restore_roundtrip() {
+    let db = mem();
+    let card = db
+        .create_card(&CardCreateParams {
+            title: "Archive me".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(card.archived_at.is_none());
+
+    let archived = db.set_card_archived(card.id, true).unwrap();
+    assert!(archived.archived_at.is_some());
+    assert!(db.get_card(card.id).unwrap().unwrap().archived_at.is_some());
+
+    let restored = db.set_card_archived(card.id, false).unwrap();
+    assert!(restored.archived_at.is_none());
+}
+
+#[test]
+fn migration_does_not_downgrade_future_schema_version() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    {
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.user_version().unwrap(), 3);
+    }
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("PRAGMA user_version = 4;").unwrap();
+    }
+    let db = Db::open(&path).unwrap();
+    assert_eq!(db.user_version().unwrap(), 4);
+}
+
+#[test]
+fn migration_v3_adds_archived_at_to_v2_database() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    {
+        let db = Db::open(&path).unwrap();
+        db.create_card(&CardCreateParams {
+            title: "pre-v3".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("ALTER TABLE cards DROP COLUMN archived_at; PRAGMA user_version = 2;")
+            .unwrap();
+    }
+    let db = Db::open(&path).unwrap();
+    assert_eq!(db.user_version().unwrap(), 3);
+    let cards = db.list_cards(BOARD_ID).unwrap();
+    assert_eq!(cards.len(), 1);
+    assert!(cards[0].archived_at.is_none());
 }
 
 #[test]

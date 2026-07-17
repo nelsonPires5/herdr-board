@@ -4,7 +4,7 @@
 use board_core::capability::{HarnessCapabilities, ModelInfo};
 use board_core::client::BoardClient;
 use board_core::protocol::{Effort, RunOutcome, SpaceInfo};
-use board_tui::app::{update, App, DetailScrollTarget, Effect, Msg, Screen};
+use board_tui::app::{update, App, CardFilter, DetailScrollTarget, Effect, Msg, Screen};
 use board_tui::editor::FakeEditor;
 use board_tui::forms::{ChoiceVal, FieldId, FieldKind, Form, FormKind, Submit};
 use board_tui::testkit::demo_client;
@@ -111,6 +111,132 @@ fn column_navigation_wraps() {
     assert_eq!(app.sel_col, 1);
     update(&mut app, key(KeyCode::Char('h')));
     assert_eq!(app.sel_col, 0);
+}
+
+#[test]
+fn archive_filter_defaults_active_and_cycles_all_then_archived() {
+    let mut client = demo_client().unwrap();
+    let done = client
+        .board_get()
+        .unwrap()
+        .columns
+        .into_iter()
+        .find(|column| column.name == "Done")
+        .unwrap();
+    let card = client.card_list(Some(done.id)).unwrap()[0].clone();
+    client.card_archive(card.id, true).unwrap();
+    let mut app = App::new(client.board_get().unwrap());
+
+    assert_eq!(app.card_filter, CardFilter::Active);
+    assert!(app.cards_of(done.id).is_empty());
+
+    let effects = update(&mut app, key(KeyCode::Char('v')));
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::SetPaneTitle(CardFilter::All)]
+    ));
+    assert_eq!(app.card_filter, CardFilter::All);
+    assert_eq!(app.cards_of(done.id).len(), 1);
+
+    let effects = update(&mut app, key(KeyCode::Char('v')));
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::SetPaneTitle(CardFilter::Archived)]
+    ));
+    assert_eq!(app.card_filter, CardFilter::Archived);
+    assert_eq!(app.cards_of(done.id).len(), 1);
+
+    let effects = update(&mut app, key(KeyCode::Char('v')));
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::SetPaneTitle(CardFilter::Active)]
+    ));
+    assert_eq!(app.card_filter, CardFilter::Active);
+}
+
+#[test]
+fn archive_shortcut_archives_and_restores_selected_card() {
+    let mut app = demo_app();
+    let card_id = app.selected_card_id().unwrap();
+    let effects = update(&mut app, key(KeyCode::Char('a')));
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::CardArchive { id, archived: true }] if *id == card_id
+    ));
+
+    app.board
+        .cards
+        .iter_mut()
+        .find(|card| card.id == card_id)
+        .unwrap()
+        .archived_at = Some("2026-07-14 12:00:00".into());
+    app.card_filter = CardFilter::Archived;
+    let effects = update(&mut app, key(KeyCode::Char('a')));
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::CardArchive { id, archived: false }] if *id == card_id
+    ));
+}
+
+#[test]
+fn archived_card_must_be_restored_before_moving() {
+    let mut client = demo_client().unwrap();
+    let board = client.board_get().unwrap();
+    let done_idx = board
+        .columns
+        .iter()
+        .position(|column| column.name == "Done")
+        .unwrap();
+    let card = board
+        .cards
+        .iter()
+        .find(|card| card.column_id == board.columns[done_idx].id)
+        .unwrap();
+    client.card_archive(card.id, true).unwrap();
+    let mut app = App::new(client.board_get().unwrap());
+    app.card_filter = CardFilter::All;
+    app.sel_col = done_idx;
+
+    let effects = update(&mut app, key(KeyCode::Char('m')));
+    assert!(effects.is_empty());
+    assert_eq!(app.screen, Screen::Board);
+    assert!(app.toast.as_ref().is_some_and(|toast| {
+        toast.is_error && toast.text.contains("restore archived card before moving")
+    }));
+}
+
+#[test]
+fn deleting_column_accounts_for_archived_cards_hidden_by_filter() {
+    let mut client = demo_client().unwrap();
+    let board = client.board_get().unwrap();
+    let done_idx = board
+        .columns
+        .iter()
+        .position(|column| column.name == "Done")
+        .unwrap();
+    let card = board
+        .cards
+        .iter()
+        .find(|card| card.column_id == board.columns[done_idx].id)
+        .unwrap();
+    client.card_archive(card.id, true).unwrap();
+    let mut app = App::new(client.board_get().unwrap());
+    app.sel_col = done_idx;
+    assert!(app.cards_of(board.columns[done_idx].id).is_empty());
+
+    update(&mut app, key(KeyCode::Char('D')));
+    assert_eq!(app.screen, Screen::Picker);
+}
+
+#[test]
+fn archive_shortcut_rejects_busy_card() {
+    let mut app = demo_app();
+    update(&mut app, key(KeyCode::Right)); // Plan's running card
+    let effects = update(&mut app, key(KeyCode::Char('a')));
+    assert!(effects.is_empty());
+    assert!(app.toast.as_ref().is_some_and(|toast| {
+        toast.is_error && toast.text.contains("cancel it before archiving")
+    }));
 }
 
 #[test]

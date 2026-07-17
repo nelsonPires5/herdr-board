@@ -11,7 +11,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, DetailScrollTarget, Screen};
+use crate::app::{App, CardFilter, DetailScrollTarget, Screen};
 use crate::forms::{FieldKind, Form};
 
 const MIN_COL_W: u16 = 26;
@@ -192,15 +192,30 @@ fn draw_board(app: &App, f: &mut Frame, area: Rect) {
         }
     }
 
-    if app.is_empty_board() {
+    let visible_cards = app
+        .board
+        .columns
+        .iter()
+        .map(|column| app.cards_of(column.id).len())
+        .sum::<usize>();
+    if app.is_empty_board() || visible_cards == 0 {
         let m = main_area(area);
+        let (message, actions) = if app.is_empty_board() {
+            ("Board is empty.", "N: new column  ·  T: apply template")
+        } else {
+            match app.card_filter {
+                CardFilter::Active => ("No active cards.", "v: show all / archived"),
+                CardFilter::All => ("No cards.", "n: new card"),
+                CardFilter::Archived => ("No archived cards.", "v: change view"),
+            }
+        };
         let hint = Paragraph::new(vec![
             Line::from(""),
             Line::from(Span::styled(
-                "Board is empty.",
+                message,
                 Style::default().add_modifier(Modifier::BOLD),
             )),
-            Line::from("N: new column  ·  T: apply template"),
+            Line::from(actions),
         ])
         .alignment(Alignment::Center);
         let box_area = centered_rect_abs(40, 5, m);
@@ -209,11 +224,18 @@ fn draw_board(app: &App, f: &mut Frame, area: Rect) {
 }
 
 fn draw_card(app: &App, f: &mut Frame, card: &Card, r: Rect, selected: bool) {
-    let (glyph, color) = status_glyph(card.status);
+    let archived = card.archived_at.is_some();
+    let (glyph, color) = if archived {
+        ('▣', Color::DarkGray)
+    } else {
+        status_glyph(card.status)
+    };
     // Selection gets its own background instead of REVERSED. This preserves
     // status foreground colors (especially idle) and avoids color inversion.
     let base = if selected {
         Style::default().fg(Color::White).bg(Color::Rgb(30, 41, 59))
+    } else if archived {
+        Style::default().fg(Color::DarkGray)
     } else {
         Style::default()
     };
@@ -223,13 +245,20 @@ fn draw_card(app: &App, f: &mut Frame, card: &Card, r: Rect, selected: bool) {
         base
     };
 
-    let mut status_spans = vec![
-        Span::raw("  "),
-        Span::styled(glyph.to_string(), Style::default().fg(color)),
-        Span::raw(" "),
-        Span::styled(card.status.as_str(), Style::default().fg(color)),
-    ];
-    if card.status == CardStatus::Running {
+    let mut status_spans = if archived {
+        vec![
+            Span::raw("  "),
+            Span::styled("▣ ARCHIVED", Style::default().fg(Color::DarkGray)),
+        ]
+    } else {
+        vec![
+            Span::raw("  "),
+            Span::styled(glyph.to_string(), Style::default().fg(color)),
+            Span::raw(" "),
+            Span::styled(card.status.as_str(), Style::default().fg(color)),
+        ]
+    };
+    if !archived && card.status == CardStatus::Running {
         let elapsed = parse_epoch(&card.updated_at)
             .map(|s| (app.now - s).max(0))
             .unwrap_or(0);
@@ -373,7 +402,7 @@ fn detail_section_title(name: &str, total: usize, offset: usize, visible: usize)
         (false, true) => " ↓",
         (false, false) => "",
     };
-    format!("{name} {total}{arrows}")
+    format!("{name}{arrows}")
 }
 
 fn push_detail_field(
@@ -421,6 +450,14 @@ fn draw_detail(app: &App, f: &mut Frame, area: Rect) {
         ),
         Span::raw("   "),
     ];
+    if card.archived_at.is_some() {
+        status_line.push(Span::styled(
+            "▣ ARCHIVED   ",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     push_detail_field(
         &mut status_line,
         "harness: ",
@@ -523,7 +560,7 @@ fn draw_detail(app: &App, f: &mut Frame, area: Rect) {
             Block::default()
                 .borders(Borders::TOP)
                 .border_style(Style::default().fg(if comments_active {
-                    Color::Rgb(255, 158, 100)
+                    Color::Blue
                 } else {
                     Color::Gray
                 }))
@@ -562,7 +599,7 @@ fn draw_detail(app: &App, f: &mut Frame, area: Rect) {
             Block::default()
                 .borders(Borders::TOP)
                 .border_style(Style::default().fg(if runs_active {
-                    Color::Rgb(255, 158, 100)
+                    Color::Blue
                 } else {
                     Color::Gray
                 }))
@@ -777,6 +814,8 @@ pub const HELP_KEYS: &[(&str, &str)] = &[
     ("N", "new column"),
     ("e", "edit card"),
     ("E", "edit focused column"),
+    ("a", "archive / restore card"),
+    ("v", "view active / all / archived"),
     ("d", "delete card"),
     ("D", "delete column (move cards / refuse if running)"),
     ("m", "move card (column picker)"),
@@ -788,6 +827,7 @@ pub const HELP_KEYS: &[(&str, &str)] = &[
     ("q / Esc", "back / quit"),
     ("--", "-- card detail --"),
     ("e", "edit card"),
+    ("a", "archive / restore card"),
     ("c", "add comment"),
     ("Tab", "focus comments / runs"),
     ("↑/↓ k/j", "scroll focused section"),
@@ -827,30 +867,10 @@ fn draw_footer(app: &App, f: &mut Frame, area: Rect) {
         );
         return;
     }
-    let hint = match app.screen {
-        Screen::Board => format!(
-            "n new card · e edit card · N new column · E edit column · m move · Enter detail · ? help · q quit · column {}/{}",
-            app.sel_col.saturating_add(1),
-            app.board.columns.len()
-        ),
-        Screen::CardDetail => format!(
-            "e edit card · c comment · Tab comments/runs · ↑/↓ scroll · f {} · o jump · x cancel · r retry · Esc back",
-            if app.detail_fullscreen {
-                "popup"
-            } else {
-                "fullscreen"
-            }
-        ),
-        Screen::CardForm | Screen::ColumnForm => {
-            "Tab field · Ctrl+E editor · Enter save · Esc cancel".to_string()
-        }
-        Screen::Picker => "↑/↓ select · Enter choose · Esc cancel".to_string(),
-        Screen::Confirm => "y yes · n no".to_string(),
-        Screen::Help => "any key to close".to_string(),
-    };
+    let hint = "? help";
     f.render_widget(
         Paragraph::new(Span::styled(
-            truncate(&hint, area.width as usize),
+            truncate(hint, area.width as usize),
             Style::default().fg(Color::DarkGray),
         )),
         rect,
@@ -908,4 +928,17 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     era * 146097 + doe - 719468
+}
+
+#[cfg(test)]
+mod tests {
+    use super::detail_section_title;
+
+    #[test]
+    fn detail_titles_show_only_overflow_arrows() {
+        assert_eq!(detail_section_title("comments", 3, 0, 3), "comments");
+        assert_eq!(detail_section_title("comments", 8, 0, 3), "comments ↓");
+        assert_eq!(detail_section_title("comments", 8, 2, 3), "comments ↑↓");
+        assert_eq!(detail_section_title("runs", 8, 5, 3), "runs ↑");
+    }
 }

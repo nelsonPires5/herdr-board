@@ -142,6 +142,18 @@ enum CardCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Archive an idle/failed card without deleting its history.
+    Archive {
+        id: i64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Restore an archived card to the active board.
+    Restore {
+        id: i64,
+        #[arg(long)]
+        json: bool,
+    },
     /// Show a card with comments and run history.
     Show {
         id: i64,
@@ -379,12 +391,24 @@ fn cmd_card(sub: CardCmd) -> Result<()> {
                 );
             }
         }
+        CardCmd::Archive { id, json } => card_archive(&mut c, id, true, json)?,
+        CardCmd::Restore { id, json } => card_archive(&mut c, id, false, json)?,
         CardCmd::Show { id, json } => {
             let d = c.card_get(id)?;
             if json {
                 print_json(&d)?;
             } else {
-                println!("#{} {}  [{}]", d.card.id, d.card.title, d.card.status);
+                println!(
+                    "#{} {}  [{}{}]",
+                    d.card.id,
+                    d.card.title,
+                    d.card.status,
+                    if d.card.archived_at.is_some() {
+                        ", archived"
+                    } else {
+                        ""
+                    }
+                );
                 if let Some(session) = &d.card.session {
                     println!("session: {session}");
                 }
@@ -432,13 +456,30 @@ fn cmd_card(sub: CardCmd) -> Result<()> {
                         .as_deref()
                         .map(|s| format!("\tsession={s}"))
                         .unwrap_or_default();
+                    let archived = if card.archived_at.is_some() {
+                        "\tarchived"
+                    } else {
+                        ""
+                    };
                     println!(
-                        "#{}\t[{}]\tcol={}\t{}{}",
-                        card.id, card.status, card.column_id, card.title, session
+                        "#{}\t[{}]\tcol={}\t{}{}{}",
+                        card.id, card.status, card.column_id, card.title, session, archived
                     );
                 }
             }
         }
+    }
+    Ok(())
+}
+
+fn card_archive(c: &mut UnixClient, id: i64, archived: bool, json: bool) -> Result<()> {
+    let card = c.card_archive(id, archived)?;
+    if json {
+        print_json(&card)?;
+    } else if archived {
+        println!("Archived card #{}", card.id);
+    } else {
+        println!("Restored card #{}", card.id);
     }
     Ok(())
 }

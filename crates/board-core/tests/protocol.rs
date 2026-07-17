@@ -1,8 +1,9 @@
 //! Serde round-trips for representative protocol messages.
 
 use board_core::protocol::{
-    BoardChangedReason, CardCreateParams, Effort, Event, HarnessCapabilitiesParams, Request,
-    Response, RpcError, RunOutcome, SpaceInfo, SpaceKind, SpaceListResult, Trigger,
+    BoardChangedReason, CardArchiveParams, CardCreateParams, Effort, Event,
+    HarnessCapabilitiesParams, Request, Response, RpcError, RunOutcome, SpaceInfo, SpaceKind,
+    SpaceListResult, Trigger,
 };
 use serde_json::json;
 
@@ -97,6 +98,19 @@ fn card_create_params_omit_none() {
     };
     let s = serde_json::to_string(&p).unwrap();
     assert_eq!(s, r#"{"title":"t"}"#);
+}
+
+#[test]
+fn card_archive_params_roundtrip() {
+    let p = CardArchiveParams {
+        id: 42,
+        archived: true,
+    };
+    roundtrip(&p);
+    assert_eq!(
+        serde_json::to_string(&p).unwrap(),
+        r#"{"id":42,"archived":true}"#
+    );
 }
 
 #[test]

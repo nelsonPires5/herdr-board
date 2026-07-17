@@ -7,8 +7,8 @@ use std::sync::Arc;
 use board_core::capability::capabilities_for;
 use board_core::db::BOARD_ID;
 use board_core::engine::{
-    decide_entry, validate_card_edit, validate_card_space, validate_column_delete,
-    validate_column_permission_override,
+    decide_entry, validate_card_archive, validate_card_edit, validate_card_space,
+    validate_column_delete, validate_column_permission_override,
 };
 use board_core::protocol::*;
 use board_core::{Error, Result};
@@ -36,6 +36,7 @@ pub fn handle_request(d: &Arc<Daemon>, method: &str, params: Value) -> Result<Va
         "card.create" => card_create(d, from(params)?),
         "card.update" => card_update(d, from(params)?),
         "card.delete" => card_delete(d, from(params)?),
+        "card.archive" => card_archive(d, from(params)?),
         "card.move" => card_move(d, from(params)?),
         "card.get" => card_get(d, from(params)?),
         "card.list" => card_list(d, from(params)?),
@@ -192,8 +193,28 @@ fn card_delete(d: &Arc<Daemon>, p: CardIdParams) -> Result<Value> {
     Ok(json!(DeletedResult { deleted: true }))
 }
 
+fn card_archive(d: &Arc<Daemon>, p: CardArchiveParams) -> Result<Value> {
+    let card = require_card(d, p.id)?;
+    if p.archived {
+        validate_card_archive(card.status)?;
+        if d.store.lock().active_run_for_card(p.id)?.is_some() {
+            return Err(Error::InvalidState(
+                "card has an active run; cancel it before archiving".into(),
+            ));
+        }
+    }
+    let card = d.store.lock().set_card_archived(p.id, p.archived)?;
+    d.emit_changed(BoardChangedReason::CardArchived, Some(p.id), None);
+    Ok(json!(card))
+}
+
 fn card_move(d: &Arc<Daemon>, p: CardMoveParams) -> Result<Value> {
-    require_card(d, p.id)?;
+    let current = require_card(d, p.id)?;
+    if current.archived_at.is_some() {
+        return Err(Error::InvalidState(
+            "archived card must be restored before moving".into(),
+        ));
+    }
     let target = require_column(d, p.column_id)?;
     let card = d.store.lock().move_card(p.id, p.column_id, p.position)?;
     d.emit_changed(
@@ -294,6 +315,11 @@ fn run_cancel(d: &Arc<Daemon>, p: RunCardParams) -> Result<Value> {
 
 fn run_retry(d: &Arc<Daemon>, p: RunCardParams) -> Result<Value> {
     let card = require_card(d, p.card_id)?;
+    if card.archived_at.is_some() {
+        return Err(Error::InvalidState(
+            "archived card must be restored before retrying".into(),
+        ));
+    }
     if matches!(card.status, CardStatus::Running | CardStatus::Queued) {
         return Err(Error::InvalidState(
             "card is running or queued; cannot retry".into(),
@@ -438,6 +464,41 @@ mod tests {
             msg.contains("claude"),
             "message lists known harnesses: {msg}"
         );
+    }
+
+    #[test]
+    fn card_archive_roundtrip_and_busy_rejection() {
+        let d = test_daemon(Config::default());
+        let created = handle_request(&d, "card.create", json!({ "title": "archive me" })).unwrap();
+        let id = created["id"].as_i64().unwrap();
+
+        let archived =
+            handle_request(&d, "card.archive", json!({ "id": id, "archived": true })).unwrap();
+        assert!(archived["archived_at"].is_string());
+
+        let restored =
+            handle_request(&d, "card.archive", json!({ "id": id, "archived": false })).unwrap();
+        assert!(restored["archived_at"].is_null());
+
+        d.store
+            .lock()
+            .set_card_status(id, CardStatus::Running)
+            .unwrap();
+        let err =
+            handle_request(&d, "card.archive", json!({ "id": id, "archived": true })).unwrap_err();
+        assert_eq!(err.code(), 3);
+        assert!(err.to_string().contains("cancel it before archiving"));
+    }
+
+    #[test]
+    fn archived_card_cannot_move_until_restored() {
+        let d = test_daemon(Config::default());
+        let created = handle_request(&d, "card.create", json!({ "title": "inert" })).unwrap();
+        let id = created["id"].as_i64().unwrap();
+        handle_request(&d, "card.archive", json!({ "id": id, "archived": true })).unwrap();
+        let err = handle_request(&d, "card.move", json!({ "id": id, "column_id": 1 })).unwrap_err();
+        assert_eq!(err.code(), 3);
+        assert!(err.to_string().contains("restored before moving"));
     }
 
     #[test]

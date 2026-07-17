@@ -16,6 +16,7 @@ pub mod testkit;
 pub mod view;
 
 use std::io::Stdout;
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -31,7 +32,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::Terminal;
 
-use crate::app::{clamp_selection, update, App, Effect, Msg};
+use crate::app::{clamp_selection, update, App, CardFilter, Effect, Msg};
 use crate::editor::{EditorLauncher, RealEditor};
 use crate::view::view;
 
@@ -56,11 +57,13 @@ impl Driver {
         editor: Box<dyn EditorLauncher>,
     ) -> Result<Driver> {
         let board = client.board_get()?;
-        Ok(Driver {
+        let mut driver = Driver {
             app: App::new(board),
             client,
             editor,
-        })
+        };
+        driver.set_pane_title(CardFilter::Active);
+        Ok(driver)
     }
 
     /// Feed one synthetic message: run the reducer, then apply its effects.
@@ -134,6 +137,21 @@ impl Driver {
                     self.refetch();
                 }
             }
+            Effect::CardArchive { id, archived } => {
+                let r = self.client.card_archive(id, archived);
+                if self.guard(r).is_some() {
+                    self.refetch();
+                    self.reload_open_detail();
+                    self.app.set_toast(
+                        if archived {
+                            "card archived"
+                        } else {
+                            "card restored"
+                        },
+                        false,
+                    );
+                }
+            }
             Effect::CardMove(p) => {
                 let r = self.client.card_move(&p);
                 if self.guard(r).is_some() {
@@ -200,8 +218,28 @@ impl Driver {
             }
             Effect::EditFocusedTextArea => self.edit_focused(),
             Effect::LoadFormOptions => self.load_form_options(),
+            Effect::SetPaneTitle(filter) => self.set_pane_title(filter),
             Effect::Quit => self.app.should_quit = true,
         }
+    }
+
+    /// Update the label rendered by Herdr in the pane border. Outside a Herdr
+    /// plugin pane (tests, examples, standalone TUI) this is deliberately a no-op.
+    fn set_pane_title(&mut self, filter: CardFilter) {
+        if std::env::var("HERDR_PLUGIN_ID").as_deref() != Ok("herdr-board") {
+            return;
+        }
+        let Ok(pane_id) = std::env::var("HERDR_PANE_ID") else {
+            return;
+        };
+        let bin = std::env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_string());
+        let title = format!("Board [{}]", filter.label());
+        let _ = Command::new(bin)
+            .args(["pane", "rename", &pane_id, &title])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
 
     /// Fetch the capability catalog + workspace list for the open card form and
