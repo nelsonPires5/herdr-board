@@ -3,13 +3,14 @@
 
 use board_core::capability::{HarnessCapabilities, ModelInfo};
 use board_core::client::BoardClient;
-use board_core::protocol::{Effort, SpaceInfo};
-use board_tui::app::{update, App, Effect, Msg, Screen};
+use board_core::protocol::{Effort, RunOutcome, SpaceInfo};
+use board_tui::app::{update, App, DetailScrollTarget, Effect, Msg, Screen};
 use board_tui::editor::FakeEditor;
-use board_tui::forms::{ChoiceVal, FieldId, FieldKind, Form, Submit};
+use board_tui::forms::{ChoiceVal, FieldId, FieldKind, Form, FormKind, Submit};
 use board_tui::testkit::demo_client;
 use board_tui::Driver;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Rect;
 
 fn key(code: KeyCode) -> Msg {
     Msg::Key(KeyEvent::new(code, KeyModifiers::empty()))
@@ -69,6 +70,31 @@ fn is_choice(form: &Form, id: FieldId) -> bool {
 }
 
 #[test]
+fn board_layout_always_fills_available_width() {
+    let mut app = demo_app();
+
+    let area = Rect::new(0, 0, 121, 35);
+    let layout = board_tui::view::board_layout(&app, area);
+    assert_eq!(layout.cols.first().unwrap().rect.x, area.x);
+    let last = layout.cols.last().unwrap().rect;
+    assert_eq!(last.x + last.width, area.x + area.width);
+
+    // When not every column fits, the selected column drives a full-width
+    // window rather than leaving a partial final page.
+    app.sel_col = app.board.columns.len() - 1;
+    let layout = board_tui::view::board_layout(&app, area);
+    assert_eq!(layout.cols.last().unwrap().idx, app.sel_col);
+    let last = layout.cols.last().unwrap().rect;
+    assert_eq!(last.x + last.width, area.x + area.width);
+
+    // A single-column board also consumes the entire viewport.
+    let mut client = board_core::client::FakeBoardClient::new().unwrap();
+    let single = App::new(client.board_get().unwrap());
+    let layout = board_tui::view::board_layout(&single, area);
+    assert_eq!(layout.cols[0].rect.width, area.width);
+}
+
+#[test]
 fn column_navigation_wraps() {
     let mut app = demo_app();
     let n = app.board.columns.len();
@@ -115,6 +141,194 @@ fn switching_columns_clamps_card_index() {
     update(&mut app, key(KeyCode::Right)); // Review
     update(&mut app, key(KeyCode::Right)); // Human Review
     assert_eq!(app.sel_card, 0);
+}
+
+#[test]
+fn card_detail_toggles_popup_and_fullscreen() {
+    let mut app = demo_app();
+    app.screen = Screen::CardDetail;
+    assert!(!app.detail_fullscreen);
+
+    update(&mut app, key(KeyCode::Char('f')));
+    assert!(app.detail_fullscreen);
+    update(&mut app, key(KeyCode::Char('f')));
+    assert!(!app.detail_fullscreen);
+}
+
+#[test]
+fn card_detail_edit_opens_form_and_returns_to_detail() {
+    let mut client = demo_client().unwrap();
+    let board = client.board_get().unwrap();
+    let card_id = board.cards[0].id;
+    let detail = client.card_get(card_id).unwrap();
+    let mut app = App::new(board);
+    app.detail = Some(detail);
+    app.screen = Screen::CardDetail;
+
+    let effects = update(&mut app, key(KeyCode::Char('e')));
+    assert_eq!(app.screen, Screen::CardForm);
+    assert!(matches!(
+        app.form.as_ref().map(|form| form.kind),
+        Some(FormKind::CardEdit { card_id: id }) if id == card_id
+    ));
+    assert!(matches!(effects.as_slice(), [Effect::LoadFormOptions]));
+
+    update(&mut app, key(KeyCode::Esc));
+    assert_eq!(app.screen, Screen::CardDetail);
+}
+
+#[test]
+fn card_detail_scrolls_comments_and_runs_independently() {
+    let mut client = demo_client().unwrap();
+    let board = client.board_get().unwrap();
+    let card = board
+        .cards
+        .iter()
+        .find(|card| card.status == board_core::protocol::CardStatus::Failed)
+        .unwrap()
+        .clone();
+    for i in 0..20 {
+        client
+            .comment_add(card.id, &format!("extra comment {i}"), Some("test"))
+            .unwrap();
+        let run = client
+            .db()
+            .create_run(card.id, card.column_id, "claude", "[]", "p", None, None)
+            .unwrap();
+        client.db().start_run(run.id, None, None).unwrap();
+        client
+            .db()
+            .finish_run(run.id, RunOutcome::Ok, Some("done"))
+            .unwrap();
+    }
+    let detail = client.card_get(card.id).unwrap();
+    let mut app = App::new(board);
+    app.detail = Some(detail);
+    app.screen = Screen::CardDetail;
+
+    update(&mut app, key(KeyCode::Down));
+    assert!(app.detail_comments_scroll > 0);
+    assert_eq!(app.detail_runs_scroll, 0);
+
+    let comments_scroll = app.detail_comments_scroll;
+    update(&mut app, key(KeyCode::Tab));
+    assert_eq!(app.detail_scroll_target, DetailScrollTarget::Runs);
+    update(&mut app, key(KeyCode::Down));
+    assert_eq!(app.detail_comments_scroll, comments_scroll);
+    assert!(app.detail_runs_scroll > 0);
+}
+
+#[test]
+fn opening_detail_starts_comments_and_runs_at_latest() {
+    let mut client = demo_client().unwrap();
+    let board = client.board_get().unwrap();
+    let card = board
+        .cards
+        .iter()
+        .find(|card| card.status == board_core::protocol::CardStatus::Failed)
+        .unwrap()
+        .clone();
+    for i in 0..20 {
+        client
+            .comment_add(card.id, &format!("comment {i}"), Some("test"))
+            .unwrap();
+        let run = client
+            .db()
+            .create_run(card.id, card.column_id, "claude", "[]", "p", None, None)
+            .unwrap();
+        client.db().start_run(run.id, None, None).unwrap();
+        client
+            .db()
+            .finish_run(run.id, RunOutcome::Ok, Some("done"))
+            .unwrap();
+    }
+    let mut driver = driver_of(client);
+    driver.handle(key(KeyCode::Right));
+    driver.handle(key(KeyCode::Right));
+    driver.handle(key(KeyCode::Right));
+    driver.handle(key(KeyCode::Enter));
+
+    let detail = driver.app.detail.as_ref().unwrap();
+    let layout = board_tui::view::detail_layout(&driver.app, driver.app.last_area);
+    let comments_visible = layout.comments.height.saturating_sub(1) as usize;
+    let runs_visible = layout.runs.height.saturating_sub(1) as usize;
+    assert_eq!(
+        driver.app.detail_comments_scroll + comments_visible,
+        detail.comments.len()
+    );
+    assert_eq!(
+        driver.app.detail_runs_scroll + runs_visible,
+        detail.runs.len()
+    );
+    assert_eq!(
+        detail.comments.last().unwrap().body,
+        "comment 19",
+        "comments remain oldest-to-newest"
+    );
+}
+
+#[test]
+fn shrinking_detail_to_popup_reanchors_history_to_latest() {
+    let mut client = demo_client().unwrap();
+    let board = client.board_get().unwrap();
+    let card = board
+        .cards
+        .iter()
+        .find(|card| card.status == board_core::protocol::CardStatus::Failed)
+        .unwrap()
+        .clone();
+    for i in 0..20 {
+        client
+            .comment_add(card.id, &format!("comment {i}"), Some("test"))
+            .unwrap();
+        let run = client
+            .db()
+            .create_run(card.id, card.column_id, "claude", "[]", "p", None, None)
+            .unwrap();
+        client.db().start_run(run.id, None, None).unwrap();
+        client
+            .db()
+            .finish_run(run.id, RunOutcome::Ok, Some("done"))
+            .unwrap();
+    }
+    let detail = client.card_get(card.id).unwrap();
+    let mut app = App::new(board);
+    app.last_area = Rect::new(0, 0, 254, 67);
+    app.detail = Some(detail);
+    app.screen = Screen::CardDetail;
+    app.detail_fullscreen = true;
+    app.scroll_detail_to_latest();
+
+    update(&mut app, key(KeyCode::Char('f')));
+
+    let detail = app.detail.as_ref().unwrap();
+    let layout = board_tui::view::detail_layout(&app, app.last_area);
+    let comments_visible = layout.comments.height.saturating_sub(1) as usize;
+    let runs_visible = layout.runs.height.saturating_sub(1) as usize;
+    assert_eq!(
+        app.detail_comments_scroll + comments_visible,
+        detail.comments.len()
+    );
+    assert_eq!(app.detail_runs_scroll + runs_visible, detail.runs.len());
+}
+
+#[test]
+fn card_detail_title_action_is_clickable() {
+    let mut app = demo_app();
+    app.screen = Screen::CardDetail;
+    let button = board_tui::view::detail_toggle_rect(&app, app.last_area);
+
+    update(
+        &mut app,
+        Msg::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: button.x,
+            row: button.y,
+            modifiers: KeyModifiers::empty(),
+        }),
+    );
+
+    assert!(app.detail_fullscreen);
 }
 
 #[test]

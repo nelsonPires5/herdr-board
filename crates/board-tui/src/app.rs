@@ -10,7 +10,7 @@ use board_core::protocol::{BoardSnapshot, CardDetail, CardMoveParams, CardStatus
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
-use crate::forms::{FieldId, FieldKind, Form, FormKind, Submit};
+use crate::forms::{FieldId, FieldKind, Form, Submit};
 
 /// Which modal/screen is active.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -22,6 +22,12 @@ pub enum Screen {
     Picker,
     Confirm,
     Help,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DetailScrollTarget {
+    Comments,
+    Runs,
 }
 
 /// A synthetic event fed to [`update`].
@@ -122,7 +128,14 @@ pub struct App {
     pub sel_col: usize,
     pub sel_card: usize,
     pub detail: Option<CardDetail>,
+    /// Card detail opens as a contextual popup; users can expand it in place.
+    pub detail_fullscreen: bool,
+    pub detail_scroll_target: DetailScrollTarget,
+    pub detail_comments_scroll: usize,
+    pub detail_runs_scroll: usize,
     pub form: Option<Form>,
+    /// Forms opened from card detail return there on save/cancel.
+    pub form_from_detail: bool,
     pub picker: Option<Picker>,
     pub confirm: Option<Confirm>,
     pub drag: Option<DragState>,
@@ -145,7 +158,12 @@ impl App {
             sel_col: 0,
             sel_card: 0,
             detail: None,
+            detail_fullscreen: false,
+            detail_scroll_target: DetailScrollTarget::Comments,
+            detail_comments_scroll: 0,
+            detail_runs_scroll: 0,
             form: None,
+            form_from_detail: false,
             picker: None,
             confirm: None,
             drag: None,
@@ -198,6 +216,24 @@ impl App {
             is_error,
             at: self.now,
         });
+    }
+
+    /// Keep chronological order (oldest → newest) and open both histories at
+    /// their bottom so the most recent item is always the last visible row.
+    pub fn scroll_detail_to_latest(&mut self) {
+        let Some(detail) = &self.detail else { return };
+        let comments_total = detail.comments.len();
+        let runs_total = detail.runs.len();
+        let layout = crate::view::detail_layout(self, self.last_area);
+        let comments_visible = layout.comments.height.saturating_sub(1) as usize;
+        let runs_visible = layout.runs.height.saturating_sub(1) as usize;
+        self.detail_comments_scroll = comments_total.saturating_sub(comments_visible.max(1));
+        self.detail_runs_scroll = runs_total.saturating_sub(runs_visible.max(1));
+    }
+
+    fn toggle_detail_fullscreen(&mut self) {
+        self.detail_fullscreen = !self.detail_fullscreen;
+        self.scroll_detail_to_latest();
     }
 
     // -- navigation ----------------------------------------------------------
@@ -314,17 +350,20 @@ fn board_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
         KeyCode::Down | KeyCode::Char('j') => app.move_card(1),
         KeyCode::Char('n') => {
             if let Some(col_id) = app.col_id_at(app.sel_col) {
+                app.form_from_detail = false;
                 app.form = Some(Form::card_create(col_id));
                 app.screen = Screen::CardForm;
                 return vec![Effect::LoadFormOptions];
             }
         }
         KeyCode::Char('N') => {
+            app.form_from_detail = false;
             app.form = Some(Form::column_create(&app.board.columns));
             app.screen = Screen::ColumnForm;
         }
         KeyCode::Char('e') => {
             if let Some(card) = app.selected_card().cloned() {
+                app.form_from_detail = false;
                 app.form = Some(Form::card_edit(&card));
                 app.screen = Screen::CardForm;
                 return vec![Effect::LoadFormOptions];
@@ -332,6 +371,7 @@ fn board_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
         }
         KeyCode::Char('E') => {
             if let Some(col) = app.board.columns.get(app.sel_col).cloned() {
+                app.form_from_detail = false;
                 app.form = Some(Form::column_edit(&col, &app.board.columns));
                 app.screen = Screen::ColumnForm;
             }
@@ -351,6 +391,10 @@ fn board_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
         KeyCode::Char('L') => return shove_card(app, 1),
         KeyCode::Enter => {
             if let Some(id) = app.selected_card_id() {
+                app.detail_fullscreen = false;
+                app.detail_scroll_target = DetailScrollTarget::Comments;
+                app.detail_comments_scroll = 0;
+                app.detail_runs_scroll = 0;
                 app.screen = Screen::CardDetail;
                 return vec![Effect::LoadDetail(id)];
             }
@@ -462,9 +506,30 @@ fn detail_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
         KeyCode::Esc | KeyCode::Char('q') => {
             app.screen = Screen::Board;
             app.detail = None;
+            app.detail_fullscreen = false;
+            app.detail_comments_scroll = 0;
+            app.detail_runs_scroll = 0;
+        }
+        KeyCode::Char('f') => app.toggle_detail_fullscreen(),
+        KeyCode::Tab => {
+            app.detail_scroll_target = match app.detail_scroll_target {
+                DetailScrollTarget::Comments => DetailScrollTarget::Runs,
+                DetailScrollTarget::Runs => DetailScrollTarget::Comments,
+            };
+        }
+        KeyCode::Up | KeyCode::Char('k') => scroll_detail(app, -1),
+        KeyCode::Down | KeyCode::Char('j') => scroll_detail(app, 1),
+        KeyCode::Char('e') => {
+            if let Some(card) = app.detail.as_ref().map(|d| d.card.clone()) {
+                app.form_from_detail = true;
+                app.form = Some(Form::card_edit(&card));
+                app.screen = Screen::CardForm;
+                return vec![Effect::LoadFormOptions];
+            }
         }
         KeyCode::Char('c') => {
             if let Some(id) = card_id {
+                app.form_from_detail = true;
                 app.form = Some(Form::comment(id));
                 app.screen = Screen::CardForm;
             }
@@ -490,6 +555,25 @@ fn detail_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
         _ => {}
     }
     vec![]
+}
+
+fn scroll_detail(app: &mut App, delta: isize) {
+    let Some(detail) = &app.detail else { return };
+    let layout = crate::view::detail_layout(app, app.last_area);
+    let (offset, total, visible) = match app.detail_scroll_target {
+        DetailScrollTarget::Comments => (
+            &mut app.detail_comments_scroll,
+            detail.comments.len(),
+            layout.comments.height.saturating_sub(1) as usize,
+        ),
+        DetailScrollTarget::Runs => (
+            &mut app.detail_runs_scroll,
+            detail.runs.len(),
+            layout.runs.height.saturating_sub(1) as usize,
+        ),
+    };
+    let max = total.saturating_sub(visible.max(1));
+    *offset = (*offset as isize + delta).clamp(0, max as isize) as usize;
 }
 
 fn form_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
@@ -573,12 +657,9 @@ fn submit_form(app: &mut App) -> Vec<Effect> {
 }
 
 fn close_form(app: &mut App, _submitted: bool) {
-    // Comment forms return to the card detail they came from; others to the board.
-    let back_to_detail = matches!(
-        app.form.as_ref().map(|f| f.kind),
-        Some(FormKind::Comment { .. })
-    );
+    let back_to_detail = app.form_from_detail;
     app.form = None;
+    app.form_from_detail = false;
     app.screen = if back_to_detail {
         Screen::CardDetail
     } else {
@@ -672,6 +753,45 @@ fn confirm_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
 // -- mouse -------------------------------------------------------------------
 
 fn on_mouse(app: &mut App, m: MouseEvent) -> Vec<Effect> {
+    if app.screen == Screen::CardDetail {
+        let detail_layout = crate::view::detail_layout(app, app.last_area);
+        let in_rect = |rect: Rect| {
+            m.column >= rect.x
+                && m.column < rect.x.saturating_add(rect.width)
+                && m.row >= rect.y
+                && m.row < rect.y.saturating_add(rect.height)
+        };
+        match m.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if in_rect(crate::view::detail_toggle_rect(app, app.last_area)) {
+                    app.toggle_detail_fullscreen();
+                } else if in_rect(detail_layout.comments) {
+                    app.detail_scroll_target = DetailScrollTarget::Comments;
+                } else if in_rect(detail_layout.runs) {
+                    app.detail_scroll_target = DetailScrollTarget::Runs;
+                }
+            }
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+                if in_rect(detail_layout.comments) {
+                    app.detail_scroll_target = DetailScrollTarget::Comments;
+                } else if in_rect(detail_layout.runs) {
+                    app.detail_scroll_target = DetailScrollTarget::Runs;
+                } else {
+                    return vec![];
+                }
+                scroll_detail(
+                    app,
+                    if matches!(m.kind, MouseEventKind::ScrollDown) {
+                        1
+                    } else {
+                        -1
+                    },
+                );
+            }
+            _ => {}
+        }
+        return vec![];
+    }
     if app.screen != Screen::Board {
         return vec![];
     }
@@ -691,6 +811,10 @@ fn on_mouse(app: &mut App, m: MouseEvent) -> Vec<Effect> {
                 app.last_click = Some((m.column, m.row, app.now_ms));
                 if dbl {
                     if let Some(id) = app.selected_card_id() {
+                        app.detail_fullscreen = false;
+                        app.detail_scroll_target = DetailScrollTarget::Comments;
+                        app.detail_comments_scroll = 0;
+                        app.detail_runs_scroll = 0;
                         app.screen = Screen::CardDetail;
                         return vec![Effect::LoadDetail(id)];
                     }

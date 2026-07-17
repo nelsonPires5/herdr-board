@@ -92,6 +92,7 @@ impl Driver {
         let r = self.client.card_get(id);
         if let Some(detail) = self.guard(r) {
             self.app.detail = Some(detail);
+            self.app.scroll_detail_to_latest();
         }
     }
 
