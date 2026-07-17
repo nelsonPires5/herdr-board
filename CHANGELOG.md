@@ -17,6 +17,8 @@ All notable changes to this project are documented here. The format is based on
   directional arrows (no counts) when content is hidden.
 
 ### Changed
+- Reorganized the README around installation and first use, with real TUI screenshots and
+  collapsible advanced reference sections.
 - The board now distributes visible columns across the full viewport, uses higher-contrast
   status-rich cards, and shows card counts in column headers.
 - Detail sections and status metadata have clearer visual hierarchy; forms, pickers, and help size
