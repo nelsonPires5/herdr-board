@@ -12,7 +12,7 @@ name = "Herdr Board"
 version = "0.2.0"
 description = "Kanban board for AI coding agents: cards are prompts, columns are pipeline stages; moving a card dispatches an agent into a herdr pane."
 min_herdr_version = "0.7.0"
-platforms = ["linux"]
+platforms = ["linux", "macos"]
 
 # Build the `board` binary at install time (idempotent: cargo no-ops when nothing
 # changed). Produces target/release/board, which the pane command below runs.
