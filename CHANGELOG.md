@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-17
+
 ### Added
 - Cards can be archived/restored without losing comments or run history. The TUI uses `a` to
   toggle archive state and `v` to cycle `ACTIVE` / `ALL` / `ARCHIVED`; the current filter appears
@@ -102,7 +104,8 @@ a visible herdr pane. Ships as a single `board` binary (TUI + daemon + CLI) and 
 - **Packaging.** `herdr-plugin.toml` manifest, and `scripts/` for build, install (guarded behind
   `--yes`), the open-or-focus launcher, a raw protocol client, and a live-herdr e2e smoke test.
 
-[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.4.0
 [0.3.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.3.0
 [0.2.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.2.0
 [0.1.1]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.1.1
