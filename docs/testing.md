@@ -104,13 +104,14 @@ case ↔ scenario ↔ status catalog):
 | `08-column-timeout.sh` | A run past its column `timeout_minutes` is killed and follows `on_fail`. |
 | `09-comment-context.sh` | A stage-1 comment flows into the stage-2 run's `prompt_snapshot` (`## Card comments`). |
 | `10-archive-filter-title.sh` | Archive filter → dynamic Herdr pane title (`Board [ACTIVE/ALL/ARCHIVED]`) + minimal footer. |
-| `run-all.sh` | Builds once, runs every scenario, prints a PASS/FAIL/SKIP summary. |
+| `11-pi-harness.sh` | Built-in Pi mint/retry through real Herdr with `e2e/fake-bin/pi`; validates model, low thinking, protocol prompt, safe positional prompt, comments, and fork target without provider cost. |
+| `real-pi-smoke.sh` | Separate opt-in (`E2E_REAL_PI=1`) real-provider poem smoke; never included by `run-all.sh`. |
+| `run-all.sh` | Builds once, runs every standard no-cost scenario, prints a PASS/FAIL/SKIP summary. |
 
-The `idle-lost` watchdog has **no** live scenario — it keys off herdr
-`pane.agent_status_changed`, which a bash fake harness never emits (panes report
-`agent_status "unknown"`), so it cannot fire without a real harness status
-integration. See [`e2e/README.md`](../e2e/README.md) for the full use case ↔
-scenario ↔ status catalog, including that gap.
+The `idle-lost` watchdog has no standard live scenario because a fake executable does not emit
+integration status. Deterministic daemon tests cover working→running, blocked, idle grace→lost,
+and pane exit without sleeps. The opt-in real-Pi smoke records live status when observable but
+does not require sampling `working` from a fast run.
 
 `scripts/e2e.sh` is a thin compat wrapper that `exec`s `run-all.sh`.
 
@@ -133,12 +134,10 @@ scenario ↔ status catalog, including that gap.
   `BOARD_SPAWNER=herdr`. The daemon it starts is entirely separate from your real
   board — it never reads your board db or socket. (`/tmp`, not `$TMPDIR`: AF_UNIX
   socket paths cap at ~108 chars.)
-- **Fake harness via config argv.** herdr agent panes do **not** inherit the
-  workspace's env — they only get what the daemon injects at `agent.start`
-  (`BOARD_CARD_ID`/`BOARD_RUN_ID`/`BOARD_SOCKET`). So `lib.sh` bakes `BOARD_BIN`
-  (and any `E2E_FAKE_ENV` knobs like `FAKE_AGENT_HOLD`) into an `env` wrapper in
-  the harness argv:
-  `argv = ["env", "BOARD_BIN=…", "FAKE_AGENT_HOLD=300", "bash", "fake-agent.sh"]`.
+- **Fake harnesses.** Config harness `fake` uses an env-wrapped bash script. For built-in Pi,
+  `run-all.sh` prepends checked-in `e2e/fake-bin/pi` and the candidate board directory to the
+  disposable Herdr server's PATH before boot; it never replaces the user's installed Pi. The fake
+  records argv under the scenario temp dir and calls the isolated `board comment`/`board done`.
 - **Disposable workspaces + trap cleanup.** Every workspace the suite creates is
   registered for close via `e2e_defer`; `e2e_cleanup` (installed by `e2e_init`)
   runs the deferred commands in reverse on `EXIT` — workspaces close, then the
@@ -230,9 +229,10 @@ e2e/run-all.sh --keep           # keep sessions + workspaces for review
 e2e/run-all.sh 04 07            # only scenarios matching a filename filter
 scripts/e2e.sh                  # compat wrapper -> run-all.sh
 bash e2e/01-core.sh             # a single scenario (boots its own ephemeral session)
+E2E_REAL_PI=1 e2e/real-pi-smoke.sh  # explicit real-provider opt-in; may incur cost
 ```
 
-- Requires a **running herdr** (`herdr 0.7.3+`) and `python3`. `run-all.sh` builds
+- Standard suite requires **herdr 0.7.3+** and `python3`; it makes no real model call. The real-Pi smoke additionally verifies Pi's runtime default model, current Herdr integration, and WezTerm, uses thinking `low`, isolates Pi sessions/board state under `/tmp`, validates a four-line Portuguese poem externally, compares git/Pi settings before/after, and cleans exact resources unless explicit keep mode is used for visual audit. `run-all.sh` builds
   the release binary once; scenarios reuse it. **No second session** is needed —
   the suite boots its own ephemeral session(s) and cleans them up.
 - Exit codes: scenario `0` = PASS, `3` = SKIP, other = FAIL; `run-all.sh` exits

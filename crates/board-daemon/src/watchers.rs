@@ -41,7 +41,12 @@ pub async fn timeout_ticker(d: Arc<Daemon>) {
 }
 
 fn check(d: &Arc<Daemon>) {
-    let now = Instant::now();
+    check_at(d, Instant::now());
+}
+
+/// Deterministic timeout/idle pass. Tests inject `now`; the ticker uses the
+/// current monotonic instant.
+fn check_at(d: &Arc<Daemon>, now: Instant) {
     let idle_grace = Duration::from_secs(d.config.idle_grace_seconds);
 
     let mut timeouts: Vec<(i64, Duration)> = Vec::new();
@@ -51,7 +56,7 @@ fn check(d: &Arc<Daemon>) {
         for (run_id, a) in &s.active {
             if let Some(dl) = a.timeout_deadline {
                 if now >= dl {
-                    timeouts.push((*run_id, a.started.elapsed()));
+                    timeouts.push((*run_id, now.saturating_duration_since(a.started)));
                     continue;
                 }
             }
@@ -314,10 +319,17 @@ fn handle_event(d: &Arc<Daemon>, ev: HerdrEvent) {
                             a.idle_since = None;
                         }
                     }
-                    let _ = d
-                        .store
+                    if d.store
                         .lock()
-                        .set_card_status(card_id, board_core::protocol::CardStatus::Running);
+                        .set_card_status(card_id, board_core::protocol::CardStatus::Running)
+                        .is_ok()
+                    {
+                        d.emit_changed(
+                            board_core::protocol::BoardChangedReason::CardUpdated,
+                            Some(card_id),
+                            None,
+                        );
+                    }
                 }
                 AgentStatus::Unknown => {}
             }
@@ -339,5 +351,196 @@ fn handle_event(d: &Arc<Daemon>, ev: HerdrEvent) {
             }
         }
         HerdrEvent::Other(_) => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use super::{check_at, handle_event};
+    use crate::settings::DaemonSettings;
+    use crate::spawner::LocalSpawner;
+    use crate::state::{ActiveRun, Daemon};
+    use crate::store::Store;
+    use board_core::config::Config;
+    use board_core::db::Db;
+    use board_core::protocol::{
+        BoardChangedReason, CardCreateParams, CardStatus, Event, RunOutcome,
+    };
+    use board_core::spawn::SpawnHandle;
+    use board_herdr::{AgentStatus, HerdrEvent};
+    use tokio::sync::{broadcast, mpsc, watch};
+
+    fn active_daemon() -> (Arc<Daemon>, i64, i64, broadcast::Receiver<Event>) {
+        let config = Config {
+            idle_grace_seconds: 5,
+            ..Default::default()
+        };
+        let db = Db::open_in_memory().unwrap();
+        let card = db
+            .create_card(&CardCreateParams {
+                title: "watch".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let run = db
+            .create_run(
+                card.id,
+                card.column_id,
+                "pi",
+                "[\"pi\"]",
+                "prompt",
+                Some("session"),
+                None,
+            )
+            .unwrap();
+        db.start_run(run.id, Some("w1"), Some("p1")).unwrap();
+        db.set_card_status(card.id, CardStatus::Running).unwrap();
+
+        let (events_tx, events_rx) = broadcast::channel(16);
+        let (dispatch_tx, _dispatch_rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let d = Arc::new(Daemon::new(
+            Store::new(db),
+            config,
+            DaemonSettings::default(),
+            PathBuf::from("/tmp/board-watch.db"),
+            PathBuf::from("/tmp/board-watch.sock"),
+            Arc::new(LocalSpawner::new()),
+            None,
+            None,
+            events_tx,
+            dispatch_tx,
+            shutdown_tx,
+        ));
+        d.sched.lock().unwrap().active.insert(
+            run.id,
+            ActiveRun {
+                card_id: card.id,
+                handle: SpawnHandle::default(),
+                started: Instant::now(),
+                timeout_deadline: None,
+                idle_since: None,
+                is_local: false,
+                pane_id: Some("p1".into()),
+            },
+        );
+        (d, run.id, card.id, events_rx)
+    }
+
+    fn status(status: AgentStatus) -> HerdrEvent {
+        HerdrEvent::AgentStatusChanged {
+            pane_id: "p1".into(),
+            workspace_id: Some("w1".into()),
+            status,
+            agent: Some("pi".into()),
+        }
+    }
+
+    #[test]
+    fn working_restores_running_and_clears_idle_state() {
+        let (d, run_id, card_id, mut events) = active_daemon();
+        d.store
+            .lock()
+            .set_card_status(card_id, CardStatus::Blocked)
+            .unwrap();
+        d.sched
+            .lock()
+            .unwrap()
+            .active
+            .get_mut(&run_id)
+            .unwrap()
+            .idle_since = Some(Instant::now());
+
+        handle_event(&d, status(AgentStatus::Working));
+
+        assert_eq!(
+            d.store.lock().get_card(card_id).unwrap().unwrap().status,
+            CardStatus::Running
+        );
+        assert!(d
+            .sched
+            .lock()
+            .unwrap()
+            .active
+            .get(&run_id)
+            .unwrap()
+            .idle_since
+            .is_none());
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            Event::BoardChanged {
+                reason: BoardChangedReason::CardUpdated,
+                card_id: Some(id),
+                ..
+            } if id == card_id
+        ));
+    }
+
+    #[test]
+    fn blocked_marks_card_and_emits_change() {
+        let (d, _run_id, card_id, mut events) = active_daemon();
+        handle_event(&d, status(AgentStatus::Blocked));
+        assert_eq!(
+            d.store.lock().get_card(card_id).unwrap().unwrap().status,
+            CardStatus::Blocked
+        );
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            Event::BoardChanged {
+                reason: BoardChangedReason::RunBlocked,
+                card_id: Some(id),
+                ..
+            } if id == card_id
+        ));
+    }
+
+    #[test]
+    fn idle_arms_grace_then_becomes_lost_without_sleeping() {
+        let (d, run_id, card_id, _events) = active_daemon();
+        handle_event(&d, status(AgentStatus::Idle));
+        let idle_since = d
+            .sched
+            .lock()
+            .unwrap()
+            .active
+            .get(&run_id)
+            .unwrap()
+            .idle_since
+            .unwrap();
+
+        check_at(&d, idle_since + Duration::from_secs(4));
+        assert!(d.store.lock().get_run(run_id).unwrap().ended_at.is_none());
+        check_at(&d, idle_since + Duration::from_secs(5));
+
+        assert_eq!(
+            d.store.lock().get_run(run_id).unwrap().outcome,
+            Some(RunOutcome::Lost)
+        );
+        assert_eq!(
+            d.store.lock().get_card(card_id).unwrap().unwrap().status,
+            CardStatus::Failed
+        );
+    }
+
+    #[test]
+    fn pane_exit_becomes_fail_without_transition() {
+        let (d, run_id, card_id, _events) = active_daemon();
+        let original_column = d.store.lock().get_card(card_id).unwrap().unwrap().column_id;
+        handle_event(
+            &d,
+            HerdrEvent::PaneExited {
+                pane_id: "p1".into(),
+                workspace_id: Some("w1".into()),
+            },
+        );
+        let db = d.store.lock();
+        assert_eq!(db.get_run(run_id).unwrap().outcome, Some(RunOutcome::Fail));
+        let card = db.get_card(card_id).unwrap().unwrap();
+        assert_eq!(card.status, CardStatus::Failed);
+        assert_eq!(card.column_id, original_column);
     }
 }

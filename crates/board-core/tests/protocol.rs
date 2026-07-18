@@ -83,7 +83,12 @@ fn enums_serialize_lowercase() {
         serde_json::to_string(&SpaceKind::NewWorkspace).unwrap(),
         "\"new_workspace\""
     );
-    assert_eq!(serde_json::to_string(&Effort::Xhigh).unwrap(), "\"xhigh\"");
+    for effort in [Effort::Off, Effort::Minimal, Effort::Xhigh] {
+        let wire = serde_json::to_string(&effort).unwrap();
+        let decoded: Effort = serde_json::from_str(&wire).unwrap();
+        assert_eq!(decoded, effort);
+        assert_eq!(Effort::parse_str(effort.as_str()), Some(effort));
+    }
     assert_eq!(
         serde_json::to_string(&RunOutcome::Cancelled).unwrap(),
         "\"cancelled\""

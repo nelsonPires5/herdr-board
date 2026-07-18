@@ -1,8 +1,8 @@
-# Research notes (2026-07-14)
+# Research notes (verified through 2026-07-17)
 
 Condensed output of three research passes: local herdr introspection, prior art, and technical building blocks.
 
-## A. herdr capability map (v0.7.3, protocol 16, verified locally)
+## A. herdr capability map (v0.7.4, protocol 16, verified locally)
 
 JSON request/response + events over unix socket `~/.config/herdr/herdr.sock`; every CLI subcommand wraps it. `herdr api schema --json` → 80 methods, 23 event types. `herdr api snapshot` → full live state (workspaces/tabs/panes/agents). IDs: `w3`, `w3:t1`, `w3:p1`.
 
@@ -18,7 +18,7 @@ JSON request/response + events over unix socket `~/.config/herdr/herdr.sock`; ev
 | Notify human | `herdr notification show <title> --body … --sound none\|done\|request` |
 | Status injection | `herdr pane report-agent <pane> --state idle\|working\|blocked\|unknown --message … --custom-status …` — how integrations push precise status in |
 
-**Agent status**: built-in detection is heuristic (manifests). `herdr integration install claude` installs `~/.claude/hooks/herdr-agent-state.sh` calling `pane report-agent` — precise idle/working/blocked + session refs. **Not currently installed on this machine** — install it as part of herdr-board setup. `idle ≠ finished`: reportable states are idle/working/blocked/unknown, so "done" needs an explicit channel (our `board done`).
+**Agent status**: per-harness integrations report precise idle/working/blocked + session refs. On 2026-07-17, `herdr integration status` reported Pi current at integration v5 (`~/.pi/agent/extensions/herdr-agent-state.ts`). It maps Pi start/end/retry/block lifecycles into Herdr state. Installation mutates personal harness config, so herdr-board recommends but never performs it. `idle ≠ finished`: `board done` remains the semantic completion channel.
 
 **Plugin architecture** (learned from installed `herdr-file-viewer`): manifest `herdr-plugin.toml` with `id/name/version/min_herdr_version`, `[[build]]` (install-time command), `[[panes]]` (id, title, placement=split/tab/overlay, command argv → herdr spawns the TUI in a pane), `[[actions]]` (shell commands, invocable via `herdr plugin action invoke` or `[[keys.command]]` keybindings, receive `PluginInvocationContext`: focused pane/cwd/agent, workspace/tab, selected text). Install from github or local → `~/.config/herdr/plugins/…`, registry `plugins.json`. Runtime env: `HERDR_BIN_PATH`, `HERDR_PLUGIN_CONFIG_DIR`, `HERDR_PLUGIN_CONTEXT_JSON`. Plugins have no special powers — they shell out to the same CLI/socket.
 
@@ -39,11 +39,13 @@ JSON request/response + events over unix socket `~/.config/herdr/herdr.sock`; ev
 
 More in the space: Cline kanban, Fusion, Nimbalyst, Crystal, Conductor, Omnara — [awesome-agent-orchestrators](https://github.com/andyrewlee/awesome-agent-orchestrators).
 
-## C. Harness invocation (verified against installed `claude` CLI, 2026-07)
+## C. Harness invocation (verified locally, 2026-07-17)
+
+**Pi Coding Agent 0.80.10**: `--model <provider/model>`; `--thinking off|minimal|low|medium|high|xhigh|max`; `--append-system-prompt <text>`; exact mint/resume via `--session-id <id>`; retry fork via `--fork <source-id> --session-id <new-id>`. Prompts are ordinary positional arguments (no Claude `--` delimiter). Pi has no per-tool permission prompts; `--approve`/`--no-approve` controls project trust and must not be mapped to the board permission field. Models are runtime provider/auth/user configuration, so the board does not persist a parsed `--list-models` catalog. At verification time the user default was `openai-codex/gpt-5.6-sol`, thinking `xhigh`; the isolated smoke detects this at runtime and overrides only the invocation to `low`.
 
 **Claude Code**: `-p/--print` headless; `--output-format text|json|stream-json` (+`--verbose`); `--system-prompt` / **`--append-system-prompt`** (+ `-file` variants); `--model`; **`--effort low|medium|high|xhigh|max`** (first-class flag); `--permission-mode acceptEdits|auto|bypassPermissions|manual|dontAsk|plan`; `--allowedTools`/`--disallowedTools`; **`--session-id <uuid>`** (pre-assign), `--resume <id>`, `--fork-session` (retry without polluting), `--no-session-persistence`; `--max-budget-usd` (print-only); `--json-schema` (structured final output); `--input-format stream-json` (long-lived multi-prompt process); `--bare`; `--bg`; `-n/--name` (label session). Hooks: Stop/StopFailure, SessionStart/SessionEnd — **Stop not fired on silent tool stop** ([#29881](https://github.com/anthropics/claude-code/issues/29881)), don't rely on it alone.
 
-**Adapter shape for later harnesses** = (binary, prompt style, model flag, permission flag, resume mechanism, output parser):
+**Adapter shape for built-in/future harnesses** = (binary, prompt style, model flag, permission flag, resume mechanism, resulting session id):
 - codex: `codex exec "p"` — `-m`, `--sandbox read-only|workspace-write|danger-full-access`, `--json`, `--output-last-message <path>`, resume `codex exec resume <id>`; effort via `-c model_reasoning_effort=…` (unverified key).
 - gemini: `gemini -p "p"` — `-m`, `--approval-mode default|auto_edit|yolo|plan`; `-o json` (unverified spelling).
 - opencode: `opencode run "p"` — `--model provider/model`; `opencode serve` + `--attach` to amortize startup (session flags unverified).

@@ -1,12 +1,21 @@
 //! Harness adapters: turn resolved settings + a prompt into `(argv, env)`.
 //!
 //! Two kinds:
-//! - builtin `claude` — flags exactly per `docs/protocol.md`, prompt positional.
+//! - built-ins `pi` and `claude` — flags exactly per `docs/protocol.md`;
 //! - config-defined harnesses — an argv template with `{model}`/`{effort}`/
 //!   `{permission_mode}` placeholders; prompt via `BOARD_PROMPT` env.
 
 use crate::config::Config;
 use crate::prompt::EffectiveSettings;
+
+/// Harness stored on newly-created cards when the caller omits one.
+pub const DEFAULT_HARNESS: &str = "pi";
+/// Built-ins routed without config-defined argv/env reconstruction.
+pub const BUILTIN_HARNESSES: [&str; 2] = ["pi", "claude"];
+
+pub fn is_builtin_harness(name: &str) -> bool {
+    BUILTIN_HARNESSES.contains(&name)
+}
 
 /// How to thread the harness session for a run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +47,9 @@ pub struct HarnessInvocation {
     /// Extra env pairs the harness itself needs (e.g. `BOARD_PROMPT` for custom
     /// harnesses). The daemon adds `BOARD_CARD_ID`/`BOARD_RUN_ID`/`BOARD_SOCKET`.
     pub env: Vec<(String, String)>,
+    /// Harness session id that the card/run should persist. Custom harnesses do
+    /// not participate in built-in session bookkeeping and return `None`.
+    pub resulting_session_id: Option<String>,
 }
 
 /// Errors from building a harness invocation.
@@ -48,9 +60,13 @@ pub enum HarnessError {
     /// `SessionPlan::Mint` was requested but no minted uuid was supplied.
     #[error("mint session requested without a minted uuid")]
     MissingMintedSession,
+    #[error("pi fork session requested without a new target uuid")]
+    MissingForkTargetSession,
+    #[error("pi does not support permission modes")]
+    PiPermissionModeUnsupported,
 }
 
-/// Board-protocol trailer appended to every builtin-claude system prompt: the
+/// Board-protocol trailer appended to every built-in harness system prompt: the
 /// close-out contract must not depend on users remembering it in each column's
 /// prompt. `board comment`/`done` read `$BOARD_CARD_ID` from the run env.
 pub const BOARD_PROTOCOL_TRAILER: &str = "\
@@ -119,8 +135,69 @@ pub fn claude_argv(
     Ok(argv)
 }
 
-/// Build a full invocation for `harness_name`, using the builtin `claude`
-/// adapter or a config-defined harness template.
+/// Build the argv/session result for the built-in Pi harness.
+///
+/// Pi takes a normal positional prompt (no Claude `--` delimiter). Prefixing it
+/// with non-flag text ensures a card description beginning with `-` cannot be
+/// interpreted as another CLI option.
+pub fn pi_argv(
+    settings: &EffectiveSettings,
+    session: &SessionPlan,
+    target_uuid: Option<&str>,
+    prompt: &str,
+) -> Result<HarnessInvocation, HarnessError> {
+    if settings.permission_mode.is_some() {
+        return Err(HarnessError::PiPermissionModeUnsupported);
+    }
+
+    let mut argv = vec!["pi".to_string()];
+    if let Some(model) = &settings.model {
+        argv.push("--model".to_string());
+        argv.push(model.clone());
+    }
+    if let Some(effort) = settings.effort {
+        argv.push("--thinking".to_string());
+        argv.push(effort.as_str().to_string());
+    }
+    let system_prompt = match &settings.system_prompt {
+        Some(sp) => format!("{sp}\n\n{BOARD_PROTOCOL_TRAILER}"),
+        None => BOARD_PROTOCOL_TRAILER.to_string(),
+    };
+    argv.push("--append-system-prompt".to_string());
+    argv.push(system_prompt);
+
+    let resulting_session_id = match session {
+        SessionPlan::Mint => {
+            let id = target_uuid.ok_or(HarnessError::MissingMintedSession)?;
+            argv.push("--session-id".to_string());
+            argv.push(id.to_string());
+            id.to_string()
+        }
+        SessionPlan::Resume(id) => {
+            argv.push("--session-id".to_string());
+            argv.push(id.clone());
+            id.clone()
+        }
+        SessionPlan::Fork(source) => {
+            let target = target_uuid.ok_or(HarnessError::MissingForkTargetSession)?;
+            argv.push("--fork".to_string());
+            argv.push(source.clone());
+            argv.push("--session-id".to_string());
+            argv.push(target.to_string());
+            target.to_string()
+        }
+    };
+    argv.push(format!("Card task:\n{prompt}"));
+
+    Ok(HarnessInvocation {
+        argv,
+        env: Vec::new(),
+        resulting_session_id: Some(resulting_session_id),
+    })
+}
+
+/// Build a full invocation for `harness_name`, using a built-in adapter or a
+/// config-defined harness template.
 pub fn build_invocation(
     harness_name: &str,
     config: &Config,
@@ -129,11 +206,19 @@ pub fn build_invocation(
     minted_uuid: Option<&str>,
     prompt: &str,
 ) -> Result<HarnessInvocation, HarnessError> {
+    if harness_name == "pi" {
+        return pi_argv(settings, session, minted_uuid, prompt);
+    }
     if harness_name == "claude" {
         let argv = claude_argv(settings, session, minted_uuid, prompt)?;
+        let resulting_session_id = match session {
+            SessionPlan::Mint => minted_uuid.map(str::to_string),
+            SessionPlan::Resume(id) | SessionPlan::Fork(id) => Some(id.clone()),
+        };
         return Ok(HarnessInvocation {
             argv,
             env: Vec::new(),
+            resulting_session_id,
         });
     }
 
@@ -149,7 +234,11 @@ pub fn build_invocation(
         env.push(("BOARD_SYSTEM_PROMPT".to_string(), sp.clone()));
     }
 
-    Ok(HarnessInvocation { argv, env })
+    Ok(HarnessInvocation {
+        argv,
+        env,
+        resulting_session_id: None,
+    })
 }
 
 /// Substitute `{model}`/`{effort}`/`{permission_mode}` in each template element.

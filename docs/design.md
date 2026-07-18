@@ -17,7 +17,7 @@ Separation card ↔ run is deliberate (vibe-kanban converged on task/attempt/exe
 ```
 ┌───────────────────────────── herdr session ─────────────────────────────┐
 │  ┌────────────── pane ─────────────┐   ┌───────── pane (ws w4) ───────┐ │
-│  │  board TUI (herdr plugin pane)  │   │  claude … (card #42 run)     │ │
+│  │  board TUI (herdr plugin pane)  │   │  pi … (card #42 run)         │ │
 │  └───────────────┬─────────────────┘   └──────────────┬───────────────┘ │
 └──────────────────┼─────────────────────────────────── │ ────────────────┘
                    │ board API (unix socket, JSON)      │ `board comment/done`
@@ -28,7 +28,7 @@ Separation card ↔ run is deliberate (vibe-kanban converged on task/attempt/exe
              └───────┬──────────────────────────────────────┘
                      │ herdr socket API (~/.config/herdr/herdr.sock)
                      ▼
-   workspace.create · worktree.create · agent.start · agent.send
+   workspace.create · agent.start · agent.send
    events.subscribe(pane_agent_status_changed, pane_exited) · pane.read
    notification.show
 ```
@@ -60,9 +60,10 @@ runs(id, card_id, column_id, harness, argv_json, prompt_snapshot,
      result_summary, log_path)
 ```
 
-Schema is versioned via `PRAGMA user_version` (current = **v3**). A fresh DB is built straight from
-`schema.sql` and stamped v3. Existing v1 DBs first receive the v2 space/session migration; v2 DBs
-receive the v3 `cards.archived_at` column.
+Schema is versioned via `PRAGMA user_version` (current = **v4**). A fresh DB is built straight from
+`schema.sql` and stamped v4. Existing v1 DBs receive the v2 space/session migration, v2 DBs receive
+v3 archive state, and v3 DBs receive the effort-constraint update for Pi's `off`/`minimal` levels.
+The v4 copy preserves every stored harness; existing Claude cards are never migrated to Pi.
 
 ### Session model
 
@@ -137,7 +138,7 @@ trigger = "manual"
 ```
 
 Notes:
-- Column `system_prompt` is delivered via `--append-system-prompt` (never `--system-prompt`) so harness defaults/CLAUDE.md stay intact. It can invoke skills (`/quick-planner`, `/code-review`) — that's how "column triggers a skill" works, no special mechanism needed.
+- Column `system_prompt` is delivered via `--append-system-prompt` (never `--system-prompt`) so harness defaults and context files stay intact. It can invoke skills (`/quick-planner`, `/code-review`) — that's how "column triggers a skill" works, no special mechanism needed.
 - `on_fail = "Execute"` from Review + comments-as-context gives the fix loop for free: the re-entered Execute run sees the reviewer's findings in its prompt.
 
 ### TUI interactions (v1)
@@ -158,7 +159,7 @@ Notes:
   title (`Board [ACTIVE|ALL|ARCHIVED]`) while the footer contains only `? help`. Archived cards are
   inert until restored and render dimmed with `▣ ARCHIVED` when visible.
 - **Content-sized overlays:** card/column forms, move pickers, and help panels shrink to their content on large terminals and clamp to the available viewport on small terminals.
-- **Guided card form**: on open the form fetches `harness.capabilities` (for the current harness) and `space.list` from the daemon, turning model / effort / permission / space-ref into live selectors — model cycles the catalog aliases plus a `(custom)` free-text escape (harnesses with `model_freeform`); effort lists the selected model's efforts (`(default)` = unset); permission lists the harness's modes; the space selector shows each workspace `label (id)` but persists the **id**, with a `(custom)` escape for not-yet-open workspaces. Effort resets only when the current value isn't valid for a newly chosen model. If either fetch fails the affected fields fall back to free-text with a status-line warning, so the form never blocks.
+- **Guided card form**: Pi is selected for new cards; Claude remains selectable. On open/harness change the form fetches `harness.capabilities` and `space.list`. Model starts at `(default)` (unset), then catalog aliases and `(custom)` when free-form is supported. Effort follows the selected/default model. Permission is hidden and submits `None` for Pi; Claude shows its modes. Switching harness resets only incompatible values. Workspace labels are shown but ids are persisted. Fetch failures degrade to free text with a warning.
 - Long text (card description, column system prompt): modal textarea, `Ctrl+E` suspends the TUI into `$EDITOR`.
 - Deleting a column with cards asks where to move them; a running card's column can't be deleted.
 - Optional: apply a board template (e.g. the example pipeline above) onto an empty board.
@@ -168,25 +169,26 @@ Notes:
 For each run, boardd builds:
 
 ```
-argv  = claude --model <card|column override> --effort <…> --permission-mode <…>
-               --append-system-prompt <column.system_prompt>
-               [--resume <card.session_id> | --session-id <new-uuid>]
+argv  = pi [--model <card|column override>] [--thinking <effort>]
+           --append-system-prompt <column.system_prompt + board protocol trailer>
+           [--session-id <exact-id> | --fork <old-id> --session-id <new-id>]
+        # explicit --harness claude retains Claude's model/effort/permission argv
 prompt = <card.description>
          + "\n\n## Card comments so far\n" + last N comments (author, ts, body)
 env    = BOARD_CARD_ID=<id>, BOARD_RUN_ID=<id>, BOARD_SOCKET=<path>
 ```
 
-- **Session strategy**: first auto column mints a `--session-id` (stored on the card); later columns `--resume` it so Execute literally continues the Plan conversation. A card moved back and re-run uses `--fork-session` to retry without polluting history. Column config can force `fresh_session = true` (e.g. Review should judge the diff, not trust its own memory).
+- **Session strategy**: Pi's first auto column mints an exact `--session-id`; later stages reuse it; retry uses `--fork <old> --session-id <new>` and persists the new target. Claude keeps exact mint, `--resume`, and `--fork-session`. Column config can force `fresh_session = true`.
 - `prompt_snapshot` is stored on the run — reproducibility and debugging.
 
 ## 6. Data flow — the canonical walkthrough
 
-1. **Create** card in *Todo*: title "Add retry to MELI scraper", description (prompt), harness=claude, model=sonnet, effort=high, permission=acceptEdits, space=workspace `w4` (or "worktree off main").
+1. **Create** card in *Todo*: title "Add retry to MELI scraper", description (prompt), harness=pi (default), model omitted (Pi configured default), effort=low, no permission mode, space=workspace `w4`.
 2. **User drags card → Plan** (TUI → boardd `card.move`).
 3. Column engine: *Plan* is `trigger=auto` → **enqueue run** on the card's space queue.
 4. Dispatcher (respecting per-space serial queue + global cap):
-   a. Resolve space: reuse workspace `w4`, or `worktree.create --base main` + `workspace.create` for isolation.
-   b. Place the pane in the workspace's **`kanban` tab** (find-or-create it; a fresh tab is filled unsplit then its leftover shell pane is closed, an existing tab splits its largest pane — `Right` when that pane is ≥ 2× as wide as tall in cells, else `Down`, so N panes tile ≈ square). `herdr agent start card-42-plan --workspace w4 --tab <kanban> [--split right|down] --env BOARD_CARD_ID=42 … -- claude --model sonnet --effort high --permission-mode acceptEdits --session-id <uuid> --append-system-prompt "<Plan system prompt>" "<card description + comments>"`.
+   a. Resolve space: reuse workspace `w4`, or create/reuse the card's labeled `new_workspace`; repository worktree isolation remains an agent prompt responsibility.
+   b. Place the pane in the workspace's **`kanban` tab** (find-or-create it; a fresh tab is filled unsplit then its leftover shell pane is closed, an existing tab splits its largest pane — `Right` when that pane is ≥ 2× as wide as tall in cells, else `Down`, so N panes tile ≈ square). `herdr agent start card-42-plan --workspace w4 --tab <kanban> [--split right|down] --env BOARD_CARD_ID=42 … -- pi --thinking low --session-id <uuid> --append-system-prompt "<Plan prompt + protocol>" "Card task:\n<description + comments>"`.
    c. Card status → `running`; run row created with pane id. The pane is **visible** — you can watch or type into it anytime.
 
    **Pane naming**: the herdr agent name is `card-<id>-<column-slug>` (e.g. `card-42-plan`, `card-42-execute`) — stable and readable per column. herdr agent names are exclusive while a pane is open, so on an `agent_name_taken` collision the daemon retries once with the run-scoped fallback `card-<id>-<column-slug>-r<run>`.
@@ -202,11 +204,11 @@ env    = BOARD_CARD_ID=<id>, BOARD_RUN_ID=<id>, BOARD_SOCKET=<path>
 | Signal | Source | Role |
 |---|---|---|
 | `board done <card> --outcome …` | agent itself (instructed by every auto-column's system prompt) | **primary** — explicit, carries semantics |
-| `pane_agent_status_changed` → `working→idle` sustained | herdr events (install `herdr integration install claude` for hook-precise status) | agent finished but forgot to call `board done` → mark run `lost`, notify human instead of guessing |
-| `pane_agent_status_changed` → `blocked` | herdr events | agent hit a permission prompt → card status `blocked`, herdr notification |
+| `pane_agent_status_changed` → `working→idle` sustained | herdr events (optionally install `herdr integration install pi`; Claude has its equivalent) | agent finished but forgot to call `board done` → mark run `lost`, notify human instead of guessing |
+| `pane_agent_status_changed` → `blocked` | herdr events | agent/integration reports blocked (provider retry exhaustion or input need) → card `blocked`, board change + notification |
 | `pane_exited` | herdr events | crash / closed pane → run `fail` |
 
-Pane-idle scraping alone is the documented weak point of every tmux-style orchestrator (claude-squad); the explicit `board done` channel is what makes auto-transition trustworthy.
+Pane-idle scraping alone is the documented weak point of every tmux-style orchestrator (claude-squad); the explicit `board done` channel is what makes auto-transition trustworthy. Without the optional Pi integration, spawn, explicit completion, timeout, and pane exit remain deterministic, while working/blocked/idle and idle-lost are unavailable.
 
 ## 7. Queueing & concurrency
 
@@ -218,7 +220,7 @@ Pane-idle scraping alone is the documented weak point of every tmux-style orches
 
 - Per-run timeout (column-configurable) → kill pane, run `fail`, card to `on_fail`.
 - `--max-budget-usd` per run (Claude supports it in print mode; interactive panes rely on timeout + human visibility).
-- `bypassPermissions` requires explicit per-card opt-in, never a column default.
+- Pi has no board tool-permission mode; no permission/approval flag is added and explicit Pi permission is rejected. Claude `bypassPermissions` requires explicit per-card opt-in, never a column default.
 - Cards never auto-move into *Done*; last auto hop is always a human-gated column.
 - Retry = new run (`--fork-session`); history preserved.
 
@@ -235,7 +237,7 @@ Pane-idle scraping alone is the documented weak point of every tmux-style orches
 
 ## 10. The herdr-board skill
 
-The repo ships a **skill** (`skill/SKILL.md`, installed to `~/.claude/skills/herdr-board/`) teaching agents the `board` CLI: command reference (`board card new/show/list`, `board comment`, `board move`, `board done --outcome ok|fail`), the card lifecycle, and the rules (always comment results *before* `board done`; `fail` means "this stage's goal was not met", not "I crashed").
+The repo ships a **skill** (`skill/SKILL.md`, optionally installed into an agent's skill directory) teaching agents the `board` CLI: command reference (`board card new/show/list`, `board comment`, `board move`, `board done --outcome ok|fail`), the card lifecycle, and the rules (always comment results *before* `board done`; `fail` means "this stage's goal was not met", not "I crashed").
 
 Two consumers:
 
@@ -256,7 +258,7 @@ herdr panes are fully drivable from the CLI (`pane send-keys` with named keys, `
 |---|---|---|
 | 1. Unit | column engine, prompt assembly, queue, transitions | plain Rust tests, in-memory SQLite; no herdr |
 | 2. TUI snapshot | every view/modal/keybind incl. `?` help | ratatui `TestBackend` + fed `KeyEvent`s + `insta` snapshots; no herdr, no terminal |
-| 3. Daemon integration | dispatch → run → done → auto-move, without burning tokens | **fake harness**: a stub script registered as harness `fake` that reads its prompt, sleeps, calls `board comment`/`board done --outcome ok`. Real boardd, real herdr spawn, zero Claude cost |
-| 4. Full E2E | keyboard-drive the real TUI in a real pane | `herdr workspace create --label board-test` → open TUI pane (`pane split` + `pane run`) → drive with `herdr pane send-keys <pane> <keys>` / `send-text` → assert screen via `herdr pane read --source visible` + assert DB via `sqlite3 $BOARD_DB 'select …'` → `workspace close` |
+| 3. Daemon integration | dispatch → run → done → auto-move, without tokens | config fake harness plus built-in Pi adapter tests; real boardd paths, no provider call |
+| 4. Full E2E | real Herdr wiring | disposable named session/workspace; standard suite shadows only `pi` with a checked-in fake and asserts mint/fork argv with zero provider cost. A separate opt-in real-Pi smoke is never in `run-all.sh`. |
 
 Isolation rules for level 3–4: `BOARD_DB=/tmp/…` + dedicated daemon socket per test run so tests never touch the real board; prefer a separate `herdr --session board-test` (or headless `herdr server`) in CI so the user's session is untouched; inside an interactive dev loop, a throwaway workspace in the live session is fine.

@@ -1,10 +1,9 @@
 ---
 source: crates/board-tui/tests/snapshots.rs
-assertion_line: 102
+assertion_line: 132
 expression: "render(&mut d, 80, 24)"
 ---
 "┌ Todo · 1 · manual ──────┐┌ Plan · 1 · auto ────────┐┌ Execute · 2 · auto ────┐"
-"│▌ Update docs            ││▌ Add retry to MELI scra…││▌ Fix flaky test        │"
 "┌ New card (Tab: field · Enter: save · Esc: cancel) ───────────────────────────┐"
 "│title                                                                         │"
 "│▏                                                                             │"
@@ -15,9 +14,11 @@ expression: "render(&mut d, 80, 24)"
 "│harness                                                                       │"
 "│< pi >                                                                        │"
 "│model                                                                         │"
-"│< (default) >                                                                 │"
+"│< (custom) >                                                                  │"
+"│custom model                                                                  │"
+"│openai-codex/example                                                          │"
 "│effort                                                                        │"
-"│< (default) >                                                                 │"
+"│< low >                                                                       │"
 "│session                                                                       │"
 "│< (default) >                                                                 │"
 "│space                                                                         │"
@@ -25,5 +26,4 @@ expression: "render(&mut d, 80, 24)"
 "│space ref                                                                     │"
 "│< MELI scraper (w4) >                                                         │"
 "└──────────────────────────────────────────────────────────────────────────────┘"
-"└─────────────────────────┘└─────────────────────────┘└────────────────────────┘"
 "? help                                                                          "

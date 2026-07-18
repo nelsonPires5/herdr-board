@@ -24,7 +24,8 @@ isolation/safety design, and the **how-to-write-a-scenario** guide, see
 | Run overruns its column `timeout_minutes` → killed and follows `on_fail` | `08-column-timeout.sh` | live |
 | A stage-1 comment flows into the stage-2 run's prompt (`## Card comments` section) | `09-comment-context.sh` | live |
 | Archive filter cycles `ACTIVE/ALL/ARCHIVED` in the Herdr pane title and keeps the footer minimal | `10-archive-filter-title.sh` | live |
-| **idle-lost watchdog**: an idle agent (no `board done`) is marked `lost` | — | **not reproducible in live e2e** (see below) |
+| Built-in Pi mint/retry argv, session fork, protocol prompt, and agent comment through real Herdr | `11-pi-harness.sh` | live, checked-in fake `pi`, zero provider cost |
+| **idle-lost watchdog**: an idle agent (no `board done`) is marked `lost` | — | deterministic daemon tests; not sampled by standard live fake |
 
 ### Why idle-lost has no live scenario
 
@@ -37,15 +38,10 @@ watchdog. It therefore cannot be reproduced live without wiring a real harness
 status integration (`herdr integration install <name>`; see
 [`../docs/herdr.md`](../docs/herdr.md)).
 
-It is also **not currently covered by a unit test**: `crates/board-daemon/src/watchers.rs`
-has no `#[test]`/`#[tokio::test]` module, and there is no `Lost`-path test in
-`crates/board-cli/tests/integration.rs` or `crates/board-core/tests/engine.rs`
-(the only automated watcher-path coverage is the timeout test
-`timeout_kills_and_applies_on_fail` in `crates/board-cli/tests/integration.rs`).
-The pure transition rule the watchdog relies on — a `lost` outcome yields **no**
-target column (card parks `failed`) — lives in `engine.rs::decide_transition`.
-This is a known coverage gap; if you add a harness status integration, this is the
-scenario to add.
+`crates/board-daemon/src/watchers.rs` covers working→running, blocked, idle grace→lost,
+and pane exit deterministically through an injected `check_at(now)` seam, with no sleeps. The
+separate opt-in real-Pi smoke records live working status when observable but does not require the
+sample because a fast provider response can finish between polls.
 
 ## Prerequisites
 
@@ -69,11 +65,12 @@ run and exports `E2E_SESSION`/`E2E_SESSION_SOCKET` to each scenario; a scenario 
 ## Running
 
 ```bash
-e2e/run-all.sh              # build once, run every scenario, print a PASS/FAIL/SKIP summary
+e2e/run-all.sh              # standard suite; fake Pi, no provider/model cost
 e2e/run-all.sh --keep       # keep sessions + each scenario's workspace for review
 e2e/run-all.sh 04 07        # only scenarios whose filename matches a filter
 scripts/e2e.sh              # compat wrapper -> e2e/run-all.sh
 bash e2e/04-fail-on-fail.sh # run a single scenario standalone (boots its own session)
+E2E_REAL_PI=1 e2e/real-pi-smoke.sh  # REAL provider, explicit opt-in, may incur cost
 ```
 
 **Keep mode** (`--keep`, or `E2E_KEEP=1`): skips session stop/delete **and**
@@ -92,7 +89,9 @@ of CI (it needs a live herdr) — it is run by a human/orchestrator.
 | File | Role |
 |---|---|
 | `lib.sh` | Shared harness sourced by every scenario: logging, isolated stack, cleanup registry, daemon + workspace helpers, pollers (`wait_ok`/`wait_runs`), JSON/`hrpc`/`brpc`/`col_create` helpers. |
-| `fake-agent.sh` | The fake harness dispatched instead of a real agent. Knobs: `FAKE_AGENT_SLEEP`, `FAKE_AGENT_OUTCOME`, `FAKE_AGENT_COMMENT`, `FAKE_AGENT_SILENT`, `FAKE_AGENT_HOLD`. |
+| `fake-agent.sh` | Config-defined fake harness used by scenarios 01–10. |
+| `fake-bin/pi` | Executable named exactly `pi`, prepended only to disposable standard-E2E Herdr server PATH; records argv under isolated temp and calls the candidate `board`. Never modifies the installed Pi. |
+| `real-pi-smoke.sh` | Fail-closed real-provider poem smoke. Detects Pi's runtime default model, passes low thinking, isolates board/Pi session output under `/tmp`, verifies integration/WezTerm, poem/comments/argv/git/settings, and supports keep mode for visual audit. Not in `run-all.sh`. |
 | `hrpc.py` | One-shot raw **herdr** socket RPC (honours `HERDR_SOCKET_PATH`) for structural asserts (`tab.list`/`pane.list`/`pane.layout`). |
 | `NN-*.sh` | The scenarios above. |
 | `run-all.sh` | Builds once, runs every scenario in order, prints the summary. |

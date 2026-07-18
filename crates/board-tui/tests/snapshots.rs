@@ -6,6 +6,7 @@ use board_core::client::{BoardClient, FakeBoardClient};
 use board_core::protocol::{CardStatus, RunOutcome};
 use board_tui::app::{App, Msg};
 use board_tui::editor::FakeEditor;
+use board_tui::forms::{FieldId, FieldKind};
 use board_tui::testkit::demo_client;
 use board_tui::view::{parse_epoch, view};
 use board_tui::Driver;
@@ -99,6 +100,36 @@ fn new_card_modal() {
     let mut d = driver(demo_client().unwrap());
     key(&mut d, KeyCode::Char('n'));
     insta::assert_snapshot!("new_card_modal", render(&mut d, 80, 24));
+}
+
+#[test]
+fn new_card_modal_pi_custom_model_low() {
+    let mut d = driver(demo_client().unwrap());
+    key(&mut d, KeyCode::Char('n'));
+    let form = d.app.form.as_mut().unwrap();
+    let model = form
+        .fields
+        .iter_mut()
+        .find(|field| field.id == FieldId::Model)
+        .unwrap();
+    if let FieldKind::Choice { opts, idx } = &mut model.kind {
+        *idx = opts.iter().position(|opt| opt.label == "(custom)").unwrap();
+    }
+    form.on_model_changed();
+    form.fields
+        .iter_mut()
+        .find(|field| field.id == FieldId::ModelCustom)
+        .unwrap()
+        .set_text("openai-codex/example");
+    let effort = form
+        .fields
+        .iter_mut()
+        .find(|field| field.id == FieldId::Effort)
+        .unwrap();
+    if let FieldKind::Choice { opts, idx } = &mut effort.kind {
+        *idx = opts.iter().position(|opt| opt.label == "low").unwrap();
+    }
+    insta::assert_snapshot!("new_card_modal_pi_custom_low", render(&mut d, 80, 24));
 }
 
 #[test]

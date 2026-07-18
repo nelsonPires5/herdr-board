@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 use board_core::capability::{run_pane_name, run_pane_name_unique};
 use board_core::db::BOARD_ID;
 use board_core::engine::{decide_transition, TransitionDecision};
-use board_core::harness::{build_invocation, plan_session, HarnessError, SessionPlan};
+use board_core::harness::{
+    build_invocation, is_builtin_harness, plan_session, HarnessError, SessionPlan,
+};
 use board_core::model::{Card, Run};
 use board_core::prompt::{assemble_prompt, effective_settings};
 use board_core::protocol::{BoardChangedReason, CardStatus, RunOutcome, SpaceKind};
@@ -27,6 +29,12 @@ fn map_harness_err(e: HarnessError) -> Error {
         HarnessError::UnknownHarness(h) => Error::BadRequest(format!("unknown harness: {h}")),
         HarnessError::MissingMintedSession => {
             Error::BadRequest("mint session requested without a uuid".into())
+        }
+        HarnessError::MissingForkTargetSession => {
+            Error::BadRequest("Pi fork requested without a new session uuid".into())
+        }
+        HarnessError::PiPermissionModeUnsupported => {
+            Error::BadRequest("pi does not support permission modes".into())
         }
     }
 }
@@ -65,26 +73,36 @@ pub fn enqueue_run(d: &Arc<Daemon>, card_id: i64, column_id: i64, is_retry: bool
     let prompt = assemble_prompt(&card.description, &comments);
     let existing_session = card.session_id.as_deref().filter(|_| session_used);
     let plan = plan_session(existing_session, settings.fresh_session, is_retry);
-    let minted = matches!(plan, SessionPlan::Mint).then(|| Uuid::new_v4().to_string());
+    // Pi needs an explicit new target id for both mint and fork. Claude ignores
+    // the target on fork and keeps its existing resume+fork semantics.
+    let target_session = matches!(plan, SessionPlan::Mint | SessionPlan::Fork(_))
+        .then(|| Uuid::new_v4().to_string());
     let invocation = build_invocation(
         &settings.harness,
         &d.config,
         &settings,
         &plan,
-        minted.as_deref(),
+        target_session.as_deref(),
         &prompt,
     )
     .map_err(map_harness_err)?;
 
-    let session_for_run = match &plan {
-        SessionPlan::Mint => minted.clone(),
-        SessionPlan::Resume(id) | SessionPlan::Fork(id) => Some(id.clone()),
-    };
+    // Built-ins state their persisted session explicitly. Preserve legacy
+    // custom-harness bookkeeping by falling back to the generic plan.
+    let session_for_run = invocation
+        .resulting_session_id
+        .clone()
+        .or_else(|| match &plan {
+            SessionPlan::Mint => target_session.clone(),
+            SessionPlan::Resume(id) | SessionPlan::Fork(id) => Some(id.clone()),
+        });
     let argv_json = serde_json::to_string(&invocation.argv)?;
 
     let db = d.store.lock();
-    if let Some(u) = &minted {
-        db.set_card_session(card_id, u)?;
+    if let Some(session_id) = &session_for_run {
+        if card.session_id.as_deref() != Some(session_id) {
+            db.set_card_session(card_id, session_id)?;
+        }
     }
     let run = db.create_run(
         card_id,
@@ -151,13 +169,11 @@ async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result<bool> {
 
     // Reconstruct the harness env (BOARD_PROMPT/BOARD_SYSTEM_PROMPT for custom
     // harnesses) plus the daemon-injected BOARD_* vars.
-    let mut env: Vec<(String, String)> = Vec::new();
-    if run.harness != "claude" {
-        env.push(("BOARD_PROMPT".into(), run.prompt_snapshot.clone()));
-        if let Some(sp) = &column.system_prompt {
-            env.push(("BOARD_SYSTEM_PROMPT".into(), sp.clone()));
-        }
-    }
+    let mut env = harness_prompt_env(
+        &run.harness,
+        &run.prompt_snapshot,
+        column.system_prompt.as_deref(),
+    );
     env.push(("BOARD_CARD_ID".into(), card.id.to_string()));
     env.push(("BOARD_RUN_ID".into(), run.id.to_string()));
     env.push((
@@ -289,6 +305,23 @@ async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result<bool> {
         Some(run.column_id),
     );
     Ok(true)
+}
+
+/// Prompt env is only for config-defined harness templates. Built-ins carry
+/// their prompt/system instructions in argv and must not receive reconstruction.
+fn harness_prompt_env(
+    harness: &str,
+    prompt: &str,
+    system_prompt: Option<&str>,
+) -> Vec<(String, String)> {
+    if is_builtin_harness(harness) {
+        return Vec::new();
+    }
+    let mut env = vec![("BOARD_PROMPT".to_string(), prompt.to_string())];
+    if let Some(system_prompt) = system_prompt {
+        env.push(("BOARD_SYSTEM_PROMPT".to_string(), system_prompt.to_string()));
+    }
+    env
 }
 
 /// Finish a never-started (queued) run as `fail` after a spawn error.
@@ -541,8 +574,58 @@ fn find_workspace_by_label(workspaces: &[WorkspaceInfo], label: &str) -> Option<
 
 #[cfg(test)]
 mod tests {
-    use super::{find_workspace_by_label, resolve_workspace_ref};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use super::{
+        dispatch_pass, enqueue_run, find_workspace_by_label, harness_prompt_env,
+        resolve_workspace_ref,
+    };
+    use crate::settings::DaemonSettings;
+    use crate::state::Daemon;
+    use crate::store::Store;
+    use board_core::config::Config;
+    use board_core::db::Db;
+    use board_core::protocol::{CardCreateParams, CardStatus, Effort, RunOutcome};
+    use board_core::spawn::{SpawnHandle, SpawnReq, Spawner};
     use board_herdr::{AgentStatus, WorkspaceInfo};
+    use tokio::sync::{broadcast, mpsc, watch};
+
+    struct MissingPiSpawner;
+
+    impl Spawner for MissingPiSpawner {
+        fn spawn(&self, req: &SpawnReq) -> anyhow::Result<SpawnHandle> {
+            assert_eq!(req.argv.first().map(String::as_str), Some("pi"));
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "pi not found").into())
+        }
+
+        fn kill(&self, _h: &SpawnHandle) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn is_alive(&self, _h: &SpawnHandle) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+    }
+
+    fn test_daemon(spawner: Arc<dyn Spawner>) -> Arc<Daemon> {
+        let (events_tx, _events_rx) = broadcast::channel(16);
+        let (dispatch_tx, _dispatch_rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        Arc::new(Daemon::new(
+            Store::new(Db::open_in_memory().unwrap()),
+            Config::default(),
+            DaemonSettings::default(),
+            PathBuf::from("/tmp/board-test.db"),
+            PathBuf::from("/tmp/board-test.sock"),
+            spawner,
+            None,
+            None,
+            events_tx,
+            dispatch_tx,
+            shutdown_tx,
+        ))
+    }
 
     fn ws(id: &str, label: &str) -> WorkspaceInfo {
         WorkspaceInfo {
@@ -553,6 +636,99 @@ mod tests {
             active_tab_id: String::new(),
             agent_status: AgentStatus::Unknown,
         }
+    }
+
+    #[test]
+    fn pi_is_builtin_and_does_not_receive_custom_prompt_env() {
+        assert!(harness_prompt_env("pi", "prompt", Some("system")).is_empty());
+        assert!(harness_prompt_env("claude", "prompt", Some("system")).is_empty());
+        assert_eq!(
+            harness_prompt_env("fake", "prompt", Some("system")),
+            vec![
+                ("BOARD_PROMPT".into(), "prompt".into()),
+                ("BOARD_SYSTEM_PROMPT".into(), "system".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn pi_fork_persists_the_new_target_session_id() {
+        let d = test_daemon(Arc::new(MissingPiSpawner));
+        let (card_id, column_id, old_session) = {
+            let db = d.store.lock();
+            let card = db
+                .create_card(&CardCreateParams {
+                    title: "retry".into(),
+                    harness: Some("pi".into()),
+                    effort: Some(Effort::Low),
+                    ..Default::default()
+                })
+                .unwrap();
+            let old_session = "11111111-1111-4111-8111-111111111111";
+            db.set_card_session(card.id, old_session).unwrap();
+            let prior = db
+                .create_run(
+                    card.id,
+                    card.column_id,
+                    "pi",
+                    "[]",
+                    "prior",
+                    Some(old_session),
+                    None,
+                )
+                .unwrap();
+            db.start_run(prior.id, None, None).unwrap();
+            db.add_comment(card.id, &format!("agent:{}", prior.id), "done")
+                .unwrap();
+            db.finish_run(prior.id, RunOutcome::Ok, None).unwrap();
+            (card.id, card.column_id, old_session.to_string())
+        };
+
+        let run = enqueue_run(&d, card_id, column_id, true).unwrap();
+        let card = d.store.lock().get_card(card_id).unwrap().unwrap();
+        let new_session = card.session_id.unwrap();
+        assert_ne!(new_session, old_session);
+        assert_eq!(run.session_id.as_deref(), Some(new_session.as_str()));
+        let argv: Vec<String> = serde_json::from_str(&run.argv_json).unwrap();
+        assert!(argv
+            .windows(2)
+            .any(|w| w == ["--fork", old_session.as_str()]));
+        assert!(argv
+            .windows(2)
+            .any(|w| w == ["--session-id", new_session.as_str()]));
+    }
+
+    #[tokio::test]
+    async fn spawn_failure_for_missing_pi_marks_run_failed_with_system_comment() {
+        let d = test_daemon(Arc::new(MissingPiSpawner));
+        let (card_id, column_id) = {
+            let db = d.store.lock();
+            let card = db
+                .create_card(&CardCreateParams {
+                    title: "missing pi".into(),
+                    ..Default::default()
+                })
+                .unwrap();
+            (card.id, card.column_id)
+        };
+        let run = enqueue_run(&d, card_id, column_id, false).unwrap();
+
+        dispatch_pass(&d).await;
+
+        let db = d.store.lock();
+        let finished = db.get_run(run.id).unwrap();
+        assert_eq!(finished.outcome, Some(RunOutcome::Fail));
+        assert_eq!(
+            db.get_card(card_id).unwrap().unwrap().status,
+            CardStatus::Failed
+        );
+        assert!(db
+            .list_comments(card_id)
+            .unwrap()
+            .iter()
+            .any(|comment| comment.author == "system"
+                && comment.body.contains("spawn failed")
+                && comment.body.contains("pi not found")));
     }
 
     #[test]

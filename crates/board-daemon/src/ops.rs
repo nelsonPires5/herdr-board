@@ -10,6 +10,7 @@ use board_core::engine::{
     decide_entry, validate_card_archive, validate_card_edit, validate_card_space,
     validate_column_delete, validate_column_permission_override,
 };
+use board_core::harness::{BUILTIN_HARNESSES, DEFAULT_HARNESS};
 use board_core::protocol::*;
 use board_core::{Error, Result};
 use serde_json::{json, Value};
@@ -140,6 +141,10 @@ fn column_delete(d: &Arc<Daemon>, p: ColumnDeleteParams) -> Result<Value> {
 // -- cards ------------------------------------------------------------------
 
 fn card_create(d: &Arc<Daemon>, p: CardCreateParams) -> Result<Value> {
+    validate_harness_permission(
+        p.harness.as_deref().unwrap_or(DEFAULT_HARNESS),
+        p.permission_mode.as_deref(),
+    )?;
     validate_card_space(
         p.space_kind.unwrap_or(SpaceKind::Workspace),
         p.space_ref.as_deref(),
@@ -176,6 +181,10 @@ fn card_update(d: &Arc<Daemon>, p: CardUpdateParams) -> Result<Value> {
         || p.space_ref.is_some()
         || p.space_cwd.is_some();
     validate_card_edit(card.status, edits_locked)?;
+    validate_harness_permission(
+        p.harness.as_deref().unwrap_or(&card.harness),
+        p.permission_mode.as_deref(),
+    )?;
     let card = d.store.lock().update_card(&p)?;
     d.emit_changed(BoardChangedReason::CardUpdated, Some(card.id), None);
     Ok(json!(card))
@@ -336,12 +345,23 @@ fn run_retry(d: &Arc<Daemon>, p: RunCardParams) -> Result<Value> {
 
 // -- harness / space --------------------------------------------------------
 
+fn validate_harness_permission(harness: &str, permission: Option<&str>) -> Result<()> {
+    if harness == "pi" && permission.is_some() {
+        return Err(Error::BadRequest(
+            "pi does not support permission modes".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn harness_capabilities(d: &Arc<Daemon>, p: HarnessCapabilitiesParams) -> Result<Value> {
     match capabilities_for(&p.harness, &d.config) {
         Some(caps) => Ok(json!(caps)),
         None => {
-            // Known harnesses: the builtin `claude` plus config-defined ones.
-            let mut known = vec!["claude".to_string()];
+            let mut known: Vec<String> = BUILTIN_HARNESSES
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect();
             known.extend(d.config.harness.keys().cloned());
             known.sort();
             Err(Error::NotFound(format!(
@@ -435,6 +455,21 @@ mod tests {
     }
 
     #[test]
+    fn harness_capabilities_pi_ok() {
+        let d = test_daemon(Config::default());
+        let v = handle_request(&d, "harness.capabilities", json!({ "harness": "pi" })).unwrap();
+        assert_eq!(v["harness"], "pi");
+        assert_eq!(v["model_freeform"], true);
+        assert!(v["models"].as_array().unwrap().is_empty());
+        assert!(v["permission_modes"].as_array().unwrap().is_empty());
+        assert!(v["default_efforts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|effort| effort == "low"));
+    }
+
+    #[test]
     fn harness_capabilities_config_defined_ok() {
         let mut config = Config::default();
         config.harness.insert(
@@ -460,10 +495,65 @@ mod tests {
         assert_eq!(err.code(), 2);
         let msg = err.to_string();
         assert!(msg.contains("ghost"), "message: {msg}");
-        assert!(
-            msg.contains("claude"),
-            "message lists known harnesses: {msg}"
-        );
+        assert!(msg.contains("pi"), "message lists Pi: {msg}");
+        assert!(msg.contains("claude"), "message lists Claude: {msg}");
+    }
+
+    #[test]
+    fn card_create_rejects_pi_permission_mode() {
+        let d = test_daemon(Config::default());
+        let err = handle_request(
+            &d,
+            "card.create",
+            json!({ "title": "bad", "harness": "pi", "permission_mode": "acceptEdits" }),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), 1);
+        assert!(err
+            .to_string()
+            .contains("pi does not support permission modes"));
+    }
+
+    #[test]
+    fn switching_card_to_pi_clears_stored_permission() {
+        let d = test_daemon(Config::default());
+        let created = handle_request(
+            &d,
+            "card.create",
+            json!({
+                "title": "switch",
+                "harness": "claude",
+                "permission_mode": "acceptEdits"
+            }),
+        )
+        .unwrap();
+        let updated = handle_request(
+            &d,
+            "card.update",
+            json!({ "id": created["id"], "harness": "pi" }),
+        )
+        .unwrap();
+        assert_eq!(updated["harness"], "pi");
+        assert!(updated["permission_mode"].is_null());
+    }
+
+    #[test]
+    fn switching_card_from_pi_to_claude_clears_incompatible_effort() {
+        let d = test_daemon(Config::default());
+        let created = handle_request(
+            &d,
+            "card.create",
+            json!({ "title": "switch", "harness": "pi", "effort": "off" }),
+        )
+        .unwrap();
+        let updated = handle_request(
+            &d,
+            "card.update",
+            json!({ "id": created["id"], "harness": "claude" }),
+        )
+        .unwrap();
+        assert_eq!(updated["harness"], "claude");
+        assert!(updated["effort"].is_null());
     }
 
     #[test]

@@ -79,8 +79,9 @@ regular, non-symlink `board` whose contents still match that marker.
 
 1. Open the board with the plugin action or an optional keybinding.
 2. On an empty board press `T` to apply the example pipeline, or `N` to create your own columns.
-3. Press `n` to create a card. The guided form selects harness, model, effort, permission, session,
-   and workspace.
+3. Press `n` to create a card. Pi is selected by default. Leave model at `(default)` to use Pi's
+   configured default, choose thinking effort if needed, then select the session and workspace.
+   Permission appears only for harnesses that support it (Pi does not).
 4. Move the card into an automatic column with `m`, `H` / `L`, or drag-and-drop.
 5. Watch the agent appear in the workspace's `kanban` tab. Follow progress with `Enter` for card
    detail; the agent comments and calls `board done` when its stage finishes.
@@ -90,10 +91,15 @@ The same flow from the shell:
 ```bash
 board card new --title "Add retry to the uploader" \
   -d "In src/upload.rs, retry failed PUTs 3x with backoff. Add a unit test." \
-  --harness claude --effort high \
+  --effort low \
   --space-kind new-workspace --space-ref uploader --space-cwd /path/to/repo
 board move <new-card-id> Execute
 ```
+
+`pi` is the default built-in harness. An omitted model lets Pi use its current configured default;
+an explicit model uses Pi's `provider/model` form. Board effort maps to Pi `--thinking`. Pi has no
+board permission mode and rejects `--permission`. Claude remains available explicitly with
+`--harness claude` and keeps its model/effort/permission behavior.
 
 ## How it works
 
@@ -181,18 +187,21 @@ command = "herdr plugin action invoke open-board --plugin herdr-board"
 </details>
 
 <details>
-<summary><strong>Install the optional Claude integration and agent skill</strong></summary>
+<summary><strong>Install an optional harness integration and agent skill</strong></summary>
 
-For more precise Claude status (`idle`, `working`, `blocked`) and session references, install Herdr's
-integration. The board still works without it.
+For precise Pi status (`idle`, `working`, `blocked`) and session references, install Herdr's Pi
+integration. Installation changes your personal Pi extension config, so herdr-board never does it
+automatically. Spawn, explicit `board done`, timeout, and pane-exit handling still work without it;
+precise status and the idle-lost watchdog do not.
 
 ```bash
-herdr integration install claude
+herdr integration install pi
 ```
 
-The repository's optional [`skill/SKILL.md`](skill/SKILL.md) teaches Claude Code sessions how to
-comment, call `board done`, and queue work interactively. GitHub plugin installation does not copy
-the skill; the local-development installer below can do so.
+Claude users can similarly run `herdr integration install claude`. The repository's optional
+[`skill/SKILL.md`](skill/SKILL.md) teaches interactive or dispatched agents to comment, call
+`board done`, and queue work. GitHub plugin installation does not copy the skill; the
+local-development installer below can do so.
 
 </details>
 
@@ -224,7 +233,7 @@ board comment [CARD_ID] <BODY>            # CARD_ID defaults to $BOARD_CARD_ID
 board done [CARD_ID] --outcome ok|fail [--summary S]
 board move <CARD_ID> <COLUMN> | cancel <CARD_ID> | retry <CARD_ID>
 board harness models [HARNESS] | efforts [HARNESS] --model M | permissions [HARNESS]
-board space list [--session S] | session list    # HARNESS defaults to "claude"
+board space list [--session S] | session list    # HARNESS defaults to "pi"
 ```
 
 `--json` is accepted everywhere. In the TUI, `d` permanently deletes a card after confirmation;
@@ -390,8 +399,8 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`AGENTS.md`](AGENTS.md) before con
 
 ## Status
 
-**v1.** Rust with Ratatui, Rusqlite, and Tokio. Claude Code is built in; config-defined harnesses
-plug in behind `HarnessAdapter`, with Codex, Gemini, and OpenCode planned. Execution happens in
+**v1.** Rust with Ratatui, Rusqlite, and Tokio. Pi is the default built-in harness and Claude Code
+remains explicitly selectable; config-defined harnesses are also supported. Execution happens in
 visible Herdr panes, and extension-owned state remains separate from Herdr's state.
 
 ## License

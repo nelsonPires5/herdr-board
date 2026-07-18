@@ -34,25 +34,24 @@ live agent status (idle / working / blocked / done) back to herdr. Manage them w
 - `herdr integration install <name>` / `herdr integration uninstall <name>`
 - `herdr integration status [--outdated-only]`
 
-As of herdr 0.7.3 the installable integrations are: **pi, omp, claude, codex,
+As of herdr 0.7.4 the installable integrations are: **pi, omp, claude, codex,
 copilot, devin, droid, kimi, opencode, kilo, hermes, qodercli, cursor,
 mastracode** (get the current list from `herdr integration --help`).
 
-Installing one **writes into that harness's own config** (for example, `claude`
-installs `~/.claude/hooks/herdr-agent-state.sh`; `herdr integration status` prints
-the target path for each). Because it mutates a developer's personal harness
-configuration, **herdr-board does not require it** — it is each developer's choice.
-The board works without it; the only board behavior that depends on harness status
-events is the **idle-lost watchdog** (a run whose agent goes idle without calling
-`board done` is marked `lost`). Without a status integration a pane's
-`agent_status` stays `unknown`, so that watchdog never arms — which is also why the
-live e2e suite cannot reproduce idle-lost (see [`../e2e/README.md`](../e2e/README.md)).
+Installing one **writes into that harness's own config** (`pi` installs
+`~/.pi/agent/extensions/herdr-agent-state.ts`; `claude` installs a hook under
+`~/.claude`). Because it mutates personal configuration, herdr-board never installs or
+updates it automatically. Pi users should optionally run `herdr integration install pi`
+for precise working/blocked/idle status and session references. Spawn, explicit
+`board done`, timeout, and pane-exit handling work without it; the idle-lost watchdog
+does not arm while status remains `unknown`. The standard E2E uses a fake Pi and tests
+watcher status mapping deterministically rather than changing integrations.
 
 ## Version drift
 
 This repo's herdr facts — [`docs/research.md`](research.md), [`docs/design.md`](design.md),
 and the wire shapes hard-coded in `board-herdr` — were **verified against
-herdr 0.7.3 / protocol 16 on 2026-07-15**.
+herdr 0.7.4 / protocol 16 on 2026-07-17**.
 
 herdr updates independently of this repo (`herdr update`, stable/preview channels).
 When something that used to work misbehaves on a newer herdr — an unknown method, a
