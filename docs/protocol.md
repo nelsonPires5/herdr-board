@@ -33,21 +33,28 @@ daemon on the same DB must exit 0 silently (lost the race = someone else serves)
 - `daemon.stop` → `{stopping:true}` (graceful: cancels nothing; running panes keep running, runs are re-adopted on next start via herdr pane liveness check)
 
 ### board / columns
-One global board (`id=1`, created on first migration with a single `Todo` column, `trigger=manual`, position 0).
 
-- `board.get` → `{board:{id,name}, columns:[Column…ordered], cards:[Card…ordered by column,position]}`.
-  Cards include `archived_at` (`null` = active); the full snapshot includes both active and archived
-  cards so clients can filter locally.
-  (the TUI's one-shot fetch; it refetches on any event)
-- `column.create {name, position?, system_prompt?, trigger?, on_success_column_id?, on_fail_column_id?, fresh_session?, harness_override?, model_override?, effort_override?, permission_override?, timeout_minutes?}` → `Column`
+Boards are independent pipelines keyed by canonical path. `Global` is board `id=1` with
+`scope_path:null`; old requests that omit `board_id` continue to target it.
+
+- `board.open {scope_path}` → `BoardSnapshot`; idempotently gets/creates the path board, seeding a
+  new board with exactly one manual `Todo` column.
+- `board.list {}` → `{boards:[Board…]}`; `Global` first, then scoped boards ordered by full path.
+- `board.get {board_id?}` → `{board:{id,name,scope_path}, columns:[Column…ordered], cards:[Card…]}`.
+  Omitted `board_id` means `Global`. Cards include active and archived rows for local filtering.
+- `column.create {name, board_id?, position?, system_prompt?, trigger?, on_success_column_id?, on_fail_column_id?, fresh_session?, harness_override?, model_override?, effort_override?, permission_override?, timeout_minutes?}` → `Column`; omitted `board_id` means `Global`.
 - `column.update {id, …any subset of the above}` → `Column` (name/trigger/etc.; unset a nullable by passing `null`)
 - `column.reorder {id, position}` → `[Column…]`
-- `column.delete {id, move_cards_to?}` → `{deleted:true}`; error 3 if it has cards and no `move_cards_to`, or if any card in it is `running|queued`
-- `template.apply {name:"pipeline"}` → full column set (error 3 unless board has only the seed `Todo` column and no cards)
+- `column.delete {id, move_cards_to?}` → `{deleted:true}`; destination must belong to the same board; error 3 if cards lack a destination or any card is `running|queued`.
+- `template.apply {name:"pipeline", board_id?}` → the requested board's full column set (omitted = `Global`; error 3 unless it has only seed `Todo` and no cards).
+
+The store enforces board boundaries: card create/move, column-delete destinations,
+`on_success`/`on_fail`, templates, and automatic transitions cannot reference another board.
+Scheduler adoption and watchers still scan runs across every board.
 
 ### cards
 A card selects a **herdr session** (`session`, `null` = the daemon's default session) AND a **space** within it.
-- `card.create {title, description?, column_id?(default Todo), harness?(default "pi"), model?, effort?, permission_mode?, session?, space_kind?("workspace"|"new_workspace"), space_ref?, space_cwd?, position?}` → `Card`
+- `card.create {title, board_id?, description?, column_id?(default Todo), harness?(default "pi"), model?, effort?, permission_mode?, session?, space_kind?("workspace"|"new_workspace"), space_ref?, space_cwd?, position?}` → `Card`; omitted `board_id` means `Global`, and an explicit column must belong to that board.
   - Pi rejects a non-null `permission_mode` with error 1; Pi has no board-level tool permission mode.
   - `space_kind`:
     - `workspace` — an ALREADY-OPEN workspace in the session; `space_ref` = its workspace id (a case-insensitive label is also accepted at dispatch).
@@ -59,9 +66,9 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
 - `card.archive {id, archived:true|false}` → `Card` — archives or restores without deleting
   comments/runs. Archiving is refused while `queued|running|blocked`; archived cards must be restored
   before move/retry.
-- `card.move {id, column_id, position?}` → `Card` — THE trigger: if target column `trigger=auto` and card idle/failed, a run is enqueued
+- `card.move {id, column_id, position?}` → `Card` — THE trigger: target must belong to the card's board; if it is `auto` and the card is idle/failed, a run is enqueued.
 - `card.get {id}` → `{card, comments:[…], runs:[…]}`
-- `card.list {column_id?}` → `[Card…]`
+- `card.list {board_id?, column_id?}` → `[Card…]`; omitted `board_id` means `Global`, and a column filter must belong to the requested board.
 
 ### comments / runs
 - `comment.add {card_id, body, author?}` → `Comment`. CLI `board comment` sets author
@@ -73,6 +80,10 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
 - `run.cancel {card_id}` → `{run, card}` — kills the pane (herdr `pane.close`), outcome `cancelled`, card status `failed`, no transition.
 - `run.retry {card_id}` → re-enqueue in current column (fresh run). Claude resumes with
   `--fork-session`; Pi uses `--fork <old-id> --session-id <new-id>` and persists the new id.
+- `run.focus {card_id, origin_socket}` → `{run_id,pane_id}` — chooses the newest run with a
+  recorded pane, resolves its Herdr session, and calls socket `pane.focus`. `origin_socket` and the
+  target socket are canonicalized and must match; cross-session focus is error 3, unavailable/stale
+  Herdr is error 4.
 
 ### harness / spaces
 - `harness.capabilities {harness}` → `{harness, models:[{id, efforts:[…]}], model_freeform: bool, default_efforts:[…], permission_modes:[…]}`. `default_efforts` is serde-defaulted for backward-compatible clients and applies when model is omitted/free-form; a known model's own efforts remain authoritative.
@@ -85,7 +96,7 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
 
 ## Events (streamed to subscribers)
 
-Coarse by design — the TUI just refetches `board.get` on any of them; payload is for logs/toasts.
+Coarse by design — the TUI refetches only its selected `board.get {board_id}` on any event; payload is for logs/toasts.
 
 - `{"event":"board_changed","reason":"card_moved|card_created|card_updated|card_deleted|card_archived|column_changed|comment_added|run_started|run_ended|run_blocked","card_id"?:N,"column_id"?:N}`
 - `{"event":"run_ended","card_id":N,"run_id":N,"outcome":"ok|fail|cancelled|lost"}` (also emitted as board_changed)

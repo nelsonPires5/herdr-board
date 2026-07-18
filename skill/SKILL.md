@@ -12,8 +12,9 @@ description: >-
 
 herdr-board is a kanban board for AI coding agents. A **card** is a prompt (title +
 description) plus harness/model/effort, an optional harness-specific permission, and a target herdr space. New cards default to Pi; runs remain harness-neutral. **Columns**
-are pipeline stages; a column can be `manual` or `auto`. Moving a card into an `auto`
-column dispatches an agent run into a visible herdr pane. Agents report back to the board
+are pipeline stages; a column can be `manual` or `auto`. Each canonical Git root (or exact
+non-Git CWD) has an independent board; the old board is preserved as `Global`. Moving a card into
+an `auto` column dispatches an agent run into a visible herdr pane. Agents report back to the board
 via the `board` CLI — never by editing the DB. The daemon (`boardd`) owns all state and
 handles column transitions; you never move a card out of your own stage.
 
@@ -67,6 +68,11 @@ unset) and a **space** within it: `workspace` runs in an already-open workspace
 workspace on first dispatch (`--space-ref` = label, `--space-cwd` = its working
 dir — both required). There is no worktree space kind; run per-branch isolation
 from the agent prompt instead.
+
+`card new/list` and `column list` use the current Git-root/CWD board. Set `BOARD_SCOPE_PATH` for a
+deterministic automation override. Commands by card id (`show`, `comment`, `done`, `cancel`,
+`retry`, archive/restore) infer the card's board; `move` also resolves the column in that board, not
+the caller's CWD.
 
 Archiving is a human/interactive-session action. It is refused for cards with an active or queued
 run; cancel first if appropriate. Archived cards must be restored before move/retry.

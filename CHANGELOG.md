@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- Independent boards per canonical Git root or non-Git CWD, with separate columns, templates, and
+  cards. Schema v5 preserves all previous data as `Global`; `b` opens a path-disambiguated board
+  picker and pane titles combine scope with `ACTIVE` / `ALL` / `ARCHIVED`.
+- Card detail `o` now focuses the newest recorded run pane through daemon-mediated Herdr
+  `pane.focus`. Same-session validation prevents pane-id collisions across sessions; success closes
+  the overlay and errors remain as toasts.
+- Live E2E scenarios cover Git/CWD board identity and real-plugin jump-to-pane behavior.
+
+### Changed
+- Scope-sensitive CLI commands use Git root/CWD (overridable with `BOARD_SCOPE_PATH`), while
+  card-id operations and `move` infer the card's own board. Legacy protocol requests without
+  `board_id` continue to target `Global`.
+
 ## [0.5.0] - 2026-07-18
 
 ### Added

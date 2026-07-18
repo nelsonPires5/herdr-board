@@ -4,7 +4,7 @@
 
 | Entity | What it is |
 |---|---|
-| **Board** | A pipeline definition: an ordered set of columns. One default board; more allowed (e.g. "features", "ops"). A fresh board contains **only a `Todo` column** — everything else is user-created. |
+| **Board** | An independent pipeline (columns/config/cards) selected by canonical Git root or non-Git CWD. `Global` preserves the pre-v5 board. A fresh scoped board contains **only a `Todo` column**; everything else is user-created. |
 | **Column** | A stage, entirely user-defined: create/rename/reorder/delete from the TUI (keyboard or mouse). Config: `system_prompt`, `trigger` (`auto` = entering the column starts a run; `manual` = waits for human), `on_success` / `on_fail` (move card to column X, or stay), optional overrides (model/effort/harness) applied to every card passing through. Nothing about column names or count is hardcoded. |
 | **Card** | A unit of work. Title, **description = the base prompt**, harness, model, effort, permission mode, a **herdr session** (`session`, null = daemon default) AND a **space** within it (`workspace` = an already-open workspace id; `new_workspace` = a label + cwd the daemon opens on first dispatch), position, live status (`idle · queued · running · blocked · failed`), the harness `session_id` for resume, and an optional `archived_at` timestamp. Archiving is reversible and preserves comments/run history. |
 | **Comment** | Timestamped note on a card. Author = `user`, `agent` (from a run), or `system` (daemon transitions). Comments are both the audit log **and** context for the next run. |
@@ -33,7 +33,7 @@ Separation card ↔ run is deliberate (vibe-kanban converged on task/attempt/exe
    notification.show
 ```
 
-- **boardd** is the only SQLite writer. State in `~/.local/share/herdr-board/board.db` (global — cards target spaces in different repos).
+- **boardd** is the only SQLite writer. One DB at `~/.local/share/herdr-board/board.db` stores every independent scoped board; cards still explicitly target Herdr sessions/workspaces.
 - **TUI** is packaged as a herdr plugin: `herdr-plugin.toml` declares a `[[panes]]` entry (herdr spawns the TUI binary in a split/tab) and `[[actions]]` (e.g. "add focused pane's repo as a card") bindable via `[[keys.command]]`. Plugin processes receive `HERDR_BIN_PATH`, `HERDR_PLUGIN_CONFIG_DIR`, `HERDR_PLUGIN_CONTEXT_JSON`.
 - **`board` CLI** subcommands hit the boardd socket — never SQLite directly (single-writer rule).
 - boardd holds a persistent connection to herdr's socket for `events.subscribe`; fallback is polling `herdr api snapshot`.
@@ -43,7 +43,7 @@ Separation card ↔ run is deliberate (vibe-kanban converged on task/attempt/exe
 See [`../schema.sql`](../schema.sql). Summary:
 
 ```
-boards(id, name)
+boards(id, name, scope_path)                 -- NULL = Global; canonical path otherwise
 columns(id, board_id, name, position, system_prompt, trigger,
         on_success_column_id, on_fail_column_id,
         model_override, effort_override, harness_override, permission_override)
@@ -60,10 +60,10 @@ runs(id, card_id, column_id, harness, argv_json, prompt_snapshot,
      result_summary, log_path)
 ```
 
-Schema is versioned via `PRAGMA user_version` (current = **v4**). A fresh DB is built straight from
-`schema.sql` and stamped v4. Existing v1 DBs receive the v2 space/session migration, v2 DBs receive
-v3 archive state, and v3 DBs receive the effort-constraint update for Pi's `off`/`minimal` levels.
-The v4 copy preserves every stored harness; existing Claude cards are never migrated to Pi.
+Schema is versioned via `PRAGMA user_version` (current = **v5**). A fresh DB is built straight from
+`schema.sql` and stamped v5. Existing v1→v4 migrations retain their space/session, archive, and Pi
+effort behavior. v5 adds unique non-null `boards.scope_path`, preserves board `id=1` plus every
+related row as `Global`, and leaves existing card harnesses unchanged.
 
 ### Session model
 
@@ -141,6 +141,21 @@ Notes:
 - Column `system_prompt` is delivered via `--append-system-prompt` (never `--system-prompt`) so harness defaults and context files stay intact. It can invoke skills (`/quick-planner`, `/code-review`) — that's how "column triggers a skill" works, no special mechanism needed.
 - `on_fail = "Execute"` from Review + comments-as-context gives the fix loop for free: the re-entered Execute run sees the reviewer's findings in its prompt.
 
+### Scope selection
+
+At the CLI/TUI boundary, non-empty `BOARD_SCOPE_PATH` wins. TUI otherwise uses
+`HERDR_PLUGIN_CONTEXT_JSON.focused_pane_cwd`, then `workspace_cwd`, then process CWD. The candidate
+is canonicalized; `git -C <candidate> rev-parse --show-toplevel` selects a canonical Git root,
+while a non-Git directory keeps its exact canonical CWD. Subdirectories of one repo therefore share
+a board; equal basenames at different paths do not. Moving/renaming a path does not migrate its old
+board, which remains available in the picker.
+
+`o` is daemon-mediated: `run.focus` chooses the card's newest run with a recorded pane, resolves the
+run's session socket, canonicalizes and compares it with the invoking plugin's
+`HERDR_SOCKET_PATH`, then calls Herdr socket method `pane.focus {pane_id}`. Cross-session jumps are
+refused; success exits the overlay, while missing/stale panes and Herdr errors remain visible as a
+toast.
+
 ### TUI interactions (v1)
 
 - **Access: overlay only** — `[[keys.command]]` keybinding (e.g. `prefix+k`) → `plugin pane open --plugin herdr-board --placement overlay`; the board floats over the current workspace from anywhere, dismiss to drop back. No pinned workspace, no sidebar entry (herdr has no sidebar extension point — verified against api schema/config).
@@ -151,12 +166,13 @@ Notes:
   wheel scroll), with a blue divider for the focused history. Histories open at the latest item and
   show only directional arrows (no counts) when content is hidden. `e` edits the card and returns to
   detail after save/cancel.
-- Mouse **and** keyboard for everything: drag card between columns / `m` move; `n` new card, `N`
-  new column; `e` edit card; `a` archive/restore; `v` cycles `ACTIVE` / `ALL` / `ARCHIVED`; `c`
-  comment; `Enter` card detail; `o` jump to the card's herdr pane; `r` refresh board (re-fetch state
+- Mouse **and** keyboard for everything: `b` switches between `Global` and scoped boards; drag card
+  between columns / `m` move; `n` new card, `N` new column; `e` edit card; `a` archive/restore; `v`
+  cycles `ACTIVE` / `ALL` / `ARCHIVED`; `c` comment; `Enter` card detail; `o` focuses the latest
+  recorded run pane when it belongs to the current Herdr session; `r` refreshes the selected board
   on demand); `?` help overlay listing **all** keybinds; column config form (rename, system prompt,
   trigger, on_success/on_fail, overrides, reorder, delete). The filter is rendered in the Herdr pane
-  title (`Board [ACTIVE|ALL|ARCHIVED]`) while the footer contains only `? help`. Archived cards are
+  title (`Board [<scope> · ACTIVE|ALL|ARCHIVED]`) while the footer contains only `? help`. Archived cards are
   inert until restored and render dimmed with `▣ ARCHIVED` when visible.
 - **Content-sized overlays:** card/column forms, move pickers, and help panels shrink to their content on large terminals and clamp to the available viewport on small terminals.
 - **Guided card form**: Pi is selected for new cards; Claude remains selectable. On open/harness change the form fetches `harness.capabilities` and `space.list`. Model starts at `(default)` (unset), then catalog aliases and `(custom)` when free-form is supported. Effort follows the selected/default model. Permission is hidden and submits `None` for Pi; Claude shows its modes. Switching harness resets only incompatible values. Workspace labels are shown but ids are persisted. Fetch failures degrade to free text with a warning.
@@ -232,7 +248,7 @@ Pane-idle scraping alone is the documented weak point of every tmux-style orches
 4. **Long-text editing: modal textarea + `Ctrl+E` → `$EDITOR`.**
 5. boardd lifecycle: `board tui` auto-starts the daemon if absent; daemon outlives the overlay (runs continue with the board closed; `herdr notification show` covers "done while closed").
 
-6. **One global board** (not per-space/per-repo): the space/path an agent must run in is configured on the card, never implied by board location.
+6. **Independent canonical-path boards.** Git-root/CWD chooses the pipeline board; `Global` preserves legacy data. The agent's runtime session/workspace remains explicit card configuration and is never inferred from board scope.
 7. **No MCP — CLI only.** Agents interact with the board exclusively through the `board` CLI.
 
 ## 10. The herdr-board skill
