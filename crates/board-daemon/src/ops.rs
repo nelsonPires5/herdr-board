@@ -2,6 +2,7 @@
 //! `events.subscribe`, handled by the connection layer). DB work is quick and
 //! serialized; spawning is deferred to the dispatcher via `wake_dispatch`.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use board_core::capability::capabilities_for;
@@ -28,7 +29,16 @@ pub fn handle_request(d: &Arc<Daemon>, method: &str, params: Value) -> Result<Va
             d.trigger_shutdown();
             Ok(json!(StopResult { stopping: true }))
         }
-        "board.get" => board_get(d),
+        "board.open" => board_open(d, from(params)?),
+        "board.list" => board_list(d),
+        "board.get" => board_get(
+            d,
+            if params.is_null() {
+                BoardGetParams::default()
+            } else {
+                from(params)?
+            },
+        ),
         "column.create" => column_create(d, from(params)?),
         "column.update" => column_update(d, from(params)?),
         "column.reorder" => column_reorder(d, from(params)?),
@@ -45,6 +55,7 @@ pub fn handle_request(d: &Arc<Daemon>, method: &str, params: Value) -> Result<Va
         "run.done" => run_done(d, from(params)?),
         "run.cancel" => run_cancel(d, from(params)?),
         "run.retry" => run_retry(d, from(params)?),
+        "run.focus" => run_focus(d, from(params)?),
         "harness.capabilities" => harness_capabilities(d, from(params)?),
         "space.list" => space_list(d, from(params)?),
         "session.list" => session_list(d),
@@ -93,13 +104,28 @@ fn daemon_status(d: &Arc<Daemon>) -> Result<Value> {
     }))
 }
 
-fn board_get(d: &Arc<Daemon>) -> Result<Value> {
+fn board_snapshot(d: &Arc<Daemon>, board_id: i64) -> Result<Value> {
     let db = d.store.lock();
     Ok(json!(BoardSnapshot {
-        board: db.get_board(BOARD_ID)?,
-        columns: db.list_columns(BOARD_ID)?,
-        cards: db.list_cards(BOARD_ID)?,
+        board: db.get_board(board_id)?,
+        columns: db.list_columns(board_id)?,
+        cards: db.list_cards(board_id)?,
     }))
+}
+
+fn board_open(d: &Arc<Daemon>, p: BoardOpenParams) -> Result<Value> {
+    let board = d.store.lock().open_board(&p.scope_path)?;
+    board_snapshot(d, board.id)
+}
+
+fn board_list(d: &Arc<Daemon>) -> Result<Value> {
+    Ok(json!(BoardListResult {
+        boards: d.store.lock().list_boards()?,
+    }))
+}
+
+fn board_get(d: &Arc<Daemon>, p: BoardGetParams) -> Result<Value> {
+    board_snapshot(d, p.board_id.unwrap_or(BOARD_ID))
 }
 
 // -- columns ----------------------------------------------------------------
@@ -256,9 +282,21 @@ fn card_get(d: &Arc<Daemon>, p: CardIdParams) -> Result<Value> {
 
 fn card_list(d: &Arc<Daemon>, p: CardListParams) -> Result<Value> {
     let db = d.store.lock();
+    let board_id = p.board_id.unwrap_or(BOARD_ID);
     let cards = match p.column_id {
-        Some(c) => db.list_cards_in_column(c)?,
-        None => db.list_cards(BOARD_ID)?,
+        Some(c) => {
+            let column = db
+                .get_column(c)?
+                .ok_or_else(|| Error::NotFound(format!("column {c}")))?;
+            if column.board_id != board_id {
+                return Err(Error::InvalidState(format!(
+                    "column {c} belongs to board {}, expected {board_id}",
+                    column.board_id
+                )));
+            }
+            db.list_cards_in_column(c)?
+        }
+        None => db.list_cards(board_id)?,
     };
     Ok(json!(cards))
 }
@@ -320,6 +358,63 @@ fn run_cancel(d: &Arc<Daemon>, p: RunCardParams) -> Result<Value> {
     d.emit_run_ended(p.card_id, run.id, RunOutcome::Cancelled);
     d.wake_dispatch();
     Ok(json!(RunActionResult { run, card }))
+}
+
+fn run_focus(d: &Arc<Daemon>, p: RunFocusParams) -> Result<Value> {
+    let run = d
+        .store
+        .lock()
+        .latest_run_with_pane(p.card_id)?
+        .ok_or_else(|| {
+            Error::NotFound(format!(
+                "no run with an accessible pane for card {}",
+                p.card_id
+            ))
+        })?;
+    let pane_id = run
+        .herdr_pane_id
+        .clone()
+        .ok_or_else(|| Error::NotFound(format!("run {} has no pane", run.id)))?;
+    let registry = d
+        .session_registry
+        .as_ref()
+        .ok_or_else(|| Error::HerdrUnavailable("jump to pane requires Herdr".into()))?;
+    let target_socket = match run.session.as_deref() {
+        None => registry.default_socket().to_path_buf(),
+        Some(session) => {
+            registry
+                .resolve(Some(session))
+                .map_err(|e| Error::HerdrUnavailable(format!("resolving run session: {e:#}")))?
+                .socket
+        }
+    };
+    let origin_socket = normalize_socket(Path::new(&p.origin_socket), "origin")?;
+    let target_socket = normalize_socket(&target_socket, "target")?;
+    if origin_socket != target_socket {
+        return Err(Error::InvalidState(
+            "run pane belongs to a different Herdr session; cross-session jump is not supported"
+                .into(),
+        ));
+    }
+
+    let mut client = board_herdr::HerdrClient::connect(&target_socket)
+        .map_err(|e| Error::HerdrUnavailable(format!("connecting to Herdr: {e}")))?;
+    client
+        .pane_focus(&pane_id)
+        .map_err(|e| Error::HerdrUnavailable(format!("pane.focus {pane_id}: {e}")))?;
+    Ok(json!(RunFocusResult {
+        run_id: run.id,
+        pane_id,
+    }))
+}
+
+fn normalize_socket(path: &Path, kind: &str) -> Result<PathBuf> {
+    path.canonicalize().map_err(|e| {
+        Error::HerdrUnavailable(format!(
+            "{kind} Herdr socket '{}' is unavailable: {e}",
+            path.display()
+        ))
+    })
 }
 
 fn run_retry(d: &Arc<Daemon>, p: RunCardParams) -> Result<Value> {
@@ -412,15 +507,26 @@ fn session_list(d: &Arc<Daemon>) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::SessionRegistry;
     use crate::settings::DaemonSettings;
     use crate::spawner::LocalSpawner;
     use crate::store::Store;
     use board_core::config::{Config, HarnessDef};
     use board_core::db::Db;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
+    use std::thread;
     use tokio::sync::{broadcast, mpsc, watch};
 
     fn test_daemon(config: Config) -> Arc<Daemon> {
+        test_daemon_with_registry(config, None)
+    }
+
+    fn test_daemon_with_registry(
+        config: Config,
+        session_registry: Option<SessionRegistry>,
+    ) -> Arc<Daemon> {
         let db = Db::open_in_memory().unwrap();
         let store = Store::new(db);
         let (events_tx, _events_rx) = broadcast::channel(16);
@@ -434,11 +540,192 @@ mod tests {
             PathBuf::from("/tmp/board-test.sock"),
             Arc::new(LocalSpawner::new()),
             None, // no herdr
-            None, // no session registry
+            session_registry,
             events_tx,
             dispatch_tx,
             shutdown_tx,
         ))
+    }
+
+    #[test]
+    fn board_open_list_get_and_legacy_default_are_scoped() {
+        let d = test_daemon(Config::default());
+        let alpha = handle_request(&d, "board.open", json!({"scope_path":"/alpha"})).unwrap();
+        let beta = handle_request(&d, "board.open", json!({"scope_path":"/beta"})).unwrap();
+        let alpha_id = alpha["board"]["id"].as_i64().unwrap();
+        let beta_id = beta["board"]["id"].as_i64().unwrap();
+        assert_ne!(alpha_id, beta_id);
+        assert_eq!(alpha["columns"].as_array().unwrap().len(), 1);
+
+        handle_request(
+            &d,
+            "card.create",
+            json!({"board_id":alpha_id,"title":"alpha"}),
+        )
+        .unwrap();
+        assert_eq!(
+            handle_request(&d, "board.get", json!({"board_id":alpha_id})).unwrap()["cards"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            handle_request(&d, "board.get", json!({"board_id":beta_id})).unwrap()["cards"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let legacy = handle_request(&d, "board.get", json!({})).unwrap();
+        assert_eq!(legacy["board"]["name"], "Global");
+        let omitted = handle_request(&d, "board.get", Value::Null).unwrap();
+        assert_eq!(omitted["board"]["name"], "Global");
+        let list = handle_request(&d, "board.list", json!({})).unwrap();
+        assert_eq!(list["boards"][0]["name"], "Global");
+    }
+
+    #[test]
+    fn template_and_scheduler_operate_on_scoped_board() {
+        let d = test_daemon(Config::default());
+        let opened = handle_request(&d, "board.open", json!({"scope_path":"/scoped"})).unwrap();
+        let board_id = opened["board"]["id"].as_i64().unwrap();
+        handle_request(
+            &d,
+            "template.apply",
+            json!({"name":"pipeline","board_id":board_id}),
+        )
+        .unwrap();
+        let snapshot = handle_request(&d, "board.get", json!({"board_id":board_id})).unwrap();
+        assert_eq!(snapshot["columns"].as_array().unwrap().len(), 6);
+        let execute = snapshot["columns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|column| column["name"] == "Execute")
+            .unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        let card = handle_request(
+            &d,
+            "card.create",
+            json!({"board_id":board_id,"column_id":execute,"title":"queued","harness":"pi"}),
+        )
+        .unwrap();
+        assert_eq!(card["board_id"], board_id);
+        assert!(d
+            .store
+            .queued_runs()
+            .unwrap()
+            .iter()
+            .any(|(_, queued)| queued.id == card["id"].as_i64().unwrap()));
+    }
+
+    fn add_run_with_pane(d: &Arc<Daemon>, pane: Option<&str>) -> i64 {
+        let db = d.store.lock();
+        let card = db
+            .create_card(&CardCreateParams {
+                title: "focus target".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let run = db
+            .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
+            .unwrap();
+        db.start_run(run.id, Some("w1"), pane).unwrap();
+        card.id
+    }
+
+    fn fake_herdr(reply: &'static str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("herdr.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        thread::spawn(move || {
+            for incoming in listener.incoming() {
+                let stream = incoming.unwrap();
+                let mut writer = stream.try_clone().unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap() == 0 {
+                    continue;
+                }
+                let request: Value = serde_json::from_str(line.trim()).unwrap();
+                assert_eq!(request["method"], "pane.focus");
+                let id = request["id"].as_str().unwrap();
+                writeln!(writer, "{{\"id\":\"{id}\",{reply}}}").unwrap();
+                break;
+            }
+        });
+        (dir, path)
+    }
+
+    #[test]
+    fn run_focus_rejects_missing_pane_and_cross_session_socket() {
+        let d = test_daemon(Config::default());
+        let card_id = add_run_with_pane(&d, None);
+        let err = handle_request(
+            &d,
+            "run.focus",
+            json!({"card_id":card_id,"origin_socket":"/tmp/origin.sock"}),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), 2);
+        assert!(err.to_string().contains("pane"));
+
+        let target_dir = tempfile::tempdir().unwrap();
+        let target = target_dir.path().join("target.sock");
+        let _listener = UnixListener::bind(&target).unwrap();
+        let origin_dir = tempfile::tempdir().unwrap();
+        let origin = origin_dir.path().join("origin.sock");
+        let _origin_listener = UnixListener::bind(&origin).unwrap();
+        let d = test_daemon_with_registry(
+            Config::default(),
+            Some(SessionRegistry::new(target.clone())),
+        );
+        let card_id = add_run_with_pane(&d, Some("w1:p2"));
+        let err = handle_request(
+            &d,
+            "run.focus",
+            json!({"card_id":card_id,"origin_socket":origin}),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), 3);
+        assert!(err.to_string().contains("different Herdr session"));
+    }
+
+    #[test]
+    fn run_focus_propagates_herdr_error_and_returns_success_ids() {
+        let (_dir, socket) =
+            fake_herdr("\"error\":{\"code\":\"pane_not_found\",\"message\":\"gone\"}");
+        let d = test_daemon_with_registry(
+            Config::default(),
+            Some(SessionRegistry::new(socket.clone())),
+        );
+        let card_id = add_run_with_pane(&d, Some("w1:p9"));
+        let err = handle_request(
+            &d,
+            "run.focus",
+            json!({"card_id":card_id,"origin_socket":socket}),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), 4);
+        assert!(err.to_string().contains("gone"));
+
+        let (_dir, socket) = fake_herdr(
+            "\"result\":{\"type\":\"pane_info\",\"pane\":{\"pane_id\":\"w1:p9\",\"terminal_id\":\"term\",\"workspace_id\":\"w1\",\"tab_id\":\"w1:t1\",\"agent_status\":\"idle\"}}",
+        );
+        let d = test_daemon_with_registry(
+            Config::default(),
+            Some(SessionRegistry::new(socket.clone())),
+        );
+        let card_id = add_run_with_pane(&d, Some("w1:p9"));
+        let result = handle_request(
+            &d,
+            "run.focus",
+            json!({"card_id":card_id,"origin_socket":socket}),
+        )
+        .unwrap();
+        assert_eq!(result["pane_id"], "w1:p9");
+        assert!(result["run_id"].as_i64().unwrap() > 0);
     }
 
     #[test]

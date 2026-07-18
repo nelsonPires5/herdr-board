@@ -370,6 +370,7 @@ fn cmd_card(sub: CardCmd) -> Result<()> {
             };
             let p = CardCreateParams {
                 title,
+                board_id: None,
                 description,
                 column_id,
                 harness,

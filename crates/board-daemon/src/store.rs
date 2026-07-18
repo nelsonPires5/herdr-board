@@ -10,7 +10,7 @@
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use board_core::db::{Db, BOARD_ID};
+use board_core::db::Db;
 use board_core::model::{Card, Run};
 use board_core::Result;
 
@@ -62,7 +62,7 @@ impl Store {
     fn collect_runs(&self, pred: impl Fn(&Run) -> bool) -> Result<Vec<(Run, Card)>> {
         let db = self.lock();
         let mut out = Vec::new();
-        for card in db.list_cards(BOARD_ID)? {
+        for card in db.list_all_cards()? {
             for run in db.list_runs(card.id)? {
                 if pred(&run) {
                     out.push((run, card.clone()));

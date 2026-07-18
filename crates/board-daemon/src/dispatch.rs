@@ -8,7 +8,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use board_core::capability::{run_pane_name, run_pane_name_unique};
-use board_core::db::BOARD_ID;
 use board_core::engine::{decide_transition, TransitionDecision};
 use board_core::harness::{
     build_invocation, is_builtin_harness, plan_session, HarnessError, SessionPlan,
@@ -394,10 +393,13 @@ pub fn finalize_run(
     let card = if transition {
         let (current_col, cols) = {
             let db = d.store.lock();
+            let card = db
+                .get_card(card_id)?
+                .ok_or_else(|| Error::NotFound(format!("card {card_id}")))?;
             let col = db
                 .get_column(column_id)?
                 .ok_or_else(|| Error::NotFound(format!("column {column_id}")))?;
-            let cols = db.list_columns(BOARD_ID)?;
+            let cols = db.list_columns(card.board_id)?;
             (col, cols)
         };
         let dec = decide_transition(&current_col, &cols, outcome, elapsed);
@@ -578,7 +580,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        dispatch_pass, enqueue_run, find_workspace_by_label, harness_prompt_env,
+        dispatch_pass, enqueue_run, finalize_run, find_workspace_by_label, harness_prompt_env,
         resolve_workspace_ref,
     };
     use crate::settings::DaemonSettings;
@@ -586,7 +588,10 @@ mod tests {
     use crate::store::Store;
     use board_core::config::Config;
     use board_core::db::Db;
-    use board_core::protocol::{CardCreateParams, CardStatus, Effort, RunOutcome};
+    use board_core::protocol::{
+        CardCreateParams, CardStatus, ColumnCreateParams, ColumnUpdateParams, Effort, RunOutcome,
+        Trigger,
+    };
     use board_core::spawn::{SpawnHandle, SpawnReq, Spawner};
     use board_herdr::{AgentStatus, WorkspaceInfo};
     use tokio::sync::{broadcast, mpsc, watch};
@@ -729,6 +734,53 @@ mod tests {
             .any(|comment| comment.author == "system"
                 && comment.body.contains("spawn failed")
                 && comment.body.contains("pi not found")));
+    }
+
+    #[test]
+    fn scoped_run_transition_uses_the_cards_board_columns() {
+        let d = test_daemon(Arc::new(MissingPiSpawner));
+        let (card, run, target) = {
+            let db = d.store.lock();
+            let board = db.open_board("/scoped").unwrap();
+            let auto = db
+                .create_column(&ColumnCreateParams {
+                    board_id: Some(board.id),
+                    name: "Execute".into(),
+                    trigger: Some(Trigger::Auto),
+                    ..Default::default()
+                })
+                .unwrap();
+            let done = db
+                .create_column(&ColumnCreateParams {
+                    board_id: Some(board.id),
+                    name: "Done".into(),
+                    ..Default::default()
+                })
+                .unwrap();
+            db.update_column(&ColumnUpdateParams {
+                id: auto.id,
+                on_success_column_id: Some(done.id),
+                ..Default::default()
+            })
+            .unwrap();
+            let card = db
+                .create_card(&CardCreateParams {
+                    board_id: Some(board.id),
+                    column_id: Some(auto.id),
+                    title: "scoped transition".into(),
+                    ..Default::default()
+                })
+                .unwrap();
+            let run = db
+                .create_run(card.id, auto.id, "pi", "[]", "p", None, None)
+                .unwrap();
+            db.start_run(run.id, None, None).unwrap();
+            (card, run, done)
+        };
+
+        let (_, moved) = finalize_run(&d, run.id, RunOutcome::Ok, None, None, false, true).unwrap();
+        assert_eq!(moved.board_id, card.board_id);
+        assert_eq!(moved.column_id, target.id);
     }
 
     #[test]

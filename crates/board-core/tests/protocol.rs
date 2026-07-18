@@ -1,9 +1,10 @@
 //! Serde round-trips for representative protocol messages.
 
 use board_core::protocol::{
-    BoardChangedReason, CardArchiveParams, CardCreateParams, Effort, Event,
-    HarnessCapabilitiesParams, Request, Response, RpcError, RunOutcome, SpaceInfo, SpaceKind,
-    SpaceListResult, Trigger,
+    BoardChangedReason, BoardGetParams, BoardListResult, BoardOpenParams, CardArchiveParams,
+    CardCreateParams, CardListParams, ColumnCreateParams, Effort, Event, HarnessCapabilitiesParams,
+    Request, Response, RpcError, RunFocusParams, RunFocusResult, RunOutcome, SpaceInfo, SpaceKind,
+    SpaceListResult, TemplateApplyParams, Trigger,
 };
 use serde_json::json;
 
@@ -146,6 +147,35 @@ fn harness_and_space_methods() {
         serde_json::to_string(&spaces).unwrap(),
         r#"{"spaces":[{"id":"w1","label":"main"},{"id":"w2","label":"docs"}]}"#
     );
+}
+
+#[test]
+fn scoped_board_and_run_focus_types_roundtrip_with_legacy_defaults() {
+    roundtrip(&BoardOpenParams {
+        scope_path: "/repo".into(),
+    });
+    let get: BoardGetParams = serde_json::from_value(json!({})).unwrap();
+    assert_eq!(get.board_id, None);
+    let list = BoardListResult { boards: vec![] };
+    roundtrip(&list);
+
+    let column: ColumnCreateParams = serde_json::from_value(json!({"name":"Todo"})).unwrap();
+    assert_eq!(column.board_id, None);
+    let card: CardCreateParams = serde_json::from_value(json!({"title":"T"})).unwrap();
+    assert_eq!(card.board_id, None);
+    let cards: CardListParams = serde_json::from_value(json!({})).unwrap();
+    assert_eq!(cards.board_id, None);
+    let template: TemplateApplyParams = serde_json::from_value(json!({"name":"pipeline"})).unwrap();
+    assert_eq!(template.board_id, None);
+
+    roundtrip(&RunFocusParams {
+        card_id: 7,
+        origin_socket: "/tmp/herdr.sock".into(),
+    });
+    roundtrip(&RunFocusResult {
+        run_id: 9,
+        pane_id: "p1".into(),
+    });
 }
 
 #[test]

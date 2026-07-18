@@ -217,7 +217,26 @@ pub struct SubscribeResult {
 // board / column methods
 // ---------------------------------------------------------------------------
 
-/// `board.get` result.
+/// `board.open` params.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardOpenParams {
+    pub scope_path: String,
+}
+
+/// `board.get` params. Omitted id preserves the legacy Global default.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardGetParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board_id: Option<i64>,
+}
+
+/// `board.list` result.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardListResult {
+    pub boards: Vec<Board>,
+}
+
+/// `board.get` / `board.open` result.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BoardSnapshot {
     pub board: Board,
@@ -229,6 +248,8 @@ pub struct BoardSnapshot {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ColumnCreateParams {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -308,6 +329,8 @@ pub struct DeletedResult {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TemplateApplyParams {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board_id: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -318,6 +341,8 @@ pub struct TemplateApplyParams {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CardCreateParams {
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -398,6 +423,8 @@ pub struct CardIdParams {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CardListParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub column_id: Option<i64>,
 }
 
@@ -435,6 +462,20 @@ pub struct RunDoneParams {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunCardParams {
     pub card_id: i64,
+}
+
+/// `run.focus` params. `origin_socket` identifies the invoking Herdr session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunFocusParams {
+    pub card_id: i64,
+    pub origin_socket: String,
+}
+
+/// `run.focus` result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunFocusResult {
+    pub run_id: i64,
+    pub pane_id: String,
 }
 
 /// `{run, card}` returned by run.done / run.cancel / run.retry.

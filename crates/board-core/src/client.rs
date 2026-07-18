@@ -9,10 +9,12 @@ use serde_json::{json, Value};
 
 use crate::model::{Card, Column, Comment};
 use crate::protocol::{
-    BoardSnapshot, CardArchiveParams, CardCreateParams, CardDetail, CardListParams, CardMoveParams,
-    CardUpdateParams, ColumnCreateParams, ColumnDeleteParams, ColumnReorderParams,
-    ColumnUpdateParams, CommentAddParams, DaemonStatus, DeletedResult, Event, Request, Response,
-    RunActionResult, RunCardParams, RunDoneParams, RunOutcome, StopResult, TemplateApplyParams,
+    BoardGetParams, BoardListResult, BoardOpenParams, BoardSnapshot, CardArchiveParams,
+    CardCreateParams, CardDetail, CardListParams, CardMoveParams, CardUpdateParams,
+    ColumnCreateParams, ColumnDeleteParams, ColumnReorderParams, ColumnUpdateParams,
+    CommentAddParams, DaemonStatus, DeletedResult, Event, Request, Response, RunActionResult,
+    RunCardParams, RunDoneParams, RunFocusParams, RunFocusResult, RunOutcome, StopResult,
+    TemplateApplyParams,
 };
 
 /// Blocking client to boardd. Object-safe so the TUI can hold `Box<dyn BoardClient>`.
@@ -42,6 +44,25 @@ pub trait BoardClient {
     fn board_get(&mut self) -> anyhow::Result<BoardSnapshot> {
         Ok(serde_json::from_value(self.call("board.get", json!({}))?)?)
     }
+    fn board_get_by_id(&mut self, board_id: i64) -> anyhow::Result<BoardSnapshot> {
+        let params = BoardGetParams {
+            board_id: Some(board_id),
+        };
+        Ok(serde_json::from_value(
+            self.call("board.get", serde_json::to_value(params)?)?,
+        )?)
+    }
+    fn board_open(&mut self, scope_path: &str) -> anyhow::Result<BoardSnapshot> {
+        let params = BoardOpenParams {
+            scope_path: scope_path.to_string(),
+        };
+        Ok(serde_json::from_value(
+            self.call("board.open", serde_json::to_value(params)?)?,
+        )?)
+    }
+    fn board_list(&mut self) -> anyhow::Result<BoardListResult> {
+        Ok(serde_json::from_value(self.call("board.list", json!({}))?)?)
+    }
 
     fn column_create(&mut self, p: &ColumnCreateParams) -> anyhow::Result<Column> {
         Ok(serde_json::from_value(
@@ -70,8 +91,16 @@ pub trait BoardClient {
         )?)
     }
     fn template_apply(&mut self, name: &str) -> anyhow::Result<Vec<Column>> {
+        self.template_apply_for_board(name, None)
+    }
+    fn template_apply_for_board(
+        &mut self,
+        name: &str,
+        board_id: Option<i64>,
+    ) -> anyhow::Result<Vec<Column>> {
         let p = TemplateApplyParams {
             name: name.to_string(),
+            board_id,
         };
         Ok(serde_json::from_value(
             self.call("template.apply", serde_json::to_value(p)?)?,
@@ -110,7 +139,17 @@ pub trait BoardClient {
         )?)
     }
     fn card_list(&mut self, column_id: Option<i64>) -> anyhow::Result<Vec<Card>> {
-        let p = CardListParams { column_id };
+        self.card_list_for_board(None, column_id)
+    }
+    fn card_list_for_board(
+        &mut self,
+        board_id: Option<i64>,
+        column_id: Option<i64>,
+    ) -> anyhow::Result<Vec<Card>> {
+        let p = CardListParams {
+            board_id,
+            column_id,
+        };
         Ok(serde_json::from_value(
             self.call("card.list", serde_json::to_value(p)?)?,
         )?)
@@ -157,6 +196,15 @@ pub trait BoardClient {
         let p = RunCardParams { card_id };
         Ok(serde_json::from_value(
             self.call("run.retry", serde_json::to_value(p)?)?,
+        )?)
+    }
+    fn run_focus(&mut self, card_id: i64, origin_socket: &str) -> anyhow::Result<RunFocusResult> {
+        let p = RunFocusParams {
+            card_id,
+            origin_socket: origin_socket.to_string(),
+        };
+        Ok(serde_json::from_value(
+            self.call("run.focus", serde_json::to_value(p)?)?,
         )?)
     }
 }
@@ -298,13 +346,27 @@ mod fake {
             let db = &self.db;
             let v = match method {
                 "board.get" => {
+                    let p: BoardGetParams = serde_json::from_value(params)?;
+                    let board_id = p.board_id.unwrap_or(BOARD_ID);
                     let snap = BoardSnapshot {
-                        board: db.get_board(BOARD_ID)?,
-                        columns: db.list_columns(BOARD_ID)?,
-                        cards: db.list_cards(BOARD_ID)?,
+                        board: db.get_board(board_id)?,
+                        columns: db.list_columns(board_id)?,
+                        cards: db.list_cards(board_id)?,
                     };
                     serde_json::to_value(snap)?
                 }
+                "board.open" => {
+                    let p: BoardOpenParams = serde_json::from_value(params)?;
+                    let board = db.open_board(&p.scope_path)?;
+                    serde_json::to_value(BoardSnapshot {
+                        columns: db.list_columns(board.id)?,
+                        cards: db.list_cards(board.id)?,
+                        board,
+                    })?
+                }
+                "board.list" => serde_json::to_value(BoardListResult {
+                    boards: db.list_boards()?,
+                })?,
                 "column.create" => {
                     let p: ColumnCreateParams = serde_json::from_value(params)?;
                     serde_json::to_value(db.create_column(&p)?)?
@@ -372,11 +434,32 @@ mod fake {
                 }
                 "card.list" => {
                     let p: CardListParams = serde_json::from_value(params)?;
+                    let board_id = p.board_id.unwrap_or(BOARD_ID);
                     let cards = match p.column_id {
-                        Some(c) => db.list_cards_in_column(c)?,
-                        None => db.list_cards(BOARD_ID)?,
+                        Some(c) => {
+                            let column = db
+                                .get_column(c)?
+                                .ok_or_else(|| anyhow::anyhow!("column {c} not found"))?;
+                            if column.board_id != board_id {
+                                anyhow::bail!("column {c} belongs to another board");
+                            }
+                            db.list_cards_in_column(c)?
+                        }
+                        None => db.list_cards(board_id)?,
                     };
                     serde_json::to_value(cards)?
+                }
+                "run.focus" => {
+                    let p: RunFocusParams = serde_json::from_value(params)?;
+                    let run = db
+                        .latest_run_with_pane(p.card_id)?
+                        .ok_or_else(|| anyhow::anyhow!("no run with an accessible pane"))?;
+                    serde_json::to_value(RunFocusResult {
+                        run_id: run.id,
+                        pane_id: run
+                            .herdr_pane_id
+                            .ok_or_else(|| anyhow::anyhow!("run has no pane"))?,
+                    })?
                 }
                 "comment.add" => {
                     let p: CommentAddParams = serde_json::from_value(params)?;

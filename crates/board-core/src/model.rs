@@ -4,11 +4,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::protocol::{CardStatus, Effort, RunOutcome, SpaceKind, Trigger};
 
-/// One board (there is a single global board `id=1` named `main`).
+/// One independent board pipeline. `scope_path=None` is the preserved Global board.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Board {
     pub id: i64,
     pub name: String,
+    pub scope_path: Option<String>,
 }
 
 /// A pipeline stage.

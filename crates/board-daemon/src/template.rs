@@ -35,11 +35,14 @@ pub fn apply(d: &Arc<Daemon>, p: board_core::protocol::TemplateApplyParams) -> R
         return Err(Error::BadRequest(format!("unknown template: {}", p.name)));
     }
 
+    let board_id = p.board_id.unwrap_or(BOARD_ID);
+
     // Precondition: only the seed Todo column, and no cards.
     {
         let db = d.store.lock();
-        let cols = db.list_columns(BOARD_ID)?;
-        let cards = db.list_cards(BOARD_ID)?;
+        db.get_board(board_id)?;
+        let cols = db.list_columns(board_id)?;
+        let cards = db.list_cards(board_id)?;
         let only_seed = cols.len() == 1 && cols[0].name == "Todo";
         if !only_seed || !cards.is_empty() {
             return Err(Error::InvalidState(
@@ -53,6 +56,7 @@ pub fn apply(d: &Arc<Daemon>, p: board_core::protocol::TemplateApplyParams) -> R
     let mk = |name: &str, trigger: Trigger, system_prompt: Option<&str>, model: Option<&str>| {
         ColumnCreateParams {
             name: name.to_string(),
+            board_id: Some(board_id),
             trigger: Some(trigger),
             system_prompt: system_prompt.map(str::to_string),
             model_override: model.map(str::to_string),
@@ -75,7 +79,7 @@ pub fn apply(d: &Arc<Daemon>, p: board_core::protocol::TemplateApplyParams) -> R
     }
 
     // Resolve name → id and wire transitions.
-    let cols = d.store.lock().list_columns(BOARD_ID)?;
+    let cols = d.store.lock().list_columns(board_id)?;
     let id_of = |name: &str| cols.iter().find(|c| c.name == name).map(|c| c.id);
 
     let todo = id_of("Todo");
@@ -108,5 +112,5 @@ pub fn apply(d: &Arc<Daemon>, p: board_core::protocol::TemplateApplyParams) -> R
         None,
         None,
     );
-    Ok(json!(d.store.lock().list_columns(BOARD_ID)?))
+    Ok(json!(d.store.lock().list_columns(board_id)?))
 }
