@@ -32,6 +32,37 @@ is now built via `HarnessCapabilities::from_meta(&dyn HarnessMeta)`. The old
 `capabilities_for` / `pi_capabilities` / `claude_capabilities` now delegate to the
 trait, so all existing tests still pass.
 
+### 1b. Live Pi model catalog (pi no longer only `(default)/(custom)`)
+Follow-up to the card's Pi gap: the `pi` harness used to report `models: []`
+(free-form only). Pi's catalog *is* discoverable and access-scoped:
+
+- `pi --list-models` is credential-filtered (verified: with no `auth.json` it
+  prints "No models available"). It filters by **provider auth**, not per-model.
+- `~/.pi/agent/auth.json` lists the providers the user has credentials for.
+- `~/.pi/agent/models-store.json` is a credential-blind JSON catalog with richer
+  data than the table — including a per-model **`thinkingLevelMap`** (effort
+  levels). Filtering it by `auth.json` providers reproduces `--list-models`
+  **exactly** (28 models, diff-verified on this machine).
+
+New module `crates/board-core/src/pi_catalog.rs`:
+- `default_agent_dir()` → `$PI_CODING_AGENT_DIR` else `~/.pi/agent`.
+- `load_from_files(dir)` → `Vec<ModelInfo>` with ids `provider/model` and efforts
+  from `thinkingLevelMap` (default Pi ladder when absent). Pure, fixture-tested.
+- `load_from_cli(pi_bin)` → fallback that parses `pi --list-models` when the files
+  are missing/unreadable (no JSON flag exists for it, so it stays a fallback).
+- `live_models(agent_dir: Option<&Path>, pi_bin)` → files first, CLI fallback, else
+  empty. **`None` agent_dir disables discovery** (keeps tests hermetic).
+
+Plumbing: `Config.pi_agent_dir: Option<PathBuf>` (serde-optional; `None` = disabled).
+The daemon resolves it at startup (`async_main`) so production gets the live
+catalog; unit tests construct `Config::default()` (→ `None`) and keep the static
+catalog. The `harness.capabilities` handler overlays live models onto Pi's static
+caps **only when `harness == "pi"` and the catalog is non-empty**. `model_freeform`
+stays `true`, so the `(custom)` escape hatch in the card form still applies — the
+TUI needed no changes (its model select already renders `models + (custom)`).
+Verified against the real `~/.pi/agent`: returns the same 28 models as
+`pi --list-models`.
+
 ### 2. `harness.list` RPC (so config-defined harnesses are selectable)
 - `board-core::protocol::HarnessListResult { harnesses: Vec<String> }`.
 - `board-core::capability::available_harnesses(config)` → built-ins + config keys,
@@ -73,7 +104,12 @@ the default option (the builders do `unwrap_or(0)`).
 ## Tests added
 - board-core: trait resolves pi/claude/config; `efforts(Some(id))` authoritative,
   `efforts(None)` = default; `available_harnesses` sorts; wire snapshot == trait.
-- daemon: `harness.list` returns built-ins only / built-ins + config-defined.
+- board-core `pi_catalog`: filters to authenticated providers; ids are
+  `provider/model`; efforts come from `thinkingLevelMap` (canonical order); models
+  without a map get the default ladder; missing/malformed files → `None`.
+- daemon: `harness.list` returns built-ins only / built-ins + config-defined;
+  `harness.capabilities` for pi overlays the live catalog when `pi_agent_dir` is
+  set (real per-model efforts) and falls back to static `models: []` when unset.
 - board-tui: column `harness_override` is a select with builtins + config-defined;
   `permission_override` hidden for pi / shown for claude with catalog modes;
   `effort_override` follows the catalog; cascading drops a stale effort on harness
@@ -82,7 +118,7 @@ the default option (the builders do `unwrap_or(0)`).
 
 ## Build gates (all green)
 ```
-cargo test --workspace --all-features        # +17 new tests, all pass
+cargo test --workspace --all-features        # +24 new tests, all pass
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all --check
 ```
@@ -123,14 +159,22 @@ cargo fmt --all --check
 ## What needs to change for production
 
 - **Docs (`docs/protocol.md`)**: document the new `harness.list` method + result
-  shape; note `HarnessCapabilities` is now `from_meta`. Update `docs/design.md` if
-  it references the catalog functions.
-- **`CHANGELOG.md`**: entry under board-core (trait + `harness.list`) and board-tui
-  (column harness_override select, hidden permission_override).
+  shape; note `HarnessCapabilities` is now `from_meta`; document the live Pi model
+  catalog (`harness.capabilities` for pi now returns real `provider/model` ids with
+  per-model efforts instead of always `models: []`). Update `docs/design.md` if it
+  references the catalog functions.
+- **`CHANGELOG.md`**: entry under board-core (trait + `harness.list` + live Pi
+  catalog) and board-tui (column harness_override select, hidden permission_override).
 - **e2e scenario** under `e2e/`: a column-config flow that sets `harness_override`
   to a config-defined harness and verifies `permission_override` hides for pi.
   Required by the repo's "new herdr-touching flow ⇒ e2e" policy — not added in the
   prototype (no live herdr here).
+- **Pi catalog robustness**: `pi --list-models` fallback parses a human table (no
+  JSON flag) — pin its expected columns in a test comment like the repo does for
+  herdr (`docs/herdr.md`), and re-verify on a newer pi. The primary path
+  (`models-store.json`) is stable JSON, so this fallback is best-effort only.
+  Consider caching `live_models` (it currently reads 2 files per call) if
+  `harness.capabilities` proves hot.
 - **Consider** a `board harness list` CLI subcommand mirroring `harness models`
   (optional; the RPC exists either way).
 - **Snapshot review**: `column_form` was re-accepted; confirm the `(default)` labels

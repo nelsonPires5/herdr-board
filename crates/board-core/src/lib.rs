@@ -21,6 +21,7 @@ pub mod engine;
 pub mod harness;
 pub mod model;
 pub mod paths;
+pub mod pi_catalog;
 pub mod prompt;
 pub mod protocol;
 pub mod scope;

@@ -12,6 +12,7 @@ use board_core::engine::{
     validate_column_delete, validate_column_permission_override,
 };
 use board_core::harness::DEFAULT_HARNESS;
+use board_core::pi_catalog;
 use board_core::protocol::*;
 use board_core::{Error, Result};
 use serde_json::{json, Value};
@@ -452,7 +453,18 @@ fn validate_harness_permission(harness: &str, permission: Option<&str>) -> Resul
 
 fn harness_capabilities(d: &Arc<Daemon>, p: HarnessCapabilitiesParams) -> Result<Value> {
     match capabilities_for(&p.harness, &d.config) {
-        Some(caps) => Ok(json!(caps)),
+        Some(mut caps) => {
+            // Pi's static catalog is free-form (models: []); overlay the live
+            // catalog read from the pi agent dir when one is configured. Tests
+            // leave `pi_agent_dir` unset, so this stays the static catalog.
+            if p.harness == "pi" {
+                let models = pi_catalog::live_models(d.config.pi_agent_dir.as_deref(), "pi");
+                if !models.is_empty() {
+                    caps.models = models;
+                }
+            }
+            Ok(json!(caps))
+        }
         None => {
             let known = available_harnesses(&d.config);
             Err(Error::NotFound(format!(
@@ -789,6 +801,52 @@ mod tests {
             .unwrap()
             .iter()
             .any(|effort| effort == "low"));
+    }
+
+    #[test]
+    fn harness_capabilities_pi_overlays_live_catalog() {
+        // A pi agent dir with auth.json + models-store.json → the daemon
+        // overlays real models (per-model efforts) onto the pi catalog.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("auth.json"),
+            r#"{"zai": {"type": "api_key"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("models-store.json"),
+            r#"{"zai": {"models": [{"id": "glm-5.2", "reasoning": true,
+                 "thinkingLevelMap": {"minimal": "low", "xhigh": "xhigh"}}]}}"#,
+        )
+        .unwrap();
+        let config = Config {
+            pi_agent_dir: Some(dir.path().to_path_buf()),
+            ..Config::default()
+        };
+        let d = test_daemon(config);
+
+        let v = handle_request(&d, "harness.capabilities", json!({ "harness": "pi" })).unwrap();
+        let models = v["models"].as_array().unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["id"], "zai/glm-5.2");
+        // Per-model efforts come from thinkingLevelMap, in canonical order.
+        let efforts: Vec<&str> = models[0]["efforts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e.as_str().unwrap())
+            .collect();
+        assert_eq!(efforts, vec!["minimal", "xhigh"]);
+        // model_freeform stays true: arbitrary model strings are still accepted.
+        assert_eq!(v["model_freeform"], true);
+    }
+
+    #[test]
+    fn harness_capabilities_pi_falls_back_to_static_without_agent_dir() {
+        // No pi_agent_dir (tests) → static free-form catalog (models: []).
+        let d = test_daemon(Config::default());
+        let v = handle_request(&d, "harness.capabilities", json!({ "harness": "pi" })).unwrap();
+        assert!(v["models"].as_array().unwrap().is_empty());
     }
 
     #[test]
