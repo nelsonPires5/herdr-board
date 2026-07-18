@@ -5,13 +5,13 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use board_core::capability::capabilities_for;
+use board_core::capability::{available_harnesses, capabilities_for};
 use board_core::db::BOARD_ID;
 use board_core::engine::{
     decide_entry, validate_card_archive, validate_card_edit, validate_card_space,
     validate_column_delete, validate_column_permission_override,
 };
-use board_core::harness::{BUILTIN_HARNESSES, DEFAULT_HARNESS};
+use board_core::harness::DEFAULT_HARNESS;
 use board_core::protocol::*;
 use board_core::{Error, Result};
 use serde_json::{json, Value};
@@ -57,6 +57,7 @@ pub fn handle_request(d: &Arc<Daemon>, method: &str, params: Value) -> Result<Va
         "run.retry" => run_retry(d, from(params)?),
         "run.focus" => run_focus(d, from(params)?),
         "harness.capabilities" => harness_capabilities(d, from(params)?),
+        "harness.list" => harness_list(d),
         "space.list" => space_list(d, from(params)?),
         "session.list" => session_list(d),
         other => Err(Error::BadRequest(format!("unknown method: {other}"))),
@@ -453,12 +454,7 @@ fn harness_capabilities(d: &Arc<Daemon>, p: HarnessCapabilitiesParams) -> Result
     match capabilities_for(&p.harness, &d.config) {
         Some(caps) => Ok(json!(caps)),
         None => {
-            let mut known: Vec<String> = BUILTIN_HARNESSES
-                .iter()
-                .map(|name| (*name).to_string())
-                .collect();
-            known.extend(d.config.harness.keys().cloned());
-            known.sort();
+            let known = available_harnesses(&d.config);
             Err(Error::NotFound(format!(
                 "unknown harness '{}'; known: {}",
                 p.harness,
@@ -466,6 +462,12 @@ fn harness_capabilities(d: &Arc<Daemon>, p: HarnessCapabilitiesParams) -> Result
             )))
         }
     }
+}
+
+fn harness_list(d: &Arc<Daemon>) -> Result<Value> {
+    Ok(json!(HarnessListResult {
+        harnesses: available_harnesses(&d.config)
+    }))
 }
 
 fn space_list(d: &Arc<Daemon>, p: SpaceListParams) -> Result<Value> {
@@ -735,6 +737,30 @@ mod tests {
         .unwrap();
         assert_eq!(result["pane_id"], "w1:p9");
         assert!(result["run_id"].as_i64().unwrap() > 0);
+    }
+
+    #[test]
+    fn harness_list_builtin_only() {
+        let d = test_daemon(Config::default());
+        let v = handle_request(&d, "harness.list", json!({})).unwrap();
+        let names: Vec<String> = serde_json::from_value(v["harnesses"].clone()).unwrap();
+        assert_eq!(names, vec!["claude".to_string(), "pi".to_string()]);
+    }
+
+    #[test]
+    fn harness_list_includes_config_defined() {
+        let mut config = Config::default();
+        config.harness.insert(
+            "fake".to_string(),
+            HarnessDef {
+                argv: vec!["bash".into(), "fake.sh".into()],
+                ..Default::default()
+            },
+        );
+        let d = test_daemon(config);
+        let v = handle_request(&d, "harness.list", json!({})).unwrap();
+        let names: Vec<String> = serde_json::from_value(v["harnesses"].clone()).unwrap();
+        assert_eq!(names, vec!["claude", "fake", "pi"]);
     }
 
     #[test]

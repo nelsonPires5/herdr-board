@@ -497,6 +497,15 @@ pub struct HarnessCapabilitiesParams {
     pub harness: String,
 }
 
+/// `harness.list` result: every harness the daemon knows about (built-ins
+/// `pi`/`claude` plus every config-defined `[harness.NAME]`), sorted. Drives
+/// the TUI harness/harness-override selects so they include config-defined
+/// harnesses without a separate config read on the client.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessListResult {
+    pub harnesses: Vec<String>,
+}
+
 /// A run space (herdr workspace) as surfaced by `space.list`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpaceInfo {
