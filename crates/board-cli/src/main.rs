@@ -39,6 +39,11 @@ enum Cmd {
         /// Log to stderr as well as the log file, and stay attached.
         #[arg(long)]
         foreground: bool,
+        /// Stop the running daemon (graceful) and exit. The plugin build step
+        /// uses this so a reinstall replaces a stopped process instead of a
+        /// stale binary the old daemon still has mapped in memory.
+        #[arg(long)]
+        stop: bool,
     },
     /// Show daemon status.
     Status {
@@ -241,7 +246,13 @@ fn main() {
 fn real_main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Daemon { foreground } => board_daemon::run(foreground).map_err(|e| anyhow!(e)),
+        Cmd::Daemon { foreground, stop } => {
+            if stop {
+                stop_daemon()
+            } else {
+                board_daemon::run(foreground).map_err(|e| anyhow!(e))
+            }
+        }
         Cmd::Tui => {
             let mut client = connect_or_start()?;
             let board = open_current_board(&mut client)?;
@@ -312,6 +323,52 @@ fn spawn_daemon() -> Result<()> {
     // Detach into a new process group so it outlives this CLI invocation.
     cmd.process_group(0);
     cmd.spawn()?;
+    Ok(())
+}
+
+/// `board daemon --stop`: gracefully shut down the running daemon over the
+/// socket, then wait for its listener to vanish. Idempotent — if nothing is
+/// running (or only a stale socket file remains) it cleans up and succeeds.
+/// Used by the plugin build step before a reinstall.
+fn stop_daemon() -> Result<()> {
+    let path = paths::socket_path();
+
+    let mut client = match UnixClient::connect(&path) {
+        Ok(c) => c,
+        Err(_) => {
+            // No live listener: clear any stale socket file left by a crash.
+            let _ = std::fs::remove_file(&path);
+            println!("boardd not running");
+            return Ok(());
+        }
+    };
+
+    // Ask the daemon to shut itself down. A daemon older than `daemon.stop`
+    // rejects it; tell the user to stop it manually in that case.
+    let stop_result = client.daemon_stop();
+    drop(client);
+    if let Err(e) = stop_result {
+        let _ = std::fs::remove_file(&path);
+        bail!(
+            "could not stop boardd gracefully ({e}); it may predate `daemon.stop` — \
+             stop it manually, e.g. `pkill -f 'board daemon'`"
+        );
+    }
+
+    // Wait for the listener to disappear (the daemon removes the socket on
+    // exit), so the next launch spawns a fresh process rather than racing a
+    // half-dead one still holding the single-instance lock.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut delay = Duration::from_millis(25);
+    while Instant::now() < deadline {
+        if UnixClient::connect(&path).is_err() {
+            break;
+        }
+        std::thread::sleep(delay);
+        delay = (delay * 2).min(Duration::from_millis(200));
+    }
+    let _ = std::fs::remove_file(&path);
+    println!("boardd stopped");
     Ok(())
 }
 
