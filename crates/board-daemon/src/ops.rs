@@ -548,6 +548,15 @@ mod tests {
     }
 
     #[test]
+    fn daemon_stop_triggers_shutdown_and_reports_stopping() {
+        let d = test_daemon(Config::default());
+        assert!(!d.is_shutdown());
+        let res = handle_request(&d, "daemon.stop", json!({})).unwrap();
+        assert_eq!(res["stopping"], true);
+        assert!(d.is_shutdown());
+    }
+
+    #[test]
     fn board_open_list_get_and_legacy_default_are_scoped() {
         let d = test_daemon(Config::default());
         let alpha = handle_request(&d, "board.open", json!({"scope_path":"/alpha"})).unwrap();
