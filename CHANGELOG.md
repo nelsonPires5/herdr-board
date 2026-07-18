@@ -14,6 +14,12 @@ All notable changes to this project are documented here. The format is based on
   `pane.focus`. Same-session validation prevents pane-id collisions across sessions; success closes
   the overlay and errors remain as toasts.
 - Live E2E scenarios cover Git/CWD board identity and real-plugin jump-to-pane behavior.
+- `board daemon --stop` gracefully stops the running daemon over its socket (idempotent; clears a
+  stale socket if nothing is listening). The plugin `build.sh` calls it before recompiling, so a
+  reinstall replaces a stopped process rather than overwriting a binary the old daemon still has
+  mapped — the cause of stale-daemon version drift after an update. README `Maintenance` now
+  documents the update flow and a full uninstall (stop the daemon first, since Herdr's plugin
+  uninstall has no lifecycle hook and leaves the detached daemon running).
 
 ### Changed
 - Scope-sensitive CLI commands use Git root/CWD (overridable with `BOARD_SCOPE_PATH`), while

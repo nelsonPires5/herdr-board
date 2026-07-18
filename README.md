@@ -295,12 +295,41 @@ and `{permission_mode}` are available in `argv`.
 ## Maintenance
 
 <details>
-<summary><strong>Uninstall</strong></summary>
+<summary><strong>Update</strong></summary>
 
-Herdr's plugin uninstall cannot remove the CLI copied outside its managed checkout. Remove it only
-when its checksum still matches the managed marker, then unregister the plugin:
+Re-run the install command to update — Herdr has no separate update command, so reinstall over the
+existing plugin:
 
 ```bash
+herdr plugin install nelsonPires5/herdr-board --yes
+```
+
+The build step stops the running daemon (`board daemon --stop`) before recompiling, so the new
+binary replaces a stopped process instead of overwriting one the old daemon still has mapped in
+memory. The next `board` command auto-starts a fresh daemon from the new binary.
+
+Run the install once from each named Herdr session where the plugin is registered.
+
+If you are updating from a version older than the `--stop` flag and a stale daemon is still
+serving the old code, stop it manually first, then reinstall:
+
+```bash
+pkill -f 'board daemon'
+herdr plugin install nelsonPires5/herdr-board --yes
+```
+
+</details>
+
+<details>
+<summary><strong>Uninstall</strong></summary>
+
+Herdr's plugin uninstall has no lifecycle hook and does not stop the board daemon — boardd is a
+detached process Herdr does not track, so uninstalling the plugin leaves it running (and, after a
+reinstall, serving stale code). Stop it first, then remove the CLI Herdr can't manage (only when
+its checksum still matches the managed marker), then unregister the plugin:
+
+```bash
+board daemon --stop 2>/dev/null || pkill -f 'board daemon'
 (
   if [ "${HERDR_BOARD_CLI_INSTALL_DIR+x}" = x ]; then
     install_dir="$HERDR_BOARD_CLI_INSTALL_DIR"
@@ -333,6 +362,10 @@ herdr plugin uninstall herdr-board
 
 If `HERDR_BOARD_CLI_INSTALL_DIR` was used, use the same directory for every update and cleanup.
 Uninstall the plugin from each named session where it was registered.
+
+To remove all board data (cards, columns, runs), delete the data directory — `BOARD_DB`'s default
+(`~/Library/Application Support/herdr-board` on macOS, `~/.local/share/herdr-board` on Linux).
+This is optional and never needed for a normal reinstall.
 
 </details>
 

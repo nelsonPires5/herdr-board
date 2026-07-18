@@ -12,6 +12,15 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
 cd "$repo_root"
 
+# Stop a running boardd before rebuilding so the reinstall replaces a stopped
+# process rather than overwriting a binary the old daemon still has mapped in
+# memory (which would leave a stale daemon serving the previous version). This
+# is best-effort: a very old `board` without `--stop` errors here and we just
+# continue — the README documents the manual stop for that one-time case.
+if command -v board >/dev/null 2>&1; then
+  board daemon --stop >/dev/null 2>&1 || true
+fi
+
 # Prefer a user-local cargo if PATH doesn't already have one.
 if ! command -v cargo >/dev/null 2>&1; then
   export PATH="$HOME/.cargo/bin:$PATH"
