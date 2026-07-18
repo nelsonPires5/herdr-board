@@ -13,8 +13,6 @@
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/lib.sh"
 
-BOARD_RPC="$REPO_ROOT/scripts/board-rpc.py"   # column.create has no CLI verb
-
 e2e_init
 e2e_build
 e2e_isolate
@@ -28,8 +26,8 @@ echo "  workspace: $WS_ID"
 step "CLI PATH"
 # ----------------------------------------------------------------------------
 step "Create an auto column 'Execute' (raw protocol — no CLI verb for columns)"
-col_json="$(python3 "$BOARD_RPC" column.create '{"name":"Execute","trigger":"auto"}')"
-echo "  -> $col_json"
+EXEC_ID="$(col_create '{"name":"Execute","trigger":"auto"}')"
+echo "  -> column $EXEC_ID on board $E2E_BOARD_ID"
 
 step "Create a card on the fake harness targeting the workspace"
 card_json="$("$BOARD_BIN" card new --title "E2E CLI Card" \
@@ -73,7 +71,7 @@ echo "  tui pane: $PANE_ID"
 # TUI talks to THIS test's daemon, not the default socket.
 mut "pane run $PANE_ID '<board> tui' (isolated BOARD_SOCKET/BOARD_DB)"
 "$HERDR_BIN" pane run "$PANE_ID" \
-  "BOARD_SOCKET=$BOARD_SOCKET BOARD_DB=$BOARD_DB HERDR_BOARD_CONFIG=$HERDR_BOARD_CONFIG $BOARD_BIN tui"
+  "BOARD_SOCKET=$BOARD_SOCKET BOARD_DB=$BOARD_DB HERDR_BOARD_CONFIG=$HERDR_BOARD_CONFIG BOARD_SCOPE_PATH=$BOARD_SCOPE_PATH $BOARD_BIN tui"
 echo "  waiting for the TUI to come up..."
 sleep 3
 

@@ -24,7 +24,7 @@ PANE_ID="$(printf '%s' "$tab_json" | jget pane_id)"
 # into anything except this disposable session/workspace.
 mut "pane run $PANE_ID '<board> tui' with isolated plugin context"
 "$HERDR_BIN" pane run "$PANE_ID" \
-  "HERDR_PLUGIN_ID=herdr-board HERDR_PANE_ID=$PANE_ID HERDR_BIN_PATH=$HERDR_BIN HERDR_SOCKET_PATH=$HERDR_SOCKET_PATH BOARD_SOCKET=$BOARD_SOCKET BOARD_DB=$BOARD_DB HERDR_BOARD_CONFIG=$HERDR_BOARD_CONFIG $BOARD_BIN tui"
+  "HERDR_PLUGIN_ID=herdr-board HERDR_PANE_ID=$PANE_ID HERDR_BIN_PATH=$HERDR_BIN HERDR_SOCKET_PATH=$HERDR_SOCKET_PATH BOARD_SOCKET=$BOARD_SOCKET BOARD_DB=$BOARD_DB HERDR_BOARD_CONFIG=$HERDR_BOARD_CONFIG BOARD_SCOPE_PATH=$BOARD_SCOPE_PATH $BOARD_BIN tui"
 
 pane_label() {
   hrpc pane.list "{\"workspace_id\":\"$WS_ID\"}" | python3 -c '
@@ -48,17 +48,18 @@ wait_label() {
   fail "pane label '$label' (expected '$expected')"
 }
 
-step "Assert startup filter is rendered in the Herdr pane title"
-wait_label "Board [ACTIVE]"
-ok "startup pane title is Board [ACTIVE]"
+SCOPE_LABEL="$(basename "$BOARD_SCOPE_PATH")"
+step "Assert startup scope + filter are rendered in the Herdr pane title"
+wait_label "Board [$SCOPE_LABEL · ACTIVE]"
+ok "startup pane title is Board [$SCOPE_LABEL · ACTIVE]"
 
-step "Cycle ACTIVE -> ALL -> ARCHIVED and assert each dynamic title"
+step "Cycle ACTIVE -> ALL -> ARCHIVED and assert each scoped title"
 mut "pane send-keys $PANE_ID v (ACTIVE -> ALL)"
 "$HERDR_BIN" pane send-keys "$PANE_ID" v
-wait_label "Board [ALL]"
+wait_label "Board [$SCOPE_LABEL · ALL]"
 mut "pane send-keys $PANE_ID v (ALL -> ARCHIVED)"
 "$HERDR_BIN" pane send-keys "$PANE_ID" v
-wait_label "Board [ARCHIVED]"
+wait_label "Board [$SCOPE_LABEL · ARCHIVED]"
 ok "archive filter stays synchronized with the Herdr pane title"
 
 step "Assert the board footer is minimal"

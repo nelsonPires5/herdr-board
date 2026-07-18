@@ -130,7 +130,14 @@ print(json.dumps(r.get("result", r) if isinstance(r, dict) else r))'
 #   FAIL=$(col_create '{"name":"Backlog","trigger":"manual"}')
 #   col_create "{\"name\":\"Execute\",\"trigger\":\"auto\",\"on_fail_column_id\":$FAIL}"
 col_create() {
-  brpc column.create "$1" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])'
+  local params
+  params="$(python3 -c '
+import json, sys
+p = json.loads(sys.argv[1])
+p.setdefault("board_id", int(sys.argv[2]))
+print(json.dumps(p))
+' "$1" "${E2E_BOARD_ID:?e2e_daemon_start must run before col_create}")"
+  brpc column.create "$params" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])'
 }
 
 # --- chained-run poller -----------------------------------------------------
@@ -278,13 +285,18 @@ e2e_session_ensure() {
 # e2e_isolate — create a SHORT /tmp temp dir (AF_UNIX socket paths cap at ~108
 # chars, so never nest under a long $TMPDIR) and point BOARD_DB/BOARD_SOCKET/
 # HERDR_BOARD_CONFIG at it, with a config that registers the fake harness. Sets
+# BOARD_SCOPE_PATH to a deterministic disposable non-Git directory and
 # BOARD_SPAWNER=herdr (real herdr panes). Registers temp-dir removal.
 e2e_isolate() {
   E2E_TMP="$(mktemp -d /tmp/hb-e2e.XXXXXX)"
   export BOARD_DB="$E2E_TMP/board.db"
   export BOARD_SOCKET="$E2E_TMP/boardd.sock"
   export HERDR_BOARD_CONFIG="$E2E_TMP/config.toml"
+  export BOARD_SCOPE_PATH="$E2E_TMP/scope"
   export BOARD_SPAWNER=herdr
+  mkdir -p "$BOARD_SCOPE_PATH"
+  BOARD_SCOPE_PATH="$(cd "$BOARD_SCOPE_PATH" && pwd -P)"
+  export BOARD_SCOPE_PATH
   e2e_write_config "$HERDR_BOARD_CONFIG"
   e2e_defer "rm -rf '$E2E_TMP'"
   echo "  tmp=$E2E_TMP"
@@ -326,7 +338,13 @@ e2e_daemon_start() {
     sleep 0.2
   done
   "$BOARD_BIN" status >/dev/null 2>&1 || fail "daemon did not come up (see $E2E_TMP/daemon.log)"
+  local scope_params opened
+  scope_params="$(python3 -c 'import json,sys; print(json.dumps({"scope_path":sys.argv[1]}))' "$BOARD_SCOPE_PATH")"
+  opened="$(brpc board.open "$scope_params")"
+  E2E_BOARD_ID="$(printf '%s' "$opened" | python3 -c 'import json,sys; print(json.load(sys.stdin)["board"]["id"])')"
+  export E2E_BOARD_ID
   echo "  daemon pid $E2E_DAEMON_PID"
+  echo "  board scope $BOARD_SCOPE_PATH (id $E2E_BOARD_ID)"
 }
 
 # e2e_daemon_stop — stop ONLY the daemon we started, by pid (never pattern-kill
@@ -352,7 +370,8 @@ e2e_ws_create() {
   mut "workspace create --label $label --no-focus${sock:+ (session socket $sock)}"
   ws_json="$(env ${sock:+HERDR_SOCKET_PATH="$sock"} "$HERDR_BIN" workspace create \
     --label "$label" --no-focus \
-    --env "BOARD_BIN=$BOARD_BIN" --env "BOARD_SOCKET=$BOARD_SOCKET")"
+    --env "BOARD_BIN=$BOARD_BIN" --env "BOARD_SOCKET=$BOARD_SOCKET" \
+    --env "BOARD_SCOPE_PATH=$BOARD_SCOPE_PATH")"
   E2E_WS="$(printf '%s' "$ws_json" | jget workspace_id)" \
     || fail "could not parse workspace_id from: $ws_json"
   e2e_ws_defer_close "$E2E_WS" "$sock"

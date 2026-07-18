@@ -44,6 +44,7 @@ SOCKET="$TMP/board.sock"
 CONFIG="$TMP/config.toml"
 PI_SESSIONS="$TMP/pi-sessions"
 mkdir -p "$WORKSPACE_DIR" "$PI_SESSIONS" "$EVIDENCE"
+WORKSPACE_DIR="$(cd "$WORKSPACE_DIR" && pwd -P)"
 
 SERVER_PID=""
 DAEMON_PID=""
@@ -151,20 +152,23 @@ printf 'HERDR MUTATION: create empty disposable workspace\n'
 ws_json="$(HERDR_SOCKET_PATH="$SOCK" "$HERDR_BIN" workspace create \
   --cwd "$WORKSPACE_DIR" --label real-pi-smoke --no-focus \
   --env "BOARD_DB=$DB" --env "BOARD_SOCKET=$SOCKET" \
-  --env "HERDR_BOARD_CONFIG=$CONFIG")"
+  --env "HERDR_BOARD_CONFIG=$CONFIG" --env "BOARD_SCOPE_PATH=$WORKSPACE_DIR")"
 WS_ID="$(printf '%s' "$ws_json" | jq -er '.result.workspace.workspace_id')"
 printf 'WS_ID=%q\n' "$WS_ID" >>"$STATE"
 
 export BOARD_DB="$DB" BOARD_SOCKET="$SOCKET" HERDR_BOARD_CONFIG="$CONFIG"
-export HERDR_SOCKET_PATH="$SOCK" BOARD_SPAWNER=herdr
+export HERDR_SOCKET_PATH="$SOCK" BOARD_SPAWNER=herdr BOARD_SCOPE_PATH="$WORKSPACE_DIR"
 "$BOARD_BIN" daemon --foreground >"$TMP/daemon.log" 2>&1 &
 DAEMON_PID=$!
 printf 'DAEMON_PID=%q\n' "$DAEMON_PID" >>"$STATE"
 for _ in $(seq 1 50); do "$BOARD_BIN" status >/dev/null 2>&1 && break; sleep .2; done
 "$BOARD_BIN" status >/dev/null
 
+BOARD_ID="$(python3 "$ROOT/scripts/board-rpc.py" board.open \
+  "$(python3 -c 'import json,sys; print(json.dumps({"scope_path":sys.argv[1]}))' "$BOARD_SCOPE_PATH")" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["board"]["id"])')"
 EXEC_ID="$(python3 "$ROOT/scripts/board-rpc.py" column.create \
-  '{"name":"Execute","trigger":"auto","system_prompt":"Execute somente a tarefa do card no diretório descartável e cumpra o protocolo do board."}' \
+  "{\"board_id\":$BOARD_ID,\"name\":\"Execute\",\"trigger\":\"auto\",\"system_prompt\":\"Execute somente a tarefa do card no diretório descartável e cumpra o protocolo do board.\"}" \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["id"])')"
 DESCRIPTION="Crie o arquivo $POEM com um poema original em português.
 O arquivo deve ter exatamente quatro linhas não vazias e conter a palavra \"lua\"
