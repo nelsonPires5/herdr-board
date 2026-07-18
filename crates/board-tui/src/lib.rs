@@ -23,7 +23,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use board_core::capability::HarnessCapabilities;
 use board_core::client::BoardClient;
-use board_core::protocol::{Event, SessionInfo, SessionListResult, SpaceInfo, SpaceListResult};
+use board_core::protocol::{
+    BoardSnapshot, Event, SessionInfo, SessionListResult, SpaceInfo, SpaceListResult,
+};
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event as CtEvent, KeyEventKind};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -32,9 +34,11 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::Terminal;
 
-use crate::app::{clamp_selection, update, App, CardFilter, Effect, Msg};
+use crate::app::{
+    clamp_selection, update, App, CardFilter, Effect, Msg, Picker, PickerPurpose, Screen,
+};
 use crate::editor::{EditorLauncher, RealEditor};
-use crate::view::view;
+use crate::view::{board_picker_label, pane_title, view};
 
 /// Owns the client + editor and applies [`Effect`]s produced by `update`.
 ///
@@ -44,6 +48,7 @@ pub struct Driver {
     pub app: App,
     client: Box<dyn BoardClient>,
     editor: Box<dyn EditorLauncher>,
+    origin_socket: Option<String>,
 }
 
 impl Driver {
@@ -57,13 +62,29 @@ impl Driver {
         editor: Box<dyn EditorLauncher>,
     ) -> Result<Driver> {
         let board = client.board_get()?;
+        Driver::with_editor_and_board(client, editor, board)
+    }
+
+    pub fn with_editor_and_board(
+        client: Box<dyn BoardClient>,
+        editor: Box<dyn EditorLauncher>,
+        board: BoardSnapshot,
+    ) -> Result<Driver> {
         let mut driver = Driver {
             app: App::new(board),
             client,
             editor,
+            origin_socket: std::env::var("HERDR_SOCKET_PATH")
+                .ok()
+                .filter(|socket| !socket.is_empty()),
         };
         driver.set_pane_title(CardFilter::Active);
         Ok(driver)
+    }
+
+    /// Override the invoking Herdr socket (deterministic tests/embedders).
+    pub fn set_origin_socket(&mut self, socket: Option<String>) {
+        self.origin_socket = socket;
     }
 
     /// Feed one synthetic message: run the reducer, then apply its effects.
@@ -84,10 +105,41 @@ impl Driver {
     }
 
     fn refetch(&mut self) {
-        let r = self.client.board_get();
+        let r = self.client.board_get_by_id(self.app.board.board.id);
         if let Some(snap) = self.guard(r) {
             self.app.board = snap;
             clamp_selection(&mut self.app);
+        }
+    }
+
+    fn load_boards(&mut self) {
+        let r = self.client.board_list();
+        if let Some(result) = self.guard(r) {
+            let options = result
+                .boards
+                .iter()
+                .map(|board| (board_picker_label(board), board.id))
+                .collect();
+            let sel = result
+                .boards
+                .iter()
+                .position(|board| board.id == self.app.board.board.id)
+                .unwrap_or(0);
+            self.app.picker = Some(Picker {
+                title: "Switch board".into(),
+                options,
+                sel,
+                purpose: PickerPurpose::SwitchBoard,
+            });
+            self.app.screen = Screen::Picker;
+        }
+    }
+
+    fn switch_board(&mut self, board_id: i64) {
+        let r = self.client.board_get_by_id(board_id);
+        if let Some(board) = self.guard(r) {
+            self.app.replace_board(board);
+            self.set_pane_title(self.app.card_filter);
         }
     }
 
@@ -117,6 +169,8 @@ impl Driver {
     fn dispatch(&mut self, eff: Effect) {
         match eff {
             Effect::Refetch => self.refetch(),
+            Effect::LoadBoards => self.load_boards(),
+            Effect::SwitchBoard(id) => self.switch_board(id),
             Effect::LoadDetail(id) => self.load_detail(id),
             Effect::CardCreate(p) => {
                 let r = self.client.card_create(&p);
@@ -190,7 +244,9 @@ impl Driver {
                 }
             }
             Effect::TemplateApply(name) => {
-                let r = self.client.template_apply(&name);
+                let r = self
+                    .client
+                    .template_apply_for_board(&name, Some(self.app.board.board.id));
                 if self.guard(r).is_some() {
                     self.refetch();
                 }
@@ -216,6 +272,19 @@ impl Driver {
                     self.refetch();
                 }
             }
+            Effect::FocusRun(id) => {
+                let Some(origin_socket) = self.origin_socket.clone() else {
+                    self.app.set_toast(
+                        "jump to pane requires Herdr (HERDR_SOCKET_PATH is unset)",
+                        true,
+                    );
+                    return;
+                };
+                let r = self.client.run_focus(id, &origin_socket);
+                if self.guard(r).is_some() {
+                    self.app.should_quit = true;
+                }
+            }
             Effect::EditFocusedTextArea => self.edit_focused(),
             Effect::LoadFormOptions => self.load_form_options(),
             Effect::SetPaneTitle(filter) => self.set_pane_title(filter),
@@ -233,7 +302,7 @@ impl Driver {
             return;
         };
         let bin = std::env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_string());
-        let title = format!("Board [{}]", filter.label());
+        let title = pane_title(&self.app.board.board, filter);
         let _ = Command::new(bin)
             .args(["pane", "rename", &pane_id, &title])
             .stdin(Stdio::null())
@@ -341,7 +410,15 @@ fn epoch_millis() -> u128 {
 /// thread, and run the draw/input loop until quit.
 pub fn run(client: Box<dyn BoardClient>) -> Result<()> {
     let mut driver = Driver::new(client)?;
+    run_driver(&mut driver)
+}
 
+pub fn run_with_board(client: Box<dyn BoardClient>, board: BoardSnapshot) -> Result<()> {
+    let mut driver = Driver::with_editor_and_board(client, Box::new(RealEditor), board)?;
+    run_driver(&mut driver)
+}
+
+fn run_driver(driver: &mut Driver) -> Result<()> {
     // Live updates: a background thread turns board events into redraw pings.
     // Falls back silently to action-driven refetch when subscribe is empty /
     // unsupported (e.g. FakeBoardClient).
@@ -363,7 +440,7 @@ pub fn run(client: Box<dyn BoardClient>) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let res = event_loop(&mut driver, &mut terminal, &rx);
+    let res = event_loop(driver, &mut terminal, &rx);
 
     disable_raw_mode()?;
     crossterm::execute!(

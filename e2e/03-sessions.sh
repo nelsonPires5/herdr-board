@@ -18,7 +18,6 @@
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/lib.sh"
 
-BOARD_RPC="$REPO_ROOT/scripts/board-rpc.py"
 export E2E_FAKE_ENV="FAKE_AGENT_HOLD=300"   # keep panes alive for the assertions
 
 e2e_init          # boots/adopts session A, binds the daemon's HERDR_SOCKET_PATH to it
@@ -81,7 +80,7 @@ ok "space list is correctly scoped per session"
 
 # --- cross-session workspace card -------------------------------------------
 step "Dispatch a 'workspace' card into session '$SESS'"
-python3 "$BOARD_RPC" column.create '{"name":"Execute","trigger":"auto"}' >/dev/null
+EXEC_ID="$(col_create '{"name":"Execute","trigger":"auto"}')"
 card_json="$("$BOARD_BIN" card new --title "Sess WS Card" -d "cross-session ws" \
   --harness fake --space-kind workspace --space-ref "$WS_SESS" --session "$SESS" --json)"
 CARD_WS="$(printf '%s' "$card_json" | jget id)" || fail "could not parse card id"

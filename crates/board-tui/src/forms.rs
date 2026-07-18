@@ -538,6 +538,7 @@ impl Form {
                 }
                 Ok(Submit::CardCreate(CardCreateParams {
                     title,
+                    board_id: None,
                     description: self.opt_text(FieldId::Description),
                     column_id: Some(column_id),
                     harness: self.opt_choice_str(FieldId::Harness),
@@ -581,6 +582,7 @@ impl Form {
                 }
                 Ok(Submit::ColumnCreate(ColumnCreateParams {
                     name,
+                    board_id: None,
                     position: None,
                     system_prompt: self.opt_text(FieldId::SystemPrompt),
                     trigger: self.opt_trigger(),

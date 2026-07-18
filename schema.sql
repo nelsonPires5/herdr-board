@@ -1,6 +1,6 @@
 -- herdr-board SQLite schema (WAL mode; boardd is the only writer).
--- This file is the CURRENT (schema v4) shape: a fresh DB is created directly
--- from it and stamped `PRAGMA user_version = 4`. Existing databases are upgraded
+-- This file is the CURRENT (schema v5) shape: a fresh DB is created directly
+-- from it and stamped `PRAGMA user_version = 5`. Existing databases are upgraded
 -- by migrations in board-core/src/db.rs (kept in sync with this file).
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -8,8 +8,13 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE boards (
   id         INTEGER PRIMARY KEY,
   name       TEXT NOT NULL UNIQUE,
+  scope_path TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- NULL scope identifies the preserved Global board. Canonical path identity is
+-- unique for scoped boards while allowing exactly one legacy/global NULL row.
+CREATE UNIQUE INDEX idx_boards_scope_path ON boards(scope_path) WHERE scope_path IS NOT NULL;
 
 -- A fresh board gets exactly one seeded column: 'Todo' (trigger=manual).
 -- Everything else (names, count, order, config) is user-created.

@@ -8,7 +8,7 @@ use board_core::protocol::{CardCreateParams, CardMoveParams, ColumnCreateParams,
 fn fake_seeds_board_and_supports_crud() {
     let mut c = FakeBoardClient::new().unwrap();
     let snap = c.board_get().unwrap();
-    assert_eq!(snap.board.name, "main");
+    assert_eq!(snap.board.name, "Global");
     assert_eq!(snap.columns.len(), 1);
     assert_eq!(snap.columns[0].name, "Todo");
     assert!(snap.cards.is_empty());
@@ -46,6 +46,65 @@ fn fake_seeds_board_and_supports_crud() {
     let snap = c.board_get().unwrap();
     assert_eq!(snap.columns.len(), 2);
     assert_eq!(snap.cards.len(), 1);
+}
+
+#[test]
+fn fake_supports_scoped_board_open_list_and_get() {
+    let mut c = FakeBoardClient::new().unwrap();
+    let alpha = c.board_open("/alpha/project").unwrap();
+    let same = c.board_open("/alpha/project").unwrap();
+    let beta = c.board_open("/beta/project").unwrap();
+    assert_eq!(alpha.board.id, same.board.id);
+    assert_ne!(alpha.board.id, beta.board.id);
+
+    c.card_create(&CardCreateParams {
+        board_id: Some(alpha.board.id),
+        title: "alpha".into(),
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(c.board_get_by_id(alpha.board.id).unwrap().cards.len(), 1);
+    assert!(c.board_get_by_id(beta.board.id).unwrap().cards.is_empty());
+    let boards = c.board_list().unwrap().boards;
+    assert_eq!(boards[0].name, "Global");
+    assert_eq!(boards.len(), 3);
+}
+
+#[test]
+fn fake_run_focus_uses_latest_recorded_pane() {
+    let mut c = FakeBoardClient::new().unwrap();
+    let card = c
+        .card_create(&CardCreateParams {
+            title: "focus".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let older = c
+        .db()
+        .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
+        .unwrap();
+    c.db()
+        .start_run(older.id, Some("w"), Some("p-old"))
+        .unwrap();
+    let latest = c
+        .db()
+        .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
+        .unwrap();
+    c.db()
+        .start_run(latest.id, Some("w"), Some("p-new"))
+        .unwrap();
+
+    let focused = c.run_focus(card.id, "/tmp/herdr.sock").unwrap();
+    assert_eq!(focused.run_id, latest.id);
+    assert_eq!(focused.pane_id, "p-new");
+
+    let no_pane = c
+        .card_create(&CardCreateParams {
+            title: "none".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(c.run_focus(no_pane.id, "/tmp/herdr.sock").is_err());
 }
 
 #[test]

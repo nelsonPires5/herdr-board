@@ -53,6 +53,8 @@ SCENARIOS=(
   09-comment-context.sh
   10-archive-filter-title.sh
   11-pi-harness.sh
+  12-cwd-boards.sh
+  13-jump-to-pane.sh
 )
 
 # apply filters (substring match on the filename); empty = run all

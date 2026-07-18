@@ -23,8 +23,10 @@ isolation/safety design, and the **how-to-write-a-scenario** guide, see
 | `board cancel` on a live run kills the herdr pane; run `cancelled`, card `failed` | `07-cancel.sh` | live |
 | Run overruns its column `timeout_minutes` → killed and follows `on_fail` | `08-column-timeout.sh` | live |
 | A stage-1 comment flows into the stage-2 run's prompt (`## Card comments` section) | `09-comment-context.sh` | live |
-| Archive filter cycles `ACTIVE/ALL/ARCHIVED` in the Herdr pane title and keeps the footer minimal | `10-archive-filter-title.sh` | live |
+| Archive filter cycles scoped `ACTIVE/ALL/ARCHIVED` Herdr pane titles and keeps the footer minimal | `10-archive-filter-title.sh` | live |
 | Built-in Pi mint/retry argv, session fork, protocol prompt, and agent comment through real Herdr | `11-pi-harness.sh` | live, checked-in fake `pi`, zero provider cost |
+| Git-root/CWD board identity, independent pipelines/cards, scoped TUI title, and Global picker entry | `12-cwd-boards.sh` | live |
+| Card-detail `o` focuses a held same-session run pane and closes the real plugin overlay | `13-jump-to-pane.sh` | live |
 | **idle-lost watchdog**: an idle agent (no `board done`) is marked `lost` | — | deterministic daemon tests; not sampled by standard live fake |
 
 ### Why idle-lost has no live scenario
@@ -93,6 +95,8 @@ of CI (it needs a live herdr) — it is run by a human/orchestrator.
 | `fake-bin/pi` | Executable named exactly `pi`, prepended only to disposable standard-E2E Herdr server PATH; records argv under isolated temp and calls the candidate `board`. Never modifies the installed Pi. |
 | `real-pi-smoke.sh` | Fail-closed real-provider poem smoke. Detects Pi's runtime default model, passes low thinking, isolates board/Pi session output under `/tmp`, verifies integration/WezTerm, poem/comments/argv/git/settings, and supports keep mode for visual audit. Not in `run-all.sh`. |
 | `hrpc.py` | One-shot raw **herdr** socket RPC (honours `HERDR_SOCKET_PATH`) for structural asserts (`tab.list`/`pane.list`/`pane.layout`). |
+| `12-cwd-boards.sh` | Scoped board identity/isolation plus real TUI title/picker. |
+| `13-jump-to-pane.sh` | Same-session pane focus through a real plugin overlay. |
 | `NN-*.sh` | The scenarios above. |
 | `run-all.sh` | Builds once, runs every scenario in order, prints the summary. |
 

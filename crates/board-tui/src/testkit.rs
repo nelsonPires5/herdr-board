@@ -283,5 +283,10 @@ pub fn demo_client() -> anyhow::Result<DemoClient> {
     // Done — idle
     c.card_create(&card("Ship v0.1", done, "Cut the first release."))?;
 
+    // Additional independent boards feed the board picker while Global remains
+    // the selected demo board.
+    c.board_open("/work/alpha/project")?;
+    c.board_open("/Volumes/archive/project")?;
+
     Ok(DemoClient::new(c))
 }

@@ -26,7 +26,7 @@ do no I/O beyond in-memory SQLite and never touch herdr.
 | File | Covers |
 |---|---|
 | `crates/board-core/tests/engine.rs` | The **pure column engine** — `decide_transition`, `decide_entry`, `validate_*`, `format_duration`. No wall clock: elapsed time is passed as an explicit seconds argument (e.g. `decide_transition(.., Some(252))` → `"4m12s"`), so results are deterministic. |
-| `crates/board-core/tests/db.rs` | SQLite migrations (including v3 archive state), seed, CRUD, position compaction, FIFO queued-runs — on an in-memory db (`mem()` helper). |
+| `crates/board-core/tests/db.rs` | SQLite migrations through v5 (scoped boards + preserved Global), board-boundary invariants, seed/CRUD, position compaction, FIFO queued-runs, and latest pane lookup — on an in-memory db. |
 | `crates/board-core/tests/{capability,config,prompt,harness,protocol,fake_client}.rs` | Harness catalog + pane-name slug rules; config defaults/parsing; prompt assembly + effective-settings; harness argv/session planning; protocol serde round-trips; the in-memory `FakeBoardClient`. |
 | `crates/board-herdr/tests/{events,socket}.rs` | herdr event decoding; socket client against an **in-process fake herdr server** on a temp unix socket (`serve_calls`/`serve_stream`), covering one-request-per-connection, error mapping, and mid-call disconnect. |
 
@@ -73,8 +73,8 @@ the `fake-client` feature.
   Determinism comes from a fixed `now` (`NOW_STR = "2026-07-14 12:00:00"`) and a
   `pin()` helper that rewrites Running cards' `updated_at`, so timers don't drift.
 - `crates/board-tui/tests/update.rs` unit-tests the pure reducer
-  (`board_tui::app::update`) — navigation, archive filtering/toggling, form field cycling/visibility,
-  selectors, drag state, template-only-on-empty-board.
+  (`board_tui::app::update`) — navigation, archive filtering/toggling, scoped board picker/switch,
+  scoped form submission, jump-to-pane success/error, selectors, drag state, and templates.
 - `cargo run -p board-tui --example tui_fake --features fake-client` runs the
   full TUI against the seeded client for a manual look.
 
@@ -103,8 +103,10 @@ case ↔ scenario ↔ status catalog):
 | `07-cancel.sh` | `board cancel` on a live run kills the herdr pane; run `cancelled`, card `failed`. |
 | `08-column-timeout.sh` | A run past its column `timeout_minutes` is killed and follows `on_fail`. |
 | `09-comment-context.sh` | A stage-1 comment flows into the stage-2 run's `prompt_snapshot` (`## Card comments`). |
-| `10-archive-filter-title.sh` | Archive filter → dynamic Herdr pane title (`Board [ACTIVE/ALL/ARCHIVED]`) + minimal footer. |
+| `10-archive-filter-title.sh` | Archive filter → scoped dynamic pane title (`Board [scope · ACTIVE/ALL/ARCHIVED]`) + minimal footer. |
 | `11-pi-harness.sh` | Built-in Pi mint/retry through real Herdr with `e2e/fake-bin/pi`; validates model, low thinking, protocol prompt, safe positional prompt, comments, and fork target without provider cost. |
+| `12-cwd-boards.sh` | Git root/subdir sharing, non-Git CWD isolation, independent columns/cards, scoped TUI title, and picker including Global. |
+| `13-jump-to-pane.sh` | Held fake-agent pane + real plugin overlay: detail `o` focuses the same-session target and closes the board pane. |
 | `real-pi-smoke.sh` | Separate opt-in (`E2E_REAL_PI=1`) real-provider poem smoke; never included by `run-all.sh`. |
 | `run-all.sh` | Builds once, runs every standard no-cost scenario, prints a PASS/FAIL/SKIP summary. |
 
@@ -130,8 +132,8 @@ does not require sampling `working` from a fast run.
   stop/delete and workspace close so a run can be inspected; `run-all.sh` then
   prints an attach + cleanup one-liner per kept session.
 - **Isolated stack.** `e2e_isolate` makes a short `/tmp/hb-e2e.XXXXXX` dir and
-  points `BOARD_DB`/`BOARD_SOCKET`/`HERDR_BOARD_CONFIG` there, with
-  `BOARD_SPAWNER=herdr`. The daemon it starts is entirely separate from your real
+  points `BOARD_DB`/`BOARD_SOCKET`/`HERDR_BOARD_CONFIG` there, sets a canonical disposable
+  `BOARD_SCOPE_PATH`, and uses `BOARD_SPAWNER=herdr`. The daemon it starts is entirely separate from your real
   board — it never reads your board db or socket. (`/tmp`, not `$TMPDIR`: AF_UNIX
   socket paths cap at ~108 chars.)
 - **Fake harnesses.** Config harness `fake` uses an env-wrapped bash script. For built-in Pi,

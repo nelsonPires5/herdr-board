@@ -13,7 +13,6 @@
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/lib.sh"
 
-BOARD_RPC="$REPO_ROOT/scripts/board-rpc.py"
 NCARDS=3
 
 export E2E_FAKE_ENV="FAKE_AGENT_HOLD=300"   # keep panes alive for layout asserts
@@ -28,7 +27,7 @@ e2e_ws_create bgrid; WS_ID="$E2E_WS"
 echo "  workspace: $WS_ID"
 
 step "Create an auto column 'Execute'"
-python3 "$BOARD_RPC" column.create '{"name":"Execute","trigger":"auto"}' >/dev/null
+EXEC_ID="$(col_create '{"name":"Execute","trigger":"auto"}')"
 
 step "Create $NCARDS cards and move each into 'Execute' (dispatches agent panes)"
 CARD_IDS=()

@@ -49,9 +49,9 @@ pub trait Spawner: Send + Sync {
 
 ## Semantics source of truth
 
-`docs/protocol.md` + `docs/design.md` §5–§8. `schema.sql` at repo root is migration v1
-(embed it; add a `schema_version` pragma/user_version). Seed on first run: board id=1 "main",
-column "Todo" trigger=manual position 0.
+`docs/protocol.md` + `docs/design.md` §5–§8. `schema.sql` at repo root is the current fresh schema
+(embedded and versioned with `PRAGMA user_version`). Schema v5 preserves board id=1 as `Global`
+(`scope_path=NULL`); every canonical-path board independently seeds one manual `Todo` column.
 
 ## Conventions
 

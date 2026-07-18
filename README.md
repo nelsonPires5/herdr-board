@@ -29,6 +29,8 @@ only `Todo`.
   failed runs to another stage.
 - **Human gates where they matter.** Automatic stages keep moving; manual columns stop the pipeline
   for approval.
+- **One board per project.** The focused pane's Git root selects an independent pipeline; non-Git
+  directories use their canonical CWD. The preserved `Global` board remains available with `b`.
 - **One binary.** `board` provides the TUI, daemon, and CLI used by both humans and agents.
 - **Session- and workspace-aware.** One daemon can dispatch cards across every Herdr session and
   existing or newly created workspaces.
@@ -77,7 +79,8 @@ regular, non-symlink `board` whose contents still match that marker.
 
 ## Quickstart
 
-1. Open the board with the plugin action or an optional keybinding.
+1. Open the board with the plugin action or an optional keybinding. Herdr's focused pane selects
+   its Git-root/CWD board; press `b` to switch boards or open the preserved `Global` board.
 2. On an empty board press `T` to apply the example pipeline, or `N` to create your own columns.
 3. Press `n` to create a card. Pi is selected by default. Leave model at `(default)` to use Pi's
    configured default, choose thinking effort if needed, then select the session and workspace.
@@ -136,8 +139,9 @@ grid.
 | Key | Action | Key | Action |
 |---|---|---|---|
 | `←/→` or `h/l` | Focus column | `↑/↓` or `k/j` | Focus card |
-| `n` | New card | `N` | New column |
-| `Enter` | Card detail | `m` | Move card picker |
+| `b` | Switch project/Global board | `n` | New card |
+| `N` | New column | `Enter` | Card detail |
+| `m` | Move card picker | `o` (detail) | Jump to latest run pane |
 | `H / L` | Move card left/right | `a` | Archive/restore card |
 | `e` | Edit card | `E` | Edit column |
 | `v` | Active/all/archived view | `?` | Full help overlay |
@@ -150,18 +154,19 @@ grid.
 |---|---|---|---|---|
 | `←/→ h/l` | focus column | | `Enter` | card detail |
 | `↑/↓ k/j` | focus card | | `T` | apply template (empty board only) |
-| `n` | new card | | `r` | refresh board |
-| `N` | new column | | `?` | help |
-| `e` | edit card | | `q / Esc` | back / quit |
-| `E` | edit focused column | | **card detail** | |
+| `b` | switch board | | `r` | refresh board |
+| `n` | new card | | `?` | help |
+| `N` | new column | | `q / Esc` | back / quit |
+| `e` | edit card | | **card detail** | |
+| `E` | edit focused column | | `e` | edit card | |
 | `a` | archive / restore card | | `a` | archive / restore card |
-| `v` | active / all / archived view | | `e` | edit card |
+| `v` | active / all / archived view | | `f` / click title | popup / fullscreen |
 | `d` | delete card | | `c` | add comment |
 | `D` | delete column | | `Tab` | focus comments / runs |
 | `m` | move card picker | | `↑/↓ k/j` | scroll focused detail section |
-| `H / L` | move card left / right | | `f` / click title | popup / fullscreen |
-| **forms** | | | `o` | jump to pane (stub) |
-| `Tab` / `Shift+Tab` | next / previous field | | `x` / `r` | cancel / retry run |
+| `H / L` | move card left / right | | `o` | jump to latest same-session run pane |
+| **forms** | | | `x` / `r` | cancel / retry run |
+| `Tab` / `Shift+Tab` | next / previous field | | `Tab`, `↑/↓` | choose/scroll detail history |
 | `←/→ Space` | cycle a picker field | | **mouse** | |
 | `Ctrl+E` | edit textarea in `$EDITOR` | | click / double-click | focus / open card detail |
 | `Enter` / `Esc` | submit / cancel | | drag / wheel | move or scroll |
@@ -211,8 +216,8 @@ local-development installer below can do so.
 Herdr keeps a plugin registry per session, while keybindings/configuration are global. Run the
 GitHub install command once from every named session where the plugin should be registered.
 
-A single board daemon serves one board across every Herdr session. Each card carries a `session`
-(the default session when unset), and dispatch resolves that session's socket through
+A single board daemon serves every scoped board across every Herdr session. Each card carries a
+`session` (the default session when unset), and dispatch resolves that session's socket through
 `herdr session list`. Use `BOARD_SOCKET` and `BOARD_DB` overrides only when you want a completely
 separate board stack.
 
@@ -236,11 +241,17 @@ board harness models [HARNESS] | efforts [HARNESS] --model M | permissions [HARN
 board space list [--session S] | session list    # HARNESS defaults to "pi"
 ```
 
+Scope-sensitive CLI commands (`card new/list`, `column list`) use the current Git root, or the
+canonical CWD outside Git. `BOARD_SCOPE_PATH` overrides this for automation. Operations by card id
+remain independent of the caller's CWD; `move` resolves its destination in the card's own board.
+
 `--json` is accepted everywhere. In the TUI, `d` permanently deletes a card after confirmation;
 `D` deletes a column after asking where to move its cards, and refuses while a card is active.
 Archiving is reversible with `a`, `board card archive <ID>`, and `board card restore <ID>`.
 
-The active filter appears as `Board [ACTIVE|ALL|ARCHIVED]`. Agent lifecycle rules and examples live
+The pane title combines scope and filter, for example `Board [my-repo · ACTIVE]`. In card detail,
+`o` focuses the latest recorded run pane only when it belongs to the current Herdr session; errors
+leave the overlay open. Agent lifecycle rules and examples live
 in [`skill/SKILL.md`](skill/SKILL.md).
 
 </details>
@@ -273,6 +284,7 @@ and `{permission_mode}` are available in `argv`.
 | `BOARD_DB` | SQLite path. Default: `~/.local/share/herdr-board/board.db`. |
 | `BOARD_SOCKET` | Daemon socket. Default: `~/.local/share/herdr-board/boardd.sock`. |
 | `HERDR_BOARD_CONFIG` | Configuration path override. |
+| `BOARD_SCOPE_PATH` | Canonicalizable scope override for CLI/TUI automation. |
 | `BOARD_SPAWNER` | `herdr` or `local`; overrides `[daemon] spawner`. |
 | `BOARD_CARD_ID` / `BOARD_RUN_ID` | Injected into runs; `comment`/`done` use them by default. |
 | `BOARD_PROMPT` / `BOARD_SYSTEM_PROMPT` | Prompt delivery for custom harnesses. |

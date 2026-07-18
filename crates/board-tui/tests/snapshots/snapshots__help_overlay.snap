@@ -1,14 +1,16 @@
 ---
 source: crates/board-tui/tests/snapshots.rs
+assertion_line: 244
 expression: "render(&mut d, 80, 24)"
 ---
 "┌ Todo · 1 · manual ──────┐┌ Plan · 1 · auto ────────┐┌ Execute · 2 · auto ────┐"
 "┌ Help — all keybindings (any key to close) ───────────────────────────────────┐"
-"│  ←/→ h/l    focus column                c          add comment               │"
-"│  ↑/↓ k/j    focus card                  Tab        focus comments / runs     │"
+"│  ←/→ h/l    focus column                a          archive / restore card    │"
+"│  ↑/↓ k/j    focus card                  c          add comment               │"
+"│  b          switch board                Tab        focus comments / runs     │"
 "│  n          new card                    ↑/↓ k/j    scroll focused section    │"
 "│  N          new column                  f / click  toggle popup / fullscreen │"
-"│  e          edit card                   o          jump to pane (stub)       │"
+"│  e          edit card                   o          jump to pane              │"
 "│  E          edit focused column         x          cancel run                │"
 "│  a          archive / restore card      r          retry run                 │"
 "│  v          view active / all / archiv forms                                 │"
@@ -23,6 +25,5 @@ expression: "render(&mut d, 80, 24)"
 "│  q / Esc    back / quit                 dbl-click  open card detail          │"
 "│ card detail                             drag       move card / reorder column│"
 "│  e          edit card                   wheel      scroll cards              │"
-"│  a          archive / restore card                                           │"
 "└──────────────────────────────────────────────────────────────────────────────┘"
 "? help                                                                          "

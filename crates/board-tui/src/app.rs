@@ -67,6 +67,8 @@ pub enum Msg {
 /// A side effect for the driver to perform (client I/O, editor, quit).
 pub enum Effect {
     Refetch,
+    LoadBoards,
+    SwitchBoard(i64),
     LoadDetail(i64),
     CardCreate(board_core::protocol::CardCreateParams),
     CardUpdate(board_core::protocol::CardUpdateParams),
@@ -94,6 +96,7 @@ pub enum Effect {
     RunCancel(i64),
     RunRetry(i64),
     RunDone(i64, RunOutcome),
+    FocusRun(i64),
     /// Hand the focused multiline text field to `$EDITOR`.
     EditFocusedTextArea,
     /// Fetch `harness.capabilities` + `session.list` + `space.list` for the open
@@ -123,6 +126,7 @@ pub struct Picker {
 
 #[derive(Clone, Copy)]
 pub enum PickerPurpose {
+    SwitchBoard,
     MoveCard { card_id: i64 },
     DeleteColumnMoveTo { column_id: i64 },
 }
@@ -208,6 +212,22 @@ impl App {
             last_area: Rect::new(0, 0, 80, 24),
             last_click: None,
         }
+    }
+
+    pub fn replace_board(&mut self, board: BoardSnapshot) {
+        self.board = board;
+        self.screen = Screen::Board;
+        self.sel_col = 0;
+        self.sel_card = 0;
+        self.detail = None;
+        self.detail_fullscreen = false;
+        self.detail_comments_scroll = 0;
+        self.detail_runs_scroll = 0;
+        self.form = None;
+        self.form_from_detail = false;
+        self.picker = None;
+        self.confirm = None;
+        self.drag = None;
     }
 
     // -- board queries -------------------------------------------------------
@@ -387,6 +407,7 @@ fn board_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
         KeyCode::Right | KeyCode::Char('l') => app.move_col(1),
         KeyCode::Up | KeyCode::Char('k') => app.move_card(-1),
         KeyCode::Down | KeyCode::Char('j') => app.move_card(1),
+        KeyCode::Char('b') => return vec![Effect::LoadBoards],
         KeyCode::Char('n') => {
             if let Some(col_id) = app.col_id_at(app.sel_col) {
                 app.form_from_detail = false;
@@ -630,7 +651,9 @@ fn detail_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
             }
         }
         KeyCode::Char('o') => {
-            app.set_toast("jump to pane: not implemented", false);
+            if let Some(id) = card_id {
+                return vec![Effect::FocusRun(id)];
+            }
         }
         KeyCode::Char('x') => {
             if let Some(id) = card_id {
@@ -734,10 +757,17 @@ fn submit_form(app: &mut App) -> Vec<Effect> {
     };
     match form.submit() {
         Ok(submit) => {
+            let board_id = app.board.board.id;
             let effects = match submit {
-                Submit::CardCreate(p) => vec![Effect::CardCreate(p)],
+                Submit::CardCreate(mut p) => {
+                    p.board_id = Some(board_id);
+                    vec![Effect::CardCreate(p)]
+                }
                 Submit::CardUpdate(p) => vec![Effect::CardUpdate(p)],
-                Submit::ColumnCreate(p) => vec![Effect::ColumnCreate(p)],
+                Submit::ColumnCreate(mut p) => {
+                    p.board_id = Some(board_id);
+                    vec![Effect::ColumnCreate(p)]
+                }
                 Submit::ColumnUpdate(p) => vec![Effect::ColumnUpdate(p)],
                 Submit::Comment { card_id, body } => vec![Effect::CommentAdd { card_id, body }],
             };
@@ -784,6 +814,7 @@ fn picker_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
             app.picker = None;
             app.screen = Screen::Board;
             return match purpose {
+                PickerPurpose::SwitchBoard => vec![Effect::SwitchBoard(target)],
                 PickerPurpose::MoveCard { card_id } => vec![Effect::CardMove(CardMoveParams {
                     id: card_id,
                     column_id: target,

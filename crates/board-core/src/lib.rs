@@ -23,6 +23,7 @@ pub mod model;
 pub mod paths;
 pub mod prompt;
 pub mod protocol;
+pub mod scope;
 pub mod spawn;
 
 pub use engine::ValidationError;

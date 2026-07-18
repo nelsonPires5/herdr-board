@@ -3,7 +3,7 @@
 //! injected `app.now` so snapshots are deterministic.
 
 use board_core::engine::format_duration;
-use board_core::model::Card;
+use board_core::model::{Board, Card};
 use board_core::protocol::{CardDetail, CardStatus};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -16,6 +16,42 @@ use crate::forms::{FieldKind, Form};
 
 const MIN_COL_W: u16 = 26;
 const CARD_H: u16 = 3;
+const MAX_SCOPE_LABEL: usize = 32;
+
+pub fn board_scope_label(board: &Board) -> String {
+    let raw = match board.scope_path.as_deref() {
+        None => "Global",
+        Some(path) => std::path::Path::new(path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or(path),
+    };
+    truncate(&sanitize(raw), MAX_SCOPE_LABEL)
+}
+
+pub fn board_picker_label(board: &Board) -> String {
+    match board.scope_path.as_deref() {
+        None => "Global".into(),
+        Some(path) => format!("{} — {}", board_scope_label(board), sanitize(path)),
+    }
+}
+
+pub fn pane_title(board: &Board, filter: CardFilter) -> String {
+    format!("Board [{} · {}]", board_scope_label(board), filter.label())
+}
+
+fn sanitize(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| match ch {
+            '[' => '(',
+            ']' => ')',
+            ch if ch.is_control() => ' ',
+            ch => ch,
+        })
+        .collect()
+}
 
 // -- layout / hit-testing ----------------------------------------------------
 
@@ -714,7 +750,7 @@ fn draw_picker(app: &App, f: &mut Frame, area: Rect) {
         .unwrap_or(0)
         .max(picker.title.chars().count() + 12)
         .saturating_add(4)
-        .clamp(30, 60) as u16;
+        .clamp(30, 100) as u16;
     let content_h = (picker.options.len() as u16).saturating_add(2).max(5);
     let box_area = centered_rect_abs(content_w, content_h, area);
     f.render_widget(Clear, box_area);
@@ -810,6 +846,7 @@ fn render_help_column(f: &mut Frame, area: Rect, keys: &[(&str, &str)]) {
 pub const HELP_KEYS: &[(&str, &str)] = &[
     ("←/→ h/l", "focus column"),
     ("↑/↓ k/j", "focus card"),
+    ("b", "switch board"),
     ("n", "new card"),
     ("N", "new column"),
     ("e", "edit card"),
@@ -832,7 +869,7 @@ pub const HELP_KEYS: &[(&str, &str)] = &[
     ("Tab", "focus comments / runs"),
     ("↑/↓ k/j", "scroll focused section"),
     ("f / click", "toggle popup / fullscreen"),
-    ("o", "jump to pane (stub)"),
+    ("o", "jump to pane"),
     ("x", "cancel run"),
     ("r", "retry run"),
     ("--", "-- forms --"),
@@ -932,7 +969,36 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::detail_section_title;
+    use super::{board_picker_label, detail_section_title, pane_title};
+    use crate::app::CardFilter;
+    use board_core::model::Board;
+
+    #[test]
+    fn pane_titles_include_scope_filter_and_sanitize_long_labels() {
+        let global = Board {
+            id: 1,
+            name: "Global".into(),
+            scope_path: None,
+        };
+        assert_eq!(
+            pane_title(&global, CardFilter::Active),
+            "Board [Global · ACTIVE]"
+        );
+
+        let scoped = Board {
+            id: 2,
+            name: "/tmp/repo".into(),
+            scope_path: Some("/tmp/a[unsafe]/abcdefghijklmnopqrstuvwxyz0123456789".into()),
+        };
+        let title = pane_title(&scoped, CardFilter::Archived);
+        assert!(title.starts_with("Board [abcdefghijklmnopqrstuvwxyz01234"));
+        assert!(title.ends_with("… · ARCHIVED]"));
+        assert!(!title.contains('[') || title.starts_with("Board ["));
+        assert_eq!(
+            board_picker_label(&scoped),
+            "abcdefghijklmnopqrstuvwxyz01234… — /tmp/a(unsafe)/abcdefghijklmnopqrstuvwxyz0123456789"
+        );
+    }
 
     #[test]
     fn detail_titles_show_only_overflow_arrows() {

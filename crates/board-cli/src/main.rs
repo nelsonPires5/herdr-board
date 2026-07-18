@@ -15,9 +15,10 @@ use board_core::client::{BoardClient, UnixClient};
 use board_core::harness::DEFAULT_HARNESS;
 use board_core::paths;
 use board_core::protocol::{
-    CardCreateParams, CardMoveParams, Effort, RunOutcome, SessionListResult, SpaceKind,
-    SpaceListResult,
+    BoardSnapshot, CardCreateParams, CardMoveParams, Effort, RunOutcome, SessionListResult,
+    SpaceKind, SpaceListResult,
 };
+use board_core::scope::{resolve_scope_path, select_scope_candidate};
 use clap::{Parser, Subcommand};
 use serde_json::json;
 
@@ -242,8 +243,9 @@ fn real_main() -> Result<()> {
     match cli.cmd {
         Cmd::Daemon { foreground } => board_daemon::run(foreground).map_err(|e| anyhow!(e)),
         Cmd::Tui => {
-            let client = connect_or_start()?;
-            board_tui::run(Box::new(client))
+            let mut client = connect_or_start()?;
+            let board = open_current_board(&mut client)?;
+            board_tui::run_with_board(Box::new(client), board)
         }
         Cmd::Status { json } => cmd_status(json),
         Cmd::Card { sub } => cmd_card(sub),
@@ -354,8 +356,9 @@ fn cmd_card(sub: CardCmd) -> Result<()> {
             space_cwd,
             json,
         } => {
+            let board = open_current_board(&mut c)?;
             let column_id = match column {
-                Some(s) => Some(resolve_column(&mut c, &s)?),
+                Some(s) => Some(resolve_column_in(&board, &s)?),
                 None => None,
             };
             let effort = match effort {
@@ -370,6 +373,7 @@ fn cmd_card(sub: CardCmd) -> Result<()> {
             };
             let p = CardCreateParams {
                 title,
+                board_id: Some(board.board.id),
                 description,
                 column_id,
                 harness,
@@ -443,11 +447,12 @@ fn cmd_card(sub: CardCmd) -> Result<()> {
             }
         }
         CardCmd::List { column, json } => {
+            let board = open_current_board(&mut c)?;
             let column_id = match column {
-                Some(s) => Some(resolve_column(&mut c, &s)?),
+                Some(s) => Some(resolve_column_in(&board, &s)?),
                 None => None,
             };
-            let cards = c.card_list(column_id)?;
+            let cards = c.card_list_for_board(Some(board.board.id), column_id)?;
             if json {
                 print_json(&cards)?;
             } else {
@@ -529,7 +534,9 @@ fn cmd_done(
 
 fn cmd_move(card_id: i64, column: String, json: bool) -> Result<()> {
     let mut c = connect_or_start()?;
-    let column_id = resolve_column(&mut c, &column)?;
+    let card = c.card_get(card_id)?.card;
+    let board = c.board_get_by_id(card.board_id)?;
+    let column_id = resolve_column_in(&board, &column)?;
     let card = c.card_move(&CardMoveParams {
         id: card_id,
         column_id,
@@ -566,7 +573,7 @@ fn cmd_column(sub: ColumnCmd) -> Result<()> {
     let mut c = connect_or_start()?;
     match sub {
         ColumnCmd::List { json } => {
-            let snap = c.board_get()?;
+            let snap = open_current_board(&mut c)?;
             if json {
                 print_json(&snap.columns)?;
             } else {
@@ -728,9 +735,27 @@ fn env_card_id() -> Result<i64> {
         .ok_or_else(|| anyhow!("no card id given and $BOARD_CARD_ID is unset"))
 }
 
-/// Resolve a column reference (numeric id or case-insensitive name) to its id.
-fn resolve_column(c: &mut UnixClient, s: &str) -> Result<i64> {
-    let snap = c.board_get()?;
+fn current_scope_path() -> Result<String> {
+    let cwd = std::env::current_dir().context("reading current directory")?;
+    let override_path = std::env::var("BOARD_SCOPE_PATH").ok();
+    let plugin_context = std::env::var("HERDR_PLUGIN_CONTEXT_JSON").ok();
+    let candidate =
+        select_scope_candidate(override_path.as_deref(), plugin_context.as_deref(), &cwd)?;
+    let resolved = resolve_scope_path(&candidate)?;
+    resolved.to_str().map(str::to_string).ok_or_else(|| {
+        anyhow!(
+            "board scope path is not valid UTF-8: {}",
+            resolved.display()
+        )
+    })
+}
+
+fn open_current_board(c: &mut UnixClient) -> Result<BoardSnapshot> {
+    c.board_open(&current_scope_path()?)
+}
+
+/// Resolve a column reference within one board snapshot.
+fn resolve_column_in(snap: &BoardSnapshot, s: &str) -> Result<i64> {
     if let Ok(id) = s.parse::<i64>() {
         if snap.columns.iter().any(|col| col.id == id) {
             return Ok(id);
