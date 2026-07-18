@@ -11,8 +11,8 @@
 #
 # herdr actions/keybindings run a command (no declarative "open this pane" field),
 # so this shells out to the herdr CLI via $HERDR_BIN_PATH (herdr injects it; fall
-# back to `herdr` on PATH). The pane is identified by its static title (`Board`)
-# or the dynamic filter title (`Board [ACTIVE|ALL|ARCHIVED]`). Any failure
+# back to `herdr` on PATH). The pane is identified by its static title (`Board`),
+# the legacy filter title, or the scoped title (`Board [scope · FILTER]`). Any failure
 # degrades to OPEN, preserving always-open behavior.
 set -uo pipefail
 
@@ -44,7 +44,9 @@ board = None
 for p in panes:
     # The TUI appends its active archive filter via `pane rename`.
     name = (p.get("label") or p.get("title") or "")
-    if name == "Board" or re.fullmatch(r"Board \[(ACTIVE|ALL|ARCHIVED)\]", name):
+    if name == "Board" or re.fullmatch(
+        r"Board \[(?:(?:ACTIVE|ALL|ARCHIVED)|.+ · (?:ACTIVE|ALL|ARCHIVED))\]", name
+    ):
         board = p
         break
 if not board:

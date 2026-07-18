@@ -227,6 +227,17 @@ fn card_detail_history_overflow_starts_latest_and_scrolls_sections() {
 }
 
 #[test]
+fn board_picker_wide_and_narrow() {
+    let mut wide = driver(demo_client().unwrap());
+    key(&mut wide, KeyCode::Char('b'));
+    insta::assert_snapshot!("board_picker_120x35", render(&mut wide, 120, 35));
+
+    let mut narrow = driver(demo_client().unwrap());
+    key(&mut narrow, KeyCode::Char('b'));
+    insta::assert_snapshot!("board_picker_80x24", render(&mut narrow, 80, 24));
+}
+
+#[test]
 fn help_overlay() {
     let mut d = driver(demo_client().unwrap());
     key(&mut d, KeyCode::Char('?'));

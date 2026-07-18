@@ -98,6 +98,55 @@ fn board_layout_always_fills_available_width() {
 }
 
 #[test]
+fn board_picker_loads_and_switch_preserves_filter() {
+    let mut app = demo_app();
+    let effects = update(&mut app, key(KeyCode::Char('b')));
+    assert!(matches!(effects.as_slice(), [Effect::LoadBoards]));
+
+    let mut driver = driver_of(demo_client().unwrap());
+    driver.handle(key(KeyCode::Char('v')));
+    assert_eq!(driver.app.card_filter, CardFilter::All);
+    driver.handle(key(KeyCode::Char('b')));
+    assert_eq!(driver.app.screen, Screen::Picker);
+    assert!(driver.app.picker.as_ref().unwrap().options.len() >= 3);
+    driver.handle(key(KeyCode::Down));
+    driver.handle(key(KeyCode::Enter));
+    assert_eq!(driver.app.screen, Screen::Board);
+    assert_eq!(driver.app.card_filter, CardFilter::All);
+    assert_eq!(driver.app.sel_col, 0);
+    assert_eq!(
+        driver.app.board.board.scope_path.as_deref(),
+        Some("/Volumes/archive/project")
+    );
+    driver.handle(Msg::Refresh);
+    assert_eq!(
+        driver.app.board.board.scope_path.as_deref(),
+        Some("/Volumes/archive/project")
+    );
+}
+
+#[test]
+fn create_forms_submit_the_active_board_id() {
+    let mut app = demo_app();
+    app.board.board.id = 42;
+    update(&mut app, key(KeyCode::Char('n')));
+    app.form.as_mut().unwrap().fields[0].set_text("scoped card");
+    let effects = update(&mut app, key(KeyCode::Enter));
+    match effects.as_slice() {
+        [Effect::CardCreate(params)] => assert_eq!(params.board_id, Some(42)),
+        _ => panic!("expected scoped card create"),
+    }
+
+    update(&mut app, key(KeyCode::Char('N')));
+    app.form.as_mut().unwrap().fields[0].set_text("Scoped column");
+    let effects = update(&mut app, key(KeyCode::Enter));
+    match effects.as_slice() {
+        [Effect::ColumnCreate(params)] => assert_eq!(params.board_id, Some(42)),
+        _ => panic!("expected scoped column create"),
+    }
+}
+
+#[test]
 fn column_navigation_wraps() {
     let mut app = demo_app();
     let n = app.board.columns.len();
@@ -270,6 +319,49 @@ fn switching_columns_clamps_card_index() {
     update(&mut app, key(KeyCode::Right)); // Review
     update(&mut app, key(KeyCode::Right)); // Human Review
     assert_eq!(app.sel_card, 0);
+}
+
+#[test]
+fn card_detail_o_emits_focus_and_driver_quits_only_on_success() {
+    let mut client = demo_client().unwrap();
+    let board = client.board_get().unwrap();
+    let running = board
+        .cards
+        .iter()
+        .find(|card| card.status == board_core::protocol::CardStatus::Running)
+        .unwrap()
+        .clone();
+    let mut app = App::new(board);
+    app.screen = Screen::CardDetail;
+    app.detail = Some(client.card_get(running.id).unwrap());
+    let effects = update(&mut app, key(KeyCode::Char('o')));
+    assert!(matches!(effects.as_slice(), [Effect::FocusRun(id)] if *id == running.id));
+
+    let mut success = driver_of(demo_client().unwrap());
+    success.set_origin_socket(Some("/tmp/herdr.sock".into()));
+    success.handle(key(KeyCode::Right));
+    success.handle(key(KeyCode::Enter));
+    success.handle(key(KeyCode::Char('o')));
+    assert!(success.app.should_quit);
+
+    let mut error = driver_of(demo_client().unwrap());
+    error.set_origin_socket(Some("/tmp/herdr.sock".into()));
+    error.handle(key(KeyCode::Enter));
+    error.handle(key(KeyCode::Char('o')));
+    assert!(!error.app.should_quit);
+    assert!(error.app.toast.as_ref().is_some_and(|toast| toast.is_error));
+
+    let mut no_herdr = driver_of(demo_client().unwrap());
+    no_herdr.set_origin_socket(None);
+    no_herdr.handle(key(KeyCode::Right));
+    no_herdr.handle(key(KeyCode::Enter));
+    no_herdr.handle(key(KeyCode::Char('o')));
+    assert!(!no_herdr.app.should_quit);
+    assert!(no_herdr
+        .app
+        .toast
+        .as_ref()
+        .is_some_and(|toast| toast.text.contains("requires Herdr")));
 }
 
 #[test]
