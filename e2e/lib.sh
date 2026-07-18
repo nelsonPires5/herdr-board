@@ -43,7 +43,16 @@ HERDR_BIN="${HERDR_BIN_PATH:-herdr}"
 BOARD_BIN="${BOARD_BIN:-$REPO_ROOT/target/release/board}"
 E2E_FAKE_AGENT="${E2E_FAKE_AGENT:-$E2E_LIB_DIR/fake-agent.sh}"
 HRPC="$E2E_LIB_DIR/hrpc.py"
+E2E_FAKE_PI_BIN_DIR="$E2E_LIB_DIR/fake-bin"
 export BOARD_BIN
+
+# Scope the checked-in executable named exactly `pi` to disposable e2e Herdr
+# servers. The candidate board binary is also on PATH so fake Pi can call
+# `board comment` / `board done` without a custom built-in harness env.
+e2e_enable_fake_pi() {
+  [ -x "$E2E_FAKE_PI_BIN_DIR/pi" ] || fail "fake pi missing/not executable"
+  export PATH="$E2E_FAKE_PI_BIN_DIR:$REPO_ROOT/target/release:$PATH"
+}
 
 # e2e_require — verify the tools every scenario needs.
 e2e_require() {

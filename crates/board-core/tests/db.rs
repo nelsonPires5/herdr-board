@@ -1,7 +1,9 @@
 //! Db migrations, seed, CRUD, and position management.
 
 use board_core::db::{Db, BOARD_ID};
-use board_core::protocol::{CardCreateParams, ColumnCreateParams, RunOutcome, SpaceKind, Trigger};
+use board_core::protocol::{
+    CardCreateParams, ColumnCreateParams, Effort, RunOutcome, SpaceKind, Trigger,
+};
 use rusqlite::Connection;
 
 fn mem() -> Db {
@@ -11,7 +13,7 @@ fn mem() -> Db {
 #[test]
 fn migration_seeds_board_and_todo_column() {
     let db = mem();
-    assert_eq!(db.user_version().unwrap(), 3);
+    assert_eq!(db.user_version().unwrap(), 4);
     let board = db.get_board(BOARD_ID).unwrap();
     assert_eq!(board.name, "main");
     let cols = db.list_columns(BOARD_ID).unwrap();
@@ -32,7 +34,7 @@ fn migration_idempotent_on_reopen() {
     // Reopen: must not re-seed (still exactly one board, one column).
     {
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.user_version().unwrap(), 3);
+        assert_eq!(db.user_version().unwrap(), 4);
         assert_eq!(db.list_columns(BOARD_ID).unwrap().len(), 1);
         assert_eq!(db.get_board(BOARD_ID).unwrap().name, "main");
     }
@@ -100,9 +102,9 @@ fn migration_v2_upgrades_v1_database() {
         .unwrap();
         conn.execute_batch("PRAGMA user_version = 1;").unwrap();
     }
-    // Open via Db → runs the v2 and v3 migrations.
+    // Open via Db → runs the v2, v3, and v4 migrations.
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 3);
+    assert_eq!(db.user_version().unwrap(), 4);
     let cards = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(cards.len(), 2);
     for c in &cards {
@@ -227,7 +229,7 @@ fn card_create_move_and_position_compaction() {
 }
 
 #[test]
-fn card_defaults_go_into_todo() {
+fn default_card_harness_is_pi() {
     let db = mem();
     let card = db
         .create_card(&CardCreateParams {
@@ -236,7 +238,7 @@ fn card_defaults_go_into_todo() {
         })
         .unwrap();
     assert_eq!(card.column_id, db.default_column_id(BOARD_ID).unwrap());
-    assert_eq!(card.harness, "claude");
+    assert_eq!(card.harness, "pi");
     assert_eq!(card.space_kind, SpaceKind::Workspace);
 }
 
@@ -260,19 +262,69 @@ fn card_archive_and_restore_roundtrip() {
 }
 
 #[test]
+fn migration_v4_preserves_claude_cards_and_accepts_pi_efforts() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    {
+        let db = Db::open(&path).unwrap();
+        let card = db
+            .create_card(&CardCreateParams {
+                title: "existing".into(),
+                harness: Some("claude".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        db.add_comment(card.id, "user", "preserved").unwrap();
+        let run = db
+            .create_run(
+                card.id,
+                card.column_id,
+                "claude",
+                "[]",
+                "prompt",
+                Some("session"),
+                None,
+            )
+            .unwrap();
+        db.start_run(run.id, None, None).unwrap();
+        db.finish_run(run.id, RunOutcome::Ok, None).unwrap();
+    }
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("PRAGMA user_version = 3;").unwrap();
+    }
+
+    let db = Db::open(&path).unwrap();
+    assert_eq!(db.user_version().unwrap(), 4);
+    let existing = db.list_cards(BOARD_ID).unwrap();
+    assert_eq!(existing[0].harness, "claude");
+    assert_eq!(db.list_comments(existing[0].id).unwrap().len(), 1);
+    assert_eq!(db.list_runs(existing[0].id).unwrap().len(), 1);
+    let pi = db
+        .create_card(&CardCreateParams {
+            title: "pi".into(),
+            effort: Some(Effort::Minimal),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(pi.harness, "pi");
+    assert_eq!(pi.effort, Some(Effort::Minimal));
+}
+
+#[test]
 fn migration_does_not_downgrade_future_schema_version() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let path = tmp.path().to_path_buf();
     {
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.user_version().unwrap(), 3);
+        assert_eq!(db.user_version().unwrap(), 4);
     }
     {
         let conn = Connection::open(&path).unwrap();
-        conn.execute_batch("PRAGMA user_version = 4;").unwrap();
+        conn.execute_batch("PRAGMA user_version = 5;").unwrap();
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 4);
+    assert_eq!(db.user_version().unwrap(), 5);
 }
 
 #[test]
@@ -291,7 +343,7 @@ fn migration_v3_adds_archived_at_to_v2_database() {
             .unwrap();
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 3);
+    assert_eq!(db.user_version().unwrap(), 4);
     let cards = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(cards.len(), 1);
     assert!(cards[0].archived_at.is_none());

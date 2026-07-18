@@ -6,6 +6,21 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- Pi Coding Agent is a first-class built-in harness with runtime-default/free-form models,
+  `off|minimal|low|medium|high|xhigh|max` thinking, exact mint/resume IDs, retry forks to a new
+  persisted session, and the mandatory board completion protocol.
+- Deterministic Pi/Herdr lifecycle tests cover working, blocked, idle-lost, pane exit, and spawn
+  failure. Standard live E2E dispatches a checked-in fake `pi` through real Herdr at zero model
+  cost; a separate fail-closed real-Pi poem smoke supports isolated visual validation.
+
+### Changed
+- Pi is now the default for newly created cards, TUI forms, and harness CLI queries. Existing
+  stored Claude cards are preserved and Claude remains explicitly selectable with unchanged argv
+  and permissions.
+- The TUI preserves an omitted `(default)` model, supports a custom Pi `provider/model`, exposes
+  Pi thinking levels, and hides/rejects permission mode for Pi.
+
 ## [0.4.0] - 2026-07-17
 
 ### Added

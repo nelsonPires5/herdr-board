@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, Context, Result};
 use board_core::capability::HarnessCapabilities;
 use board_core::client::{BoardClient, UnixClient};
+use board_core::harness::DEFAULT_HARNESS;
 use board_core::paths;
 use board_core::protocol::{
     CardCreateParams, CardMoveParams, Effort, RunOutcome, SessionListResult, SpaceKind,
@@ -183,7 +184,7 @@ enum HarnessCmd {
     /// List known models and the efforts each accepts.
     Models {
         /// Harness name.
-        #[arg(default_value = "claude")]
+        #[arg(default_value = DEFAULT_HARNESS)]
         harness: String,
         #[arg(long)]
         json: bool,
@@ -191,7 +192,7 @@ enum HarnessCmd {
     /// Show the efforts a model accepts.
     Efforts {
         /// Harness name.
-        #[arg(default_value = "claude")]
+        #[arg(default_value = DEFAULT_HARNESS)]
         harness: String,
         #[arg(long)]
         model: String,
@@ -201,7 +202,7 @@ enum HarnessCmd {
     /// List the permission modes a harness understands.
     Permissions {
         /// Harness name.
-        #[arg(default_value = "claude")]
+        #[arg(default_value = DEFAULT_HARNESS)]
         harness: String,
         #[arg(long)]
         json: bool,
@@ -593,7 +594,11 @@ fn cmd_harness(sub: HarnessCmd) -> Result<()> {
                     println!("{}  {}", m.id, efforts_str(&m.efforts));
                 }
                 if caps.model_freeform {
-                    println!("\n(any model string accepted; these are known aliases)");
+                    if caps.models.is_empty() {
+                        println!("(any model string accepted; catalog comes from harness config)");
+                    } else {
+                        println!("\n(any model string accepted; these are known aliases)");
+                    }
                 }
             }
         }
@@ -702,9 +707,10 @@ fn efforts_str(efforts: &[Effort]) -> String {
         .join(" ")
 }
 
-/// Deduplicated union of every model's efforts, preserving first-seen order.
+/// Deduplicated default/free-form efforts followed by every model's efforts,
+/// preserving first-seen order.
 fn union_efforts(caps: &HarnessCapabilities) -> Vec<Effort> {
-    let mut out = Vec::new();
+    let mut out = caps.default_efforts.clone();
     for m in &caps.models {
         for e in &m.efforts {
             if !out.contains(e) {

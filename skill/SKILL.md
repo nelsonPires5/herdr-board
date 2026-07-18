@@ -11,7 +11,7 @@ description: >-
 # herdr-board
 
 herdr-board is a kanban board for AI coding agents. A **card** is a prompt (title +
-description) plus harness/model/effort/permission and a target herdr space. **Columns**
+description) plus harness/model/effort, an optional harness-specific permission, and a target herdr space. New cards default to Pi; runs remain harness-neutral. **Columns**
 are pipeline stages; a column can be `manual` or `auto`. Moving a card into an `auto`
 column dispatches an agent run into a visible herdr pane. Agents report back to the board
 via the `board` CLI — never by editing the DB. The daemon (`boardd`) owns all state and
@@ -88,10 +88,13 @@ that dispatches the agent. Creating a card directly into an `auto` column dispat
 # Create in the default Todo column, then dispatch by moving into an auto column:
 board card new --title "Add retry to the uploader" \
   -d "In src/upload.rs, retry failed PUTs 3x with backoff. Add a unit test." \
-  --harness claude --effort high \
+  --effort low \
   --space-kind new-workspace --space-ref uploader --space-cwd /path/to/repo
 board move <new-card-id> Execute        # Execute is an auto column -> run starts
 ```
+
+Omitting `--harness` selects Pi; omitting `--model` lets Pi use its configured default. Pi effort
+maps to thinking and Pi has no `--permission` mode. Use `--harness claude` explicitly for Claude.
 
 Watch the run land in a herdr pane; the agent will comment and `board done`, and the daemon
 moves the card along until it reaches a manual gate. Use `board card show <id>` to follow along.

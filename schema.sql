@@ -1,6 +1,6 @@
 -- herdr-board SQLite schema (WAL mode; boardd is the only writer).
--- This file is the CURRENT (schema v3) shape: a fresh DB is created directly
--- from it and stamped `PRAGMA user_version = 3`. Existing databases are upgraded
+-- This file is the CURRENT (schema v4) shape: a fresh DB is created directly
+-- from it and stamped `PRAGMA user_version = 4`. Existing databases are upgraded
 -- by migrations in board-core/src/db.rs (kept in sync with this file).
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -39,9 +39,9 @@ CREATE TABLE cards (
   position        INTEGER NOT NULL,
   title           TEXT NOT NULL,
   description     TEXT NOT NULL DEFAULT '',   -- the base prompt
-  harness         TEXT NOT NULL DEFAULT 'claude',
+  harness         TEXT NOT NULL DEFAULT 'pi',
   model           TEXT,
-  effort          TEXT CHECK (effort IN (NULL,'low','medium','high','xhigh','max')),
+  effort          TEXT CHECK (effort IN (NULL,'off','minimal','low','medium','high','xhigh','max')),
   permission_mode TEXT,                        -- e.g. acceptEdits, plan; bypass = explicit opt-in
   session         TEXT,                        -- herdr session name; NULL = daemon's default session
   space_kind      TEXT NOT NULL DEFAULT 'workspace'

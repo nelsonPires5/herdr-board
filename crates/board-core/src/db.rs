@@ -18,7 +18,7 @@ use crate::{Error, Result};
 const SCHEMA_SQL: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../schema.sql"));
 
 /// The latest schema version embedded in [`SCHEMA_SQL`].
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// v1 → v2 migration. SQLite cannot alter a CHECK constraint or drop a column
 /// in place, so `cards` is rebuilt. Legacy `space_kind` values `cwd`/`worktree`
@@ -71,6 +71,51 @@ ALTER TABLE runs ADD COLUMN session TEXT;
 /// history; a NULL timestamp means the card is active.
 const V3_MIGRATION_SQL: &str = "ALTER TABLE cards ADD COLUMN archived_at TEXT;";
 
+/// v3 → v4 migration: admit Pi's `off`/`minimal` thinking values. Rebuilding is
+/// required because SQLite cannot alter a CHECK constraint in place. Existing
+/// rows (including their stored harness) are copied unchanged; only the default
+/// for future direct SQL inserts becomes Pi.
+const V4_MIGRATION_SQL: &str = "
+PRAGMA foreign_keys = OFF;
+BEGIN;
+CREATE TABLE cards_v4 (
+  id              INTEGER PRIMARY KEY,
+  board_id        INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+  column_id       INTEGER NOT NULL REFERENCES columns(id),
+  position        INTEGER NOT NULL,
+  title           TEXT NOT NULL,
+  description     TEXT NOT NULL DEFAULT '',
+  harness         TEXT NOT NULL DEFAULT 'pi',
+  model           TEXT,
+  effort          TEXT CHECK (effort IN (NULL,'off','minimal','low','medium','high','xhigh','max')),
+  permission_mode TEXT,
+  session         TEXT,
+  space_kind      TEXT NOT NULL DEFAULT 'workspace'
+                    CHECK (space_kind IN ('workspace','new_workspace')),
+  space_ref       TEXT,
+  space_cwd       TEXT,
+  status          TEXT NOT NULL DEFAULT 'idle'
+                    CHECK (status IN ('idle','queued','running','blocked','failed')),
+  session_id      TEXT,
+  created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+  archived_at     TEXT
+);
+INSERT INTO cards_v4
+  (id,board_id,column_id,position,title,description,harness,model,effort,
+   permission_mode,session,space_kind,space_ref,space_cwd,status,session_id,
+   created_at,updated_at,archived_at)
+  SELECT id,board_id,column_id,position,title,description,harness,model,effort,
+    permission_mode,session,space_kind,space_ref,space_cwd,status,session_id,
+    created_at,updated_at,archived_at
+  FROM cards;
+DROP TABLE cards;
+ALTER TABLE cards_v4 RENAME TO cards;
+CREATE INDEX idx_cards_column ON cards(column_id, position);
+COMMIT;
+PRAGMA foreign_keys = ON;
+";
+
 /// The single global board id.
 pub const BOARD_ID: i64 = 1;
 
@@ -121,13 +166,13 @@ impl Db {
     /// - A fresh DB (`version 0`) is built straight from [`SCHEMA_SQL`] (the
     ///   current shape) plus the seed (`board id=1 'main'`, column `Todo` manual
     ///   position 0) and stamped [`SCHEMA_VERSION`] — no per-version replay.
-    /// - Existing DBs replay the required v2/v3 migrations in order.
+    /// - Existing DBs replay the required migrations in order.
     fn migrate(&self) -> Result<()> {
         let version: i64 = self
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if version < 1 {
-            // Fresh DB: schema.sql already reflects the latest (v3) shape.
+            // Fresh DB: schema.sql already reflects the latest shape.
             self.conn.execute_batch(SCHEMA_SQL)?;
             self.conn.execute(
                 "INSERT INTO boards (id, name) VALUES (?1, 'main')",
@@ -147,6 +192,9 @@ impl Db {
             }
             if version < 3 {
                 self.conn.execute_batch(V3_MIGRATION_SQL)?;
+            }
+            if version < 4 {
+                self.conn.execute_batch(V4_MIGRATION_SQL)?;
             }
             self.conn
                 .execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
@@ -413,7 +461,10 @@ impl Db {
             |r| r.get(0),
         )?;
         let description = p.description.clone().unwrap_or_default();
-        let harness = p.harness.clone().unwrap_or_else(|| "claude".to_string());
+        let harness = p
+            .harness
+            .clone()
+            .unwrap_or_else(|| crate::harness::DEFAULT_HARNESS.to_string());
         let space_kind = p.space_kind.unwrap_or(SpaceKind::Workspace).as_str();
         let effort = p.effort.map(|e| e.as_str());
         self.conn.execute(
@@ -454,6 +505,11 @@ impl Db {
         }
         if let Some(v) = &p.harness {
             c.harness = v.clone();
+            if v == "pi" {
+                c.permission_mode = None;
+            } else if v == "claude" && matches!(c.effort, Some(Effort::Off | Effort::Minimal)) {
+                c.effort = None;
+            }
         }
         if let Some(v) = &p.model {
             c.model = Some(v.clone());

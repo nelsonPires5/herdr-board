@@ -2,7 +2,8 @@
 
 use board_core::config::{Config, HarnessDef};
 use board_core::harness::{
-    build_invocation, claude_argv, plan_session, HarnessError, SessionPlan, BOARD_PROTOCOL_TRAILER,
+    build_invocation, claude_argv, is_builtin_harness, pi_argv, plan_session, HarnessError,
+    SessionPlan, BOARD_PROTOCOL_TRAILER, DEFAULT_HARNESS,
 };
 use board_core::prompt::EffectiveSettings;
 use board_core::protocol::Effort;
@@ -17,6 +18,26 @@ fn settings() -> EffectiveSettings {
         fresh_session: false,
         timeout_minutes: None,
     }
+}
+
+fn pi_settings() -> EffectiveSettings {
+    EffectiveSettings {
+        harness: "pi".into(),
+        model: Some("openai-codex/example".into()),
+        effort: Some(Effort::Low),
+        permission_mode: None,
+        system_prompt: Some("EXECUTE stage".into()),
+        fresh_session: false,
+        timeout_minutes: None,
+    }
+}
+
+#[test]
+fn builtin_registry_is_pi_first() {
+    assert_eq!(DEFAULT_HARNESS, "pi");
+    assert!(is_builtin_harness("pi"));
+    assert!(is_builtin_harness("claude"));
+    assert!(!is_builtin_harness("fake"));
 }
 
 #[test]
@@ -123,6 +144,127 @@ fn claude_bypass_permission_is_allowed_when_card_set() {
     assert!(argv
         .windows(2)
         .any(|w| w == ["--permission-mode", "bypassPermissions"]));
+}
+
+#[test]
+fn pi_mint_argv_uses_exact_session_id() {
+    let target = "11111111-1111-4111-8111-111111111111";
+    let inv = pi_argv(&pi_settings(), &SessionPlan::Mint, Some(target), "write it").unwrap();
+    assert!(inv.argv.windows(2).any(|w| w == ["--session-id", target]));
+    assert_eq!(inv.resulting_session_id.as_deref(), Some(target));
+}
+
+#[test]
+fn pi_resume_argv_uses_exact_session_id() {
+    let inv = pi_argv(
+        &pi_settings(),
+        &SessionPlan::Resume("existing-id".into()),
+        None,
+        "continue",
+    )
+    .unwrap();
+    assert!(inv
+        .argv
+        .windows(2)
+        .any(|w| w == ["--session-id", "existing-id"]));
+    assert!(!inv.argv.iter().any(|a| a == "--fork"));
+    assert_eq!(inv.resulting_session_id.as_deref(), Some("existing-id"));
+}
+
+#[test]
+fn pi_retry_forks_to_new_session_id() {
+    let target = "22222222-2222-4222-8222-222222222222";
+    let inv = pi_argv(
+        &pi_settings(),
+        &SessionPlan::Fork("source-id".into()),
+        Some(target),
+        "retry",
+    )
+    .unwrap();
+    assert!(inv.argv.windows(2).any(|w| w == ["--fork", "source-id"]));
+    assert!(inv.argv.windows(2).any(|w| w == ["--session-id", target]));
+    assert_eq!(inv.resulting_session_id.as_deref(), Some(target));
+}
+
+#[test]
+fn pi_maps_effort_to_thinking_and_model() {
+    let inv = pi_argv(
+        &pi_settings(),
+        &SessionPlan::Resume("s".into()),
+        None,
+        "task",
+    )
+    .unwrap();
+    assert!(inv
+        .argv
+        .windows(2)
+        .any(|w| w == ["--model", "openai-codex/example"]));
+    assert!(inv.argv.windows(2).any(|w| w == ["--thinking", "low"]));
+}
+
+#[test]
+fn pi_omits_unset_model_and_thinking() {
+    let mut s = pi_settings();
+    s.model = None;
+    s.effort = None;
+    let inv = pi_argv(&s, &SessionPlan::Resume("s".into()), None, "task").unwrap();
+    assert!(!inv.argv.iter().any(|a| a == "--model"));
+    assert!(!inv.argv.iter().any(|a| a == "--thinking"));
+}
+
+#[test]
+fn pi_appends_board_protocol_trailer() {
+    let inv = pi_argv(
+        &pi_settings(),
+        &SessionPlan::Resume("s".into()),
+        None,
+        "task",
+    )
+    .unwrap();
+    let system = inv
+        .argv
+        .windows(2)
+        .find(|w| w[0] == "--append-system-prompt")
+        .map(|w| w[1].as_str())
+        .unwrap();
+    assert_eq!(system, format!("EXECUTE stage\n\n{BOARD_PROTOCOL_TRAILER}"));
+}
+
+#[test]
+fn pi_prompt_cannot_be_parsed_as_a_flag() {
+    let inv = pi_argv(
+        &pi_settings(),
+        &SessionPlan::Resume("s".into()),
+        None,
+        "--version",
+    )
+    .unwrap();
+    assert!(!inv.argv.iter().any(|a| a == "--"));
+    assert_eq!(inv.argv.last().unwrap(), "Card task:\n--version");
+}
+
+#[test]
+fn pi_rejects_explicit_permission_mode() {
+    let mut s = pi_settings();
+    s.permission_mode = Some("acceptEdits".into());
+    let err = pi_argv(&s, &SessionPlan::Mint, Some("target"), "task").unwrap_err();
+    assert_eq!(err.to_string(), "pi does not support permission modes");
+}
+
+#[test]
+fn build_invocation_routes_pi_without_config() {
+    let inv = build_invocation(
+        "pi",
+        &Config::default(),
+        &pi_settings(),
+        &SessionPlan::Mint,
+        Some("target"),
+        "task",
+    )
+    .unwrap();
+    assert_eq!(inv.argv.first().map(String::as_str), Some("pi"));
+    assert!(inv.env.is_empty());
+    assert_eq!(inv.resulting_session_id.as_deref(), Some("target"));
 }
 
 #[test]

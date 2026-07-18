@@ -1,7 +1,9 @@
 //! Unit tests for the pure reducer: navigation wrapping, form field cycling,
 //! and drag-state transitions.
 
-use board_core::capability::{HarnessCapabilities, ModelInfo};
+use board_core::capability::{
+    claude_capabilities, pi_capabilities, HarnessCapabilities, ModelInfo,
+};
 use board_core::client::BoardClient;
 use board_core::protocol::{Effort, RunOutcome, SpaceInfo};
 use board_tui::app::{update, App, CardFilter, DetailScrollTarget, Effect, Msg, Screen};
@@ -41,6 +43,7 @@ fn split_effort_caps() -> HarnessCapabilities {
             },
         ],
         model_freeform: true,
+        default_efforts: vec![Effort::Low, Effort::Medium, Effort::High],
         permission_modes: vec!["manual".to_string()],
     }
 }
@@ -645,6 +648,16 @@ fn r_reloads_through_the_driver() {
 // -- Feature 1: guided card-form selectors -----------------------------------
 
 #[test]
+fn new_card_defaults_to_pi_and_lists_both_builtins() {
+    let mut d = driver_of(demo_client().unwrap());
+    d.handle(key(KeyCode::Char('n')));
+    let form = d.app.form.as_ref().unwrap();
+    assert_eq!(form.current_harness(), "pi");
+    assert_eq!(opt_labels(form, FieldId::Harness), vec!["pi", "claude"]);
+    assert_eq!(form.caps.as_ref().unwrap().harness, "pi");
+}
+
+#[test]
 fn opening_card_form_fetches_capabilities_and_spaces() {
     let mut d = driver_of(demo_client().unwrap());
     d.handle(key(KeyCode::Char('n')));
@@ -674,12 +687,145 @@ fn fetch_failure_falls_back_to_free_text() {
 }
 
 #[test]
+fn pi_form_defaults_model_hides_permission_and_offers_low() {
+    let mut form = Form::card_create(1);
+    form.apply_options(Some(pi_capabilities()), Some(vec![]), None);
+    assert_eq!(
+        opt_labels(&form, FieldId::Model),
+        vec!["(default)", "(custom)"]
+    );
+    assert_eq!(
+        form.fields
+            .iter()
+            .find(|field| field.id == FieldId::Model)
+            .unwrap()
+            .display(),
+        "(default)"
+    );
+    assert!(opt_labels(&form, FieldId::Effort).contains(&"low".to_string()));
+    let permission_idx = form
+        .fields
+        .iter()
+        .position(|field| field.id == FieldId::Permission)
+        .unwrap();
+    assert!(!form.field_visible(permission_idx));
+}
+
+#[test]
+fn switching_harness_reloads_capabilities() {
+    let mut d = driver_of(demo_client().unwrap());
+    d.handle(key(KeyCode::Char('n')));
+    let form = d.app.form.as_mut().unwrap();
+    form.focus = form
+        .fields
+        .iter()
+        .position(|field| field.id == FieldId::Harness)
+        .unwrap();
+    d.handle(key(KeyCode::Right));
+    let form = d.app.form.as_ref().unwrap();
+    assert_eq!(form.current_harness(), "claude");
+    assert_eq!(form.caps.as_ref().unwrap().harness, "claude");
+    assert!(opt_labels(form, FieldId::Model).contains(&"sonnet".to_string()));
+    let permission_idx = form
+        .fields
+        .iter()
+        .position(|field| field.id == FieldId::Permission)
+        .unwrap();
+    assert!(form.field_visible(permission_idx));
+}
+
+#[test]
+fn switching_from_claude_to_pi_resets_only_permission() {
+    let mut form = Form::card_create(1);
+    form.apply_options(Some(claude_capabilities()), Some(vec![]), None);
+    set_choice(&mut form, FieldId::Harness, "claude");
+    set_choice(&mut form, FieldId::Model, "sonnet");
+    set_choice(&mut form, FieldId::Effort, "high");
+    set_choice(&mut form, FieldId::Permission, "acceptEdits");
+    set_choice(&mut form, FieldId::Harness, "pi");
+    form.apply_options(Some(pi_capabilities()), Some(vec![]), None);
+
+    assert_eq!(form.current_harness(), "pi");
+    assert_eq!(
+        form.fields
+            .iter()
+            .find(|field| field.id == FieldId::Model)
+            .unwrap()
+            .display(),
+        "(custom)"
+    );
+    assert_eq!(
+        form.fields
+            .iter()
+            .find(|field| field.id == FieldId::ModelCustom)
+            .unwrap()
+            .get_text(),
+        "sonnet"
+    );
+    assert_eq!(
+        form.fields
+            .iter()
+            .find(|field| field.id == FieldId::Effort)
+            .unwrap()
+            .display(),
+        "high"
+    );
+    form.fields[0].set_text("switch");
+    match form.submit().unwrap() {
+        Submit::CardCreate(params) => assert!(params.permission_mode.is_none()),
+        _ => panic!("expected CardCreate"),
+    }
+}
+
+#[test]
+fn switching_from_pi_to_claude_resets_incompatible_effort() {
+    let mut form = Form::card_create(1);
+    form.apply_options(Some(pi_capabilities()), Some(vec![]), None);
+    set_choice(&mut form, FieldId::Effort, "off");
+    set_choice(&mut form, FieldId::Harness, "claude");
+    form.apply_options(Some(claude_capabilities()), Some(vec![]), None);
+    assert_eq!(
+        form.fields
+            .iter()
+            .find(|field| field.id == FieldId::Effort)
+            .unwrap()
+            .display(),
+        "(default)"
+    );
+}
+
+#[test]
+fn pi_submit_carries_custom_model_low_and_no_permission() {
+    let mut form = Form::card_create(7);
+    form.apply_options(Some(pi_capabilities()), Some(vec![]), None);
+    form.fields[0].set_text("pi task");
+    set_choice(&mut form, FieldId::Model, "(custom)");
+    form.fields
+        .iter_mut()
+        .find(|field| field.id == FieldId::ModelCustom)
+        .unwrap()
+        .set_text("openai-codex/example");
+    form.on_model_changed();
+    set_choice(&mut form, FieldId::Effort, "low");
+
+    match form.submit().unwrap() {
+        Submit::CardCreate(params) => {
+            assert_eq!(params.harness.as_deref(), Some("pi"));
+            assert_eq!(params.model.as_deref(), Some("openai-codex/example"));
+            assert_eq!(params.effort, Some(Effort::Low));
+            assert!(params.permission_mode.is_none());
+        }
+        _ => panic!("expected CardCreate"),
+    }
+}
+
+#[test]
 fn model_selector_cycles_catalog_plus_custom() {
     let mut form = Form::card_create(1);
     form.apply_options(Some(split_effort_caps()), Some(vec![]), None);
     assert_eq!(
         opt_labels(&form, FieldId::Model),
-        vec!["opus", "haiku", "(custom)"]
+        vec!["(default)", "opus", "haiku", "(custom)"]
     );
 }
 
@@ -687,7 +833,9 @@ fn model_selector_cycles_catalog_plus_custom() {
 fn effort_options_follow_selected_model_and_reset_when_invalid() {
     let mut form = Form::card_create(1);
     form.apply_options(Some(split_effort_caps()), Some(vec![]), None);
-    // Default model = opus -> efforts low/high.
+    // `(default)` preserves an omitted model; selecting opus narrows efforts.
+    set_choice(&mut form, FieldId::Model, "opus");
+    form.on_model_changed();
     assert_eq!(
         opt_labels(&form, FieldId::Effort),
         vec!["(default)", "low", "high"]
@@ -733,6 +881,15 @@ fn custom_model_reveals_free_text_and_submits_it() {
     form.apply_options(Some(split_effort_caps()), Some(vec![]), None);
     form.fields[0].set_text("t"); // title required
     set_choice(&mut form, FieldId::Model, "(custom)");
+    form.on_model_changed();
+    assert_eq!(
+        form.fields
+            .iter()
+            .find(|field| field.id == FieldId::Model)
+            .unwrap()
+            .display(),
+        "(custom)"
+    );
     // ModelCustom becomes visible; type an arbitrary id.
     let mc = form
         .fields

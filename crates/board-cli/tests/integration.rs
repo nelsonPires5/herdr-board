@@ -532,14 +532,19 @@ fn harness_models_claude_json_and_human() {
 }
 
 #[test]
-fn harness_models_default_is_claude() {
+fn harness_models_default_is_pi() {
     let td = TestDaemon::start(&[]);
-    // No positional harness → defaults to claude.
     let out = td.board(&["harness", "models", "--json"]);
     assert!(out.status.success());
     let caps: board_core::capability::HarnessCapabilities =
         serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(caps.harness, "claude");
+    assert_eq!(caps.harness, "pi");
+    assert!(caps.models.is_empty());
+    assert!(caps.model_freeform);
+    assert!(caps
+        .default_efforts
+        .iter()
+        .any(|effort| effort.as_str() == "low"));
 }
 
 #[test]
@@ -588,6 +593,40 @@ fn harness_efforts_known_and_unknown_model() {
         text.contains("unknown"),
         "notes unknown model; got:\n{text}"
     );
+}
+
+#[test]
+fn harness_efforts_pi_freeform_model_includes_low() {
+    let td = TestDaemon::start(&[]);
+    let out = td.board(&[
+        "harness",
+        "efforts",
+        "pi",
+        "--model",
+        "openai-codex/example",
+        "--json",
+    ]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["known"], false);
+    assert!(v["efforts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|effort| effort == "low"));
+}
+
+#[test]
+fn harness_permissions_pi_is_empty() {
+    let td = TestDaemon::start(&[]);
+    let out = td.board(&["harness", "permissions", "--json"]);
+    assert!(out.status.success());
+    let modes: Vec<String> = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(modes.is_empty());
 }
 
 #[test]
@@ -689,6 +728,66 @@ fn card_new_new_workspace_missing_cwd_is_validation_error() {
         err.contains("error 1"),
         "error surfaces the validation code; got: {err}"
     );
+}
+
+#[test]
+fn card_new_defaults_to_pi_and_claude_remains_explicit() {
+    let td = TestDaemon::start(&[]);
+    let pi = td.board(&["card", "new", "--title", "default", "--json"]);
+    assert!(pi.status.success());
+    let pi: serde_json::Value = serde_json::from_slice(&pi.stdout).unwrap();
+    assert_eq!(pi["harness"], "pi");
+
+    let claude = td.board(&[
+        "card",
+        "new",
+        "--title",
+        "explicit",
+        "--harness",
+        "claude",
+        "--json",
+    ]);
+    assert!(claude.status.success());
+    let claude: serde_json::Value = serde_json::from_slice(&claude.stdout).unwrap();
+    assert_eq!(claude["harness"], "claude");
+}
+
+#[test]
+fn card_new_rejects_pi_permission_mode() {
+    let td = TestDaemon::start(&[]);
+    let out = td.board(&[
+        "card",
+        "new",
+        "--title",
+        "bad",
+        "--permission",
+        "acceptEdits",
+    ]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("pi does not support permission modes"));
+}
+
+#[test]
+fn local_spawner_missing_pi_surfaces_clean_run_failure() {
+    let td = TestDaemon::start(&[("PATH", "/usr/bin:/bin")]);
+    let mut c = td.client();
+    c.column_create(&col("work", Trigger::Auto)).unwrap();
+    let out = td.board(&[
+        "card", "new", "--title", "missing", "--column", "work", "--json",
+    ]);
+    assert!(out.status.success());
+    let card: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let id = card["id"].as_i64().unwrap();
+    assert!(poll(&mut c, 10, |client| {
+        client.card_get(id).unwrap().card.status == CardStatus::Failed
+    }));
+    let detail = c.card_get(id).unwrap();
+    assert_eq!(detail.runs[0].outcome, Some(RunOutcome::Fail));
+    assert!(detail.comments.iter().any(|comment| {
+        comment.author == "system"
+            && comment.body.contains("spawn failed")
+            && comment.body.contains("pi")
+    }));
 }
 
 #[test]

@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Hermetic Pi stand-in for e2e/11-pi-harness.sh. This file is used only when
+# e2e_enable_fake_pi prepends e2e/fake-bin to the disposable Herdr server PATH.
+set -euo pipefail
+
+: "${BOARD_CARD_ID:?BOARD_CARD_ID required}"
+: "${BOARD_RUN_ID:?BOARD_RUN_ID required}"
+: "${BOARD_SOCKET:?BOARD_SOCKET required}"
+
+model=""
+thinking=""
+system_prompt=""
+session_id=""
+fork_id=""
+prompt=""
+argv=("$@")
+
+while (($#)); do
+  case "$1" in
+    --model)
+      (($# >= 2)) || { echo "fake pi: --model missing value" >&2; exit 2; }
+      model="$2"; shift 2 ;;
+    --thinking)
+      (($# >= 2)) || { echo "fake pi: --thinking missing value" >&2; exit 2; }
+      thinking="$2"; shift 2 ;;
+    --append-system-prompt)
+      (($# >= 2)) || { echo "fake pi: --append-system-prompt missing value" >&2; exit 2; }
+      system_prompt="$2"; shift 2 ;;
+    --session-id)
+      (($# >= 2)) || { echo "fake pi: --session-id missing value" >&2; exit 2; }
+      session_id="$2"; shift 2 ;;
+    --fork)
+      (($# >= 2)) || { echo "fake pi: --fork missing value" >&2; exit 2; }
+      fork_id="$2"; shift 2 ;;
+    --)
+      echo "fake pi: Claude prompt delimiter is forbidden" >&2
+      exit 2 ;;
+    -*)
+      echo "fake pi: unexpected option: $1" >&2
+      exit 2 ;;
+    *)
+      [ -z "$prompt" ] || { echo "fake pi: multiple positional prompts" >&2; exit 2; }
+      prompt="$1"; shift ;;
+  esac
+done
+
+[ -n "$system_prompt" ] || { echo "fake pi: system prompt required" >&2; exit 2; }
+[ -n "$session_id" ] || { echo "fake pi: session id required" >&2; exit 2; }
+[ -n "$prompt" ] || { echo "fake pi: positional prompt required" >&2; exit 2; }
+[[ "$system_prompt" == *"## herdr-board protocol"* ]] \
+  || { echo "fake pi: board protocol trailer missing" >&2; exit 2; }
+[[ "$prompt" == "Card task:"$'\n'* ]] \
+  || { echo "fake pi: card prompt lacks safe non-flag prefix" >&2; exit 2; }
+
+record_dir="$(dirname "$BOARD_SOCKET")"
+record="$record_dir/fake-pi-run-$BOARD_RUN_ID.json"
+python3 - "$record" "$BOARD_RUN_ID" "$model" "$thinking" "$system_prompt" \
+  "$session_id" "$fork_id" "$prompt" "${argv[@]}" <<'PY'
+import json, sys
+path, run_id, model, thinking, system, session_id, fork_id, prompt, *argv = sys.argv[1:]
+with open(path, "w", encoding="utf-8") as f:
+    json.dump({
+        "run_id": int(run_id),
+        "model": model,
+        "thinking": thinking,
+        "system_prompt": system,
+        "session_id": session_id,
+        "fork_id": fork_id or None,
+        "prompt": prompt,
+        "argv": argv,
+    }, f, ensure_ascii=False, indent=2)
+PY
+
+# Avoid the run-start/done race, then exercise the real isolated board CLI path.
+sleep "${FAKE_PI_SLEEP:-1.5}"
+board comment "fake pi: argv validated for run $BOARD_RUN_ID"
+board done --outcome ok

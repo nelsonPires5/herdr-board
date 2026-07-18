@@ -1,7 +1,7 @@
 //! Demo/seed helpers shared by the example binary and the snapshot tests.
 //! Only compiled with the `fake-client` feature.
 
-use board_core::capability::{claude_capabilities, HarnessCapabilities};
+use board_core::capability::{claude_capabilities, pi_capabilities};
 use board_core::client::{BoardClient, FakeBoardClient};
 use board_core::protocol::{
     CardCreateParams, CardStatus, ColumnCreateParams, Effort, Event, RunOutcome, SessionInfo,
@@ -22,7 +22,7 @@ use serde_json::{json, Value};
 /// `without_sessions`) to exercise the form's fallback paths.
 pub struct DemoClient {
     inner: FakeBoardClient,
-    caps: Option<HarnessCapabilities>,
+    caps_available: bool,
     spaces: Option<Vec<SpaceInfo>>,
     sessions: Option<Vec<SessionInfo>>,
 }
@@ -31,7 +31,7 @@ impl DemoClient {
     pub fn new(inner: FakeBoardClient) -> DemoClient {
         DemoClient {
             inner,
-            caps: Some(claude_capabilities()),
+            caps_available: true,
             spaces: Some(demo_spaces()),
             sessions: Some(demo_sessions()),
         }
@@ -39,7 +39,7 @@ impl DemoClient {
 
     /// Make `harness.capabilities` fail (form falls back to free-text model).
     pub fn without_caps(mut self) -> DemoClient {
-        self.caps = None;
+        self.caps_available = false;
         self
     }
 
@@ -64,10 +64,17 @@ impl DemoClient {
 impl BoardClient for DemoClient {
     fn call(&mut self, method: &str, params: Value) -> anyhow::Result<Value> {
         match method {
-            "harness.capabilities" => match &self.caps {
-                Some(c) => Ok(json!(c)),
-                None => anyhow::bail!("harness.capabilities: stubbed failure"),
-            },
+            "harness.capabilities" if self.caps_available => {
+                match params.get("harness").and_then(Value::as_str) {
+                    Some("pi") => Ok(json!(pi_capabilities())),
+                    Some("claude") => Ok(json!(claude_capabilities())),
+                    Some(other) => anyhow::bail!("unknown harness: {other}"),
+                    None => anyhow::bail!("missing harness"),
+                }
+            }
+            "harness.capabilities" => {
+                anyhow::bail!("harness.capabilities: stubbed failure")
+            }
             "space.list" => match &self.spaces {
                 Some(_) => {
                     let session = params.get("session").and_then(|v| v.as_str());
@@ -153,6 +160,7 @@ fn card(title: &str, column_id: i64, desc: &str) -> CardCreateParams {
         title: title.to_string(),
         description: Some(desc.to_string()),
         column_id: Some(column_id),
+        harness: Some("claude".to_string()),
         ..Default::default()
     }
 }

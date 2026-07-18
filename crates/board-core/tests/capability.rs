@@ -1,7 +1,7 @@
 //! Harness capability catalog + run-pane naming.
 
 use board_core::capability::{
-    capabilities_for, claude_capabilities, run_pane_name, run_pane_name_unique,
+    capabilities_for, claude_capabilities, pi_capabilities, run_pane_name, run_pane_name_unique,
 };
 use board_core::config::Config;
 use board_core::protocol::Effort;
@@ -40,6 +40,42 @@ fn claude_catalog_shape() {
             "plan"
         ]
     );
+    assert_eq!(
+        caps.default_efforts,
+        vec![
+            Effort::Low,
+            Effort::Medium,
+            Effort::High,
+            Effort::Xhigh,
+            Effort::Max
+        ]
+    );
+}
+
+#[test]
+fn pi_capabilities_are_freeform_without_permissions() {
+    let caps = pi_capabilities();
+    assert_eq!(caps.harness, "pi");
+    assert!(caps.models.is_empty());
+    assert!(caps.model_freeform);
+    assert!(caps.permission_modes.is_empty());
+}
+
+#[test]
+fn pi_capabilities_expose_default_thinking_levels() {
+    let caps = pi_capabilities();
+    assert_eq!(
+        caps.default_efforts,
+        vec![
+            Effort::Off,
+            Effort::Minimal,
+            Effort::Low,
+            Effort::Medium,
+            Effort::High,
+            Effort::Xhigh,
+            Effort::Max,
+        ]
+    );
 }
 
 #[test]
@@ -49,6 +85,7 @@ fn capabilities_for_builtin_and_unknown() {
         capabilities_for("claude", &cfg),
         Some(claude_capabilities())
     );
+    assert_eq!(capabilities_for("pi", &cfg), Some(pi_capabilities()));
     assert!(capabilities_for("nope", &cfg).is_none());
 }
 
@@ -71,6 +108,7 @@ permission_modes = ["auto", "manual"]
         assert_eq!(m.efforts, vec![Effort::Low, Effort::High]);
     }
     assert_eq!(caps.permission_modes, vec!["auto", "manual"]);
+    assert_eq!(caps.default_efforts, vec![Effort::Low, Effort::High]);
 }
 
 #[test]
@@ -80,6 +118,7 @@ fn config_harness_without_capabilities_is_empty() {
     let caps = capabilities_for("bare", &cfg).unwrap();
     assert!(caps.models.is_empty());
     assert!(caps.permission_modes.is_empty());
+    assert!(caps.default_efforts.is_empty());
     assert!(caps.model_freeform);
 }
 

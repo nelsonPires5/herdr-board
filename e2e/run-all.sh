@@ -35,6 +35,9 @@ for arg in "$@"; do
 done
 if [ -n "${E2E_KEEP:-}" ] && [ "$E2E_KEEP" = "1" ]; then KEEP=1; fi
 
+# The suite's disposable Herdr server inherits this PATH before it boots. Pi
+# scenarios therefore use the hermetic fake executable and never a real model.
+e2e_enable_fake_pi
 e2e_require
 e2e_build   # build once; scenarios' own e2e_build is then a no-op
 
@@ -49,6 +52,7 @@ SCENARIOS=(
   08-column-timeout.sh
   09-comment-context.sh
   10-archive-filter-title.sh
+  11-pi-harness.sh
 )
 
 # apply filters (substring match on the filename); empty = run all

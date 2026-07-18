@@ -7,6 +7,7 @@
 //! into a protocol params struct.
 
 use board_core::capability::HarnessCapabilities;
+use board_core::harness::{BUILTIN_HARNESSES, DEFAULT_HARNESS};
 use board_core::model::{Card, Column};
 use board_core::protocol::{
     CardCreateParams, CardUpdateParams, ColumnCreateParams, ColumnUpdateParams, Effort,
@@ -16,7 +17,9 @@ use tui_textarea::TextArea;
 
 /// Reasoning efforts in canonical (ascending) order — the fallback effort menu
 /// and the ordering used when taking the union of a catalog's efforts.
-const EFFORT_ORDER: [Effort; 5] = [
+const EFFORT_ORDER: [Effort; 7] = [
+    Effort::Off,
+    Effort::Minimal,
     Effort::Low,
     Effort::Medium,
     Effort::High,
@@ -24,8 +27,8 @@ const EFFORT_ORDER: [Effort; 5] = [
     Effort::Max,
 ];
 
-/// Permission modes offered when the capability catalog can't be fetched
-/// (matches the builtin `claude` catalog so the form stays usable offline).
+/// Claude permission modes offered when its capability catalog cannot be
+/// fetched. Pi hides this field even in fallback mode.
 const FALLBACK_PERMISSION_MODES: [&str; 6] = [
     "acceptEdits",
     "auto",
@@ -323,7 +326,7 @@ impl Form {
     /// The harness the guided selectors should be populated for.
     pub fn current_harness(&self) -> String {
         self.opt_choice_str(FieldId::Harness)
-            .unwrap_or_else(|| "claude".to_string())
+            .unwrap_or_else(|| DEFAULT_HARNESS.to_string())
     }
 
     /// The currently selected herdr session (`None` = the daemon's default
@@ -388,6 +391,7 @@ impl Form {
             description: self.raw_text(FieldId::Description),
             harness: self.current_harness(),
             model: self.card_model().unwrap_or_default(),
+            model_custom_selected: self.model_is_custom(),
             effort: self.opt_choice_str(FieldId::Effort),
             permission: self.opt_choice_str(FieldId::Permission),
             session: self.current_session(),
@@ -466,9 +470,17 @@ impl Form {
         match self.fields[idx].id {
             FieldId::SpaceCwd => self.space_kind_is_new_workspace(),
             FieldId::ModelCustom => self.model_is_custom(),
+            FieldId::Permission => self.permission_is_applicable(),
             FieldId::SpaceRefCustom => self.space_ref_is_custom(),
             _ => true,
         }
+    }
+
+    fn permission_is_applicable(&self) -> bool {
+        self.caps
+            .as_ref()
+            .map(|caps| !caps.permission_modes.is_empty())
+            .unwrap_or_else(|| self.current_harness() != "pi")
     }
 
     fn space_kind_is_new_workspace(&self) -> bool {
@@ -531,7 +543,9 @@ impl Form {
                     harness: self.opt_choice_str(FieldId::Harness),
                     model: self.card_model(),
                     effort: self.opt_effort(FieldId::Effort),
-                    permission_mode: self.opt_choice_str(FieldId::Permission),
+                    permission_mode: (self.current_harness() != "pi")
+                        .then(|| self.opt_choice_str(FieldId::Permission))
+                        .flatten(),
                     session: self.current_session(),
                     space_kind: self.opt_space_kind(),
                     space_ref: self.card_space_ref(),
@@ -551,7 +565,9 @@ impl Form {
                     harness: self.opt_choice_str(FieldId::Harness),
                     model: self.card_model(),
                     effort: self.opt_effort(FieldId::Effort),
-                    permission_mode: self.opt_choice_str(FieldId::Permission),
+                    permission_mode: (self.current_harness() != "pi")
+                        .then(|| self.opt_choice_str(FieldId::Permission))
+                        .flatten(),
                     session: self.current_session(),
                     space_kind: self.opt_space_kind(),
                     space_ref: self.card_space_ref(),
@@ -727,6 +743,9 @@ struct CardValues {
     harness: String,
     /// Effective model string ("" = none / catalog default).
     model: String,
+    /// Keep an empty `(custom)` selection stable while its companion field is
+    /// first revealed.
+    model_custom_selected: bool,
     /// Effort wire string, or `None` for the harness default.
     effort: Option<String>,
     /// Permission-mode wire string, or `None` for the harness default.
@@ -748,6 +767,7 @@ impl CardValues {
                 description: c.description.clone(),
                 harness: c.harness.clone(),
                 model: c.model.clone().unwrap_or_default(),
+                model_custom_selected: false,
                 effort: c.effort.map(|e| e.as_str().to_string()),
                 permission: c.permission_mode.clone(),
                 session: c.session.clone(),
@@ -756,7 +776,7 @@ impl CardValues {
                 space_cwd: c.space_cwd.clone().unwrap_or_default(),
             },
             None => CardValues {
-                harness: "claude".to_string(),
+                harness: DEFAULT_HARNESS.to_string(),
                 // A new card defaults to the session the TUI itself runs in.
                 session: detect_current_session(),
                 space_kind: "workspace".to_string(),
@@ -774,7 +794,13 @@ fn union_efforts(caps: &HarnessCapabilities) -> Vec<Effort> {
     EFFORT_ORDER
         .iter()
         .copied()
-        .filter(|e| caps.models.iter().any(|m| m.efforts.contains(e)))
+        .filter(|effort| {
+            caps.default_efforts.contains(effort)
+                || caps
+                    .models
+                    .iter()
+                    .any(|model| model.efforts.contains(effort))
+        })
         .collect()
 }
 
@@ -791,8 +817,16 @@ fn build_card_fields(
 ) -> Vec<Field> {
     let v = values;
 
-    // -- harness (only `claude` is known client-side) ------------------------
-    let harness_opts = vec![ChoiceOpt::str("claude")];
+    // -- harness -------------------------------------------------------------
+    let mut harness_opts: Vec<ChoiceOpt> = BUILTIN_HARNESSES
+        .iter()
+        .map(|name| ChoiceOpt::str(name))
+        .collect();
+    // Preserve config-defined harnesses on existing cards, even though the TUI
+    // cannot discover arbitrary config names from the capability RPC.
+    if !v.harness.is_empty() && !harness_opts.iter().any(|opt| opt.label == v.harness) {
+        harness_opts.push(ChoiceOpt::str(&v.harness));
+    }
     let harness_idx = harness_opts
         .iter()
         .position(|o| o.label == v.harness)
@@ -802,13 +836,13 @@ fn build_card_fields(
     let model_in_catalog = caps
         .map(|c| c.models.iter().any(|m| m.id == v.model))
         .unwrap_or(false);
-    let use_custom_model =
-        caps.map(|c| c.model_freeform).unwrap_or(false) && !v.model.is_empty() && !model_in_catalog;
+    let use_custom_model = caps.map(|c| c.model_freeform).unwrap_or(false)
+        && (v.model_custom_selected || (!v.model.is_empty() && !model_in_catalog));
 
     let model_field = match caps {
         Some(caps) => {
-            let mut opts: Vec<ChoiceOpt> =
-                caps.models.iter().map(|m| ChoiceOpt::str(&m.id)).collect();
+            let mut opts = vec![ChoiceOpt::default_opt()];
+            opts.extend(caps.models.iter().map(|model| ChoiceOpt::str(&model.id)));
             if caps.model_freeform {
                 opts.push(ChoiceOpt::custom());
             }
@@ -816,12 +850,19 @@ fn build_card_fields(
                 opts.iter()
                     .position(|o| matches!(o.val, ChoiceVal::Custom))
                     .unwrap_or(0)
+            } else if v.model.is_empty() {
+                0
             } else {
                 opts.iter().position(|o| o.label == v.model).unwrap_or(0)
             };
             Field::choice(FieldId::Model, "model", opts, idx)
         }
-        None => Field::text(FieldId::Model, "model (sonnet/opus/haiku)", &v.model, false),
+        None => Field::text(
+            FieldId::Model,
+            "model (blank = harness default)",
+            &v.model,
+            false,
+        ),
     };
     let model_custom_init = if use_custom_model {
         v.model.as_str()
@@ -838,13 +879,10 @@ fn build_card_fields(
     // -- effort (options follow the selected model) --------------------------
     let efforts: Vec<Effort> = match caps {
         Some(caps) => {
-            let selected_id = if use_custom_model {
-                None
-            } else if model_in_catalog {
+            let selected_id = if !use_custom_model && model_in_catalog {
                 Some(v.model.clone())
             } else {
-                // create/default: the model selector defaults to the first entry
-                caps.models.first().map(|m| m.id.clone())
+                None
             };
             match selected_id {
                 Some(id) => caps
@@ -856,7 +894,8 @@ fn build_card_fields(
                 None => union_efforts(caps),
             }
         }
-        None => EFFORT_ORDER.to_vec(),
+        None if v.harness == "pi" => EFFORT_ORDER.to_vec(),
+        None => EFFORT_ORDER[2..].to_vec(),
     };
     let mut eff_opts = vec![ChoiceOpt::default_opt()];
     for e in &efforts {

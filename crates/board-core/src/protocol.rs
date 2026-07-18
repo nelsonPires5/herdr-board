@@ -59,6 +59,8 @@ pub enum RunOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Effort {
+    Off,
+    Minimal,
     Low,
     Medium,
     High,
@@ -96,7 +98,8 @@ str_enum!(RunOutcome {
     Ok => "ok", Fail => "fail", Cancelled => "cancelled", Lost => "lost",
 });
 str_enum!(Effort {
-    Low => "low", Medium => "medium", High => "high", Xhigh => "xhigh", Max => "max",
+    Off => "off", Minimal => "minimal", Low => "low", Medium => "medium",
+    High => "high", Xhigh => "xhigh", Max => "max",
 });
 
 // ---------------------------------------------------------------------------

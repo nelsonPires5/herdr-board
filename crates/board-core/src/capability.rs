@@ -1,12 +1,14 @@
 //! Harness capability catalog + run-pane naming.
 //!
-//! The claude CLI exposes no runtime capability query, so the catalog is static
-//! (field-verified against claude CLI 2.1.209). Config-defined harnesses declare
-//! their own capabilities in `[harness.NAME]` (see [`crate::config::HarnessDef`]).
+//! Built-in harness catalogs are intentionally small and static. Pi models stay
+//! free-form because they depend on provider/auth/user configuration; Claude's
+//! aliases are field-verified against Claude CLI 2.1.209. Config-defined
+//! harnesses declare capabilities in `[harness.NAME]`.
 
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
+use crate::harness::is_builtin_harness;
 use crate::protocol::Effort;
 
 // ---------------------------------------------------------------------------
@@ -30,11 +32,15 @@ pub struct HarnessCapabilities {
     pub harness: String,
     pub models: Vec<ModelInfo>,
     pub model_freeform: bool,
+    /// Efforts available when the model is omitted or entered free-form.
+    /// Missing on older serialized capability payloads, so default to empty.
+    #[serde(default)]
+    pub default_efforts: Vec<Effort>,
     pub permission_modes: Vec<String>,
 }
 
-/// Every reasoning effort, ascending.
-const ALL_EFFORTS: [Effort; 5] = [
+/// Claude reasoning efforts, ascending.
+const CLAUDE_EFFORTS: [Effort; 5] = [
     Effort::Low,
     Effort::Medium,
     Effort::High,
@@ -63,13 +69,14 @@ pub fn claude_capabilities() -> HarnessCapabilities {
         .into_iter()
         .map(|id| ModelInfo {
             id: id.to_string(),
-            efforts: ALL_EFFORTS.to_vec(),
+            efforts: CLAUDE_EFFORTS.to_vec(),
         })
         .collect();
     HarnessCapabilities {
         harness: "claude".to_string(),
         models,
         model_freeform: true,
+        default_efforts: CLAUDE_EFFORTS.to_vec(),
         permission_modes: CLAUDE_PERMISSION_MODES
             .iter()
             .map(|s| s.to_string())
@@ -77,12 +84,36 @@ pub fn claude_capabilities() -> HarnessCapabilities {
     }
 }
 
-/// Resolve capabilities for `harness`: the builtin `claude`, or a config-defined
-/// harness (capabilities built from its `models`/`efforts`/`permission_modes`).
-/// Custom harnesses are always `model_freeform`. Unknown harness → `None`.
+/// Built-in Pi capabilities. Models are user/provider-defined and therefore
+/// free-form; thinking is valid for omitted and explicit model ids. Pi has no
+/// board-level tool permission mode.
+pub fn pi_capabilities() -> HarnessCapabilities {
+    HarnessCapabilities {
+        harness: "pi".to_string(),
+        models: Vec::new(),
+        model_freeform: true,
+        default_efforts: vec![
+            Effort::Off,
+            Effort::Minimal,
+            Effort::Low,
+            Effort::Medium,
+            Effort::High,
+            Effort::Xhigh,
+            Effort::Max,
+        ],
+        permission_modes: Vec::new(),
+    }
+}
+
+/// Resolve capabilities for a built-in or config-defined harness. Custom
+/// harnesses are always `model_freeform`. Unknown harness → `None`.
 pub fn capabilities_for(harness: &str, config: &Config) -> Option<HarnessCapabilities> {
-    if harness == "claude" {
-        return Some(claude_capabilities());
+    if is_builtin_harness(harness) {
+        return match harness {
+            "pi" => Some(pi_capabilities()),
+            "claude" => Some(claude_capabilities()),
+            _ => None,
+        };
     }
     let def = config.harness.get(harness)?;
     let efforts: Vec<Effort> = def
@@ -102,6 +133,7 @@ pub fn capabilities_for(harness: &str, config: &Config) -> Option<HarnessCapabil
         harness: harness.to_string(),
         models,
         model_freeform: true,
+        default_efforts: efforts,
         permission_modes: def.permission_modes.clone(),
     })
 }
