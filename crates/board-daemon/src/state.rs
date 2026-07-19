@@ -59,6 +59,17 @@ impl Sched {
         }
         Ok(())
     }
+
+    /// Reject a column mutation that could invalidate a finalizer's transition
+    /// snapshot, regardless of which card's source or target it touches.
+    pub fn ensure_no_finalizing_cards(&self, action: &str) -> board_core::Result<()> {
+        if !self.finalizing_cards.is_empty() {
+            return Err(board_core::Error::InvalidState(format!(
+                "card finalization is in progress; cannot {action}"
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// The panes the herdr event watcher should subscribe to, grouped by the herdr

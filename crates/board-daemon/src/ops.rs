@@ -141,7 +141,11 @@ fn column_create(d: &Arc<Daemon>, p: ColumnCreateParams) -> Result<Value> {
 
 fn column_update(d: &Arc<Daemon>, p: ColumnUpdateParams) -> Result<Value> {
     validate_column_permission_override(p.permission_override.as_deref())?;
-    let col = d.store.lock().update_column(&p)?;
+    let col = {
+        let sched = d.sched.lock().unwrap();
+        sched.ensure_no_finalizing_cards("update a column")?;
+        d.store.lock().update_column(&p)?
+    };
     d.emit_changed(BoardChangedReason::ColumnChanged, None, Some(col.id));
     Ok(json!(col))
 }
@@ -157,11 +161,7 @@ fn column_delete(d: &Arc<Daemon>, p: ColumnDeleteParams) -> Result<Value> {
         // A pending transition may still read its source or move into its
         // target, so column deletion pauses briefly for any finalizing card.
         let sched = d.sched.lock().unwrap();
-        if !sched.finalizing_cards.is_empty() {
-            return Err(Error::InvalidState(
-                "card finalization is in progress; cannot delete a column".into(),
-            ));
-        }
+        sched.ensure_no_finalizing_cards("delete a column")?;
         let db = d.store.lock();
         let cards = db.list_cards_in_column(p.id)?;
         let has_open_run = db.column_has_open_run(p.id)?;
@@ -804,6 +804,7 @@ mod tests {
                 json!({"id": card_id, "model": "locked-model"}),
             ),
             ("card.move", json!({"id": card_id, "column_id": target_id})),
+            ("column.update", json!({"id": source_id, "trigger": "auto"})),
             (
                 "column.delete",
                 json!({"id": source_id, "move_cards_to": target_id}),
@@ -818,6 +819,15 @@ mod tests {
         assert_eq!(card.column_id, source_id);
         assert!(card.archived_at.is_none());
         assert_eq!(card.model, None);
+        assert_eq!(
+            d.store
+                .lock()
+                .get_column(source_id)
+                .unwrap()
+                .unwrap()
+                .trigger,
+            Trigger::Manual
+        );
         assert!(d.store.lock().list_runs(card_id).unwrap().is_empty());
         assert_eq!(
             d.sched.lock().unwrap().finalizing_cards.get(&card_id),
