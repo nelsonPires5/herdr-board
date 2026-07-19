@@ -28,23 +28,28 @@ isolation/safety design, and the **how-to-write-a-scenario** guide, see
 | Git-root/CWD board identity, independent pipelines/cards, scoped TUI title, and Global picker entry | `12-cwd-boards.sh` | live |
 | Card-detail `o` focuses a held same-session run pane and closes the real plugin overlay | `13-jump-to-pane.sh` | live |
 | A column `harness_override` (TUI select) drives a run via a config-defined harness; `harness.list` advertises config harnesses; effort/permission overrides flow into the run argv | `14-column-config.sh` | live |
-| **idle-lost watchdog**: an idle agent (no `board done`) is marked `lost` | — | deterministic daemon tests; not sampled by standard live fake |
+| Integration-style status reports on a live managed pane: blocked → working → end-of-turn idle (Herdr derives `done`) → `awaiting` (`agent_done`), timeout paused; `board done ok` → `done` in the same column | `15-awaiting.sh` | live |
 
-### Why idle-lost has no live scenario
+### How the live scenario produces Herdr `done`
 
-The idle-lost watchdog (`watchers.rs`, `AgentStatusChanged` arm + `timeout_ticker`
-lost loop) keys off herdr `pane.agent_status_changed` events. `idle_since` is only
-armed on an `Idle`/`Done` status transition; the `Unknown` status is a no-op. A
-plain bash pane (our fake harness) has **no** herdr agent-status integration
-installed, so it reports `agent_status "unknown"` forever and never arms the
-watchdog. It therefore cannot be reproduced live without wiring a real harness
-status integration (`herdr integration install <name>`; see
-[`../docs/herdr.md`](../docs/herdr.md)).
+Herdr 0.7.4 / protocol 16 exposes `done` as an output `AgentStatus`, but its
+supported integration input, `pane.report_agent`, accepts only
+`idle|working|blocked|unknown` (`herdr pane report-agent --help` and `herdr api
+schema --json`). The installed Pi integration v5 uses that API with
+`source=herdr:pi` and reports `working`/`blocked`/`idle`; there is no supported
+`herdr ... --state done` argv to inject. On a managed `agent.start` pane, Herdr
+derives the output status `done` from the integration's end-of-turn idle report.
+The live scenario reproduces that supported path and asserts Herdr
+`agent_status=done`, board `awaiting_reason=agent_done`, an open run/live pane,
+paused timeout, and explicit confirmation to board `done`.
 
-`crates/board-daemon/src/watchers.rs` covers working→running, blocked, idle grace→lost,
-and pane exit deterministically through an injected `check_at(now)` seam, with no sleeps. The
-separate opt-in real-Pi smoke records live working status when observable but does not require the
-sample because a fast provider response can finish between polls.
+`crates/board-daemon/src/watchers.rs` additionally covers idle grace →
+`awaiting` (`idle_expired`), working/blocked signals, timeout pause, and pane exit
+deterministically through an injected `check_at(now)` seam. One live scenario
+is sufficient to prove the real Herdr event subscription and signal-application
+path without a provider call or an unsupported status injection. The separate
+opt-in real-Pi smoke records live working status when observable but does not
+require the sample because a fast provider response can finish between polls.
 
 ## Prerequisites
 

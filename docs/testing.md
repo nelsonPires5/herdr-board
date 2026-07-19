@@ -107,15 +107,18 @@ case ↔ scenario ↔ status catalog):
 | `11-pi-harness.sh` | Built-in Pi mint/retry through real Herdr with `e2e/fake-bin/pi`; validates model, low thinking, protocol prompt, safe positional prompt, comments, and fork target without provider cost. |
 | `12-cwd-boards.sh` | Git root/subdir sharing, non-Git CWD isolation, independent columns/cards, scoped TUI title, and picker including Global. |
 | `13-jump-to-pane.sh` | Held fake-agent pane + real plugin overlay: detail `o` focuses the same-session target and closes the board pane. |
-| `15-awaiting.sh` | Silent finish in a column with no `on_success`: the agent ends without `board done` → card `awaiting` (run stays open); `board done ok` confirms → card `done`, no column move. |
+| `15-awaiting.sh` | Integration-style reports on a live managed pane: blocked → working → end-of-turn idle (Herdr derives `done`) → `awaiting` (`agent_done`, run/pane stay open, timeout paused); `board done ok` confirms → `done`, no column move. |
 | `real-pi-smoke.sh` | Separate opt-in (`E2E_REAL_PI=1`) real-provider poem smoke; never included by `run-all.sh`. |
 | `run-all.sh` | Builds once, runs every standard no-cost scenario, prints a PASS/FAIL/SKIP summary. |
 
-Deterministic daemon tests cover working→running, blocked, idle grace→`awaiting` (never `lost` —
-that outcome is no longer produced), timeout paused while `awaiting`, and pane exit without
-sleeps. The live `15-awaiting.sh` scenario covers the silent-finish → `awaiting` → confirm →
-`done` flow end to end. The opt-in real-Pi smoke records live status when observable but does not
-require sampling `working` from a fast run.
+Deterministic daemon tests cover working→running, blocked, Herdr's output-only `done` event →
+`awaiting` (`agent_done`), idle grace→`awaiting` (`idle_expired`; never `lost`), timeout paused
+while `awaiting`, and pane exit without sleeps. Herdr 0.7.4 / protocol 16 does not accept `done`
+as a `pane.report_agent` input (`idle|working|blocked|unknown` only), so the live
+`15-awaiting.sh` scenario uses the installed Pi integration's supported report shape; on a managed
+`agent.start` pane Herdr derives output `done` from the end-of-turn idle report. The scenario covers
+blocked → working → Herdr done → `awaiting` → confirm → board `done` end to end. The opt-in real-Pi
+smoke records live status when observable but does not require sampling `working` from a fast run.
 
 `scripts/e2e.sh` is a thin compat wrapper that `exec`s `run-all.sh`.
 

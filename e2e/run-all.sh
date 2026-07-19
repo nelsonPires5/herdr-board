@@ -56,6 +56,7 @@ SCENARIOS=(
   12-cwd-boards.sh
   13-jump-to-pane.sh
   14-column-config.sh
+  15-awaiting.sh
 )
 
 # apply filters (substring match on the filename); empty = run all
