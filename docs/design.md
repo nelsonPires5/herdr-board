@@ -6,7 +6,7 @@
 |---|---|
 | **Board** | An independent pipeline (columns/config/cards) selected by canonical Git root or non-Git CWD. `Global` preserves the pre-v5 board. A fresh scoped board contains **only a `Todo` column**; everything else is user-created. |
 | **Column** | A stage, entirely user-defined: create/rename/reorder/delete from the TUI (keyboard or mouse). Config: `system_prompt`, `trigger` (`auto` = entering the column starts a run; `manual` = waits for human), `on_success` / `on_fail` (move card to column X, or stay), optional overrides (model/effort/harness) applied to every card passing through. Nothing about column names or count is hardcoded. |
-| **Card** | A unit of work. Title, **description = the base prompt**, harness, model, effort, permission mode, a **herdr session** (`session`, null = daemon default) AND a **space** within it (`workspace` = an already-open workspace id; `new_workspace` = a label + cwd the daemon opens on first dispatch), position, live status (`idle · queued · running · blocked · failed`), the harness `session_id` for resume, and an optional `archived_at` timestamp. Archiving is reversible and preserves comments/run history. |
+| **Card** | A unit of work. Title, **description = the base prompt**, harness, model, effort, permission mode, a **herdr session** (`session`, null = daemon default) AND a **space** within it (`workspace` = an already-open workspace id; `new_workspace` = a label + cwd the daemon opens on first dispatch), position, live status (`idle · queued · running · blocked · awaiting · done · failed`), the harness `session_id` for resume, and an optional `archived_at` timestamp. Archiving is reversible and preserves comments/run history. `awaiting` (agent finished/went idle without `board done`, run still open, pending human review) records an `awaiting_reason` (`agent_done` / `idle_expired`); `done` is confirmed completion with no target column. |
 | **Comment** | Timestamped note on a card. Author = `user`, `agent` (from a run), or `system` (daemon transitions). Comments are both the audit log **and** context for the next run. |
 | **Run** | One agent execution of a card in a column: argv, herdr pane/workspace ids, session id, started/ended, exit status, result summary. Cards keep full run history (retries = new runs). |
 
@@ -51,19 +51,21 @@ cards(id, board_id, column_id, position, title, description,
       harness, model, effort, permission_mode,
       session,                                   -- herdr session name (NULL = default)
       space_kind ('workspace'|'new_workspace'), space_ref, space_cwd,
-      status, session_id, created_at, updated_at, archived_at)
+      status, awaiting_reason,                   -- reason set in 'awaiting', NULL otherwise
+      session_id, created_at, updated_at, archived_at)
 comments(id, card_id, author, body, created_at)
 runs(id, card_id, column_id, harness, argv_json, prompt_snapshot,
      herdr_workspace_id, herdr_pane_id, session_id,
      session,                                    -- herdr session the run spawned into
-     started_at, ended_at, outcome ('ok'|'fail'|'cancelled'|'lost'),
+     started_at, ended_at, outcome ('ok'|'fail'|'cancelled'|'lost'),  -- 'lost' is legacy, no longer produced
      result_summary, log_path)
 ```
 
-Schema is versioned via `PRAGMA user_version` (current = **v5**). A fresh DB is built straight from
-`schema.sql` and stamped v5. Existing v1→v4 migrations retain their space/session, archive, and Pi
+Schema is versioned via `PRAGMA user_version` (current = **v6**). A fresh DB is built straight from
+`schema.sql` and stamped v6. Existing v1→v4 migrations retain their space/session, archive, and Pi
 effort behavior. v5 adds unique non-null `boards.scope_path`, preserves board `id=1` plus every
-related row as `Global`, and leaves existing card harnesses unchanged.
+related row as `Global`, and leaves existing card harnesses unchanged. v6 rebuilds `cards` to admit
+the `awaiting`/`done` statuses and adds `cards.awaiting_reason` (NULL outside `awaiting`).
 
 ### Session model
 
@@ -159,13 +161,15 @@ toast.
 ### TUI interactions (v1)
 
 - **Access: overlay only** — `[[keys.command]]` keybinding (e.g. `prefix+k`) → `plugin pane open --plugin herdr-board --placement overlay`; the board floats over the current workspace from anywhere, dismiss to drop back. No pinned workspace, no sidebar entry (herdr has no sidebar extension point — verified against api schema/config).
-- **Responsive board view:** visible columns divide the entire viewport while preserving a readable minimum width; when not all columns fit, the selected column drives a full-width sliding window. Cards use a status-colored marker, readable selected background, harness/model metadata, status glyphs (▶ running, ⏸ blocked, ✗ failed), and a live run timer.
+- **Responsive board view:** visible columns divide the entire viewport while preserving a readable minimum width; when not all columns fit, the selected column drives a full-width sliding window. Cards use a status-colored marker, readable selected background, harness/model metadata, status glyphs (▶ running, ⏸ blocked, ✗ failed, ⧗ queued, ? awaiting — yellow, ✓ done — green), and a live run timer.
 - **Card detail:** opens as a contextual popup and toggles fullscreen with `f` or its clickable title
   action. Status fields use blue labels and white values. Description, comments, and runs size to
   their content; comments and runs scroll independently (`Tab` selects, arrows/`k`/`j` or mouse
   wheel scroll), with a blue divider for the focused history. Histories open at the latest item and
   show only directional arrows (no counts) when content is hidden. `e` edits the card and returns to
-  detail after save/cancel.
+  detail after save/cancel. `Enter` on an `awaiting` card confirms completion (the same `run.done
+  ok` channel as `board done ok`); the detail view shows the `awaiting` reason (agent reported
+  done / idle past grace).
 - Mouse **and** keyboard for everything: `b` switches between `Global` and scoped boards; drag card
   between columns / `m` move; `n` new card, `N` new column; `e` edit card; `a` archive/restore; `v`
   cycles `ACTIVE` / `ALL` / `ARCHIVED`; `c` comment; `Enter` card detail; `o` focuses the latest
@@ -220,11 +224,38 @@ env    = BOARD_CARD_ID=<id>, BOARD_RUN_ID=<id>, BOARD_SOCKET=<path>
 | Signal | Source | Role |
 |---|---|---|
 | `board done <card> --outcome …` | agent itself (instructed by every auto-column's system prompt) | **primary** — explicit, carries semantics |
-| `pane_agent_status_changed` → `working→idle` sustained | herdr events (optionally install `herdr integration install pi`; Claude has its equivalent) | agent finished but forgot to call `board done` → mark run `lost`, notify human instead of guessing |
+| `pane_agent_status_changed` → `done` | herdr events (requires `herdr integration install pi`; Claude has its equivalent) | agent finished but forgot `board done` → card `awaiting` (`agent_done`), run stays open, notify human |
+| `pane_agent_status_changed` → `idle` sustained past grace | herdr events | agent idle without `board done` → card `awaiting` (`idle_expired`), run stays open, notify human |
 | `pane_agent_status_changed` → `blocked` | herdr events | agent/integration reports blocked (provider retry exhaustion or input need) → card `blocked`, board change + notification |
 | `pane_exited` | herdr events | crash / closed pane → run `fail` |
 
-Pane-idle scraping alone is the documented weak point of every tmux-style orchestrator (claude-squad); the explicit `board done` channel is what makes auto-transition trustworthy. Without the optional Pi integration, spawn, explicit completion, timeout, and pane exit remain deterministic, while working/blocked/idle and idle-lost are unavailable.
+**Golden rule:** herdr status is a HINT; `board done` is the only terminal success truth. Pane-idle
+scraping alone is the documented weak point of every tmux-style orchestrator (claude-squad); the
+explicit `board done` channel is what makes auto-transition trustworthy, and silent finishes park
+the card in `awaiting` for review instead of guessing an outcome. Without the optional Pi
+integration, spawn, explicit completion, timeout, and pane exit remain deterministic, while
+working/blocked/done signals and the idle→`awaiting` watchdog are unavailable (degraded mode).
+
+### The `awaiting` state and the single signal decider
+
+Watchers only **observe**: herdr pane statuses and idle expiry are translated into `AgentSignal`s
+(`working` / `blocked` / `done` / `idle_expired`), and the pure engine
+(`board_core::engine::decide_signal`) is the **single decider** mapping a signal plus the current
+card status onto a `SignalDecision` (new status, optional `awaiting_reason`, optional
+notification). The daemon applies the decision in one place; pane-exit, column timeout, and cancel
+keep their existing `finalize_run` paths.
+
+- `awaiting` = the agent finished(?) without `board done`. The run stays **OPEN** — it never
+  becomes a failure on its own. The **column timeout is paused**: entering `awaiting` records the
+  span and shifts the deadline forward by the review time on exit.
+- Entry: herdr `done` (immediate, `agent_done`) or `idle` sustained past `idle_grace_seconds`
+  (`idle_expired`). The reason is stored on the card and cleared when the card leaves `awaiting`.
+- **Review cycle**: the human reads the pane and either confirms (`board done` / TUI `Enter` on the
+  card detail → the same `run.done ok` channel → `done` or column move) or types feedback into the
+  pane — the integration then reports `working`, the card goes back to `running`, and the cycle
+  continues. `board cancel` still cancels.
+- The run outcome `lost` is retained in the schema and enums for backward compatibility but is no
+  longer produced; the old idle→`lost`→`failed` path is replaced by idle→`awaiting`.
 
 ## 7. Queueing & concurrency
 

@@ -25,7 +25,7 @@ do no I/O beyond in-memory SQLite and never touch herdr.
 
 | File | Covers |
 |---|---|
-| `crates/board-core/tests/engine.rs` | The **pure column engine** — `decide_transition`, `decide_entry`, `validate_*`, `format_duration`. No wall clock: elapsed time is passed as an explicit seconds argument (e.g. `decide_transition(.., Some(252))` → `"4m12s"`), so results are deterministic. |
+| `crates/board-core/tests/engine.rs` | The **pure column engine** — `decide_transition`, `decide_entry`, `decide_signal` (agent signals → `awaiting`/`running`/`blocked` decisions), `validate_*`, `format_duration`. No wall clock: elapsed time is passed as an explicit seconds argument (e.g. `decide_transition(.., Some(252))` → `"4m12s"`), so results are deterministic. |
 | `crates/board-core/tests/db.rs` | SQLite migrations through v5 (scoped boards + preserved Global), board-boundary invariants, seed/CRUD, position compaction, FIFO queued-runs, and latest pane lookup — on an in-memory db. |
 | `crates/board-core/tests/{capability,config,prompt,harness,protocol,fake_client}.rs` | Harness catalog + pane-name slug rules; config defaults/parsing; prompt assembly + effective-settings; harness argv/session planning; protocol serde round-trips; the in-memory `FakeBoardClient`. |
 | `crates/board-herdr/tests/{events,socket}.rs` | herdr event decoding; socket client against an **in-process fake herdr server** on a temp unix socket (`serve_calls`/`serve_stream`), covering one-request-per-connection, error mapping, and mid-call disconnect. |
@@ -107,13 +107,15 @@ case ↔ scenario ↔ status catalog):
 | `11-pi-harness.sh` | Built-in Pi mint/retry through real Herdr with `e2e/fake-bin/pi`; validates model, low thinking, protocol prompt, safe positional prompt, comments, and fork target without provider cost. |
 | `12-cwd-boards.sh` | Git root/subdir sharing, non-Git CWD isolation, independent columns/cards, scoped TUI title, and picker including Global. |
 | `13-jump-to-pane.sh` | Held fake-agent pane + real plugin overlay: detail `o` focuses the same-session target and closes the board pane. |
+| `15-awaiting.sh` | Silent finish in a column with no `on_success`: the agent ends without `board done` → card `awaiting` (run stays open); `board done ok` confirms → card `done`, no column move. |
 | `real-pi-smoke.sh` | Separate opt-in (`E2E_REAL_PI=1`) real-provider poem smoke; never included by `run-all.sh`. |
 | `run-all.sh` | Builds once, runs every standard no-cost scenario, prints a PASS/FAIL/SKIP summary. |
 
-The `idle-lost` watchdog has no standard live scenario because a fake executable does not emit
-integration status. Deterministic daemon tests cover working→running, blocked, idle grace→lost,
-and pane exit without sleeps. The opt-in real-Pi smoke records live status when observable but
-does not require sampling `working` from a fast run.
+Deterministic daemon tests cover working→running, blocked, idle grace→`awaiting` (never `lost` —
+that outcome is no longer produced), timeout paused while `awaiting`, and pane exit without
+sleeps. The live `15-awaiting.sh` scenario covers the silent-finish → `awaiting` → confirm →
+`done` flow end to end. The opt-in real-Pi smoke records live status when observable but does not
+require sampling `working` from a fast run.
 
 `scripts/e2e.sh` is a thin compat wrapper that `exec`s `run-all.sh`.
 

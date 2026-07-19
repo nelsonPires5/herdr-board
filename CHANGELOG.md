@@ -7,6 +7,30 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- New card statuses `awaiting` and `done` (schema v6 adds `cards.awaiting_reason`). `awaiting`
+  means the agent finished — or went idle past `idle_grace_seconds` — **without** `board done`:
+  the run stays open, the column timeout is paused, and the card waits for human review instead of
+  failing. The reason (`agent_done` / `idle_expired`) is shown in the card detail. `done` is
+  confirmed completion via `board done ok` when the column has no `on_success` target (with a
+  target the card moves as before). The TUI renders `?` (yellow) for `awaiting` and `✓` (green)
+  for `done`, and `Enter` on an `awaiting` card's detail confirms completion through the same
+  `run.done ok` channel.
+- `engine::decide_signal` is now the single, pure decider for agent signals: watchers only
+  translate herdr pane statuses and idle expiry into signals, and the daemon applies the engine's
+  decision in one place.
+- Live e2e scenario `15-awaiting.sh` covers the silent-finish → `awaiting` → confirm → `done`
+  flow.
+
+### Changed
+- Idle past `idle_grace_seconds` no longer fails the run as `lost`; it parks the card in
+  `awaiting` (reason `idle_expired`). The `lost` outcome is kept in the schema and wire enums for
+  backward compatibility but is no longer produced.
+- The board-protocol preamble is injected unconditionally into every run's prompt, instructing
+  agents to finish with `board done ok` / `board done fail` and warning that finishing without
+  `board done` leaves the card in `awaiting`.
+- Docs now stress that `herdr integration install <harness>` is a user prerequisite (the board
+  never installs integrations): without it, herdr's `working`/`blocked`/`done` signals don't exist
+  and `awaiting` is only reachable via the idle grace path (degraded mode).
 - Independent boards per canonical Git root or non-Git CWD, with separate columns, templates, and
   cards. Schema v5 preserves all previous data as `Global`; `b` opens a path-disambiguated board
   picker and pane titles combine scope with `ACTIVE` / `ALL` / `ARCHIVED`.

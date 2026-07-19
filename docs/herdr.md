@@ -40,11 +40,28 @@ mastracode** (get the current list from `herdr integration --help`).
 
 Installing one **writes into that harness's own config** (`pi` installs
 `~/.pi/agent/extensions/herdr-agent-state.ts`; `claude` installs a hook under
-`~/.claude`). Because it mutates personal configuration, herdr-board never installs or
-updates it automatically. Pi users should optionally run `herdr integration install pi`
-for precise working/blocked/idle status and session references. Spawn, explicit
-`board done`, timeout, and pane-exit handling work without it; the idle-lost watchdog
-does not arm while status remains `unknown`. The standard E2E uses a fake Pi and tests
+`~/.claude`). Because it mutates personal configuration, **herdr-board never installs or
+updates integrations** — running `herdr integration install <harness>` is a **user
+prerequisite** for live lifecycle signals.
+
+What the integration buys you:
+
+- **With it**, herdr reports precise `working` / `blocked` / `done` (plus `idle`) per pane, and
+  the board maps them to card statuses: `working` → `running`, `blocked` → `blocked`, and
+  `done` without `board done` → `awaiting` (reason `agent_done`) for human review.
+- **Without it (degraded mode)**, herdr's `working`/`blocked`/`done` signals don't exist. Spawn,
+  explicit `board done`, column timeout, and pane-exit handling still work; the only lifecycle
+  hint left is herdr's own `idle` status, so `awaiting` can only be reached via `idle_expired`
+  (`idle` sustained past `idle_grace_seconds`). If the pane status stays `unknown`, even that
+  watchdog never arms and the card simply stays `running` until `board done`, timeout, or pane
+  exit.
+
+To verify what a running herdr actually reports, inspect the live state:
+`herdr api snapshot` (panes carry their current agent status), plus
+`herdr integration status` for which integrations are installed/current.
+
+Pi users should optionally run `herdr integration install pi` for precise
+working/blocked/done status and session references. The standard E2E uses a fake Pi and tests
 watcher status mapping deterministically rather than changing integrations.
 
 ## Version drift
