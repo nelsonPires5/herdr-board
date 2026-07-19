@@ -319,7 +319,6 @@ mod fake {
     use super::*;
     use crate::db::{Db, BOARD_ID};
     use crate::engine;
-    use crate::protocol::CardStatus;
 
     /// In-memory board state machine for TUI tests. Backed by an in-memory
     /// SQLite db, so CRUD/move/positions/comments behave exactly like the real
@@ -382,10 +381,12 @@ mod fake {
                 "column.delete" => {
                     let p: ColumnDeleteParams = serde_json::from_value(params)?;
                     let cards = db.list_cards_in_column(p.id)?;
-                    let has_active = cards
-                        .iter()
-                        .any(|c| matches!(c.status, CardStatus::Running | CardStatus::Queued));
-                    engine::validate_column_delete(!cards.is_empty(), has_active, p.move_cards_to)?;
+                    let has_open_run = db.column_has_open_run(p.id)?;
+                    engine::validate_column_delete(
+                        !cards.is_empty(),
+                        has_open_run,
+                        p.move_cards_to,
+                    )?;
                     db.delete_column(p.id, p.move_cards_to)?;
                     serde_json::to_value(DeletedResult { deleted: true })?
                 }

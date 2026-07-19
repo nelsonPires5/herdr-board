@@ -10,9 +10,9 @@ use crate::protocol::{AwaitingReason, CardStatus, RunOutcome, SpaceKind, Trigger
 pub enum ValidationError {
     #[error("column has cards; specify move_cards_to")]
     ColumnHasCards,
-    #[error("column has a running or queued card")]
+    #[error("column has a card with an open run")]
     ColumnHasActiveCard,
-    #[error("card is running or queued; cannot edit harness/space fields")]
+    #[error("card has an open run; cannot edit harness/space fields")]
     CardBusy,
     #[error("card has an active run; cancel it before archiving")]
     CardHasActiveRun,
@@ -170,7 +170,12 @@ pub fn validate_card_edit(
     status: CardStatus,
     edits_locked_fields: bool,
 ) -> Result<(), ValidationError> {
-    if edits_locked_fields && matches!(status, CardStatus::Running | CardStatus::Queued) {
+    if edits_locked_fields
+        && matches!(
+            status,
+            CardStatus::Running | CardStatus::Queued | CardStatus::Blocked | CardStatus::Awaiting
+        )
+    {
         return Err(ValidationError::CardBusy);
     }
     Ok(())
@@ -287,7 +292,7 @@ pub fn decide_signal(card_status: CardStatus, signal: AgentSignal) -> Option<Sig
                 Some(SignalDecision {
                     new_status: CardStatus::Blocked,
                     awaiting_reason: None,
-                    emit_notification: None,
+                    emit_notification: Some("is blocked (needs input)".to_string()),
                 })
             }
         }

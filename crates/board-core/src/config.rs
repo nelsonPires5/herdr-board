@@ -21,7 +21,7 @@ pub struct Config {
     /// Global cap on concurrent runs across all spaces.
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent: usize,
-    /// Seconds an agent may sit idle (no `board done`) before a run is marked `lost`.
+    /// Seconds an agent may sit idle (no `board done`) before it is parked awaiting review.
     #[serde(default = "default_idle_grace_seconds")]
     pub idle_grace_seconds: u64,
     /// Config-defined harnesses keyed by name (`[harness.NAME]`).

@@ -158,9 +158,19 @@ fn validate_card_edit_rules() {
         validate_card_edit(CardStatus::Running, true),
         Err(ValidationError::CardBusy)
     );
+    for status in [
+        CardStatus::Queued,
+        CardStatus::Blocked,
+        CardStatus::Awaiting,
+    ] {
+        assert_eq!(
+            validate_card_edit(status, true),
+            Err(ValidationError::CardBusy)
+        );
+    }
     assert_eq!(
-        validate_card_edit(CardStatus::Queued, true),
-        Err(ValidationError::CardBusy)
+        ValidationError::CardBusy.to_string(),
+        "card has an open run; cannot edit harness/space fields"
     );
 }
 
@@ -243,7 +253,10 @@ fn signal_blocked_marks_blocked_and_leaves_awaiting() {
         let d = decide_signal(from, AgentSignal::Blocked).unwrap();
         assert_eq!(d.new_status, CardStatus::Blocked);
         assert_eq!(d.awaiting_reason, None);
-        assert_eq!(d.emit_notification, None);
+        assert_eq!(
+            d.emit_notification.as_deref(),
+            Some("is blocked (needs input)")
+        );
     }
     assert_eq!(
         decide_signal(CardStatus::Blocked, AgentSignal::Blocked),

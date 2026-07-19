@@ -51,14 +51,17 @@ fn migration_v2_upgrades_v1_database() {
     const V1_SCHEMA: &str = "
     CREATE TABLE boards (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE,
       created_at TEXT NOT NULL DEFAULT (datetime('now')));
-    CREATE TABLE columns (id INTEGER PRIMARY KEY, board_id INTEGER NOT NULL,
+    CREATE TABLE columns (id INTEGER PRIMARY KEY,
+      board_id INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
       name TEXT NOT NULL, position INTEGER NOT NULL, system_prompt TEXT,
       trigger TEXT NOT NULL DEFAULT 'manual', on_success_column_id INTEGER,
       on_fail_column_id INTEGER, fresh_session INTEGER NOT NULL DEFAULT 0,
       harness_override TEXT, model_override TEXT, effort_override TEXT,
       permission_override TEXT, timeout_minutes INTEGER, UNIQUE (board_id, name));
-    CREATE TABLE cards (id INTEGER PRIMARY KEY, board_id INTEGER NOT NULL,
-      column_id INTEGER NOT NULL, position INTEGER NOT NULL, title TEXT NOT NULL,
+    CREATE TABLE cards (id INTEGER PRIMARY KEY,
+      board_id INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+      column_id INTEGER NOT NULL REFERENCES columns(id),
+      position INTEGER NOT NULL, title TEXT NOT NULL,
       description TEXT NOT NULL DEFAULT '', harness TEXT NOT NULL DEFAULT 'claude',
       model TEXT, effort TEXT, permission_mode TEXT,
       space_kind TEXT NOT NULL DEFAULT 'workspace'
@@ -67,14 +70,20 @@ fn migration_v2_upgrades_v1_database() {
       status TEXT NOT NULL DEFAULT 'idle', session_id TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now')));
-    CREATE TABLE comments (id INTEGER PRIMARY KEY, card_id INTEGER NOT NULL,
+    CREATE TABLE comments (id INTEGER PRIMARY KEY,
+      card_id INTEGER NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
       author TEXT NOT NULL, body TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now')));
-    CREATE TABLE runs (id INTEGER PRIMARY KEY, card_id INTEGER NOT NULL,
-      column_id INTEGER NOT NULL, harness TEXT NOT NULL, argv_json TEXT NOT NULL,
+    CREATE TABLE runs (id INTEGER PRIMARY KEY,
+      card_id INTEGER NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+      column_id INTEGER NOT NULL REFERENCES columns(id),
+      harness TEXT NOT NULL, argv_json TEXT NOT NULL,
       prompt_snapshot TEXT NOT NULL, herdr_workspace_id TEXT, herdr_pane_id TEXT,
       session_id TEXT, started_at TEXT, ended_at TEXT, outcome TEXT,
       result_summary TEXT, log_path TEXT);
+    CREATE INDEX idx_cards_column ON cards(column_id, position);
+    CREATE INDEX idx_comments_card ON comments(card_id, created_at);
+    CREATE INDEX idx_runs_card ON runs(card_id, started_at);
     ";
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let path = tmp.path().to_path_buf();
@@ -102,6 +111,17 @@ fn migration_v2_upgrades_v1_database() {
             [],
         )
         .unwrap();
+        conn.execute(
+            "INSERT INTO comments (card_id,author,body) VALUES (1,'user','preserved')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO runs (card_id,column_id,harness,argv_json,prompt_snapshot)
+             VALUES (1,1,'claude','[]','preserved prompt')",
+            [],
+        )
+        .unwrap();
         conn.execute_batch("PRAGMA user_version = 1;").unwrap();
     }
     // Open via Db → runs the v2 through v6 migrations.
@@ -121,12 +141,58 @@ fn migration_v2_upgrades_v1_database() {
     assert!(cards
         .iter()
         .any(|c| c.space_ref.as_deref() == Some("/some/dir")));
-    // runs.session now exists and defaults NULL.
-    let card = &cards[0];
+    // Related rows survive both cards rebuilds, and runs.session defaults NULL.
+    let card = cards.iter().find(|c| c.title == "wt").unwrap();
+    assert_eq!(db.list_comments(card.id).unwrap()[0].body, "preserved");
+    assert_eq!(
+        db.list_runs(card.id).unwrap()[0].prompt_snapshot,
+        "preserved prompt"
+    );
     let run = db
         .create_run(card.id, card.column_id, "claude", "[]", "p", None, None)
         .unwrap();
     assert!(run.session.is_none());
+    let card_id = card.id;
+    drop(db);
+
+    let conn = Connection::open(path).unwrap();
+    conn.pragma_update(None, "foreign_keys", true).unwrap();
+    let index_names: Vec<String> = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type='index'")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    for expected in ["idx_cards_column", "idx_comments_card", "idx_runs_card"] {
+        assert!(index_names.iter().any(|name| name == expected));
+    }
+    let violations: Vec<String> = conn
+        .prepare("PRAGMA foreign_key_check")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert!(violations.is_empty());
+
+    conn.execute("DELETE FROM cards WHERE id=?1", [card_id])
+        .unwrap();
+    let comments: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM comments WHERE card_id=?1",
+            [card_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let runs: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM runs WHERE card_id=?1",
+            [card_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!((comments, runs), (0, 0));
 }
 
 #[test]
@@ -694,6 +760,11 @@ fn awaiting_reason_set_and_cleared_with_status() {
     let card = db.set_card_status(card.id, CardStatus::Done).unwrap();
     assert_eq!(card.status, CardStatus::Done);
     assert!(card.awaiting_reason.is_none());
+
+    let err = db
+        .set_card_status(card.id, CardStatus::Awaiting)
+        .unwrap_err();
+    assert!(err.to_string().contains("set_card_awaiting"));
 }
 
 /// A v5 database (old `status` CHECK without `awaiting`/`done`, no
@@ -794,7 +865,7 @@ fn migration_v6_rebuilds_cards_check_and_preserves_data() {
         Some(RunOutcome::Ok)
     );
 
-    // The new CHECK accepts the new statuses end-to-end.
+    // The new CHECK accepts only invariant-preserving status/reason pairs.
     let card = db
         .set_card_awaiting(kept.id, AwaitingReason::AgentDone)
         .unwrap();
@@ -802,4 +873,88 @@ fn migration_v6_rebuilds_cards_check_and_preserves_data() {
     let card = db.set_card_status(card.id, CardStatus::Done).unwrap();
     assert_eq!(card.status, CardStatus::Done);
     assert!(card.awaiting_reason.is_none());
+    drop(db);
+
+    let conn = Connection::open(path).unwrap();
+    assert!(conn
+        .execute(
+            "UPDATE cards SET status='awaiting', awaiting_reason=NULL WHERE id=1",
+            [],
+        )
+        .is_err());
+    assert!(conn
+        .execute(
+            "UPDATE cards SET status='awaiting', awaiting_reason='bogus' WHERE id=1",
+            [],
+        )
+        .is_err());
+    assert!(conn
+        .execute(
+            "UPDATE cards SET status='done', awaiting_reason='agent_done' WHERE id=1",
+            [],
+        )
+        .is_err());
+}
+
+#[test]
+fn current_schema_enforces_awaiting_reason_invariant_for_raw_rows() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    let db = Db::open(&path).unwrap();
+    let column_id = db.default_column_id(BOARD_ID).unwrap();
+    drop(db);
+
+    let conn = Connection::open(path).unwrap();
+    conn.execute(
+        "INSERT INTO cards (board_id,column_id,position,title,status,awaiting_reason)
+         VALUES (1,?1,0,'valid awaiting','awaiting','idle_expired')",
+        [column_id],
+    )
+    .unwrap();
+    for (title, status, reason) in [
+        ("missing reason", "awaiting", None),
+        ("invalid reason", "awaiting", Some("other")),
+        ("reason while done", "done", Some("agent_done")),
+    ] {
+        assert!(conn
+            .execute(
+                "INSERT INTO cards (board_id,column_id,position,title,status,awaiting_reason)
+                 VALUES (1,?1,1,?2,?3,?4)",
+                rusqlite::params![column_id, title, status, reason],
+            )
+            .is_err());
+    }
+}
+
+#[test]
+fn delete_column_rolls_back_card_moves_when_delete_fails() {
+    let db = mem();
+    let todo = db.default_column_id(BOARD_ID).unwrap();
+    let source = db
+        .create_column(&ColumnCreateParams {
+            name: "Source".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let card = db
+        .create_card(&CardCreateParams {
+            title: "must stay".into(),
+            column_id: Some(source.id),
+            ..Default::default()
+        })
+        .unwrap();
+    let run = db
+        .create_run(card.id, source.id, "pi", "[]", "p", None, None)
+        .unwrap();
+    db.finish_run(run.id, RunOutcome::Fail, None).unwrap();
+
+    // The historical run still references the source column, so its delete is
+    // rejected by the FK after the card move has begun.
+    assert!(db.delete_column(source.id, Some(todo)).is_err());
+    assert_eq!(
+        db.get_card(card.id).unwrap().unwrap().column_id,
+        source.id,
+        "the preceding move must roll back with the failed delete"
+    );
+    assert!(db.get_column(source.id).unwrap().is_some());
 }

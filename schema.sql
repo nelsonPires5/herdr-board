@@ -59,7 +59,13 @@ CREATE TABLE cards (
   session_id      TEXT,                        -- harness conversation id for --resume
   created_at      TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
-  archived_at     TEXT                         -- NULL = active; timestamp = archived
+  archived_at     TEXT,                        -- NULL = active; timestamp = archived
+  CHECK (
+    (status = 'awaiting' AND awaiting_reason IS NOT NULL
+      AND awaiting_reason IN ('agent_done','idle_expired'))
+    OR
+    (status <> 'awaiting' AND awaiting_reason IS NULL)
+  )
 );
 
 CREATE TABLE comments (

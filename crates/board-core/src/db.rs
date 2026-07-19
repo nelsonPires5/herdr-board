@@ -29,6 +29,8 @@ const SCHEMA_VERSION: i64 = 6;
 /// `runs.session` are added (NULL = daemon's default session); `worktree_base`
 /// is dropped.
 const V2_MIGRATION_SQL: &str = "
+PRAGMA foreign_keys = OFF;
+BEGIN;
 CREATE TABLE cards_v2 (
   id              INTEGER PRIMARY KEY,
   board_id        INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
@@ -65,6 +67,8 @@ DROP TABLE cards;
 ALTER TABLE cards_v2 RENAME TO cards;
 CREATE INDEX idx_cards_column ON cards(column_id, position);
 ALTER TABLE runs ADD COLUMN session TEXT;
+COMMIT;
+PRAGMA foreign_keys = ON;
 ";
 
 /// v2 → v3 migration: archived cards remain in their column and preserve all
@@ -154,7 +158,13 @@ CREATE TABLE cards_v6 (
   session_id      TEXT,
   created_at      TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
-  archived_at     TEXT
+  archived_at     TEXT,
+  CHECK (
+    (status = 'awaiting' AND awaiting_reason IS NOT NULL
+      AND awaiting_reason IN ('agent_done','idle_expired'))
+    OR
+    (status <> 'awaiting' AND awaiting_reason IS NULL)
+  )
 );
 INSERT INTO cards_v6
   (id,board_id,column_id,position,title,description,harness,model,effort,
@@ -501,6 +511,7 @@ impl Db {
     /// Delete a column, optionally moving its cards to `move_cards_to` first.
     /// Callers should validate with the engine beforehand.
     pub fn delete_column(&self, id: i64, move_cards_to: Option<i64>) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
         let board_id = self.require_column(id)?.board_id;
         if let Some(dst) = move_cards_to {
             let destination = self.require_column(dst)?;
@@ -532,6 +543,7 @@ impl Db {
                 params![i as i64, cid],
             )?;
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -778,17 +790,15 @@ impl Db {
     /// use [`Db::set_card_awaiting`] to enter `awaiting` with a reason.
     pub fn set_card_status(&self, id: i64, status: CardStatus) -> Result<Card> {
         if status == CardStatus::Awaiting {
-            self.conn.execute(
-                "UPDATE cards SET status='awaiting', updated_at=datetime('now') WHERE id=?1",
-                params![id],
-            )?;
-        } else {
-            self.conn.execute(
-                "UPDATE cards SET status=?1, awaiting_reason=NULL, updated_at=datetime('now')
-                 WHERE id=?2",
-                params![status.as_str(), id],
-            )?;
+            return Err(Error::InvalidState(
+                "enter awaiting with Db::set_card_awaiting so a reason is recorded".into(),
+            ));
         }
+        self.conn.execute(
+            "UPDATE cards SET status=?1, awaiting_reason=NULL, updated_at=datetime('now')
+             WHERE id=?2",
+            params![status.as_str(), id],
+        )?;
         self.require_card(id)
     }
 
@@ -924,6 +934,28 @@ impl Db {
             .query_map(params![card_id], row_to_run)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    /// The card's open (queued or started, not ended) run, if any.
+    pub fn open_run_for_card(&self, card_id: i64) -> Result<Option<Run>> {
+        opt(self.conn.query_row(
+            "SELECT * FROM runs WHERE card_id=?1 AND ended_at IS NULL
+             ORDER BY id DESC LIMIT 1",
+            params![card_id],
+            row_to_run,
+        ))
+    }
+
+    /// Whether any card currently in `column_id` has an open run.
+    pub fn column_has_open_run(&self, column_id: i64) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM runs r JOIN cards c ON c.id=r.card_id
+               WHERE c.column_id=?1 AND r.ended_at IS NULL
+             )",
+            params![column_id],
+            |row| row.get(0),
+        )?)
     }
 
     /// The card's active (started, not ended) run, if any.
