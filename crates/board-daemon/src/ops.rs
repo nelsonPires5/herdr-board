@@ -756,7 +756,7 @@ mod tests {
         let d = test_daemon(Config::default());
         let v = handle_request(&d, "harness.list", json!({})).unwrap();
         let names: Vec<String> = serde_json::from_value(v["harnesses"].clone()).unwrap();
-        assert_eq!(names, vec!["claude".to_string(), "pi".to_string()]);
+        assert_eq!(names, vec!["pi".to_string(), "claude".to_string()]);
     }
 
     #[test]
@@ -772,7 +772,7 @@ mod tests {
         let d = test_daemon(config);
         let v = handle_request(&d, "harness.list", json!({})).unwrap();
         let names: Vec<String> = serde_json::from_value(v["harnesses"].clone()).unwrap();
-        assert_eq!(names, vec!["claude", "fake", "pi"]);
+        assert_eq!(names, vec!["pi", "claude", "fake"]);
     }
 
     #[test]

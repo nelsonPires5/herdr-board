@@ -241,14 +241,21 @@ pub fn meta_for(harness: &str, config: &Config) -> Option<Box<dyn HarnessMeta>> 
     }
 }
 
-/// Every harness the daemon knows about: built-ins (`pi`, `claude`) plus every
-/// config-defined `[harness.NAME]`, sorted and de-duplicated. Drives the
-/// `harness.list` RPC and the harness/harness-override selects in the TUI.
+/// Every harness the daemon knows about: built-ins (`pi`, `claude`) in their
+/// declared/default order (pi is the card default, so it stays first) followed
+/// by every config-defined `[harness.NAME]` sorted, de-duplicated. This is the
+/// single source for the `harness.list` RPC and BOTH the card `harness` and
+/// column `harness_override` selects in the TUI, so every harness menu shares
+/// one list in one (default-first) order.
 pub fn available_harnesses(config: &Config) -> Vec<String> {
     let mut out: Vec<String> = BUILTIN_HARNESSES.iter().map(|s| s.to_string()).collect();
-    out.extend(config.harness.keys().cloned());
-    out.sort();
-    out.dedup();
+    let mut config_keys: Vec<String> = config.harness.keys().cloned().collect();
+    config_keys.sort();
+    for k in config_keys {
+        if !out.contains(&k) {
+            out.push(k);
+        }
+    }
     out
 }
 

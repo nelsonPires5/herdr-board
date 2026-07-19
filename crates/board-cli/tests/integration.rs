@@ -539,6 +539,23 @@ fn harness_models_claude_json_and_human() {
 }
 
 #[test]
+fn harness_list_builtins_and_config_defined() {
+    let td = TestDaemon::start(&[]);
+    // human: one harness per line, built-ins first (pi, claude) then config.
+    let out = td.board(&["harness", "list"]);
+    assert!(out.status.success(), "harness list should succeed");
+    let text = String::from_utf8_lossy(&out.stdout);
+    let names: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(names, vec!["pi", "claude", "fake"], "got:\n{text}");
+
+    // --json: the same names, default-first, as a JSON array.
+    let out = td.board(&["harness", "list", "--json"]);
+    assert!(out.status.success());
+    let names: Vec<String> = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(names, vec!["pi", "claude", "fake"]);
+}
+
+#[test]
 fn harness_models_default_is_pi() {
     let td = TestDaemon::start(&[]);
     let out = td.board(&["harness", "models", "--json"]);

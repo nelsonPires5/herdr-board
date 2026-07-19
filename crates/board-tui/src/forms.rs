@@ -271,7 +271,7 @@ impl Form {
         let values = CardValues::from_card(None);
         Form {
             kind: FormKind::CardCreate { column_id },
-            fields: build_card_fields(&values, None, &[], &[]),
+            fields: build_card_fields(&values, None, &default_harnesses(), &[], &[]),
             focus: 0,
             caps: None,
             harnesses: default_harnesses(),
@@ -285,7 +285,7 @@ impl Form {
         let values = CardValues::from_card(Some(card));
         Form {
             kind: FormKind::CardEdit { card_id: card.id },
-            fields: build_card_fields(&values, None, &[], &[]),
+            fields: build_card_fields(&values, None, &default_harnesses(), &[], &[]),
             focus: 0,
             caps: None,
             harnesses: default_harnesses(),
@@ -420,7 +420,13 @@ impl Form {
             return;
         }
         let values = self.card_values();
-        self.fields = build_card_fields(&values, self.caps.as_ref(), &self.spaces, &self.sessions);
+        self.fields = build_card_fields(
+            &values,
+            self.caps.as_ref(),
+            &self.harnesses,
+            &self.spaces,
+            &self.sessions,
+        );
         if self.focus >= self.fields.len() {
             self.focus = 0;
         }
@@ -811,6 +817,20 @@ fn default_harnesses() -> Vec<String> {
     BUILTIN_HARNESSES.iter().map(|s| (*s).to_string()).collect()
 }
 
+/// Harness selector options (no leading sentinel): every available harness
+/// from the shared `harness.list` source, preserving an unknown current value
+/// (e.g. a card whose harness isn't listed yet) by appending it. Used by the
+/// card `Harness` field so it draws from the same source as the column
+/// harness_override selector. `current` selects itself (else index 0).
+fn harness_choice_opts(harnesses: &[String], current: &str) -> (Vec<ChoiceOpt>, usize) {
+    let mut opts: Vec<ChoiceOpt> = harnesses.iter().map(|h| ChoiceOpt::str(h)).collect();
+    if !current.is_empty() && !opts.iter().any(|o| o.label == current) {
+        opts.push(ChoiceOpt::str(current));
+    }
+    let idx = opts.iter().position(|o| o.label == current).unwrap_or(0);
+    (opts, idx)
+}
+
 /// Harness-override selector options: `(none)` + every available harness,
 /// preserving an unknown current value (e.g. a config harness not yet listed)
 /// by appending it. `current` of `None` selects `(none)` (no override).
@@ -936,25 +956,16 @@ fn union_efforts(caps: &HarnessCapabilities) -> Vec<Effort> {
 fn build_card_fields(
     values: &CardValues,
     caps: Option<&HarnessCapabilities>,
+    harnesses: &[String],
     spaces: &[SpaceInfo],
     sessions: &[SessionInfo],
 ) -> Vec<Field> {
     let v = values;
 
     // -- harness -------------------------------------------------------------
-    let mut harness_opts: Vec<ChoiceOpt> = BUILTIN_HARNESSES
-        .iter()
-        .map(|name| ChoiceOpt::str(name))
-        .collect();
-    // Preserve config-defined harnesses on existing cards, even though the TUI
-    // cannot discover arbitrary config names from the capability RPC.
-    if !v.harness.is_empty() && !harness_opts.iter().any(|opt| opt.label == v.harness) {
-        harness_opts.push(ChoiceOpt::str(&v.harness));
-    }
-    let harness_idx = harness_opts
-        .iter()
-        .position(|o| o.label == v.harness)
-        .unwrap_or(0);
+    // Drawn from the shared `harness.list` source (`Form::harnesses`), same list
+    // the column harness_override selector uses; pi stays first (default).
+    let (harness_opts, harness_idx) = harness_choice_opts(harnesses, &v.harness);
 
     // -- model ---------------------------------------------------------------
     let model_in_catalog = caps
@@ -1379,6 +1390,28 @@ mod tests {
     /// Index of a column-field id in the flat field list (for field_visible).
     fn idx_of(form: &Form, id: FieldId) -> usize {
         form.fields.iter().position(|f| f.id == id).unwrap()
+    }
+
+    #[test]
+    fn card_harness_select_consumes_harness_list() {
+        // The card Harness selector draws from the shared `harness.list` source
+        // (Form::harnesses) — the same source as the column harness_override
+        // selector — so config-defined harnesses appear there too, with pi first
+        // (the card default).
+        let mut form = Form::card_create(1);
+        let before = choice_labels(&form, FieldId::Harness);
+        assert_eq!(before, vec!["pi".to_string(), "claude".to_string()]);
+        form.apply_options(
+            None,
+            Some(vec!["pi".into(), "claude".into(), "fake".into()]),
+            None,
+            None,
+        );
+        let after = choice_labels(&form, FieldId::Harness);
+        assert_eq!(
+            after,
+            vec!["pi".to_string(), "claude".to_string(), "fake".to_string()]
+        );
     }
 
     #[test]
