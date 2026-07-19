@@ -1,14 +1,19 @@
 //! Background watchers: the timeout/idle ticker, the LocalSpawner liveness
-//! poller, and the herdr status-event thread. Each maps a completion signal
-//! onto a `finalize_run` per `docs/protocol.md` §4.
+//! poller, and the herdr status-event thread.
+//!
+//! Watchers only OBSERVE: herdr pane statuses and idle expiry are translated
+//! into [`AgentSignal`]s, the pure engine ([`decide_signal`]) decides the card
+//! transition, and [`apply_signal`] is the single application point (DB write,
+//! event, notification). Terminal finalization (`finalize_run`) is reserved
+//! for pane-exit and column-timeout, per `docs/protocol.md` §4.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use board_core::engine::format_duration;
-use board_core::protocol::RunOutcome;
+use board_core::engine::{decide_signal, format_duration, AgentSignal};
+use board_core::protocol::{BoardChangedReason, CardStatus, RunOutcome};
 use board_herdr::{watch_subscriptions, Backoff, HerdrEvent, HerdrEvents, NotificationSound};
 
 use crate::dispatch::finalize_run;
@@ -25,7 +30,10 @@ fn run_open(d: &Arc<Daemon>, run_id: i64) -> bool {
 // -- timeout / idle ticker ---------------------------------------------------
 
 /// Every `tick_ms`: kill runs past their column timeout (→ fail + on_fail) and
-/// mark runs idle beyond `idle_grace_seconds` as `lost`.
+/// move runs idle beyond `idle_grace_seconds` to `awaiting` (the run stays
+/// OPEN for human review — it is never auto-failed). Runs whose card is
+/// `awaiting` are skipped entirely: the column timeout is paused and the idle
+/// check no longer applies.
 pub async fn timeout_ticker(d: Arc<Daemon>) {
     let mut rx = d.shutdown_rx();
     let mut iv = tokio::time::interval(Duration::from_millis(d.settings.tick_ms));
@@ -49,73 +57,140 @@ fn check(d: &Arc<Daemon>) {
 fn check_at(d: &Arc<Daemon>, now: Instant) {
     let idle_grace = Duration::from_secs(d.config.idle_grace_seconds);
 
-    let mut timeouts: Vec<(i64, Duration)> = Vec::new();
-    let mut losts: Vec<i64> = Vec::new();
+    // Snapshot the active runs, then classify. Cards already `awaiting` are
+    // skipped: their run stays open and the column timeout is paused.
+    struct Candidate {
+        run_id: i64,
+        card_id: i64,
+        elapsed: Duration,
+        timed_out: bool,
+        idle_expired: bool,
+    }
+    let mut candidates: Vec<Candidate> = Vec::new();
     {
         let s = d.sched.lock().unwrap();
+        let store = d.store.lock();
         for (run_id, a) in &s.active {
-            if let Some(dl) = a.timeout_deadline {
-                if now >= dl {
-                    timeouts.push((*run_id, now.saturating_duration_since(a.started)));
-                    continue;
-                }
+            let awaiting = store
+                .get_card(a.card_id)
+                .ok()
+                .flatten()
+                .map(|c| c.status == CardStatus::Awaiting)
+                .unwrap_or(false);
+            if awaiting {
+                continue;
             }
-            if let Some(idle) = a.idle_since {
-                if now.duration_since(idle) >= idle_grace {
-                    losts.push(*run_id);
-                }
+            let timed_out = a.timeout_deadline.is_some_and(|dl| now >= dl);
+            let idle_expired = !timed_out
+                && a.idle_since
+                    .is_some_and(|idle| now.duration_since(idle) >= idle_grace);
+            if timed_out || idle_expired {
+                candidates.push(Candidate {
+                    run_id: *run_id,
+                    card_id: a.card_id,
+                    elapsed: now.saturating_duration_since(a.started),
+                    timed_out,
+                    idle_expired,
+                });
             }
         }
     }
 
-    for (run_id, elapsed) in timeouts {
-        if !run_open(d, run_id) {
+    for c in candidates {
+        if !run_open(d, c.run_id) {
             continue;
         }
-        let msg = format!(
-            "run timed out after {}; applying on_fail",
-            format_duration(Some(elapsed.as_secs() as i64))
-        );
-        if let Err(e) = finalize_run(
-            d,
-            run_id,
-            RunOutcome::Fail,
-            Some(msg.clone()),
-            Some(msg),
-            true,
-            true,
-        ) {
-            tracing::warn!("timeout finalize run {run_id}: {e}");
-        }
-    }
-
-    for run_id in losts {
-        if !run_open(d, run_id) {
-            continue;
-        }
-        let msg = "agent went idle without calling `board done`; marking run lost".to_string();
-        let card_id = match finalize_run(
-            d,
-            run_id,
-            RunOutcome::Lost,
-            Some(msg.clone()),
-            Some(msg),
-            false,
-            true,
-        ) {
-            Ok((_, card)) => Some(card.id),
-            Err(e) => {
-                tracing::warn!("lost finalize run {run_id}: {e}");
-                None
-            }
-        };
-        if let Some(cid) = card_id {
-            d.notify(
-                format!("Card #{cid}: agent went idle without finishing"),
-                None,
-                NotificationSound::Request,
+        if c.timed_out {
+            let msg = format!(
+                "run timed out after {}; applying on_fail",
+                format_duration(Some(c.elapsed.as_secs() as i64))
             );
+            if let Err(e) = finalize_run(
+                d,
+                c.run_id,
+                RunOutcome::Fail,
+                Some(msg.clone()),
+                Some(msg),
+                true,
+                true,
+            ) {
+                tracing::warn!("timeout finalize run {}: {e}", c.run_id);
+            }
+        } else if c.idle_expired {
+            // Idle past the grace period without `board done`: the agent may
+            // have finished silently. Awaiting (run open) — never a failure.
+            apply_signal(d, c.run_id, c.card_id, AgentSignal::IdleExpired);
         }
+    }
+}
+
+// -- signal application ------------------------------------------------------
+
+/// The single application point for engine signal decisions: watchers/ticker
+/// emit [`AgentSignal`]s, [`decide_signal`] decides, this writes the decision
+/// to the DB, maintains timeout-pause bookkeeping, and emits the board event
+/// plus any notification. No-op for stale/no-op signals (engine `None`).
+fn apply_signal(d: &Arc<Daemon>, run_id: i64, card_id: i64, signal: AgentSignal) {
+    let card = match d.store.lock().get_card(card_id) {
+        Ok(Some(c)) => c,
+        _ => return,
+    };
+    let Some(dec) = decide_signal(card.status, signal) else {
+        return;
+    };
+
+    let written = match dec.awaiting_reason {
+        Some(reason) => d.store.lock().set_card_awaiting(card_id, reason),
+        None => d.store.lock().set_card_status(card_id, dec.new_status),
+    };
+    if let Err(e) = written {
+        tracing::warn!("apply signal to card {card_id}: {e}");
+        return;
+    }
+
+    // Timeout-pause bookkeeping: entering `awaiting` disarms idle tracking and
+    // stamps the pause start; leaving it shifts the column deadline forward by
+    // the awaiting span so review time never counts against the timeout.
+    {
+        let mut s = d.sched.lock().unwrap();
+        if let Some(a) = s.active.get_mut(&run_id) {
+            match (card.status, dec.new_status) {
+                (before, CardStatus::Awaiting) if before != CardStatus::Awaiting => {
+                    a.idle_since = None;
+                    a.awaiting_since = Some(Instant::now());
+                }
+                (CardStatus::Awaiting, after) if after != CardStatus::Awaiting => {
+                    if let Some(paused) = a.awaiting_since.take() {
+                        if let Some(dl) = &mut a.timeout_deadline {
+                            *dl += paused.elapsed();
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let reason = if dec.new_status == CardStatus::Blocked {
+        BoardChangedReason::RunBlocked
+    } else {
+        BoardChangedReason::CardUpdated
+    };
+    d.emit_changed(reason, Some(card_id), None);
+
+    if let Some(msg) = dec.emit_notification {
+        d.notify(
+            format!("Card #{card_id}: {msg}"),
+            None,
+            NotificationSound::Request,
+        );
+    }
+    if dec.new_status == CardStatus::Blocked {
+        d.notify(
+            format!("Card #{card_id} is blocked (needs input)"),
+            None,
+            NotificationSound::Request,
+        );
     }
 }
 
@@ -269,6 +344,16 @@ fn card_of(d: &Arc<Daemon>, run_id: i64) -> Option<i64> {
         .map(|a| a.card_id)
 }
 
+fn clear_idle(d: &Arc<Daemon>, run_id: i64) {
+    let mut s = d.sched.lock().unwrap();
+    if let Some(a) = s.active.get_mut(&run_id) {
+        a.idle_since = None;
+    }
+}
+
+/// Map one herdr event onto an [`AgentSignal`] (or idle arming) for its run.
+/// Events without a matching active run are stale and ignored; the engine
+/// additionally no-ops signals that don't apply to the card's live status.
 fn handle_event(d: &Arc<Daemon>, ev: HerdrEvent) {
     use board_herdr::AgentStatus;
     match ev {
@@ -282,53 +367,28 @@ fn handle_event(d: &Arc<Daemon>, ev: HerdrEvent) {
                 return;
             };
             match status {
-                AgentStatus::Blocked => {
-                    {
-                        let mut s = d.sched.lock().unwrap();
-                        if let Some(a) = s.active.get_mut(&run_id) {
-                            a.idle_since = None;
-                        }
-                    }
-                    let _ = d
-                        .store
-                        .lock()
-                        .set_card_status(card_id, board_core::protocol::CardStatus::Blocked);
-                    d.emit_changed(
-                        board_core::protocol::BoardChangedReason::RunBlocked,
-                        Some(card_id),
-                        None,
-                    );
-                    d.notify(
-                        format!("Card #{card_id} is blocked (needs input)"),
-                        None,
-                        NotificationSound::Request,
-                    );
+                AgentStatus::Working => {
+                    clear_idle(d, run_id);
+                    apply_signal(d, run_id, card_id, AgentSignal::Working);
                 }
-                AgentStatus::Idle | AgentStatus::Done => {
+                AgentStatus::Blocked => {
+                    clear_idle(d, run_id);
+                    apply_signal(d, run_id, card_id, AgentSignal::Blocked);
+                }
+                // herdr `done` while the run is open (no `board done`): the
+                // agent claims completion — card goes `awaiting` immediately,
+                // no grace period.
+                AgentStatus::Done => {
+                    clear_idle(d, run_id);
+                    apply_signal(d, run_id, card_id, AgentSignal::Done);
+                }
+                // `idle` only arms the grace timer; expiry is the ticker's job.
+                AgentStatus::Idle => {
                     let mut s = d.sched.lock().unwrap();
                     if let Some(a) = s.active.get_mut(&run_id) {
                         if a.idle_since.is_none() {
                             a.idle_since = Some(Instant::now());
                         }
-                    }
-                }
-                AgentStatus::Working => {
-                    {
-                        let mut s = d.sched.lock().unwrap();
-                        if let Some(a) = s.active.get_mut(&run_id) {
-                            a.idle_since = None;
-                        }
-                    }
-                    if d.store
-                        .lock()
-                        .set_card_status(card_id, board_core::protocol::CardStatus::Running)
-                        .is_ok()
-                    {
-                        d.emit_changed(
-                            board_core::protocol::BoardChangedReason::CardUpdated,
-                            Some(card_id),
-                            None,
-                        );
                     }
                 }
                 AgentStatus::Unknown => {}
@@ -368,7 +428,7 @@ mod tests {
     use board_core::config::Config;
     use board_core::db::Db;
     use board_core::protocol::{
-        BoardChangedReason, CardCreateParams, CardStatus, Event, RunOutcome,
+        AwaitingReason, BoardChangedReason, CardCreateParams, CardStatus, Event, RunOutcome,
     };
     use board_core::spawn::SpawnHandle;
     use board_herdr::{AgentStatus, HerdrEvent};
@@ -424,6 +484,7 @@ mod tests {
                 started: Instant::now(),
                 timeout_deadline: None,
                 idle_since: None,
+                awaiting_since: None,
                 is_local: false,
                 pane_id: Some("p1".into()),
             },
@@ -499,7 +560,7 @@ mod tests {
     }
 
     #[test]
-    fn idle_arms_grace_then_becomes_lost_without_sleeping() {
+    fn idle_arms_grace_then_becomes_awaiting_without_sleeping() {
         let (d, run_id, card_id, _events) = active_daemon();
         handle_event(&d, status(AgentStatus::Idle));
         let idle_since = d
@@ -516,14 +577,149 @@ mod tests {
         assert!(d.store.lock().get_run(run_id).unwrap().ended_at.is_none());
         check_at(&d, idle_since + Duration::from_secs(5));
 
+        // Idle past grace → awaiting, NOT lost: the run stays OPEN and the
+        // card is never auto-failed.
+        let db = d.store.lock();
+        let run = db.get_run(run_id).unwrap();
+        assert!(run.ended_at.is_none());
+        assert_eq!(run.outcome, None);
+        let card = db.get_card(card_id).unwrap().unwrap();
+        assert_eq!(card.status, CardStatus::Awaiting);
+        assert_eq!(card.awaiting_reason, Some(AwaitingReason::IdleExpired));
+    }
+
+    #[test]
+    fn herdr_done_enters_awaiting_immediately_without_grace() {
+        let (d, run_id, card_id, mut events) = active_daemon();
+        handle_event(&d, status(AgentStatus::Done));
+
+        let db = d.store.lock();
+        let card = db.get_card(card_id).unwrap().unwrap();
+        assert_eq!(card.status, CardStatus::Awaiting);
+        assert_eq!(card.awaiting_reason, Some(AwaitingReason::AgentDone));
+        assert!(db.get_run(run_id).unwrap().ended_at.is_none());
+        drop(db);
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            Event::BoardChanged {
+                reason: BoardChangedReason::CardUpdated,
+                card_id: Some(id),
+                ..
+            } if id == card_id
+        ));
+        // Idle bookkeeping is disarmed while awaiting.
+        let s = d.sched.lock().unwrap();
+        let a = s.active.get(&run_id).unwrap();
+        assert!(a.idle_since.is_none());
+        assert!(a.awaiting_since.is_some());
+    }
+
+    #[test]
+    fn working_resumes_running_from_awaiting_and_shifts_the_timeout() {
+        let (d, run_id, card_id, _events) = active_daemon();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        d.sched
+            .lock()
+            .unwrap()
+            .active
+            .get_mut(&run_id)
+            .unwrap()
+            .timeout_deadline = Some(deadline);
+
+        handle_event(&d, status(AgentStatus::Done));
         assert_eq!(
-            d.store.lock().get_run(run_id).unwrap().outcome,
-            Some(RunOutcome::Lost)
+            d.store.lock().get_card(card_id).unwrap().unwrap().status,
+            CardStatus::Awaiting
+        );
+        // Simulate review time passing while awaiting.
+        let paused = d
+            .sched
+            .lock()
+            .unwrap()
+            .active
+            .get(&run_id)
+            .unwrap()
+            .awaiting_since
+            .unwrap();
+        d.sched
+            .lock()
+            .unwrap()
+            .active
+            .get_mut(&run_id)
+            .unwrap()
+            .awaiting_since = Some(paused - Duration::from_secs(30));
+
+        handle_event(&d, status(AgentStatus::Working));
+
+        let card = d.store.lock().get_card(card_id).unwrap().unwrap();
+        assert_eq!(card.status, CardStatus::Running);
+        assert_eq!(card.awaiting_reason, None);
+        let a = d.sched.lock().unwrap().active.remove(&run_id).unwrap();
+        assert!(a.awaiting_since.is_none());
+        // The column timeout was paused: the deadline absorbed the review span.
+        assert!(a.timeout_deadline.unwrap() >= deadline + Duration::from_secs(29));
+    }
+
+    #[test]
+    fn ticker_skips_awaiting_runs_for_both_idle_and_timeout() {
+        let (d, run_id, card_id, _events) = active_daemon();
+        handle_event(&d, status(AgentStatus::Done));
+        {
+            let mut s = d.sched.lock().unwrap();
+            let a = s.active.get_mut(&run_id).unwrap();
+            a.idle_since = Some(Instant::now() - Duration::from_secs(3600));
+            a.timeout_deadline = Some(Instant::now() - Duration::from_secs(60));
+        }
+
+        check_at(&d, Instant::now());
+
+        let db = d.store.lock();
+        let run = db.get_run(run_id).unwrap();
+        assert!(run.ended_at.is_none());
+        assert_eq!(run.outcome, None);
+        let card = db.get_card(card_id).unwrap().unwrap();
+        assert_eq!(card.status, CardStatus::Awaiting);
+        assert_eq!(card.awaiting_reason, Some(AwaitingReason::AgentDone));
+    }
+
+    #[test]
+    fn timeout_still_finalizes_fail_when_not_awaiting() {
+        let (d, run_id, card_id, _events) = active_daemon();
+        let started = Instant::now() - Duration::from_secs(120);
+        {
+            let mut s = d.sched.lock().unwrap();
+            let a = s.active.get_mut(&run_id).unwrap();
+            a.started = started;
+            a.timeout_deadline = Some(started + Duration::from_secs(60));
+        }
+
+        check_at(&d, Instant::now());
+
+        let db = d.store.lock();
+        assert_eq!(db.get_run(run_id).unwrap().outcome, Some(RunOutcome::Fail));
+        assert_eq!(
+            db.get_card(card_id).unwrap().unwrap().status,
+            CardStatus::Failed
+        );
+    }
+
+    #[test]
+    fn stale_status_events_without_an_active_run_are_ignored() {
+        let (d, _run_id, card_id, mut events) = active_daemon();
+        handle_event(
+            &d,
+            HerdrEvent::AgentStatusChanged {
+                pane_id: "ghost-pane".into(),
+                workspace_id: Some("w1".into()),
+                status: AgentStatus::Done,
+                agent: Some("pi".into()),
+            },
         );
         assert_eq!(
             d.store.lock().get_card(card_id).unwrap().unwrap().status,
-            CardStatus::Failed
+            CardStatus::Running
         );
+        assert!(events.try_recv().is_err());
     }
 
     #[test]

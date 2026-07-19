@@ -390,9 +390,12 @@ fn retry_creates_new_forked_run() {
 
     let done = poll(&mut c, 15, |c| {
         let d = c.card_get(card.id).unwrap();
-        d.card.status == CardStatus::Idle && d.runs.iter().any(|r| r.ended_at.is_some())
+        d.card.status == CardStatus::Done && d.runs.iter().any(|r| r.ended_at.is_some())
     });
-    assert!(done, "first run should finish and card go idle");
+    assert!(
+        done,
+        "first run should finish and the card go done (ok, no target column)"
+    );
     let first = c.card_get(card.id).unwrap();
     let session = first.card.session_id.clone();
     assert!(session.is_some(), "first run mints a session");

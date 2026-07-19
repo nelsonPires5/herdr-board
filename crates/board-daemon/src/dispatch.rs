@@ -292,6 +292,7 @@ async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result<bool> {
                 started: Instant::now(),
                 timeout_deadline: deadline,
                 idle_since: None,
+                awaiting_since: None,
                 is_local,
                 pane_id,
             },
@@ -308,6 +309,8 @@ async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result<bool> {
 
 /// Prompt env is only for config-defined harness templates. Built-ins carry
 /// their prompt/system instructions in argv and must not receive reconstruction.
+/// The board-protocol trailer is unconditional: every custom-harness run gets
+/// BOARD_SYSTEM_PROMPT even when the column sets no system prompt.
 fn harness_prompt_env(
     harness: &str,
     prompt: &str,
@@ -316,11 +319,13 @@ fn harness_prompt_env(
     if is_builtin_harness(harness) {
         return Vec::new();
     }
-    let mut env = vec![("BOARD_PROMPT".to_string(), prompt.to_string())];
-    if let Some(system_prompt) = system_prompt {
-        env.push(("BOARD_SYSTEM_PROMPT".to_string(), system_prompt.to_string()));
-    }
-    env
+    vec![
+        ("BOARD_PROMPT".to_string(), prompt.to_string()),
+        (
+            "BOARD_SYSTEM_PROMPT".to_string(),
+            board_core::harness::protocol_system_prompt(system_prompt),
+        ),
+    ]
 }
 
 /// Finish a never-started (queued) run as `fail` after a spawn error.
@@ -651,7 +656,21 @@ mod tests {
             harness_prompt_env("fake", "prompt", Some("system")),
             vec![
                 ("BOARD_PROMPT".into(), "prompt".into()),
-                ("BOARD_SYSTEM_PROMPT".into(), "system".into()),
+                (
+                    "BOARD_SYSTEM_PROMPT".into(),
+                    board_core::harness::protocol_system_prompt(Some("system")),
+                ),
+            ]
+        );
+        // No column prompt → the trailer alone, never a missing env var.
+        assert_eq!(
+            harness_prompt_env("fake", "prompt", None),
+            vec![
+                ("BOARD_PROMPT".into(), "prompt".into()),
+                (
+                    "BOARD_SYSTEM_PROMPT".into(),
+                    board_core::harness::protocol_system_prompt(None),
+                ),
             ]
         );
     }

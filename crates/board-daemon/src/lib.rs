@@ -248,6 +248,7 @@ async fn adopt_runs(d: &Arc<Daemon>) {
                     started: std::time::Instant::now(),
                     timeout_deadline: deadline,
                     idle_since: None,
+                    awaiting_since: None,
                     is_local: false,
                     pane_id: run.herdr_pane_id.clone(),
                 },

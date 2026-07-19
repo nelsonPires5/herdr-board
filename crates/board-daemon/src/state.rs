@@ -30,6 +30,9 @@ pub struct ActiveRun {
     pub timeout_deadline: Option<Instant>,
     /// When the agent last went idle (herdr status), for idle-grace detection.
     pub idle_since: Option<Instant>,
+    /// When the card entered `awaiting`. While set the column timeout is
+    /// paused; on exit the deadline is shifted forward by the awaiting span.
+    pub awaiting_since: Option<Instant>,
     pub is_local: bool,
     pub pane_id: Option<String>,
 }

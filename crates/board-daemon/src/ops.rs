@@ -426,6 +426,13 @@ fn run_retry(d: &Arc<Daemon>, p: RunCardParams) -> Result<Value> {
             "archived card must be restored before retrying".into(),
         ));
     }
+    if card.status == CardStatus::Awaiting {
+        // An awaiting card's run is still OPEN (pending human review); a retry
+        // would stack a second open run on the same card.
+        return Err(Error::InvalidState(
+            "card is awaiting review; confirm with `board done` or cancel the run first".into(),
+        ));
+    }
     if matches!(card.status, CardStatus::Running | CardStatus::Queued) {
         return Err(Error::InvalidState(
             "card is running or queued; cannot retry".into(),
@@ -641,6 +648,58 @@ mod tests {
             .unwrap()
             .iter()
             .any(|(_, queued)| queued.id == card["id"].as_i64().unwrap()));
+    }
+
+    #[test]
+    fn run_done_ok_without_target_column_marks_card_done() {
+        let d = test_daemon(Config::default());
+        let (card_id, run_id) = {
+            let db = d.store.lock();
+            let card = db
+                .create_card(&CardCreateParams {
+                    title: "confirm me".into(),
+                    ..Default::default()
+                })
+                .unwrap();
+            let run = db
+                .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
+                .unwrap();
+            db.start_run(run.id, Some("w1"), Some("p1")).unwrap();
+            // Simulate the pre-confirmation state: awaiting human review.
+            db.set_card_awaiting(card.id, AwaitingReason::AgentDone)
+                .unwrap();
+            (card.id, run.id)
+        };
+
+        let res =
+            handle_request(&d, "run.done", json!({"card_id": card_id, "outcome": "ok"})).unwrap();
+
+        // The seed Todo column has no on_success target: confirmed completion
+        // lands on `done` (not `idle`), clearing the awaiting reason.
+        assert_eq!(res["run"]["id"], run_id);
+        assert_eq!(res["run"]["outcome"], "ok");
+        assert_eq!(res["card"]["status"], "done");
+        assert!(res["card"]["awaiting_reason"].is_null());
+    }
+
+    #[test]
+    fn run_retry_rejects_an_awaiting_card() {
+        let d = test_daemon(Config::default());
+        let card_id = {
+            let db = d.store.lock();
+            let card = db
+                .create_card(&CardCreateParams {
+                    title: "awaiting".into(),
+                    ..Default::default()
+                })
+                .unwrap();
+            db.set_card_awaiting(card.id, AwaitingReason::IdleExpired)
+                .unwrap();
+            card.id
+        };
+        let err = handle_request(&d, "run.retry", json!({"card_id": card_id})).unwrap_err();
+        assert_eq!(err.code(), 3);
+        assert!(err.to_string().contains("awaiting review"));
     }
 
     fn add_run_with_pane(d: &Arc<Daemon>, pane: Option<&str>) -> i64 {
