@@ -20,11 +20,28 @@ All notable changes to this project are documented here. The format is based on
   mapped — the cause of stale-daemon version drift after an update. README `Maintenance` now
   documents the update flow and a full uninstall (stop the daemon first, since Herdr's plugin
   uninstall has no lifecycle hook and leaves the detached daemon running).
+- `HarnessMeta` adapter trait in `board-core` is the single daemon-side source of truth for harness
+  models/efforts/permissions; built-in `pi`/`claude` and config-defined harnesses all implement it
+  and produce the existing `HarnessCapabilities` wire DTO via `from_meta`.
+- `harness.list` RPC returns every harness the daemon knows (built-ins `pi`/`claude` plus every
+  config-defined `[harness.NAME]`, sorted) so the TUI can offer config-defined harnesses without a
+  client-side config read.
+- The `pi` harness now reports a **live** model catalog (real `provider/model` ids with per-model
+  efforts from each model's `thinkingLevelMap`) instead of always `models:[]`. The daemon reads
+  `$PI_CODING_AGENT_DIR`/`~/.pi/agent` (`auth.json` + `models-store.json`), filters to authenticated
+  providers, and falls back to `pi --list-models` then the static catalog. `model_freeform` stays
+  `true`.
 
 ### Changed
 - Scope-sensitive CLI commands use Git root/CWD (overridable with `BOARD_SCOPE_PATH`), while
   card-id operations and `move` infer the card's own board. Legacy protocol requests without
   `board_id` continue to target `Global`.
+- The card-create/edit and column-config forms now share one harness-metadata source
+  (`harness.capabilities` + `harness.list`). In the column config form, `harness_override` is a
+  **select** over the available harnesses (built-ins + config-defined, `(none)` = no override)
+  instead of free text, `effort_override` follows the override harness's catalog, and
+  `permission_override` is **hidden** for permission-less harnesses (e.g. Pi). Changing the
+  override harness refetches capabilities and resets only the overrides that became invalid.
 
 ## [0.5.0] - 2026-07-18
 
