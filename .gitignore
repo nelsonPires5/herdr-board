@@ -2,3 +2,4 @@
 *.snap.new
 daemon.log
 __pycache__/
+worktree/
