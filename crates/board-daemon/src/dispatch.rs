@@ -372,9 +372,11 @@ fn register_spawned_run(
             return Ok(false);
         }
         let card = card.ok_or_else(|| Error::NotFound(format!("card {}", run.card_id)))?;
-        let spawned = handle
-            .as_ref()
-            .expect("spawn handle remains available until registration succeeds");
+        let spawned = handle.as_ref().ok_or_else(|| {
+            Error::InvalidState(format!(
+                "run {run_id} registration lost its spawn handle before promotion"
+            ))
+        })?;
         let is_local = spawned.pid.is_some();
         let pane_id = spawned.pane_id.clone();
         db.start_run(
@@ -383,13 +385,16 @@ fn register_spawned_run(
             spawned.pane_id.as_deref(),
         )?;
         db.set_card_status(card.id, CardStatus::Running)?;
+        let registered_handle = handle.take().ok_or_else(|| {
+            Error::InvalidState(format!(
+                "run {run_id} registration lost its spawn handle before bookkeeping"
+            ))
+        })?;
         sched.active.insert(
             run_id,
             ActiveRun {
                 card_id: card.id,
-                handle: handle
-                    .take()
-                    .expect("spawn handle is consumed only by successful registration"),
+                handle: registered_handle,
                 started,
                 timeout_deadline,
                 idle_since: None,
