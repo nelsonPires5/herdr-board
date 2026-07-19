@@ -16,7 +16,7 @@ use board_core::engine::{decide_signal, format_duration, AgentSignal};
 use board_core::protocol::{BoardChangedReason, CardStatus, RunOutcome};
 use board_herdr::{watch_subscriptions, Backoff, HerdrEvent, HerdrEvents, NotificationSound};
 
-use crate::dispatch::finalize_run;
+use crate::dispatch::{finalize_run, finalize_run_timeout};
 use crate::state::Daemon;
 
 /// Is the run still open (started, not ended) in the DB?
@@ -97,17 +97,15 @@ fn check_at(d: &Arc<Daemon>, now: Instant) {
     }
 
     for c in candidates {
-        if !run_open(d, c.run_id) {
-            continue;
-        }
         if c.timed_out {
             let msg = format!(
                 "run timed out after {}; applying on_fail",
                 format_duration(Some(c.elapsed.as_secs() as i64))
             );
-            if let Err(e) = finalize_run(
+            if let Err(e) = finalize_run_timeout(
                 d,
                 c.run_id,
+                now,
                 RunOutcome::Fail,
                 Some(msg.clone()),
                 Some(msg),
@@ -130,64 +128,74 @@ fn check_at(d: &Arc<Daemon>, now: Instant) {
 /// emit [`AgentSignal`]s, [`decide_signal`] decides, this writes the decision
 /// to the DB, maintains timeout-pause bookkeeping, and emits the board event
 /// plus any notification. No-op for stale/no-op signals (engine `None`).
-fn apply_signal(d: &Arc<Daemon>, run_id: i64, card_id: i64, signal: AgentSignal) {
-    let card = match d.store.lock().get_card(card_id) {
-        Ok(Some(c)) => c,
-        _ => return,
-    };
-    let Some(dec) = decide_signal(card.status, signal) else {
-        return;
-    };
+pub(crate) fn apply_signal(d: &Arc<Daemon>, run_id: i64, card_id: i64, signal: AgentSignal) {
+    let now = Instant::now();
+    let dec = {
+        // Signals and finalizers share one lock order. The exact active run and
+        // its open DB row are revalidated while both locks are held, so a run
+        // removed by finalization can never write the card afterward.
+        let mut sched = d.sched.lock().unwrap();
+        let Some(active) = sched.active.get_mut(&run_id) else {
+            return;
+        };
+        if active.card_id != card_id {
+            return;
+        }
+        let db = d.store.lock();
+        let run = match db.get_run(run_id) {
+            Ok(run) => run,
+            Err(_) => return,
+        };
+        if run.card_id != card_id || run.started_at.is_none() || run.ended_at.is_some() {
+            return;
+        }
+        let card = match db.get_card(card_id) {
+            Ok(Some(card)) => card,
+            _ => return,
+        };
+        let Some(dec) = decide_signal(card.status, signal) else {
+            return;
+        };
 
-    let written = match dec.awaiting_reason {
-        Some(reason) => d.store.lock().set_card_awaiting(card_id, reason),
-        None => d.store.lock().set_card_status(card_id, dec.new_status),
-    };
-    if let Err(e) = written {
-        tracing::warn!("apply signal to card {card_id}: {e}");
-        return;
-    }
+        let written = match dec.awaiting_reason {
+            Some(reason) => db.set_card_awaiting(card_id, reason),
+            None => db.set_card_status(card_id, dec.new_status),
+        };
+        if let Err(e) = written {
+            tracing::warn!("apply signal to card {card_id}: {e}");
+            return;
+        }
 
-    // Timeout-pause bookkeeping: entering `awaiting` disarms idle tracking and
-    // stamps the pause start; leaving it shifts the column deadline forward by
-    // the awaiting span so review time never counts against the timeout.
-    {
-        let mut s = d.sched.lock().unwrap();
-        if let Some(a) = s.active.get_mut(&run_id) {
-            match (card.status, dec.new_status) {
-                (before, CardStatus::Awaiting) if before != CardStatus::Awaiting => {
-                    a.idle_since = None;
-                    a.awaiting_since = Some(Instant::now());
-                }
-                (CardStatus::Awaiting, after) if after != CardStatus::Awaiting => {
-                    if let Some(paused) = a.awaiting_since.take() {
-                        if let Some(dl) = &mut a.timeout_deadline {
-                            *dl += paused.elapsed();
-                        }
+        // Timeout-pause bookkeeping is committed under the same locks as the
+        // status write. Entering awaiting disarms idle tracking; leaving it
+        // shifts the deadline by exactly the review span.
+        match (card.status, dec.new_status) {
+            (before, CardStatus::Awaiting) if before != CardStatus::Awaiting => {
+                active.idle_since = None;
+                active.awaiting_since = Some(now);
+            }
+            (CardStatus::Awaiting, after) if after != CardStatus::Awaiting => {
+                if let Some(paused) = active.awaiting_since.take() {
+                    if let Some(deadline) = &mut active.timeout_deadline {
+                        *deadline += now.saturating_duration_since(paused);
                     }
                 }
-                _ => {}
             }
+            _ => {}
         }
-    }
+        dec
+    };
 
+    // Effects are deliberately outside both locks.
     let reason = if dec.new_status == CardStatus::Blocked {
         BoardChangedReason::RunBlocked
     } else {
         BoardChangedReason::CardUpdated
     };
     d.emit_changed(reason, Some(card_id), None);
-
     if let Some(msg) = dec.emit_notification {
         d.notify(
             format!("Card #{card_id}: {msg}"),
-            None,
-            NotificationSound::Request,
-        );
-    }
-    if dec.new_status == CardStatus::Blocked {
-        d.notify(
-            format!("Card #{card_id} is blocked (needs input)"),
             None,
             NotificationSound::Request,
         );
@@ -420,7 +428,8 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use super::{check_at, handle_event};
+    use super::{apply_signal, check_at, handle_event, AgentSignal};
+    use crate::dispatch::{finalize_run, finalize_run_timeout};
     use crate::settings::DaemonSettings;
     use crate::spawner::LocalSpawner;
     use crate::state::{ActiveRun, Daemon};
@@ -680,6 +689,67 @@ mod tests {
         let card = db.get_card(card_id).unwrap().unwrap();
         assert_eq!(card.status, CardStatus::Awaiting);
         assert_eq!(card.awaiting_reason, Some(AwaitingReason::AgentDone));
+    }
+
+    #[test]
+    fn stale_signal_after_terminal_completion_is_ignored() {
+        let (d, run_id, card_id, mut events) = active_daemon();
+        finalize_run(&d, run_id, RunOutcome::Ok, None, None, false, true).unwrap();
+        while events.try_recv().is_ok() {}
+
+        apply_signal(&d, run_id, card_id, AgentSignal::Done);
+
+        let db = d.store.lock();
+        assert_eq!(db.get_run(run_id).unwrap().outcome, Some(RunOutcome::Ok));
+        assert_eq!(
+            db.get_card(card_id).unwrap().unwrap().status,
+            CardStatus::Done
+        );
+        assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn preclassified_timeout_is_rejected_after_done_enters_awaiting() {
+        let (d, run_id, card_id, _events) = active_daemon();
+        let now = Instant::now();
+        d.sched
+            .lock()
+            .unwrap()
+            .active
+            .get_mut(&run_id)
+            .unwrap()
+            .timeout_deadline = Some(now - Duration::from_secs(1));
+        assert!(d
+            .sched
+            .lock()
+            .unwrap()
+            .active
+            .get(&run_id)
+            .unwrap()
+            .timeout_deadline
+            .is_some_and(|deadline| now >= deadline));
+
+        // This signal wins after timeout classification but before its claim.
+        apply_signal(&d, run_id, card_id, AgentSignal::Done);
+        let finalized = finalize_run_timeout(
+            &d,
+            run_id,
+            now,
+            RunOutcome::Fail,
+            Some("stale timeout".into()),
+            Some("stale timeout".into()),
+            true,
+            true,
+        )
+        .unwrap();
+        assert!(finalized.is_none());
+
+        let db = d.store.lock();
+        assert!(db.get_run(run_id).unwrap().ended_at.is_none());
+        assert_eq!(
+            db.get_card(card_id).unwrap().unwrap().status,
+            CardStatus::Awaiting
+        );
     }
 
     #[test]

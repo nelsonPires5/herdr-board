@@ -358,41 +358,106 @@ pub fn finalize_run(
     kill: bool,
     transition: bool,
 ) -> Result<(Run, Card)> {
-    // Remove from the in-memory active set, capturing elapsed + handle.
-    let removed = d.sched.lock().unwrap().active.remove(&run_id);
-    let elapsed = removed
-        .as_ref()
-        .map(|a| a.started.elapsed().as_secs() as i64);
+    finalize_run_inner(
+        d,
+        run_id,
+        outcome,
+        summary,
+        extra_comment,
+        kill,
+        transition,
+        None,
+    )?
+    .ok_or_else(|| Error::InvalidState(format!("run {run_id} could not be claimed")))
+}
 
-    // Idempotency: if another path already finalized this run, do nothing.
-    {
+/// Finalize a run selected by the timeout ticker, but only if its current DB
+/// card is still non-awaiting at the atomic scheduler/DB claim point. A stale
+/// timeout candidate returns `None` and leaves the run open.
+#[allow(clippy::too_many_arguments)]
+pub fn finalize_run_timeout(
+    d: &Arc<Daemon>,
+    run_id: i64,
+    timeout_at: Instant,
+    outcome: RunOutcome,
+    summary: Option<String>,
+    extra_comment: Option<String>,
+    kill: bool,
+    transition: bool,
+) -> Result<Option<(Run, Card)>> {
+    finalize_run_inner(
+        d,
+        run_id,
+        outcome,
+        summary,
+        extra_comment,
+        kill,
+        transition,
+        Some(timeout_at),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finalize_run_inner(
+    d: &Arc<Daemon>,
+    run_id: i64,
+    outcome: RunOutcome,
+    summary: Option<String>,
+    extra_comment: Option<String>,
+    kill: bool,
+    transition: bool,
+    timeout_at: Option<Instant>,
+) -> Result<Option<(Run, Card)>> {
+    // One claim order everywhere: scheduler, then store. Ending the DB row
+    // while both are held means a removed run is already terminal before any
+    // competing finalizer or signal can inspect it.
+    let (removed, elapsed, finished) = {
+        let mut sched = d.sched.lock().unwrap();
         let db = d.store.lock();
         let existing = db.get_run(run_id)?;
         if existing.ended_at.is_some() {
             let card = db
                 .get_card(existing.card_id)?
                 .ok_or_else(|| Error::NotFound(format!("card {}", existing.card_id)))?;
-            return Ok((existing, card));
+            return Ok(Some((existing, card)));
         }
-    }
+
+        if let Some(classified_at) = timeout_at {
+            let active_still_due = sched.active.get(&run_id).is_some_and(|active| {
+                active.card_id == existing.card_id
+                    && active
+                        .timeout_deadline
+                        .is_some_and(|deadline| classified_at >= deadline)
+            });
+            let card_is_awaiting = db
+                .get_card(existing.card_id)?
+                .is_some_and(|card| card.status == CardStatus::Awaiting);
+            if !active_still_due || existing.started_at.is_none() || card_is_awaiting {
+                return Ok(None);
+            }
+        }
+
+        let removed = sched.active.remove(&run_id);
+        let elapsed = removed
+            .as_ref()
+            .map(|active| active.started.elapsed().as_secs() as i64);
+        let finished = db.finish_run(run_id, outcome, summary.as_deref())?;
+        (removed, elapsed, finished)
+    };
 
     if kill {
-        if let Some(a) = &removed {
-            if let Err(e) = d.spawner.kill(&a.handle) {
+        if let Some(active) = &removed {
+            if let Err(e) = d.spawner.kill(&active.handle) {
                 tracing::warn!("kill run {run_id} failed: {e}");
             }
         }
     }
     d.refresh_watch();
 
-    let (finished, card_id, column_id) = {
-        let db = d.store.lock();
-        let finished = db.finish_run(run_id, outcome, summary.as_deref())?;
-        (finished.clone(), finished.card_id, finished.column_id)
-    };
-
-    if let Some(c) = &extra_comment {
-        d.store.lock().add_comment(card_id, "system", c)?;
+    let card_id = finished.card_id;
+    let column_id = finished.column_id;
+    if let Some(comment) = &extra_comment {
+        d.store.lock().add_comment(card_id, "system", comment)?;
     }
 
     let card = if transition {
@@ -423,7 +488,7 @@ pub fn finalize_run(
 
     d.emit_run_ended(card_id, run_id, outcome);
     d.wake_dispatch();
-    Ok((finished, card))
+    Ok(Some((finished, card)))
 }
 
 /// Apply a transition decision: move the card, enqueue the next auto run (with

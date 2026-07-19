@@ -156,10 +156,8 @@ fn column_delete(d: &Arc<Daemon>, p: ColumnDeleteParams) -> Result<Value> {
     {
         let db = d.store.lock();
         let cards = db.list_cards_in_column(p.id)?;
-        let has_active = cards
-            .iter()
-            .any(|c| matches!(c.status, CardStatus::Running | CardStatus::Queued));
-        validate_column_delete(!cards.is_empty(), has_active, p.move_cards_to)?;
+        let has_open_run = db.column_has_open_run(p.id)?;
+        validate_column_delete(!cards.is_empty(), has_open_run, p.move_cards_to)?;
         db.delete_column(p.id, p.move_cards_to)?;
     }
     d.emit_changed(BoardChangedReason::ColumnChanged, None, None);
@@ -426,16 +424,9 @@ fn run_retry(d: &Arc<Daemon>, p: RunCardParams) -> Result<Value> {
             "archived card must be restored before retrying".into(),
         ));
     }
-    if card.status == CardStatus::Awaiting {
-        // An awaiting card's run is still OPEN (pending human review); a retry
-        // would stack a second open run on the same card.
+    if d.store.lock().open_run_for_card(p.card_id)?.is_some() {
         return Err(Error::InvalidState(
-            "card is awaiting review; confirm with `board done` or cancel the run first".into(),
-        ));
-    }
-    if matches!(card.status, CardStatus::Running | CardStatus::Queued) {
-        return Err(Error::InvalidState(
-            "card is running or queued; cannot retry".into(),
+            "card has an open run; complete or cancel it before retrying".into(),
         ));
     }
     // Human action: reset the auto-chain counter and fork the session.
@@ -683,23 +674,89 @@ mod tests {
     }
 
     #[test]
-    fn run_retry_rejects_an_awaiting_card() {
-        let d = test_daemon(Config::default());
-        let card_id = {
-            let db = d.store.lock();
-            let card = db
-                .create_card(&CardCreateParams {
-                    title: "awaiting".into(),
-                    ..Default::default()
-                })
-                .unwrap();
-            db.set_card_awaiting(card.id, AwaitingReason::IdleExpired)
-                .unwrap();
-            card.id
-        };
-        let err = handle_request(&d, "run.retry", json!({"card_id": card_id})).unwrap_err();
-        assert_eq!(err.code(), 3);
-        assert!(err.to_string().contains("awaiting review"));
+    fn run_retry_rejects_every_kind_of_open_run_from_db_truth() {
+        for (status, started) in [
+            (CardStatus::Queued, false),
+            (CardStatus::Blocked, true),
+            (CardStatus::Awaiting, true),
+        ] {
+            let d = test_daemon(Config::default());
+            let card_id = {
+                let db = d.store.lock();
+                let card = db
+                    .create_card(&CardCreateParams {
+                        title: format!("{status:?}"),
+                        ..Default::default()
+                    })
+                    .unwrap();
+                let run = db
+                    .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
+                    .unwrap();
+                if started {
+                    db.start_run(run.id, Some("w1"), Some("p1")).unwrap();
+                }
+                if status == CardStatus::Awaiting {
+                    db.set_card_awaiting(card.id, AwaitingReason::IdleExpired)
+                        .unwrap();
+                } else {
+                    db.set_card_status(card.id, status).unwrap();
+                }
+                card.id
+            };
+            let err = handle_request(&d, "run.retry", json!({"card_id": card_id})).unwrap_err();
+            assert_eq!(err.code(), 3);
+            assert!(err.to_string().contains("open run"));
+        }
+    }
+
+    #[test]
+    fn column_delete_rejects_queued_blocked_and_awaiting_open_runs() {
+        for (status, started) in [
+            (CardStatus::Queued, false),
+            (CardStatus::Blocked, true),
+            (CardStatus::Awaiting, true),
+        ] {
+            let d = test_daemon(Config::default());
+            let (source_id, target_id) = {
+                let db = d.store.lock();
+                let target_id = db.default_column_id(BOARD_ID).unwrap();
+                let source = db
+                    .create_column(&ColumnCreateParams {
+                        name: "Source".into(),
+                        ..Default::default()
+                    })
+                    .unwrap();
+                let card = db
+                    .create_card(&CardCreateParams {
+                        title: format!("{status:?}"),
+                        column_id: Some(source.id),
+                        ..Default::default()
+                    })
+                    .unwrap();
+                let run = db
+                    .create_run(card.id, source.id, "pi", "[]", "p", None, None)
+                    .unwrap();
+                if started {
+                    db.start_run(run.id, Some("w1"), Some("p1")).unwrap();
+                }
+                if status == CardStatus::Awaiting {
+                    db.set_card_awaiting(card.id, AwaitingReason::AgentDone)
+                        .unwrap();
+                } else {
+                    db.set_card_status(card.id, status).unwrap();
+                }
+                (source.id, target_id)
+            };
+
+            let err = handle_request(
+                &d,
+                "column.delete",
+                json!({"id": source_id, "move_cards_to": target_id}),
+            )
+            .unwrap_err();
+            assert_eq!(err.code(), 3);
+            assert!(err.to_string().contains("open run"));
+        }
     }
 
     fn add_run_with_pane(d: &Arc<Daemon>, pane: Option<&str>) -> i64 {
