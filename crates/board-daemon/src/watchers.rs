@@ -52,84 +52,133 @@ fn check(d: &Arc<Daemon>) {
     check_at(d, Instant::now());
 }
 
+#[derive(Debug)]
+struct Candidate {
+    run_id: i64,
+    card_id: i64,
+    elapsed: Duration,
+    timed_out: bool,
+    observed_idle_since: Option<Instant>,
+}
+
+/// Snapshot and classify active runs. Cards already `awaiting` are skipped:
+/// their run stays open and the column timeout is paused.
+fn classify_candidates(d: &Arc<Daemon>, now: Instant) -> Vec<Candidate> {
+    let idle_grace = Duration::from_secs(d.config.idle_grace_seconds);
+    let mut candidates = Vec::new();
+    let s = d.sched.lock().unwrap();
+    let store = d.store.lock();
+    for (run_id, a) in &s.active {
+        let awaiting = store
+            .get_card(a.card_id)
+            .ok()
+            .flatten()
+            .map(|c| c.status == CardStatus::Awaiting)
+            .unwrap_or(false);
+        if awaiting {
+            continue;
+        }
+        let timed_out = a.timeout_deadline.is_some_and(|dl| now >= dl);
+        let observed_idle_since = (!timed_out)
+            .then_some(a.idle_since)
+            .flatten()
+            .filter(|idle| now.saturating_duration_since(*idle) >= idle_grace);
+        if timed_out || observed_idle_since.is_some() {
+            candidates.push(Candidate {
+                run_id: *run_id,
+                card_id: a.card_id,
+                elapsed: now.saturating_duration_since(a.started),
+                timed_out,
+                observed_idle_since,
+            });
+        }
+    }
+    candidates
+}
+
+fn apply_candidate(d: &Arc<Daemon>, c: Candidate, now: Instant) {
+    if c.timed_out {
+        let msg = format!(
+            "run timed out after {}; applying on_fail",
+            format_duration(Some(c.elapsed.as_secs() as i64))
+        );
+        if let Err(e) = finalize_run_timeout(
+            d,
+            c.run_id,
+            now,
+            RunOutcome::Fail,
+            Some(msg.clone()),
+            Some(msg),
+            true,
+            true,
+        ) {
+            tracing::warn!("timeout finalize run {}: {e}", c.run_id);
+        }
+    } else if let Some(observed_idle_since) = c.observed_idle_since {
+        // Idle past the grace period without `board done`: the agent may have
+        // finished silently. Awaiting (run open) — never a failure. Revalidate
+        // the exact idle observation because a newer Working event may have
+        // cleared or replaced it since classification.
+        apply_idle_expired(d, c.run_id, c.card_id, observed_idle_since, now);
+    }
+}
+
 /// Deterministic timeout/idle pass. Tests inject `now`; the ticker uses the
 /// current monotonic instant.
 fn check_at(d: &Arc<Daemon>, now: Instant) {
-    let idle_grace = Duration::from_secs(d.config.idle_grace_seconds);
-
-    // Snapshot the active runs, then classify. Cards already `awaiting` are
-    // skipped: their run stays open and the column timeout is paused.
-    struct Candidate {
-        run_id: i64,
-        card_id: i64,
-        elapsed: Duration,
-        timed_out: bool,
-        idle_expired: bool,
-    }
-    let mut candidates: Vec<Candidate> = Vec::new();
-    {
-        let s = d.sched.lock().unwrap();
-        let store = d.store.lock();
-        for (run_id, a) in &s.active {
-            let awaiting = store
-                .get_card(a.card_id)
-                .ok()
-                .flatten()
-                .map(|c| c.status == CardStatus::Awaiting)
-                .unwrap_or(false);
-            if awaiting {
-                continue;
-            }
-            let timed_out = a.timeout_deadline.is_some_and(|dl| now >= dl);
-            let idle_expired = !timed_out
-                && a.idle_since
-                    .is_some_and(|idle| now.duration_since(idle) >= idle_grace);
-            if timed_out || idle_expired {
-                candidates.push(Candidate {
-                    run_id: *run_id,
-                    card_id: a.card_id,
-                    elapsed: now.saturating_duration_since(a.started),
-                    timed_out,
-                    idle_expired,
-                });
-            }
-        }
-    }
-
-    for c in candidates {
-        if c.timed_out {
-            let msg = format!(
-                "run timed out after {}; applying on_fail",
-                format_duration(Some(c.elapsed.as_secs() as i64))
-            );
-            if let Err(e) = finalize_run_timeout(
-                d,
-                c.run_id,
-                now,
-                RunOutcome::Fail,
-                Some(msg.clone()),
-                Some(msg),
-                true,
-                true,
-            ) {
-                tracing::warn!("timeout finalize run {}: {e}", c.run_id);
-            }
-        } else if c.idle_expired {
-            // Idle past the grace period without `board done`: the agent may
-            // have finished silently. Awaiting (run open) — never a failure.
-            apply_signal(d, c.run_id, c.card_id, AgentSignal::IdleExpired);
-        }
+    for candidate in classify_candidates(d, now) {
+        apply_candidate(d, candidate, now);
     }
 }
 
 // -- signal application ------------------------------------------------------
+
+#[derive(Clone, Copy)]
+enum SignalGuard {
+    None,
+    IdleExpired {
+        observed_idle_since: Instant,
+        now: Instant,
+        grace: Duration,
+    },
+}
 
 /// The single application point for engine signal decisions: watchers/ticker
 /// emit [`AgentSignal`]s, [`decide_signal`] decides, this writes the decision
 /// to the DB, maintains timeout-pause bookkeeping, and emits the board event
 /// plus any notification. No-op for stale/no-op signals (engine `None`).
 pub(crate) fn apply_signal(d: &Arc<Daemon>, run_id: i64, card_id: i64, signal: AgentSignal) {
-    let now = Instant::now();
+    apply_signal_guarded(d, run_id, card_id, signal, SignalGuard::None);
+}
+
+fn apply_idle_expired(
+    d: &Arc<Daemon>,
+    run_id: i64,
+    card_id: i64,
+    observed_idle_since: Instant,
+    now: Instant,
+) {
+    apply_signal_guarded(
+        d,
+        run_id,
+        card_id,
+        AgentSignal::IdleExpired,
+        SignalGuard::IdleExpired {
+            observed_idle_since,
+            now,
+            grace: Duration::from_secs(d.config.idle_grace_seconds),
+        },
+    );
+}
+
+fn apply_signal_guarded(
+    d: &Arc<Daemon>,
+    run_id: i64,
+    card_id: i64,
+    signal: AgentSignal,
+    guard: SignalGuard,
+) {
+    let applied_at = Instant::now();
     let dec = {
         // Signals and finalizers share one lock order. The exact active run and
         // its open DB row are revalidated while both locks are held, so a run
@@ -142,6 +191,18 @@ pub(crate) fn apply_signal(d: &Arc<Daemon>, run_id: i64, card_id: i64, signal: A
             return;
         }
         let db = d.store.lock();
+        if let SignalGuard::IdleExpired {
+            observed_idle_since,
+            now,
+            grace,
+        } = guard
+        {
+            if active.idle_since != Some(observed_idle_since)
+                || now.saturating_duration_since(observed_idle_since) < grace
+            {
+                return;
+            }
+        }
         let run = match db.get_run(run_id) {
             Ok(run) => run,
             Err(_) => return,
@@ -172,12 +233,12 @@ pub(crate) fn apply_signal(d: &Arc<Daemon>, run_id: i64, card_id: i64, signal: A
         match (card.status, dec.new_status) {
             (before, CardStatus::Awaiting) if before != CardStatus::Awaiting => {
                 active.idle_since = None;
-                active.awaiting_since = Some(now);
+                active.awaiting_since = Some(applied_at);
             }
             (CardStatus::Awaiting, after) if after != CardStatus::Awaiting => {
                 if let Some(paused) = active.awaiting_since.take() {
                     if let Some(deadline) = &mut active.timeout_deadline {
-                        *deadline += now.saturating_duration_since(paused);
+                        *deadline += applied_at.saturating_duration_since(paused);
                     }
                 }
             }
@@ -428,7 +489,9 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use super::{apply_signal, check_at, handle_event, AgentSignal};
+    use super::{
+        apply_candidate, apply_signal, check_at, classify_candidates, handle_event, AgentSignal,
+    };
     use crate::dispatch::{finalize_run, finalize_run_timeout};
     use crate::settings::DaemonSettings;
     use crate::spawner::LocalSpawner;
@@ -595,6 +658,44 @@ mod tests {
         let card = db.get_card(card_id).unwrap().unwrap();
         assert_eq!(card.status, CardStatus::Awaiting);
         assert_eq!(card.awaiting_reason, Some(AwaitingReason::IdleExpired));
+    }
+
+    #[test]
+    fn stale_idle_expiry_after_working_is_ignored_without_sleeping() {
+        let (d, run_id, card_id, mut events) = active_daemon();
+        handle_event(&d, status(AgentStatus::Idle));
+        let idle_since = d
+            .sched
+            .lock()
+            .unwrap()
+            .active
+            .get(&run_id)
+            .unwrap()
+            .idle_since
+            .unwrap();
+        let now = idle_since + Duration::from_secs(5);
+        let candidate = classify_candidates(&d, now).pop().unwrap();
+
+        // Working wins after the ticker classified the old idle period but
+        // before that candidate is applied.
+        handle_event(&d, status(AgentStatus::Working));
+        while events.try_recv().is_ok() {}
+        apply_candidate(&d, candidate, now);
+
+        assert_eq!(
+            d.store.lock().get_card(card_id).unwrap().unwrap().status,
+            CardStatus::Running
+        );
+        assert!(d
+            .sched
+            .lock()
+            .unwrap()
+            .active
+            .get(&run_id)
+            .unwrap()
+            .idle_since
+            .is_none());
+        assert!(events.try_recv().is_err());
     }
 
     #[test]

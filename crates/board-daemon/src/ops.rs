@@ -197,7 +197,6 @@ fn card_create(d: &Arc<Daemon>, p: CardCreateParams) -> Result<Value> {
 }
 
 fn card_update(d: &Arc<Daemon>, p: CardUpdateParams) -> Result<Value> {
-    let card = require_card(d, p.id)?;
     let edits_locked = p.harness.is_some()
         || p.model.is_some()
         || p.effort.is_some()
@@ -206,39 +205,61 @@ fn card_update(d: &Arc<Daemon>, p: CardUpdateParams) -> Result<Value> {
         || p.space_kind.is_some()
         || p.space_ref.is_some()
         || p.space_cwd.is_some();
-    validate_card_edit(card.status, edits_locked)?;
-    validate_harness_permission(
-        p.harness.as_deref().unwrap_or(&card.harness),
-        p.permission_mode.as_deref(),
-    )?;
-    let card = d.store.lock().update_card(&p)?;
+    let card = {
+        let db = d.store.lock();
+        let card = db
+            .get_card(p.id)?
+            .ok_or_else(|| Error::NotFound(format!("card {}", p.id)))?;
+        // Status validation remains a defense against inconsistent card state;
+        // the open-run query is authoritative and serialized with the update.
+        validate_card_edit(card.status, edits_locked)?;
+        if edits_locked && db.open_run_for_card(p.id)?.is_some() {
+            return Err(Error::InvalidState(
+                "card has an open run; cannot edit harness/space fields".into(),
+            ));
+        }
+        validate_harness_permission(
+            p.harness.as_deref().unwrap_or(&card.harness),
+            p.permission_mode.as_deref(),
+        )?;
+        db.update_card(&p)?
+    };
     d.emit_changed(BoardChangedReason::CardUpdated, Some(card.id), None);
     Ok(json!(card))
 }
 
 fn card_delete(d: &Arc<Daemon>, p: CardIdParams) -> Result<Value> {
-    require_card(d, p.id)?;
-    if d.store.lock().active_run_for_card(p.id)?.is_some() {
-        return Err(Error::InvalidState(
-            "card is running; cancel it first".into(),
-        ));
+    {
+        let db = d.store.lock();
+        db.get_card(p.id)?
+            .ok_or_else(|| Error::NotFound(format!("card {}", p.id)))?;
+        if db.open_run_for_card(p.id)?.is_some() {
+            return Err(Error::InvalidState(
+                "card has an open run; cancel it first".into(),
+            ));
+        }
+        db.delete_card(p.id)?;
     }
-    d.store.lock().delete_card(p.id)?;
     d.emit_changed(BoardChangedReason::CardDeleted, Some(p.id), None);
     Ok(json!(DeletedResult { deleted: true }))
 }
 
 fn card_archive(d: &Arc<Daemon>, p: CardArchiveParams) -> Result<Value> {
-    let card = require_card(d, p.id)?;
-    if p.archived {
-        validate_card_archive(card.status)?;
-        if d.store.lock().active_run_for_card(p.id)?.is_some() {
-            return Err(Error::InvalidState(
-                "card has an active run; cancel it before archiving".into(),
-            ));
+    let card = {
+        let db = d.store.lock();
+        let card = db
+            .get_card(p.id)?
+            .ok_or_else(|| Error::NotFound(format!("card {}", p.id)))?;
+        if p.archived {
+            validate_card_archive(card.status)?;
+            if db.open_run_for_card(p.id)?.is_some() {
+                return Err(Error::InvalidState(
+                    "card has an open run; cancel it before archiving".into(),
+                ));
+            }
         }
-    }
-    let card = d.store.lock().set_card_archived(p.id, p.archived)?;
+        db.set_card_archived(p.id, p.archived)?
+    };
     d.emit_changed(BoardChangedReason::CardArchived, Some(p.id), None);
     Ok(json!(card))
 }
@@ -707,6 +728,130 @@ mod tests {
             assert_eq!(err.code(), 3);
             assert!(err.to_string().contains("open run"));
         }
+    }
+
+    #[test]
+    fn card_delete_rejects_and_preserves_queued_blocked_and_awaiting_open_runs() {
+        for (status, started) in [
+            (CardStatus::Queued, false),
+            (CardStatus::Blocked, true),
+            (CardStatus::Awaiting, true),
+        ] {
+            let d = test_daemon(Config::default());
+            let (card_id, run_id) = {
+                let db = d.store.lock();
+                let card = db
+                    .create_card(&CardCreateParams {
+                        title: format!("{status:?}"),
+                        ..Default::default()
+                    })
+                    .unwrap();
+                let run = db
+                    .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
+                    .unwrap();
+                if started {
+                    db.start_run(run.id, Some("w1"), Some("p1")).unwrap();
+                }
+                if status == CardStatus::Awaiting {
+                    db.set_card_awaiting(card.id, AwaitingReason::AgentDone)
+                        .unwrap();
+                } else {
+                    db.set_card_status(card.id, status).unwrap();
+                }
+                (card.id, run.id)
+            };
+
+            let err = handle_request(&d, "card.delete", json!({"id": card_id})).unwrap_err();
+            assert_eq!(err.code(), 3);
+            assert!(err.to_string().contains("open run"));
+            let db = d.store.lock();
+            assert!(db.get_card(card_id).unwrap().is_some());
+            assert!(db.get_run(run_id).unwrap().ended_at.is_none());
+        }
+    }
+
+    #[test]
+    fn card_locked_field_update_rejects_queued_blocked_and_awaiting_open_runs() {
+        for (status, started) in [
+            (CardStatus::Queued, false),
+            (CardStatus::Blocked, true),
+            (CardStatus::Awaiting, true),
+        ] {
+            let d = test_daemon(Config::default());
+            let card_id = {
+                let db = d.store.lock();
+                let card = db
+                    .create_card(&CardCreateParams {
+                        title: format!("{status:?}"),
+                        ..Default::default()
+                    })
+                    .unwrap();
+                let run = db
+                    .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
+                    .unwrap();
+                if started {
+                    db.start_run(run.id, Some("w1"), Some("p1")).unwrap();
+                }
+                if status == CardStatus::Awaiting {
+                    db.set_card_awaiting(card.id, AwaitingReason::IdleExpired)
+                        .unwrap();
+                } else {
+                    db.set_card_status(card.id, status).unwrap();
+                }
+                card.id
+            };
+
+            let err = handle_request(
+                &d,
+                "card.update",
+                json!({"id": card_id, "model": "locked-model"}),
+            )
+            .unwrap_err();
+            assert_eq!(err.code(), 3);
+            assert!(err.to_string().contains("open run"));
+
+            // Unlocked metadata remains editable while a run is open.
+            let updated = handle_request(
+                &d,
+                "card.update",
+                json!({"id": card_id, "title": "new title"}),
+            )
+            .unwrap();
+            assert_eq!(updated["title"], "new title");
+        }
+    }
+
+    #[test]
+    fn card_open_run_db_guard_wins_over_stale_nonbusy_status() {
+        let d = test_daemon(Config::default());
+        let card_id = {
+            let db = d.store.lock();
+            let card = db
+                .create_card(&CardCreateParams {
+                    title: "stale status".into(),
+                    ..Default::default()
+                })
+                .unwrap();
+            db.create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
+                .unwrap();
+            db.set_card_status(card.id, CardStatus::Done).unwrap();
+            card.id
+        };
+
+        let edit_err = handle_request(
+            &d,
+            "card.update",
+            json!({"id": card_id, "model": "locked-model"}),
+        )
+        .unwrap_err();
+        assert_eq!(edit_err.code(), 3);
+        assert!(edit_err.to_string().contains("open run"));
+
+        let archive_err =
+            handle_request(&d, "card.archive", json!({"id": card_id, "archived": true}))
+                .unwrap_err();
+        assert_eq!(archive_err.code(), 3);
+        assert!(archive_err.to_string().contains("open run"));
     }
 
     #[test]

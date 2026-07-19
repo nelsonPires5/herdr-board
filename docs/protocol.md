@@ -45,7 +45,7 @@ Boards are independent pipelines keyed by canonical path. `Global` is board `id=
 - `column.create {name, board_id?, position?, system_prompt?, trigger?, on_success_column_id?, on_fail_column_id?, fresh_session?, harness_override?, model_override?, effort_override?, permission_override?, timeout_minutes?}` → `Column`; omitted `board_id` means `Global`.
 - `column.update {id, …any subset of the above}` → `Column` (name/trigger/etc.; unset a nullable by passing `null`)
 - `column.reorder {id, position}` → `[Column…]`
-- `column.delete {id, move_cards_to?}` → `{deleted:true}`; destination must belong to the same board; error 3 if cards lack a destination or any card is `running|queued`.
+- `column.delete {id, move_cards_to?}` → `{deleted:true}`; destination must belong to the same board; error 3 if cards lack a destination or any card has an open run (`queued|running|blocked|awaiting`; `done` is not open).
 - `template.apply {name:"pipeline", board_id?}` → the requested board's full column set (omitted = `Global`; error 3 unless it has only seed `Todo` and no cards).
 
 The store enforces board boundaries: card create/move, column-delete destinations,
@@ -61,11 +61,10 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
     - `new_workspace` — the daemon creates the workspace on first dispatch (label = `space_ref`, cwd = `space_cwd`), reusing an open workspace with that label if one exists. **Requires** non-empty `space_ref` and `space_cwd` on create (else error 1).
   - creating directly into an `auto` column dispatches immediately (same as move)
   - (v2 schema) the legacy `cwd`/`worktree` kinds and `worktree_base` are removed; worktree isolation is now the agent's job via prompt instructions, not a board concept. Existing DBs migrate `cwd`/`worktree` cards to `workspace` (best effort, `space_ref` kept).
-- `card.update {id, …subset}` → `Card` (error 3 while `running|queued` for harness/`session`/space fields)
-- `card.delete {id}` → `{deleted:true}` (error 3 while running; cancel first)
+- `card.update {id, …subset}` → `Card`; harness/model/effort/permission/session/space fields are refused while the card has an open run (`queued|running|blocked|awaiting`). Title/description remain editable; `done` is not open.
+- `card.delete {id}` → `{deleted:true}`; refused while the card has an open run (`queued|running|blocked|awaiting`; cancel first). `done` is not open.
 - `card.archive {id, archived:true|false}` → `Card` — archives or restores without deleting
-  comments/runs. Archiving is refused while `queued|running|blocked|awaiting`; `done` cards can be
-  archived. Archived cards must be restored before move/retry.
+  comments/runs. Archiving is refused while the card has an open run (`queued|running|blocked|awaiting`); `done` cards can be archived. Archived cards must be restored before move/retry.
 - `card.move {id, column_id, position?}` → `Card` — THE trigger: target must belong to the
   card's board; if it is `auto` and the card is `idle`, `failed`, or `done`, a run is enqueued.
   `awaiting` is not re-dispatched because its run remains open.

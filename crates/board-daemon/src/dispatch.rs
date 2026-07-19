@@ -98,8 +98,29 @@ pub fn enqueue_run(d: &Arc<Daemon>, card_id: i64, column_id: i64, is_retry: bool
     let argv_json = serde_json::to_string(&invocation.argv)?;
 
     let db = d.store.lock();
+    // Invocation preparation above deliberately runs without the store lock.
+    // Revalidate the mutable facts that govern enqueue while holding the same
+    // lock through create_run, making this the authoritative duplicate guard.
+    let current_card = db
+        .get_card(card_id)?
+        .ok_or_else(|| Error::NotFound(format!("card {card_id}")))?;
+    if current_card.archived_at.is_some() {
+        return Err(Error::InvalidState(
+            "archived card must be restored before starting a run".into(),
+        ));
+    }
+    if db.open_run_for_card(card_id)?.is_some() {
+        return Err(Error::InvalidState(
+            "card has an open run; complete or cancel it before starting another".into(),
+        ));
+    }
+    if current_card.column_id != column_id {
+        return Err(Error::InvalidState(
+            "card moved to another column while its run was being prepared".into(),
+        ));
+    }
     if let Some(session_id) = &session_for_run {
-        if card.session_id.as_deref() != Some(session_id) {
+        if current_card.session_id.as_deref() != Some(session_id) {
             db.set_card_session(card_id, session_id)?;
         }
     }
@@ -785,6 +806,36 @@ mod tests {
         assert!(argv
             .windows(2)
             .any(|w| w == ["--session-id", new_session.as_str()]));
+    }
+
+    #[test]
+    fn enqueue_run_final_guard_prevents_duplicate_open_runs() {
+        let d = test_daemon(Arc::new(MissingPiSpawner));
+        let (card_id, column_id) = {
+            let db = d.store.lock();
+            let card = db
+                .create_card(&CardCreateParams {
+                    title: "single open run".into(),
+                    ..Default::default()
+                })
+                .unwrap();
+            (card.id, card.column_id)
+        };
+
+        let first = enqueue_run(&d, card_id, column_id, true).unwrap();
+        let err = enqueue_run(&d, card_id, column_id, true).unwrap_err();
+        assert_eq!(err.code(), 3);
+        assert!(err.to_string().contains("open run"));
+        let open_runs: Vec<_> = d
+            .store
+            .lock()
+            .list_runs(card_id)
+            .unwrap()
+            .into_iter()
+            .filter(|run| run.ended_at.is_none())
+            .collect();
+        assert_eq!(open_runs.len(), 1);
+        assert_eq!(open_runs[0].id, first.id);
     }
 
     #[tokio::test]

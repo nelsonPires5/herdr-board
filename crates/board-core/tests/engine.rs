@@ -190,6 +190,10 @@ fn validate_card_archive_rules() {
             Err(ValidationError::CardHasActiveRun)
         );
     }
+    assert_eq!(
+        ValidationError::CardHasActiveRun.to_string(),
+        "card has an open run; cancel it before archiving"
+    );
 }
 
 #[test]

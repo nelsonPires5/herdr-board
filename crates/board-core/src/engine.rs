@@ -14,7 +14,7 @@ pub enum ValidationError {
     ColumnHasActiveCard,
     #[error("card has an open run; cannot edit harness/space fields")]
     CardBusy,
-    #[error("card has an active run; cancel it before archiving")]
+    #[error("card has an open run; cancel it before archiving")]
     CardHasActiveRun,
     #[error("bypassPermissions is only allowed as an explicit per-card setting, never a column override")]
     BypassNotAllowed,
@@ -165,7 +165,8 @@ pub fn validate_column_delete(
 }
 
 /// Validate a `card.update`. `edits_locked_fields` is true when the patch touches
-/// harness/model/effort/permission/space fields, which are frozen while busy.
+/// harness/model/effort/permission/session/space fields, which are frozen while
+/// a run is open.
 pub fn validate_card_edit(
     status: CardStatus,
     edits_locked_fields: bool,
