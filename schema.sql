@@ -1,6 +1,6 @@
 -- herdr-board SQLite schema (WAL mode; boardd is the only writer).
--- This file is the CURRENT (schema v5) shape: a fresh DB is created directly
--- from it and stamped `PRAGMA user_version = 5`. Existing databases are upgraded
+-- This file is the CURRENT (schema v6) shape: a fresh DB is created directly
+-- from it and stamped `PRAGMA user_version = 6`. Existing databases are upgraded
 -- by migrations in board-core/src/db.rs (kept in sync with this file).
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -54,7 +54,8 @@ CREATE TABLE cards (
   space_ref       TEXT,                        -- workspace id (workspace) | new-workspace label (new_workspace)
   space_cwd       TEXT,                        -- working dir when space_kind='new_workspace'
   status          TEXT NOT NULL DEFAULT 'idle'
-                    CHECK (status IN ('idle','queued','running','blocked','failed')),
+                    CHECK (status IN ('idle','queued','running','blocked','failed','awaiting','done')),
+  awaiting_reason TEXT,                        -- 'agent_done'|'idle_expired'; set in awaiting, NULL otherwise
   session_id      TEXT,                        -- harness conversation id for --resume
   created_at      TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at      TEXT NOT NULL DEFAULT (datetime('now')),

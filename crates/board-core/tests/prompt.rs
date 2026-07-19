@@ -72,6 +72,7 @@ fn base_card() -> Card {
         space_ref: Some("w4".into()),
         space_cwd: None,
         status: CardStatus::Idle,
+        awaiting_reason: None,
         session_id: None,
         created_at: "t".into(),
         updated_at: "t".into(),

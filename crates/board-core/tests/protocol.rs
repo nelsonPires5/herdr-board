@@ -1,10 +1,10 @@
 //! Serde round-trips for representative protocol messages.
 
 use board_core::protocol::{
-    BoardChangedReason, BoardGetParams, BoardListResult, BoardOpenParams, CardArchiveParams,
-    CardCreateParams, CardListParams, ColumnCreateParams, Effort, Event, HarnessCapabilitiesParams,
-    Request, Response, RpcError, RunFocusParams, RunFocusResult, RunOutcome, SpaceInfo, SpaceKind,
-    SpaceListResult, TemplateApplyParams, Trigger,
+    AwaitingReason, BoardChangedReason, BoardGetParams, BoardListResult, BoardOpenParams,
+    CardArchiveParams, CardCreateParams, CardListParams, CardStatus, ColumnCreateParams, Effort,
+    Event, HarnessCapabilitiesParams, Request, Response, RpcError, RunFocusParams, RunFocusResult,
+    RunOutcome, SpaceInfo, SpaceKind, SpaceListResult, TemplateApplyParams, Trigger,
 };
 use serde_json::json;
 
@@ -187,4 +187,48 @@ fn as_str_matches_serde() {
         );
         assert_eq!(Trigger::parse_str(t.as_str()), Some(t));
     }
+}
+
+#[test]
+fn card_status_new_variants_wire_strings() {
+    assert_eq!(
+        serde_json::to_string(&CardStatus::Awaiting).unwrap(),
+        "\"awaiting\""
+    );
+    assert_eq!(
+        serde_json::to_string(&CardStatus::Done).unwrap(),
+        "\"done\""
+    );
+    roundtrip(&CardStatus::Awaiting);
+    roundtrip(&CardStatus::Done);
+    assert_eq!(
+        CardStatus::parse_str("awaiting"),
+        Some(CardStatus::Awaiting)
+    );
+    assert_eq!(CardStatus::parse_str("done"), Some(CardStatus::Done));
+    assert_eq!(CardStatus::Awaiting.as_str(), "awaiting");
+    assert_eq!(CardStatus::Done.as_str(), "done");
+}
+
+#[test]
+fn awaiting_reason_snake_case_wire_strings() {
+    assert_eq!(
+        serde_json::to_string(&AwaitingReason::AgentDone).unwrap(),
+        "\"agent_done\""
+    );
+    assert_eq!(
+        serde_json::to_string(&AwaitingReason::IdleExpired).unwrap(),
+        "\"idle_expired\""
+    );
+    roundtrip(&AwaitingReason::AgentDone);
+    roundtrip(&AwaitingReason::IdleExpired);
+    assert_eq!(
+        AwaitingReason::parse_str("agent_done"),
+        Some(AwaitingReason::AgentDone)
+    );
+    assert_eq!(
+        AwaitingReason::parse_str("idle_expired"),
+        Some(AwaitingReason::IdleExpired)
+    );
+    assert_eq!(AwaitingReason::parse_str("bogus"), None);
 }

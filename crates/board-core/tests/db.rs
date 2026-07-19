@@ -2,8 +2,8 @@
 
 use board_core::db::{Db, BOARD_ID};
 use board_core::protocol::{
-    CardCreateParams, ColumnCreateParams, ColumnUpdateParams, Effort, RunOutcome, SpaceKind,
-    Trigger,
+    AwaitingReason, CardCreateParams, CardStatus, ColumnCreateParams, ColumnUpdateParams, Effort,
+    RunOutcome, SpaceKind, Trigger,
 };
 use rusqlite::Connection;
 
@@ -14,7 +14,7 @@ fn mem() -> Db {
 #[test]
 fn migration_seeds_board_and_todo_column() {
     let db = mem();
-    assert_eq!(db.user_version().unwrap(), 5);
+    assert_eq!(db.user_version().unwrap(), 6);
     let board = db.get_board(BOARD_ID).unwrap();
     assert_eq!(board.name, "Global");
     assert_eq!(board.scope_path, None);
@@ -36,7 +36,7 @@ fn migration_idempotent_on_reopen() {
     // Reopen: must not re-seed (still exactly one board, one column).
     {
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.user_version().unwrap(), 5);
+        assert_eq!(db.user_version().unwrap(), 6);
         assert_eq!(db.list_columns(BOARD_ID).unwrap().len(), 1);
         assert_eq!(db.get_board(BOARD_ID).unwrap().name, "Global");
     }
@@ -104,9 +104,9 @@ fn migration_v2_upgrades_v1_database() {
         .unwrap();
         conn.execute_batch("PRAGMA user_version = 1;").unwrap();
     }
-    // Open via Db → runs the v2, v3, v4, and v5 migrations.
+    // Open via Db → runs the v2 through v6 migrations.
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 5);
+    assert_eq!(db.user_version().unwrap(), 6);
     let cards = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(cards.len(), 2);
     for c in &cards {
@@ -303,7 +303,7 @@ fn migration_v4_preserves_claude_cards_and_accepts_pi_efforts() {
     }
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 5);
+    assert_eq!(db.user_version().unwrap(), 6);
     let existing = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(existing[0].harness, "claude");
     assert_eq!(db.list_comments(existing[0].id).unwrap().len(), 1);
@@ -325,14 +325,14 @@ fn migration_does_not_downgrade_future_schema_version() {
     let path = tmp.path().to_path_buf();
     {
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.user_version().unwrap(), 5);
+        assert_eq!(db.user_version().unwrap(), 6);
     }
     {
         let conn = Connection::open(&path).unwrap();
-        conn.execute_batch("PRAGMA user_version = 6;").unwrap();
+        conn.execute_batch("PRAGMA user_version = 7;").unwrap();
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 6);
+    assert_eq!(db.user_version().unwrap(), 7);
 }
 
 #[test]
@@ -357,7 +357,7 @@ fn migration_v3_adds_archived_at_to_v2_database() {
         .unwrap();
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 5);
+    assert_eq!(db.user_version().unwrap(), 6);
     let cards = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(cards.len(), 1);
     assert!(cards[0].archived_at.is_none());
@@ -640,7 +640,7 @@ fn migration_v5_preserves_global_data_and_renames_it() {
 
     let db = Db::open(&path).unwrap();
     let global = db.get_board(BOARD_ID).unwrap();
-    assert_eq!(db.user_version().unwrap(), 5);
+    assert_eq!(db.user_version().unwrap(), 6);
     assert_eq!(global.name, "Global");
     assert!(global.scope_path.is_none());
     let cards = db.list_cards(BOARD_ID).unwrap();
@@ -655,4 +655,151 @@ fn migration_v5_preserves_global_data_and_renames_it() {
             .as_deref(),
         Some("p1")
     );
+}
+
+#[test]
+fn awaiting_reason_set_and_cleared_with_status() {
+    let db = mem();
+    let card = db
+        .create_card(&CardCreateParams {
+            title: "A".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(card.status, CardStatus::Idle);
+    assert!(card.awaiting_reason.is_none());
+
+    // Entering awaiting records the reason.
+    let card = db
+        .set_card_awaiting(card.id, AwaitingReason::AgentDone)
+        .unwrap();
+    assert_eq!(card.status, CardStatus::Awaiting);
+    assert_eq!(card.awaiting_reason, Some(AwaitingReason::AgentDone));
+    // Persisted, not just on the returned struct.
+    let fetched = db.get_card(card.id).unwrap().unwrap();
+    assert_eq!(fetched.awaiting_reason, Some(AwaitingReason::AgentDone));
+
+    // Re-entering refreshes the reason (explicit done supersedes idle expiry).
+    let card = db
+        .set_card_awaiting(card.id, AwaitingReason::IdleExpired)
+        .unwrap();
+    assert_eq!(card.awaiting_reason, Some(AwaitingReason::IdleExpired));
+
+    // Any non-awaiting status clears the reason.
+    let card = db.set_card_status(card.id, CardStatus::Running).unwrap();
+    assert_eq!(card.status, CardStatus::Running);
+    assert!(card.awaiting_reason.is_none());
+
+    // `done` is accepted by the schema.
+    let card = db.set_card_status(card.id, CardStatus::Done).unwrap();
+    assert_eq!(card.status, CardStatus::Done);
+    assert!(card.awaiting_reason.is_none());
+}
+
+/// A v5 database (old `status` CHECK without `awaiting`/`done`, no
+/// `awaiting_reason` column) must upgrade to v6 via a table rebuild: all rows
+/// preserved, the new statuses accepted, and `awaiting_reason` NULL (no
+/// backfill of idle cards to `done`).
+#[test]
+fn migration_v6_rebuilds_cards_check_and_preserves_data() {
+    const V5_SCHEMA: &str = "
+    CREATE TABLE boards (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE,
+      scope_path TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')));
+    CREATE UNIQUE INDEX idx_boards_scope_path ON boards(scope_path)
+      WHERE scope_path IS NOT NULL;
+    CREATE TABLE columns (id INTEGER PRIMARY KEY, board_id INTEGER NOT NULL,
+      name TEXT NOT NULL, position INTEGER NOT NULL, system_prompt TEXT,
+      trigger TEXT NOT NULL DEFAULT 'manual', on_success_column_id INTEGER,
+      on_fail_column_id INTEGER, fresh_session INTEGER NOT NULL DEFAULT 0,
+      harness_override TEXT, model_override TEXT, effort_override TEXT,
+      permission_override TEXT, timeout_minutes INTEGER, UNIQUE (board_id, name));
+    CREATE TABLE cards (id INTEGER PRIMARY KEY, board_id INTEGER NOT NULL,
+      column_id INTEGER NOT NULL, position INTEGER NOT NULL, title TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '', harness TEXT NOT NULL DEFAULT 'pi',
+      model TEXT, effort TEXT, permission_mode TEXT, session TEXT,
+      space_kind TEXT NOT NULL DEFAULT 'workspace'
+        CHECK (space_kind IN ('workspace','new_workspace')),
+      space_ref TEXT, space_cwd TEXT,
+      status TEXT NOT NULL DEFAULT 'idle'
+        CHECK (status IN ('idle','queued','running','blocked','failed')),
+      session_id TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')), archived_at TEXT);
+    CREATE INDEX idx_cards_column ON cards(column_id, position);
+    CREATE TABLE comments (id INTEGER PRIMARY KEY, card_id INTEGER NOT NULL,
+      author TEXT NOT NULL, body TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')));
+    CREATE TABLE runs (id INTEGER PRIMARY KEY, card_id INTEGER NOT NULL,
+      column_id INTEGER NOT NULL, harness TEXT NOT NULL, argv_json TEXT NOT NULL,
+      prompt_snapshot TEXT NOT NULL, herdr_workspace_id TEXT, herdr_pane_id TEXT,
+      session_id TEXT, session TEXT, started_at TEXT, ended_at TEXT, outcome TEXT,
+      result_summary TEXT, log_path TEXT);
+    ";
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(V5_SCHEMA).unwrap();
+        conn.execute("INSERT INTO boards (id, name) VALUES (1, 'Global')", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO columns (id, board_id, name, position) VALUES (1, 1, 'Todo', 0)",
+            [],
+        )
+        .unwrap();
+        // One blocked card (a non-default status must survive the rebuild) and
+        // one plain idle card.
+        conn.execute(
+            "INSERT INTO cards (id,board_id,column_id,position,title,status)
+             VALUES (1,1,1,0,'kept','blocked')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cards (id,board_id,column_id,position,title)
+             VALUES (2,1,1,1,'idle-card')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO comments (card_id,author,body) VALUES (1,'user','kept comment')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO runs (card_id,column_id,harness,argv_json,prompt_snapshot,outcome)
+             VALUES (1,1,'pi','[]','kept prompt','ok')",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA user_version = 5;").unwrap();
+    }
+
+    let db = Db::open(&path).unwrap();
+    assert_eq!(db.user_version().unwrap(), 6);
+    let cards = db.list_cards(BOARD_ID).unwrap();
+    assert_eq!(cards.len(), 2);
+    let kept = &cards[0];
+    assert_eq!(kept.title, "kept");
+    assert_eq!(kept.status, CardStatus::Blocked);
+    // No backfill: existing rows get awaiting_reason NULL and idle stays idle.
+    assert!(kept.awaiting_reason.is_none());
+    assert_eq!(cards[1].status, CardStatus::Idle);
+    assert!(cards[1].awaiting_reason.is_none());
+    // Related tables untouched.
+    assert_eq!(db.list_comments(kept.id).unwrap()[0].body, "kept comment");
+    assert_eq!(
+        db.list_runs(kept.id).unwrap()[0].outcome,
+        Some(RunOutcome::Ok)
+    );
+
+    // The new CHECK accepts the new statuses end-to-end.
+    let card = db
+        .set_card_awaiting(kept.id, AwaitingReason::AgentDone)
+        .unwrap();
+    assert_eq!(card.status, CardStatus::Awaiting);
+    let card = db.set_card_status(card.id, CardStatus::Done).unwrap();
+    assert_eq!(card.status, CardStatus::Done);
+    assert!(card.awaiting_reason.is_none());
 }

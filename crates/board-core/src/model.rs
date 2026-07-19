@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::{CardStatus, Effort, RunOutcome, SpaceKind, Trigger};
+use crate::protocol::{AwaitingReason, CardStatus, Effort, RunOutcome, SpaceKind, Trigger};
 
 /// One independent board pipeline. `scope_path=None` is the preserved Global board.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +52,8 @@ pub struct Card {
     /// Working directory for a `new_workspace` space; `None` otherwise.
     pub space_cwd: Option<String>,
     pub status: CardStatus,
+    /// Why the card is `awaiting`; `None` unless `status == awaiting`.
+    pub awaiting_reason: Option<AwaitingReason>,
     /// Harness conversation id for `--resume` (distinct from `session`).
     pub session_id: Option<String>,
     pub created_at: String,
