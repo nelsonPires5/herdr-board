@@ -4,7 +4,7 @@
 
 use board_core::engine::format_duration;
 use board_core::model::{Board, Card};
-use board_core::protocol::{CardDetail, CardStatus};
+use board_core::protocol::{AwaitingReason, CardDetail, CardStatus};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -159,7 +159,24 @@ fn status_glyph(status: CardStatus) -> (char, Color) {
         CardStatus::Blocked => ('⏸', Color::LightYellow),
         CardStatus::Failed => ('✗', Color::LightRed),
         CardStatus::Queued => ('⧗', Color::LightCyan),
+        // awaiting = agent finished(?) without `board done`; pending review.
+        CardStatus::Awaiting => ('?', Color::Yellow),
+        // done = completion confirmed; final state.
+        CardStatus::Done => ('✓', Color::Green),
         CardStatus::Idle => ('·', Color::Gray),
+    }
+}
+
+/// Status label for the detail view: `awaiting` explains *why* it is waiting.
+fn status_label(card: &Card) -> String {
+    match (card.status, card.awaiting_reason) {
+        (CardStatus::Awaiting, Some(AwaitingReason::AgentDone)) => {
+            "awaiting (agent reported done)".to_string()
+        }
+        (CardStatus::Awaiting, Some(AwaitingReason::IdleExpired)) => {
+            "awaiting (idle timeout)".to_string()
+        }
+        (status, _) => status.as_str().to_string(),
     }
 }
 
@@ -481,7 +498,7 @@ fn draw_detail(app: &App, f: &mut Frame, area: Rect) {
     let (gl, gc) = status_glyph(card.status);
     let mut status_line = vec![
         Span::styled(
-            format!("{} {}", gl, card.status.as_str()),
+            format!("{} {}", gl, status_label(card)),
             Style::default().fg(gc).add_modifier(Modifier::BOLD),
         ),
         Span::raw("   "),
@@ -863,6 +880,7 @@ pub const HELP_KEYS: &[(&str, &str)] = &[
     ("?", "this help"),
     ("q / Esc", "back / quit"),
     ("--", "-- card detail --"),
+    ("Enter", "confirm done (awaiting)"),
     ("e", "edit card"),
     ("a", "archive / restore card"),
     ("c", "add comment"),

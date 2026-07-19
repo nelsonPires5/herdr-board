@@ -3,7 +3,7 @@
 //! terminal sizes, and running-card timers pinned by rewriting `updated_at`.
 
 use board_core::client::{BoardClient, FakeBoardClient};
-use board_core::protocol::{CardStatus, RunOutcome};
+use board_core::protocol::{AwaitingReason, CardCreateParams, CardStatus, RunOutcome};
 use board_tui::app::{App, Msg};
 use board_tui::editor::FakeEditor;
 use board_tui::forms::{FieldId, FieldKind};
@@ -274,4 +274,59 @@ fn toast_on_client_error() {
     key(&mut d, KeyCode::Char('r'));
     assert!(d.app.toast.as_ref().is_some_and(|t| t.is_error));
     insta::assert_snapshot!("toast_error", render(&mut d, 80, 24));
+}
+
+#[test]
+fn awaiting_card_detail_shows_agent_done_reason() {
+    let mut d = driver(demo_client().unwrap());
+    // Review (idx 3): failed card first, awaiting ("Tune retry backoff") second.
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Down);
+    key(&mut d, KeyCode::Enter);
+    insta::assert_snapshot!("awaiting_card_detail", render(&mut d, 80, 24));
+}
+
+#[test]
+fn awaiting_card_detail_shows_idle_timeout_reason() {
+    let mut client = demo_client().unwrap();
+    let board = client.board_get().unwrap();
+    let todo = board
+        .columns
+        .iter()
+        .find(|column| column.name == "Todo")
+        .unwrap()
+        .id;
+    let id = client
+        .card_create(&CardCreateParams {
+            title: "Silent agent".into(),
+            description: Some("Went idle without reporting back.".into()),
+            column_id: Some(todo),
+            harness: Some("claude".into()),
+            ..Default::default()
+        })
+        .unwrap()
+        .id;
+    client
+        .db()
+        .set_card_awaiting(id, AwaitingReason::IdleExpired)
+        .unwrap();
+
+    let mut d = driver(client);
+    key(&mut d, KeyCode::Down); // second card in Todo
+    key(&mut d, KeyCode::Enter);
+    insta::assert_snapshot!("awaiting_idle_detail", render(&mut d, 80, 24));
+}
+
+#[test]
+fn done_card_detail_is_final() {
+    let mut d = driver(demo_client().unwrap());
+    // Done column (idx 5): "Ship v0.1" (idle) first, "Write changelog" (done) second.
+    for _ in 0..5 {
+        key(&mut d, KeyCode::Right);
+    }
+    key(&mut d, KeyCode::Down);
+    key(&mut d, KeyCode::Enter);
+    insta::assert_snapshot!("done_card_detail", render(&mut d, 80, 24));
 }

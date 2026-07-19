@@ -490,7 +490,7 @@ fn archive_selected_card(app: &mut App) -> Vec<Effect> {
     if card.archived_at.is_none()
         && matches!(
             card.status,
-            CardStatus::Queued | CardStatus::Running | CardStatus::Blocked
+            CardStatus::Queued | CardStatus::Running | CardStatus::Blocked | CardStatus::Awaiting
         )
     {
         app.set_toast("card has an active run; cancel it before archiving", true);
@@ -632,7 +632,10 @@ fn detail_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
             if card.archived_at.is_none()
                 && matches!(
                     card.status,
-                    CardStatus::Queued | CardStatus::Running | CardStatus::Blocked
+                    CardStatus::Queued
+                        | CardStatus::Running
+                        | CardStatus::Blocked
+                        | CardStatus::Awaiting
                 )
             {
                 app.set_toast("card has an active run; cancel it before archiving", true);
@@ -653,6 +656,16 @@ fn detail_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
         KeyCode::Char('o') => {
             if let Some(id) = card_id {
                 return vec![Effect::FocusRun(id)];
+            }
+        }
+        // Enter on an `awaiting` card confirms completion: the same `run.done`
+        // (ok) channel as `board done ok`. Other statuses: Enter is a no-op
+        // (`done` is a final visual state).
+        KeyCode::Enter => {
+            if let Some(detail) = &app.detail {
+                if detail.card.status == CardStatus::Awaiting {
+                    return vec![Effect::RunDone(detail.card.id, RunOutcome::Ok)];
+                }
             }
         }
         KeyCode::Char('x') => {

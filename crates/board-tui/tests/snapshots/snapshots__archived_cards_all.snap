@@ -2,12 +2,12 @@
 source: crates/board-tui/tests/snapshots.rs
 expression: "render(&mut d, 120, 35)"
 ---
-"┌ Execute · 2 · auto ────────┐┌ Review · 1 · auto ─────────┐┌ Human Review · 0 · manual ─┐┌ Done · 1 · manual ─────────┐"
+"┌ Execute · 2 · auto ────────┐┌ Review · 2 · auto ─────────┐┌ Human Review · 0 · manual ─┐┌ Done · 2 · manual ─────────┐"
 "│▌ Fix flaky test            ││▌ Refactor auth module      ││                            ││▌ Ship v0.1                 │"
 "│  ⧗ queued · claude         ││  ✗ failed · claude/opus    ││                            ││  ▣ ARCHIVED · claude       │"
 "│                            ││                            ││                            ││                            │"
-"│▌ Investigate crash         ││                            ││                            ││                            │"
-"│  ⏸ blocked · claude        ││                            ││                            ││                            │"
+"│▌ Investigate crash         ││▌ Tune retry backoff        ││                            ││▌ Write changelog           │"
+"│  ⏸ blocked · claude        ││  ? awaiting · claude       ││                            ││  ✓ done · claude           │"
 "│                            ││                            ││                            ││                            │"
 "│                            ││                            ││                            ││                            │"
 "│                            ││                            ││                            ││                            │"

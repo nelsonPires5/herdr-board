@@ -1,9 +1,7 @@
 ---
 source: crates/board-tui/tests/snapshots.rs
-assertion_line: 244
 expression: "render(&mut d, 80, 24)"
 ---
-"┌ Todo · 1 · manual ──────┐┌ Plan · 1 · auto ────────┐┌ Execute · 2 · auto ────┐"
 "┌ Help — all keybindings (any key to close) ───────────────────────────────────┐"
 "│  ←/→ h/l    focus column                a          archive / restore card    │"
 "│  ↑/↓ k/j    focus card                  c          add comment               │"
@@ -24,6 +22,7 @@ expression: "render(&mut d, 80, 24)"
 "│  ?          this help                   click      focus card/column         │"
 "│  q / Esc    back / quit                 dbl-click  open card detail          │"
 "│ card detail                             drag       move card / reorder column│"
-"│  e          edit card                   wheel      scroll cards              │"
+"│  Enter      confirm done (awaiting)     wheel      scroll cards              │"
+"│  e          edit card                                                        │"
 "└──────────────────────────────────────────────────────────────────────────────┘"
 "? help                                                                          "
