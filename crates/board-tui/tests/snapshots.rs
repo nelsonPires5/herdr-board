@@ -31,6 +31,13 @@ fn pin(app: &mut App) {
             c.updated_at = RUN_START.to_string();
         }
     }
+    if let Some(detail) = &mut app.detail {
+        for run in &mut detail.runs {
+            if run.started_at.is_some() && run.ended_at.is_none() {
+                run.started_at = Some(NOW_STR.to_string());
+            }
+        }
+    }
 }
 
 fn driver<C: BoardClient + 'static>(client: C) -> Driver {
@@ -286,6 +293,37 @@ fn awaiting_card_detail_shows_agent_done_reason() {
     key(&mut d, KeyCode::Down);
     key(&mut d, KeyCode::Enter);
     insta::assert_snapshot!("awaiting_card_detail", render(&mut d, 80, 24));
+}
+
+#[test]
+fn enter_on_awaiting_detail_runs_done_and_refreshes_driver_state() {
+    let mut d = driver(demo_client().unwrap());
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Down);
+    key(&mut d, KeyCode::Enter);
+    assert_eq!(
+        d.app.detail.as_ref().unwrap().card.status,
+        CardStatus::Awaiting
+    );
+
+    key(&mut d, KeyCode::Enter);
+
+    let detail = d.app.detail.as_ref().unwrap();
+    assert_eq!(detail.card.status, CardStatus::Done);
+    assert_eq!(detail.runs.len(), 1);
+    assert_eq!(detail.runs[0].outcome, Some(RunOutcome::Ok));
+    assert_eq!(
+        d.app
+            .board
+            .cards
+            .iter()
+            .find(|card| card.id == detail.card.id)
+            .unwrap()
+            .status,
+        CardStatus::Done
+    );
 }
 
 #[test]

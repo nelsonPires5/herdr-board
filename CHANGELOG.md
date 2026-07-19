@@ -22,6 +22,11 @@ All notable changes to this project are documented here. The format is based on
   flow.
 
 ### Changed
+- Run finalization now holds an in-memory per-card claim from the atomic run close through its
+  transition and optional auto-enqueue. Concurrent retry/enqueue and conflicting card or column
+  mutations are rejected until the final status is committed.
+- The hermetic TUI demo now carries a real open run for its `awaiting` card, and the fake client
+  executes `run.done` through the same pure transition engine used by the daemon.
 - Idle past `idle_grace_seconds` no longer fails the run as `lost`; it parks the card in
   `awaiting` (reason `idle_expired`). The `lost` outcome is kept in the schema and wire enums for
   backward compatibility but is no longer produced.

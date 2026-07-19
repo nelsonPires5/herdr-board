@@ -41,6 +41,24 @@ fn map_harness_err(e: HarnessError) -> Error {
 /// Create a queued run row for `card` in `column`, minting/resuming/forking the
 /// session per policy. Sets the card to `queued`. Does not spawn.
 pub fn enqueue_run(d: &Arc<Daemon>, card_id: i64, column_id: i64, is_retry: bool) -> Result<Run> {
+    enqueue_run_inner(d, card_id, column_id, is_retry, EnqueueMode::Public)
+}
+
+#[derive(Clone, Copy)]
+enum EnqueueMode {
+    Public,
+    /// Only the finalizer owning this private run-id token may enqueue while
+    /// its card remains claimed.
+    Finalization(i64),
+}
+
+fn enqueue_run_inner(
+    d: &Arc<Daemon>,
+    card_id: i64,
+    column_id: i64,
+    is_retry: bool,
+    mode: EnqueueMode,
+) -> Result<Run> {
     let (card, column, comments, session_used) = {
         let db = d.store.lock();
         let card = db
@@ -97,10 +115,11 @@ pub fn enqueue_run(d: &Arc<Daemon>, card_id: i64, column_id: i64, is_retry: bool
         });
     let argv_json = serde_json::to_string(&invocation.argv)?;
 
+    // Invocation preparation above deliberately runs without either lock.
+    // Revalidate under scheduler -> store and keep both through the writes:
+    // this is the authoritative open-run and finalization guard.
+    let sched = d.sched.lock().unwrap();
     let db = d.store.lock();
-    // Invocation preparation above deliberately runs without the store lock.
-    // Revalidate the mutable facts that govern enqueue while holding the same
-    // lock through create_run, making this the authoritative duplicate guard.
     let current_card = db
         .get_card(card_id)?
         .ok_or_else(|| Error::NotFound(format!("card {card_id}")))?;
@@ -108,6 +127,20 @@ pub fn enqueue_run(d: &Arc<Daemon>, card_id: i64, column_id: i64, is_retry: bool
         return Err(Error::InvalidState(
             "archived card must be restored before starting a run".into(),
         ));
+    }
+    match (mode, sched.finalizing_cards.get(&card_id)) {
+        (EnqueueMode::Public, None) => {}
+        (EnqueueMode::Finalization(run_id), Some(owner)) if run_id == *owner => {}
+        (EnqueueMode::Public, Some(_)) => {
+            return Err(Error::InvalidState(
+                "card finalization is in progress; retry after it completes".into(),
+            ));
+        }
+        (EnqueueMode::Finalization(_), _) => {
+            return Err(Error::InvalidState(
+                "internal enqueue lost its card finalization claim".into(),
+            ));
+        }
     }
     if db.open_run_for_card(card_id)?.is_some() {
         return Err(Error::InvalidState(
@@ -162,6 +195,17 @@ pub async fn dispatch_pass(d: &Arc<Daemon>) {
     for (run, card) in queued {
         if active_count >= max {
             break;
+        }
+        // The finalizer wakes dispatch after releasing its claim. Until then,
+        // keep an internally enqueued next hop queued so its final status is
+        // stable and no new agent starts inside the finalization window.
+        if d.sched
+            .lock()
+            .unwrap()
+            .finalizing_cards
+            .contains_key(&card.id)
+        {
+            continue;
         }
         let key = space_key_str(&card);
         if busy.contains(&key) {
@@ -418,6 +462,21 @@ pub fn finalize_run_timeout(
     )
 }
 
+struct FinalizationClaim<'a> {
+    d: &'a Daemon,
+    card_id: i64,
+    run_id: i64,
+}
+
+impl Drop for FinalizationClaim<'_> {
+    fn drop(&mut self) {
+        let mut sched = self.d.sched.lock().unwrap();
+        if sched.finalizing_cards.get(&self.card_id) == Some(&self.run_id) {
+            sched.finalizing_cards.remove(&self.card_id);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn finalize_run_inner(
     d: &Arc<Daemon>,
@@ -436,6 +495,11 @@ fn finalize_run_inner(
         let mut sched = d.sched.lock().unwrap();
         let db = d.store.lock();
         let existing = db.get_run(run_id)?;
+        // An ended row can still be mid-transition. A duplicate finalizer must
+        // neither return that intermediate card nor disturb the owner's claim.
+        if sched.finalizing_cards.contains_key(&existing.card_id) {
+            return Ok(None);
+        }
         if existing.ended_at.is_some() {
             let card = db
                 .get_card(existing.card_id)?
@@ -458,12 +522,19 @@ fn finalize_run_inner(
             }
         }
 
-        let removed = sched.active.remove(&run_id);
-        let elapsed = removed
-            .as_ref()
+        let elapsed = sched
+            .active
+            .get(&run_id)
             .map(|active| active.started.elapsed().as_secs() as i64);
         let finished = db.finish_run(run_id, outcome, summary.as_deref())?;
+        let removed = sched.active.remove(&run_id);
+        sched.finalizing_cards.insert(existing.card_id, run_id);
         (removed, elapsed, finished)
+    };
+    let claim = FinalizationClaim {
+        d,
+        card_id: finished.card_id,
+        run_id,
     };
 
     if kill {
@@ -497,7 +568,7 @@ fn finalize_run_inner(
         d.store
             .lock()
             .add_comment(card_id, "system", &dec.system_comment)?;
-        apply_transition(d, card_id, &dec, &cols)?
+        apply_transition(d, card_id, run_id, &dec, &cols)?
     } else {
         d.sched.lock().unwrap().chain_hops.remove(&card_id);
         let status = match outcome {
@@ -507,6 +578,9 @@ fn finalize_run_inner(
         d.store.lock().set_card_status(card_id, status)?
     };
 
+    // Release only after the final status write / internal auto-enqueue. Errors
+    // on any path above release through Drop as well.
+    drop(claim);
     d.emit_run_ended(card_id, run_id, outcome);
     d.wake_dispatch();
     Ok(Some((finished, card)))
@@ -517,6 +591,7 @@ fn finalize_run_inner(
 fn apply_transition(
     d: &Arc<Daemon>,
     card_id: i64,
+    finalizing_run_id: i64,
     dec: &TransitionDecision,
     cols: &[board_core::model::Column],
 ) -> Result<Card> {
@@ -544,8 +619,13 @@ fn apply_transition(
             d.store.lock().add_comment(card_id, "system", &msg)?;
             return d.store.lock().set_card_status(card_id, CardStatus::Failed);
         }
-        enqueue_run(d, card_id, tid, false)?;
-        d.wake_dispatch();
+        enqueue_run_inner(
+            d,
+            card_id,
+            tid,
+            false,
+            EnqueueMode::Finalization(finalizing_run_id),
+        )?;
         d.store
             .lock()
             .get_card(card_id)?
@@ -836,6 +916,161 @@ mod tests {
             .collect();
         assert_eq!(open_runs.len(), 1);
         assert_eq!(open_runs[0].id, first.id);
+    }
+
+    #[test]
+    fn public_enqueue_rejects_a_card_claimed_for_finalization() {
+        let d = test_daemon(Arc::new(MissingPiSpawner));
+        let (card_id, column_id) = {
+            let db = d.store.lock();
+            let card = db
+                .create_card(&CardCreateParams {
+                    title: "finishing".into(),
+                    ..Default::default()
+                })
+                .unwrap();
+            (card.id, card.column_id)
+        };
+        d.sched.lock().unwrap().finalizing_cards.insert(card_id, 99);
+
+        let err = enqueue_run(&d, card_id, column_id, true).unwrap_err();
+        assert_eq!(err.code(), 3);
+        assert!(err.to_string().contains("finalization"));
+        assert!(d.store.lock().list_runs(card_id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn auto_transition_enqueues_once_inside_claim_and_releases_it() {
+        let d = test_daemon(Arc::new(MissingPiSpawner));
+        let (card_id, run_id, target_id) = {
+            let db = d.store.lock();
+            let source = db
+                .create_column(&ColumnCreateParams {
+                    name: "Source".into(),
+                    trigger: Some(Trigger::Auto),
+                    ..Default::default()
+                })
+                .unwrap();
+            let target = db
+                .create_column(&ColumnCreateParams {
+                    name: "Target".into(),
+                    trigger: Some(Trigger::Auto),
+                    ..Default::default()
+                })
+                .unwrap();
+            db.update_column(&ColumnUpdateParams {
+                id: source.id,
+                on_success_column_id: Some(target.id),
+                ..Default::default()
+            })
+            .unwrap();
+            let card = db
+                .create_card(&CardCreateParams {
+                    column_id: Some(source.id),
+                    title: "chain".into(),
+                    ..Default::default()
+                })
+                .unwrap();
+            let run = db
+                .create_run(card.id, source.id, "pi", "[]", "p", None, None)
+                .unwrap();
+            db.start_run(run.id, None, None).unwrap();
+            db.set_card_status(card.id, CardStatus::Running).unwrap();
+            (card.id, run.id, target.id)
+        };
+
+        let (_, card) = finalize_run(&d, run_id, RunOutcome::Ok, None, None, false, true).unwrap();
+
+        assert_eq!(card.column_id, target_id);
+        assert_eq!(card.status, CardStatus::Queued);
+        let runs = d.store.lock().list_runs(card_id).unwrap();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs.iter().filter(|run| run.ended_at.is_none()).count(), 1);
+        assert!(!d
+            .sched
+            .lock()
+            .unwrap()
+            .finalizing_cards
+            .contains_key(&card_id));
+    }
+
+    #[test]
+    fn finalization_claim_releases_after_transition_error() {
+        let d = test_daemon(Arc::new(MissingPiSpawner));
+        let (card_id, run_id) = {
+            let db = d.store.lock();
+            let source = db
+                .create_column(&ColumnCreateParams {
+                    name: "Source".into(),
+                    ..Default::default()
+                })
+                .unwrap();
+            let target = db
+                .create_column(&ColumnCreateParams {
+                    name: "Target".into(),
+                    trigger: Some(Trigger::Auto),
+                    ..Default::default()
+                })
+                .unwrap();
+            db.update_column(&ColumnUpdateParams {
+                id: source.id,
+                on_success_column_id: Some(target.id),
+                ..Default::default()
+            })
+            .unwrap();
+            let card = db
+                .create_card(&CardCreateParams {
+                    column_id: Some(source.id),
+                    title: "bad next harness".into(),
+                    harness: Some("missing".into()),
+                    ..Default::default()
+                })
+                .unwrap();
+            let run = db
+                .create_run(card.id, source.id, "pi", "[]", "p", None, None)
+                .unwrap();
+            db.start_run(run.id, None, None).unwrap();
+            (card.id, run.id)
+        };
+
+        assert!(finalize_run(&d, run_id, RunOutcome::Ok, None, None, false, true).is_err());
+        assert!(!d
+            .sched
+            .lock()
+            .unwrap()
+            .finalizing_cards
+            .contains_key(&card_id));
+    }
+
+    #[test]
+    fn duplicate_finalizer_does_not_clear_an_existing_claim() {
+        let d = test_daemon(Arc::new(MissingPiSpawner));
+        let (card_id, run_id) = {
+            let db = d.store.lock();
+            let card = db
+                .create_card(&CardCreateParams {
+                    title: "already claimed".into(),
+                    ..Default::default()
+                })
+                .unwrap();
+            let run = db
+                .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
+                .unwrap();
+            db.start_run(run.id, None, None).unwrap();
+            db.finish_run(run.id, RunOutcome::Ok, None).unwrap();
+            (card.id, run.id)
+        };
+        d.sched
+            .lock()
+            .unwrap()
+            .finalizing_cards
+            .insert(card_id, run_id);
+
+        assert!(finalize_run(&d, run_id, RunOutcome::Ok, None, None, false, true).is_err());
+        assert_eq!(
+            d.sched.lock().unwrap().finalizing_cards.get(&card_id),
+            Some(&run_id)
+        );
     }
 
     #[tokio::test]

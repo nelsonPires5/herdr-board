@@ -294,6 +294,17 @@ pub fn demo_client() -> anyhow::Result<DemoClient> {
             "Tune the backoff constants based on the new metrics.",
         ))?
         .id;
+    let awaiting_run = c.db().create_run(
+        awaiting,
+        review,
+        "claude",
+        "[\"claude\"]",
+        "p",
+        Some("sess-awaiting"),
+        None,
+    )?;
+    c.db()
+        .start_run(awaiting_run.id, Some("w1"), Some("p-awaiting"))?;
     c.db()
         .set_card_awaiting(awaiting, AwaitingReason::AgentDone)?;
 

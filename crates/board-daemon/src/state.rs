@@ -42,8 +42,23 @@ pub struct ActiveRun {
 pub struct Sched {
     /// Started runs by run id.
     pub active: HashMap<i64, ActiveRun>,
+    /// Cards whose ended run is still applying its transition. The value is the
+    /// owning run id, so a duplicate finalizer cannot clear another claim.
+    pub finalizing_cards: HashMap<i64, i64>,
     /// Consecutive auto-hops per card (reset on human action / chain end).
     pub chain_hops: HashMap<i64, u32>,
+}
+
+impl Sched {
+    /// Reject a public mutation that could conflict with a pending transition.
+    pub fn ensure_card_not_finalizing(&self, card_id: i64) -> board_core::Result<()> {
+        if self.finalizing_cards.contains_key(&card_id) {
+            return Err(board_core::Error::InvalidState(
+                "card finalization is in progress; retry after it completes".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// The panes the herdr event watcher should subscribe to, grouped by the herdr

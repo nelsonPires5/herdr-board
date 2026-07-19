@@ -67,8 +67,8 @@ enum Cmd {
     /// Close the active run (`board done [CARD_ID] --outcome ok|fail`).
     ///
     /// `ok` with no on_success column marks the card `done` (with a target it
-    /// moves instead). A run ended WITHOUT this command leaves the card in
-    /// `awaiting`, pending human review — never auto-completed.
+    /// moves instead). If the agent reports done or goes idle without this
+    /// command, the card becomes `awaiting`; timeout and pane exit still fail.
     Done {
         /// Card id; defaults to $BOARD_CARD_ID.
         card_id: Option<i64>,

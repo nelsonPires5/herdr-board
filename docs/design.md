@@ -259,6 +259,10 @@ keep their existing `finalize_run` paths.
 
 ## 7. Queueing & concurrency
 
+- **Atomic card finalization**: the scheduler claims a card while closing/removing its old run and
+  keeps that claim through comments, transition/status writes, and any internal auto-target
+  enqueue. Public enqueue/retry and conflicting card/column mutations reject the claimed card;
+  only that finalizer's private enqueue token may create its next run.
 - **Per-space FIFO**: two agents mutating one working tree collide; cards sharing a `(session, space_kind, space_ref)` key run serially.
 - **Global semaphore** (default 3) caps concurrent runs across spaces (cost + machine load).
 - A `new_workspace` card that opens a distinct workspace per label gets its own queue key, so distinct labels run in parallel (up to the global cap). Agent-driven worktree isolation (see §3) is what escapes a per-repo bottleneck now.
