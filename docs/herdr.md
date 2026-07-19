@@ -60,9 +60,11 @@ To verify what a running herdr actually reports, inspect the live state:
 `herdr api snapshot` (panes carry their current agent status), plus
 `herdr integration status` for which integrations are installed/current.
 
-Pi users should optionally run `herdr integration install pi` for precise
-working/blocked/done status and session references. The standard E2E uses a fake Pi and tests
-watcher status mapping deterministically rather than changing integrations.
+Pi users who need precise live working/blocked/done status and session references must run
+`herdr integration install pi`; the matching integration is a prerequisite for whichever harness
+is being dispatched. Without it, the board continues in the degraded mode described above. The
+standard E2E uses a fake Pi and tests watcher status mapping deterministically rather than changing
+integrations.
 
 ## Version drift
 

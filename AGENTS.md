@@ -69,7 +69,7 @@ Full layering, harness details, and how to add tests live in [`docs/testing.md`]
 sources are the installed binary itself — `herdr api schema --json` (methods/types/events +
 protocol number), `herdr <cmd> --help`, `herdr api snapshot`. Never assume a herdr command,
 flag, or JSON shape from memory, and pin the argv you verified in a test comment. Repo herdr
-facts are pinned to **herdr 0.7.3 / protocol 16**; on a newer herdr, re-verify against
+facts are pinned to **herdr 0.7.4 / protocol 16**; on a newer herdr, re-verify against
 `api schema` **before** patching code. **See [`docs/herdr.md`](docs/herdr.md).**
 
 - **Never run destructive herdr commands against a user's workspaces/sessions.** Mutations only

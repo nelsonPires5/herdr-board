@@ -64,9 +64,11 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
 - `card.update {id, …subset}` → `Card` (error 3 while `running|queued` for harness/`session`/space fields)
 - `card.delete {id}` → `{deleted:true}` (error 3 while running; cancel first)
 - `card.archive {id, archived:true|false}` → `Card` — archives or restores without deleting
-  comments/runs. Archiving is refused while `queued|running|blocked`; archived cards must be restored
-  before move/retry.
-- `card.move {id, column_id, position?}` → `Card` — THE trigger: target must belong to the card's board; if it is `auto` and the card is idle/failed, a run is enqueued.
+  comments/runs. Archiving is refused while `queued|running|blocked|awaiting`; `done` cards can be
+  archived. Archived cards must be restored before move/retry.
+- `card.move {id, column_id, position?}` → `Card` — THE trigger: target must belong to the
+  card's board; if it is `auto` and the card is `idle`, `failed`, or `done`, a run is enqueued.
+  `awaiting` is not re-dispatched because its run remains open.
 - `card.get {id}` → `{card, comments:[…], runs:[…]}`
 - `card.list {board_id?, column_id?}` → `[Card…]`; omitted `board_id` means `Global`, and a column filter must belong to the requested board.
 

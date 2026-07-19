@@ -46,6 +46,10 @@ Ensure `~/.local/bin` is on your `PATH`.
 herdr plugin install nelsonPires5/herdr-board
 ```
 
+Precise live lifecycle status also requires Herdr's integration for the harness you dispatch (for
+example, `herdr integration install pi`). Without that integration the board still dispatches and
+accepts `board done`, but runs in degraded mode without precise working/blocked/done signals.
+
 Open the board:
 
 ```bash
@@ -174,7 +178,7 @@ grid.
 
 </details>
 
-## Optional setup
+## Integration and optional setup
 
 <details>
 <summary><strong>Add a Herdr keybinding</strong></summary>
@@ -193,7 +197,7 @@ command = "herdr plugin action invoke open-board --plugin herdr-board"
 </details>
 
 <details>
-<summary><strong>Install an optional harness integration and agent skill</strong></summary>
+<summary><strong>Install the harness integration and optional agent skill</strong></summary>
 
 For precise Pi status (`idle`, `working`, `blocked`, `done`) and session references, install Herdr's
 Pi integration. Installation changes your personal Pi extension config, so herdr-board never does it
@@ -267,10 +271,11 @@ Configuration lives at `~/.config/herdr-board/config.toml`; override it with
 `HERDR_BOARD_CONFIG`.
 
 ```toml
-[daemon]
-spawner = "herdr"          # herdr = agent panes (default); local = child processes
 max_concurrent = 3         # global cap on concurrent runs
 idle_grace_seconds = 90    # idle without board done before the card is parked in `awaiting` for review
+
+[daemon]
+spawner = "herdr"          # herdr = agent panes (default); local = child processes
 
 [harness.myharness]
 argv = ["mytool", "--model", "{model}"]

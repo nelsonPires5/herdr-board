@@ -45,7 +45,6 @@ card_json="$("$BOARD_BIN" card new --title "Awaiting Card" \
   --description "wait for human confirmation" --harness fake \
   --space-kind workspace --space-ref "$WS_ID" --json)"
 CARD_ID="$(printf '%s' "$card_json" | jget id)" || fail "could not parse card id"
-DISPATCHED_AT="$(date +%s)"
 mut "board move $CARD_ID 'Await Execute' -> agent.start in $WS_ID"
 "$BOARD_BIN" move "$CARD_ID" "Await Execute" --json >/dev/null
 
@@ -61,6 +60,8 @@ for _ in $(seq 1 80); do
   sleep .1
 done
 [ -n "$PANE_ID" ] || { tail -50 "$E2E_TMP/daemon.log"; fail "run never recorded a live pane"; }
+monotonic_ms() { python3 -c 'import time; print(time.monotonic_ns() // 1_000_000)'; }
+RUN_STARTED_OBSERVED_MS="$(monotonic_ms)"
 ok "run started in live pane $PANE_ID"
 
 status_of() { card_field "$CARD_ID" card.status 2>/dev/null || true; }
@@ -103,6 +104,7 @@ ok "integration-style working signal resumed the card to running"
 step "Report the integration's end-of-turn idle; wait for Herdr done -> awaiting"
 report_agent idle
 wait_status awaiting 80
+AWAITING_OBSERVED_MS="$(monotonic_ms)"
 
 "$BOARD_BIN" card show "$CARD_ID" --json | python3 -c '
 import json, sys
@@ -122,9 +124,13 @@ print("  live Herdr pane agent_status=done")
 ' || fail "agent pane is not live with Herdr status done"
 
 step "Assert awaiting pauses the original column timeout"
-# Stay beyond the four-second deadline measured from dispatch. Poll every 100ms
-# and fail immediately on any state/run/pane regression; this is not a blind sleep.
-while [ $(( $(date +%s) - DISPATCHED_AT )) -lt 6 ]; do
+TIMEOUT_DURATION_MS=4000
+PAUSE_MARGIN_MS=1000
+PAUSE_PROOF_DEADLINE_MS=$((AWAITING_OBSERVED_MS + TIMEOUT_DURATION_MS + PAUSE_MARGIN_MS))
+# Start this proof clock only after `awaiting` was observed: spawn and signal setup
+# cannot consume the interval. Staying awaiting for a full configured timeout plus
+# margin, while polling card/run/pane state, proves the column timeout is paused.
+while :; do
   "${BOARD_BIN}" card show "$CARD_ID" --json | python3 -c '
 import json, sys
 x = json.load(sys.stdin)
@@ -134,9 +140,13 @@ assert x["runs"][-1]["ended_at"] is None
 ' || fail "awaiting run changed before confirmation"
   hrpc pane.get "{\"pane_id\":\"$PANE_ID\"}" >/dev/null 2>&1 \
     || fail "awaiting pane disappeared before confirmation"
+  NOW_MS="$(monotonic_ms)"
+  [ "$NOW_MS" -gt "$PAUSE_PROOF_DEADLINE_MS" ] && break
   sleep .1
 done
-ok "card stayed awaiting with an open run/pane beyond its original timeout"
+RUN_OBSERVED_ELAPSED_MS=$((NOW_MS - RUN_STARTED_OBSERVED_MS))
+AWAITING_ELAPSED_MS=$((NOW_MS - AWAITING_OBSERVED_MS))
+ok "card stayed awaiting with an open run/pane for ${AWAITING_ELAPSED_MS}ms after awaiting was observed (${RUN_OBSERVED_ELAPSED_MS}ms since confirmed run start)"
 
 step "Confirm through the supported board run.done CLI contract"
 "$BOARD_BIN" done "$CARD_ID" --outcome ok --json >/dev/null
