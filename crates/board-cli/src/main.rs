@@ -187,6 +187,11 @@ enum ColumnCmd {
 
 #[derive(Subcommand)]
 enum HarnessCmd {
+    /// List every available harness (built-ins `pi`/`claude` + config-defined).
+    List {
+        #[arg(long)]
+        json: bool,
+    },
     /// List known models and the efforts each accepts.
     Models {
         /// Harness name.
@@ -649,6 +654,17 @@ fn cmd_column(sub: ColumnCmd) -> Result<()> {
 fn cmd_harness(sub: HarnessCmd) -> Result<()> {
     let mut c = connect_or_start()?;
     match sub {
+        HarnessCmd::List { json } => {
+            let v = c.call("harness.list", json!({}))?;
+            let names: Vec<String> = serde_json::from_value(v["harnesses"].clone())?;
+            if json {
+                print_json(&names)?;
+            } else {
+                for h in &names {
+                    println!("{h}");
+                }
+            }
+        }
         HarnessCmd::Models { harness, json } => {
             let caps = harness_capabilities(&mut c, &harness)?;
             if json {

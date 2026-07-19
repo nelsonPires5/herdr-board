@@ -731,10 +731,11 @@ fn form_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
                     let fid = form.focused().id;
                     form.focused_mut().cycle(delta);
                     // A changed harness needs fresh capabilities; a changed
-                    // session needs its own workspace list; model/space-kind
-                    // changes reshape the dependent selectors in place.
+                    // session needs its own workspace list; a changed column
+                    // harness-override needs its own capabilities; model/space-
+                    // kind changes reshape the dependent selectors in place.
                     match fid {
-                        FieldId::Harness | FieldId::Session => {
+                        FieldId::Harness | FieldId::Session | FieldId::HarnessOverride => {
                             return vec![Effect::LoadFormOptions]
                         }
                         FieldId::Model => form.on_model_changed(),

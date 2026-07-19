@@ -24,7 +24,8 @@ use anyhow::Result;
 use board_core::capability::HarnessCapabilities;
 use board_core::client::BoardClient;
 use board_core::protocol::{
-    BoardSnapshot, Event, SessionInfo, SessionListResult, SpaceInfo, SpaceListResult,
+    BoardSnapshot, Event, HarnessListResult, SessionInfo, SessionListResult, SpaceInfo,
+    SpaceListResult,
 };
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event as CtEvent, KeyEventKind};
 use crossterm::terminal::{
@@ -322,6 +323,7 @@ impl Driver {
         // The workspace list is scoped to the currently selected session.
         let session = form.current_session();
         let caps = fetch_capabilities(self.client.as_mut(), &harness);
+        let harnesses = fetch_harness_list(self.client.as_mut());
         let sessions = fetch_sessions(self.client.as_mut());
         let spaces = fetch_spaces(self.client.as_mut(), session.as_deref());
 
@@ -333,6 +335,8 @@ impl Driver {
                 None
             }
         };
+        // harness.list failing is non-fatal: the selectors keep the built-ins.
+        let harnesses_opt = harnesses.ok();
         let spaces_opt = match spaces {
             Ok(s) => Some(s),
             Err(e) => {
@@ -345,7 +349,7 @@ impl Driver {
         // Sessions failing is non-fatal: keep `(default)` + any preselection.
         let sessions_opt = sessions.ok();
         if let Some(form) = self.app.form.as_mut() {
-            form.apply_options(caps_opt, spaces_opt, sessions_opt);
+            form.apply_options(caps_opt, harnesses_opt, spaces_opt, sessions_opt);
         }
         if let Some(w) = warning {
             self.app.set_toast(w, true);
@@ -375,6 +379,15 @@ fn fetch_capabilities(client: &mut dyn BoardClient, harness: &str) -> Result<Har
         serde_json::json!({ "harness": harness }),
     )?;
     Ok(serde_json::from_value(v)?)
+}
+
+/// Fetch `harness.list` (built-ins + config-defined) via the client's generic
+/// `call`. Drives the harness/harness-override selects so config-defined
+/// harnesses appear without a client-side config read.
+fn fetch_harness_list(client: &mut dyn BoardClient) -> Result<Vec<String>> {
+    let v = client.call("harness.list", serde_json::json!({}))?;
+    let r: HarnessListResult = serde_json::from_value(v)?;
+    Ok(r.harnesses)
 }
 
 /// Fetch `space.list` (scoped to `session`, `None` = default) via the client's

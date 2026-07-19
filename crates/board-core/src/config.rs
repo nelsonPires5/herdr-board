@@ -2,7 +2,7 @@
 //! A missing file yields defaults.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -27,6 +27,12 @@ pub struct Config {
     /// Config-defined harnesses keyed by name (`[harness.NAME]`).
     #[serde(default)]
     pub harness: HashMap<String, HarnessDef>,
+    /// Pi agent dir to read the live model catalog from (`auth.json` +
+    /// `models-store.json`). `None` disables live Pi model discovery → the
+    /// `pi` harness reports the static free-form catalog (`models: []`). The
+    /// daemon fills this in at startup; tests leave it `None` to stay hermetic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pi_agent_dir: Option<PathBuf>,
 }
 
 /// A config-defined harness: an argv template plus an optional capability
@@ -54,6 +60,7 @@ impl Default for Config {
             max_concurrent: default_max_concurrent(),
             idle_grace_seconds: default_idle_grace_seconds(),
             harness: HashMap::new(),
+            pi_agent_dir: None,
         }
     }
 }

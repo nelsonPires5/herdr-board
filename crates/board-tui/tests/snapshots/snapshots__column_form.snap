@@ -1,5 +1,6 @@
 ---
 source: crates/board-tui/tests/snapshots.rs
+assertion_line: 159
 expression: "render(&mut d, 80, 24)"
 ---
 "┌ New column (Tab: field · Enter: save · Esc: cancel) ─────────────────────────┐"
@@ -8,6 +9,8 @@ expression: "render(&mut d, 80, 24)"
 "│trigger                                                                       │"
 "│< manual >                                                                    │"
 "│system prompt  (Ctrl+E: $EDITOR)                                              │"
+"│                                                                              │"
+"│                                                                              │"
 "│                                                                              │"
 "│on success                                                                    │"
 "│< none >                                                                      │"
@@ -18,10 +21,8 @@ expression: "render(&mut d, 80, 24)"
 "│model override                                                                │"
 "│                                                                              │"
 "│effort override                                                               │"
-"│< none >                                                                      │"
+"│< (default) >                                                                 │"
 "│harness override                                                              │"
-"│                                                                              │"
-"│permission override                                                           │"
 "│< none >                                                                      │"
 "│timeout (minutes)                                                             │"
 "│                                                                              │"

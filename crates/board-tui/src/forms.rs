@@ -233,10 +233,19 @@ pub struct Form {
     pub kind: FormKind,
     pub fields: Vec<Field>,
     pub focus: usize,
-    /// Live capability catalog for the current harness (card forms only).
-    /// `None` = not yet fetched, or the fetch failed → guided fields fall back
-    /// to free-text / static menus.
+    /// Live capability catalog for the form's driving harness — the card
+    /// `Harness` field for card forms, the column `HarnessOverride` field for
+    /// column forms. `None` = not yet fetched, or the fetch failed → guided
+    /// fields fall back to free-text / static menus.
     pub caps: Option<HarnessCapabilities>,
+    /// Available harness names (built-ins + config-defined), fetched via
+    /// `harness.list`. Seeds both the card `Harness` selector and the column
+    /// `HarnessOverride` selector. Defaults to the built-ins so the form is
+    /// usable before the fetch lands.
+    pub harnesses: Vec<String>,
+    /// Sibling columns (column forms only) — the on-success/on-fail option
+    /// source, retained so rebuilds on caps/harness changes regenerate them.
+    pub columns: Vec<Column>,
     /// Live workspace list for the space selector (card forms only). Empty when
     /// unfetched / failed → the space ref falls back to free-text.
     pub spaces: Vec<SpaceInfo>,
@@ -262,9 +271,11 @@ impl Form {
         let values = CardValues::from_card(None);
         Form {
             kind: FormKind::CardCreate { column_id },
-            fields: build_card_fields(&values, None, &[], &[]),
+            fields: build_card_fields(&values, None, &default_harnesses(), &[], &[]),
             focus: 0,
             caps: None,
+            harnesses: default_harnesses(),
+            columns: Vec::new(),
             spaces: Vec::new(),
             sessions: Vec::new(),
         }
@@ -274,9 +285,11 @@ impl Form {
         let values = CardValues::from_card(Some(card));
         Form {
             kind: FormKind::CardEdit { card_id: card.id },
-            fields: build_card_fields(&values, None, &[], &[]),
+            fields: build_card_fields(&values, None, &default_harnesses(), &[], &[]),
             focus: 0,
             caps: None,
+            harnesses: default_harnesses(),
+            columns: Vec::new(),
             spaces: Vec::new(),
             sessions: Vec::new(),
         }
@@ -285,9 +298,11 @@ impl Form {
     pub fn column_create(columns: &[Column]) -> Form {
         Form {
             kind: FormKind::ColumnCreate,
-            fields: column_fields(None, columns),
+            fields: column_fields(None, columns, None, &default_harnesses()),
             focus: 0,
             caps: None,
+            harnesses: default_harnesses(),
+            columns: columns.to_vec(),
             spaces: Vec::new(),
             sessions: Vec::new(),
         }
@@ -296,9 +311,11 @@ impl Form {
     pub fn column_edit(col: &Column, columns: &[Column]) -> Form {
         Form {
             kind: FormKind::ColumnEdit { column_id: col.id },
-            fields: column_fields(Some(col), columns),
+            fields: column_fields(Some(col), columns, None, &default_harnesses()),
             focus: 0,
             caps: None,
+            harnesses: default_harnesses(),
+            columns: columns.to_vec(),
             spaces: Vec::new(),
             sessions: Vec::new(),
         }
@@ -310,6 +327,8 @@ impl Form {
             fields: vec![Field::text(FieldId::CommentBody, "comment", "", true)],
             focus: 0,
             caps: None,
+            harnesses: default_harnesses(),
+            columns: Vec::new(),
             spaces: Vec::new(),
             sessions: Vec::new(),
         }
@@ -323,9 +342,24 @@ impl Form {
         )
     }
 
-    /// The harness the guided selectors should be populated for.
+    /// Whether this form is a column create/edit form.
+    pub fn is_column_form(&self) -> bool {
+        matches!(
+            self.kind,
+            FormKind::ColumnCreate | FormKind::ColumnEdit { .. }
+        )
+    }
+
+    /// The harness the guided selectors should be populated for: the card
+    /// `Harness` field for card forms, the column `HarnessOverride` field for
+    /// column forms. Drives which `harness.capabilities` the loader fetches.
     pub fn current_harness(&self) -> String {
-        self.opt_choice_str(FieldId::Harness)
+        let id = if self.is_column_form() {
+            FieldId::HarnessOverride
+        } else {
+            FieldId::Harness
+        };
+        self.opt_choice_str(id)
             .unwrap_or_else(|| DEFAULT_HARNESS.to_string())
     }
 
@@ -335,27 +369,30 @@ impl Form {
         self.opt_choice_str(FieldId::Session)
     }
 
-    /// Install freshly fetched capabilities / spaces / sessions and rebuild the
-    /// guided card fields (preserving whatever the user already selected/typed).
-    /// A `None` argument means the fetch failed — the affected selectors fall
-    /// back to free-text / minimal menus. No-op for non-card forms.
+    /// Install freshly fetched capabilities / harness list / spaces / sessions
+    /// and rebuild the guided fields (preserving whatever the user already
+    /// selected/typed). A `None` argument means the fetch failed — the affected
+    /// selectors fall back to free-text / minimal menus. No-op for comment forms.
     pub fn apply_options(
         &mut self,
         caps: Option<HarnessCapabilities>,
+        harnesses: Option<Vec<String>>,
         spaces: Option<Vec<SpaceInfo>>,
         sessions: Option<Vec<SessionInfo>>,
     ) {
-        if !self.is_card_form() {
-            return;
-        }
         self.caps = caps;
-        if let Some(sp) = spaces {
-            self.spaces = sp;
+        if let Some(h) = harnesses {
+            self.harnesses = h;
         }
-        if let Some(se) = sessions {
-            self.sessions = se;
+        if self.is_card_form() {
+            if let Some(sp) = spaces {
+                self.spaces = sp;
+            }
+            if let Some(se) = sessions {
+                self.sessions = se;
+            }
         }
-        self.rebuild_card_fields();
+        self.rebuild_fields();
     }
 
     /// React to a model change: effort options follow the selected model, and
@@ -370,12 +407,45 @@ impl Form {
         self.rebuild_card_fields();
     }
 
+    fn rebuild_fields(&mut self) {
+        if self.is_card_form() {
+            self.rebuild_card_fields();
+        } else if self.is_column_form() {
+            self.rebuild_column_fields();
+        }
+    }
+
     fn rebuild_card_fields(&mut self) {
         if !self.is_card_form() {
             return;
         }
         let values = self.card_values();
-        self.fields = build_card_fields(&values, self.caps.as_ref(), &self.spaces, &self.sessions);
+        self.fields = build_card_fields(
+            &values,
+            self.caps.as_ref(),
+            &self.harnesses,
+            &self.spaces,
+            &self.sessions,
+        );
+        if self.focus >= self.fields.len() {
+            self.focus = 0;
+        }
+        if !self.field_visible(self.focus) {
+            self.focus_step(1);
+        }
+    }
+
+    /// Rebuild the column fields after caps / harness list arrive or after the
+    /// harness-override changes. Values that stay valid are preserved; an
+    /// effort/permission override that the new harness doesn't offer resets to
+    /// the default option.
+    fn rebuild_column_fields(&mut self) {
+        if !self.is_column_form() {
+            return;
+        }
+        let values = self.column_values();
+        self.fields =
+            column_fields_from_values(&values, &self.columns, self.caps.as_ref(), &self.harnesses);
         if self.focus >= self.fields.len() {
             self.focus = 0;
         }
@@ -400,6 +470,25 @@ impl Form {
                 .unwrap_or_else(|| "workspace".to_string()),
             space_ref: self.card_space_ref().unwrap_or_default(),
             space_cwd: self.raw_text(FieldId::SpaceCwd),
+        }
+    }
+
+    /// Snapshot the current column field values (for rebuilding in place).
+    /// The override harness drives caps; `effort_override`/`permission_override`
+    /// are read as the effective choice/text string (`None` = default/none).
+    fn column_values(&self) -> ColumnValues {
+        ColumnValues {
+            name: self.raw_text(FieldId::Name),
+            system_prompt: self.raw_text(FieldId::SystemPrompt),
+            trigger: self.opt_choice_str(FieldId::Trigger),
+            on_success: self.opt_col(FieldId::OnSuccess),
+            on_fail: self.opt_col(FieldId::OnFail),
+            fresh_session: self.opt_bool(FieldId::FreshSession),
+            harness_override: self.opt_str_field(FieldId::HarnessOverride),
+            model_override: self.opt_text(FieldId::ModelOverride),
+            effort_override: self.opt_str_field(FieldId::EffortOverride),
+            permission_override: self.opt_str_field(FieldId::PermissionOverride),
+            timeout: self.opt_int(FieldId::Timeout),
         }
     }
 
@@ -465,17 +554,22 @@ impl Form {
 
     /// Whether a field is currently shown. The `(custom)` free-text companion
     /// appears only when the `SpaceRef` selector is on `(custom)`; `cwd` only for
-    /// the `new_workspace` space kind.
+    /// the `new_workspace` space kind; both `permission` selectors disappear
+    /// when the driving harness has no permission modes (e.g. Pi).
     pub fn field_visible(&self, idx: usize) -> bool {
         match self.fields[idx].id {
             FieldId::SpaceCwd => self.space_kind_is_new_workspace(),
             FieldId::ModelCustom => self.model_is_custom(),
-            FieldId::Permission => self.permission_is_applicable(),
+            FieldId::Permission | FieldId::PermissionOverride => self.permission_is_applicable(),
             FieldId::SpaceRefCustom => self.space_ref_is_custom(),
             _ => true,
         }
     }
 
+    /// Whether any permission selector applies for the form's driving harness.
+    /// With a loaded catalog this is `!permission_modes.is_empty()`; without one
+    /// (fetch failed / pending) it falls back to "not pi" so the field stays
+    /// reachable for claude/config harnesses.
     fn permission_is_applicable(&self) -> bool {
         self.caps
             .as_ref()
@@ -589,10 +683,10 @@ impl Form {
                     on_success_column_id: self.opt_col(FieldId::OnSuccess),
                     on_fail_column_id: self.opt_col(FieldId::OnFail),
                     fresh_session: self.opt_bool(FieldId::FreshSession),
-                    harness_override: self.opt_text(FieldId::HarnessOverride),
+                    harness_override: self.opt_str_field(FieldId::HarnessOverride),
                     model_override: self.opt_text(FieldId::ModelOverride),
-                    effort_override: self.opt_choice_str(FieldId::EffortOverride),
-                    permission_override: self.opt_choice_str(FieldId::PermissionOverride),
+                    effort_override: self.opt_str_field(FieldId::EffortOverride),
+                    permission_override: self.opt_str_field(FieldId::PermissionOverride),
                     timeout_minutes: self.opt_int(FieldId::Timeout),
                 }))
             }
@@ -610,10 +704,10 @@ impl Form {
                     on_success_column_id: self.opt_col(FieldId::OnSuccess),
                     on_fail_column_id: self.opt_col(FieldId::OnFail),
                     fresh_session: self.opt_bool(FieldId::FreshSession),
-                    harness_override: self.opt_text(FieldId::HarnessOverride),
+                    harness_override: self.opt_str_field(FieldId::HarnessOverride),
                     model_override: self.opt_text(FieldId::ModelOverride),
-                    effort_override: self.opt_choice_str(FieldId::EffortOverride),
-                    permission_override: self.opt_choice_str(FieldId::PermissionOverride),
+                    effort_override: self.opt_str_field(FieldId::EffortOverride),
+                    permission_override: self.opt_str_field(FieldId::PermissionOverride),
                     timeout_minutes: self.opt_int(FieldId::Timeout),
                 }))
             }
@@ -648,6 +742,15 @@ impl Form {
         match self.field(id).and_then(|f| f.choice_val()) {
             Some(ChoiceVal::Str(s)) => Some(s.clone()),
             _ => None,
+        }
+    }
+    /// Effective string for a field that may be a choice (default/none → `None`)
+    /// or free text (fallback when no catalog is loaded). Used by the column
+    /// override fields, which are choices once caps arrive but text otherwise.
+    fn opt_str_field(&self, id: FieldId) -> Option<String> {
+        match self.field(id).map(|f| &f.kind) {
+            Some(FieldKind::Choice { .. }) => self.opt_choice_str(id),
+            _ => self.opt_text(id),
         }
     }
     fn opt_col(&self, id: FieldId) -> Option<i64> {
@@ -708,29 +811,68 @@ fn detect_current_session() -> Option<String> {
 
 // -- field templates ---------------------------------------------------------
 
-fn effort_opts(current: Option<&str>) -> (Vec<ChoiceOpt>, usize) {
-    let opts = vec![
-        ChoiceOpt::none(),
-        ChoiceOpt::str("low"),
-        ChoiceOpt::str("medium"),
-        ChoiceOpt::str("high"),
-        ChoiceOpt::str("xhigh"),
-        ChoiceOpt::str("max"),
-    ];
+/// Built-in harness names, the pre-fetch default for [`Form::harnesses`] so the
+/// harness/harness-override selectors are usable before `harness.list` lands.
+fn default_harnesses() -> Vec<String> {
+    BUILTIN_HARNESSES.iter().map(|s| (*s).to_string()).collect()
+}
+
+/// Harness selector options (no leading sentinel): every available harness
+/// from the shared `harness.list` source, preserving an unknown current value
+/// (e.g. a card whose harness isn't listed yet) by appending it. Used by the
+/// card `Harness` field so it draws from the same source as the column
+/// harness_override selector. `current` selects itself (else index 0).
+fn harness_choice_opts(harnesses: &[String], current: &str) -> (Vec<ChoiceOpt>, usize) {
+    let mut opts: Vec<ChoiceOpt> = harnesses.iter().map(|h| ChoiceOpt::str(h)).collect();
+    if !current.is_empty() && !opts.iter().any(|o| o.label == current) {
+        opts.push(ChoiceOpt::str(current));
+    }
+    let idx = opts.iter().position(|o| o.label == current).unwrap_or(0);
+    (opts, idx)
+}
+
+/// Harness-override selector options: `(none)` + every available harness,
+/// preserving an unknown current value (e.g. a config harness not yet listed)
+/// by appending it. `current` of `None` selects `(none)` (no override).
+fn harness_override_opts(harnesses: &[String], current: Option<&str>) -> (Vec<ChoiceOpt>, usize) {
+    let mut opts = vec![ChoiceOpt::none()];
+    for h in harnesses {
+        if !opts.iter().any(|o| &o.label == h) {
+            opts.push(ChoiceOpt::str(h));
+        }
+    }
+    if let Some(cur) = current {
+        if !opts.iter().any(|o| o.label == cur) {
+            opts.push(ChoiceOpt::str(cur));
+        }
+    }
     let idx = current
         .and_then(|c| opts.iter().position(|o| o.label == c))
         .unwrap_or(0);
     (opts, idx)
 }
 
-fn permission_opts(current: Option<&str>) -> (Vec<ChoiceOpt>, usize) {
-    let opts = vec![
-        ChoiceOpt::none(),
-        ChoiceOpt::str("acceptEdits"),
-        ChoiceOpt::str("plan"),
-        ChoiceOpt::str("manual"),
-        ChoiceOpt::str("dontAsk"),
-    ];
+/// Shared effort selector: `(default)` (wire `None`) + each effort. Used by
+/// both the card `Effort` field and the column `EffortOverride` field so the
+/// two forms share one source of truth for the effort menu.
+fn effort_choice_opts(efforts: &[Effort], current: Option<&str>) -> (Vec<ChoiceOpt>, usize) {
+    let mut opts = vec![ChoiceOpt::default_opt()];
+    for e in efforts {
+        opts.push(ChoiceOpt::str(e.as_str()));
+    }
+    let idx = current
+        .and_then(|c| opts.iter().position(|o| o.label == c))
+        .unwrap_or(0);
+    (opts, idx)
+}
+
+/// Shared permission selector: `(default)` (wire `None`) + each mode. Used by
+/// both the card `Permission` field and the column `PermissionOverride` field.
+fn permission_choice_opts(modes: &[String], current: Option<&str>) -> (Vec<ChoiceOpt>, usize) {
+    let mut opts = vec![ChoiceOpt::default_opt()];
+    for m in modes {
+        opts.push(ChoiceOpt::str(m));
+    }
     let idx = current
         .and_then(|c| opts.iter().position(|o| o.label == c))
         .unwrap_or(0);
@@ -814,25 +956,16 @@ fn union_efforts(caps: &HarnessCapabilities) -> Vec<Effort> {
 fn build_card_fields(
     values: &CardValues,
     caps: Option<&HarnessCapabilities>,
+    harnesses: &[String],
     spaces: &[SpaceInfo],
     sessions: &[SessionInfo],
 ) -> Vec<Field> {
     let v = values;
 
     // -- harness -------------------------------------------------------------
-    let mut harness_opts: Vec<ChoiceOpt> = BUILTIN_HARNESSES
-        .iter()
-        .map(|name| ChoiceOpt::str(name))
-        .collect();
-    // Preserve config-defined harnesses on existing cards, even though the TUI
-    // cannot discover arbitrary config names from the capability RPC.
-    if !v.harness.is_empty() && !harness_opts.iter().any(|opt| opt.label == v.harness) {
-        harness_opts.push(ChoiceOpt::str(&v.harness));
-    }
-    let harness_idx = harness_opts
-        .iter()
-        .position(|o| o.label == v.harness)
-        .unwrap_or(0);
+    // Drawn from the shared `harness.list` source (`Form::harnesses`), same list
+    // the column harness_override selector uses; pi stays first (default).
+    let (harness_opts, harness_idx) = harness_choice_opts(harnesses, &v.harness);
 
     // -- model ---------------------------------------------------------------
     let model_in_catalog = caps
@@ -899,15 +1032,7 @@ fn build_card_fields(
         None if v.harness == "pi" => EFFORT_ORDER.to_vec(),
         None => EFFORT_ORDER[2..].to_vec(),
     };
-    let mut eff_opts = vec![ChoiceOpt::default_opt()];
-    for e in &efforts {
-        eff_opts.push(ChoiceOpt::str(e.as_str()));
-    }
-    let eff_idx = v
-        .effort
-        .as_deref()
-        .and_then(|c| eff_opts.iter().position(|o| o.label == c))
-        .unwrap_or(0);
+    let (eff_opts, eff_idx) = effort_choice_opts(&efforts, v.effort.as_deref());
     let effort_field = Field::choice(FieldId::Effort, "effort", eff_opts, eff_idx);
 
     // -- permission ----------------------------------------------------------
@@ -918,15 +1043,7 @@ fn build_card_fields(
             .map(|s| s.to_string())
             .collect(),
     };
-    let mut perm_opts = vec![ChoiceOpt::default_opt()];
-    for m in &modes {
-        perm_opts.push(ChoiceOpt::str(m));
-    }
-    let perm_idx = v
-        .permission
-        .as_deref()
-        .and_then(|c| perm_opts.iter().position(|o| o.label == c))
-        .unwrap_or(0);
+    let (perm_opts, perm_idx) = permission_choice_opts(&modes, v.permission.as_deref());
     let permission_field = Field::choice(FieldId::Permission, "permission", perm_opts, perm_idx);
 
     // -- session (running sessions + `(default)` = daemon's default) ---------
@@ -1046,10 +1163,76 @@ fn session_field(current: Option<&str>, sessions: &[SessionInfo]) -> Field {
     Field::choice(FieldId::Session, "session", opts, idx)
 }
 
-fn column_fields(col: Option<&Column>, columns: &[Column]) -> Vec<Field> {
+/// A flat snapshot of a column form's values, used to (re)build the fields.
+/// The override harness drives the capability catalog; `*_override` strings
+/// are `None` for the default/none option.
+#[derive(Clone, Default)]
+struct ColumnValues {
+    name: String,
+    system_prompt: String,
+    /// Trigger wire string (`None` = default manual).
+    trigger: Option<String>,
+    on_success: Option<i64>,
+    on_fail: Option<i64>,
+    fresh_session: Option<bool>,
+    /// Selected override harness (`None` = no override / column default).
+    harness_override: Option<String>,
+    /// Free-text model override (`None` = unset).
+    model_override: Option<String>,
+    effort_override: Option<String>,
+    permission_override: Option<String>,
+    timeout: Option<i64>,
+}
+
+impl ColumnValues {
+    /// Seed from a column model (create = `None`).
+    fn from_column(col: Option<&Column>) -> ColumnValues {
+        match col {
+            Some(c) => ColumnValues {
+                name: c.name.clone(),
+                system_prompt: c.system_prompt.clone().unwrap_or_default(),
+                trigger: Some(c.trigger.as_str().to_string()),
+                on_success: c.on_success_column_id,
+                on_fail: c.on_fail_column_id,
+                fresh_session: Some(c.fresh_session),
+                harness_override: c.harness_override.clone(),
+                model_override: c.model_override.clone(),
+                effort_override: c.effort_override.clone(),
+                permission_override: c.permission_override.clone(),
+                timeout: c.timeout_minutes,
+            },
+            None => ColumnValues::default(),
+        }
+    }
+}
+
+/// Build the column fields from a column model. Delegates to
+/// [`column_fields_from_values`] via a [`ColumnValues`] snapshot.
+fn column_fields(
+    col: Option<&Column>,
+    columns: &[Column],
+    caps: Option<&HarnessCapabilities>,
+    harnesses: &[String],
+) -> Vec<Field> {
+    column_fields_from_values(&ColumnValues::from_column(col), columns, caps, harnesses)
+}
+
+/// Build the column fields from a value snapshot. The harness-override,
+/// effort-override, and permission-override selectors share the same builders
+/// as the card form so the two forms draw from one source of truth
+/// (`harness.capabilities` + `harness.list`). Invalid override values (e.g. an
+/// effort the new harness doesn't offer) reset to the default option via the
+/// builder's `unwrap_or(0)`.
+fn column_fields_from_values(
+    v: &ColumnValues,
+    columns: &[Column],
+    caps: Option<&HarnessCapabilities>,
+    harnesses: &[String],
+) -> Vec<Field> {
     let trigger_opts = vec![ChoiceOpt::str("manual"), ChoiceOpt::str("auto")];
-    let trigger_idx = col
-        .map(|c| c.trigger.as_str())
+    let trigger_idx = v
+        .trigger
+        .as_deref()
         .and_then(|s| trigger_opts.iter().position(|o| o.label == s))
         .unwrap_or(0);
 
@@ -1062,16 +1245,16 @@ fn column_fields(col: Option<&Column>, columns: &[Column]) -> Vec<Field> {
             val: ChoiceVal::Col(c.id),
         });
     }
-    let on_success_idx = col
-        .and_then(|c| c.on_success_column_id)
+    let on_success_idx = v
+        .on_success
         .and_then(|id| {
             col_opts
                 .iter()
                 .position(|o| matches!(o.val, ChoiceVal::Col(x) if x == id))
         })
         .unwrap_or(0);
-    let on_fail_idx = col
-        .and_then(|c| c.on_fail_column_id)
+    let on_fail_idx = v
+        .on_fail
         .and_then(|id| {
             col_opts
                 .iter()
@@ -1089,23 +1272,69 @@ fn column_fields(col: Option<&Column>, columns: &[Column]) -> Vec<Field> {
             val: ChoiceVal::Bool(true),
         },
     ];
-    let fresh_idx = usize::from(col.map(|c| c.fresh_session).unwrap_or(false));
+    let fresh_idx = match v.fresh_session {
+        Some(true) => 1,
+        _ => 0,
+    };
 
-    let (eff_opts, eff_idx) = effort_opts(col.and_then(|c| c.effort_override.as_deref()));
-    let (perm_opts, perm_idx) = permission_opts(col.and_then(|c| c.permission_override.as_deref()));
+    // -- override fields share the card form's builders ---------------------
+    // model_override stays free text: models are advisory and every harness is
+    // model-freeform, so a select would add noise without adding safety.
+    let model_override_field = Field::text(
+        FieldId::ModelOverride,
+        "model override",
+        v.model_override.as_deref().unwrap_or(""),
+        false,
+    );
+
+    // Efforts for the override harness (its default/free-form set); fallback
+    // to the canonical ladder when caps aren't loaded yet.
+    let efforts: Vec<Effort> = match caps {
+        Some(c) => union_efforts(c),
+        None => EFFORT_ORDER.to_vec(),
+    };
+    let (eff_opts, eff_idx) = effort_choice_opts(&efforts, v.effort_override.as_deref());
+    let effort_override_field = Field::choice(
+        FieldId::EffortOverride,
+        "effort override",
+        eff_opts,
+        eff_idx,
+    );
+
+    // harness_override is now a SELECT over the available harnesses (built-ins
+    // + config-defined), not free text. `(none)` = no override.
+    let (ho_opts, ho_idx) = harness_override_opts(harnesses, v.harness_override.as_deref());
+    let harness_override_field = Field::choice(
+        FieldId::HarnessOverride,
+        "harness override",
+        ho_opts,
+        ho_idx,
+    );
+
+    // permission_override mirrors the card Permission selector and is hidden
+    // (via field_visible) when the harness has no permission modes (Pi).
+    let modes: Vec<String> = match caps {
+        Some(c) => c.permission_modes.clone(),
+        None => FALLBACK_PERMISSION_MODES
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+    };
+    let (po_opts, po_idx) = permission_choice_opts(&modes, v.permission_override.as_deref());
+    let permission_override_field = Field::choice(
+        FieldId::PermissionOverride,
+        "permission override",
+        po_opts,
+        po_idx,
+    );
 
     vec![
-        Field::text(
-            FieldId::Name,
-            "name",
-            col.map(|c| c.name.as_str()).unwrap_or(""),
-            false,
-        ),
+        Field::text(FieldId::Name, "name", &v.name, false),
         Field::choice(FieldId::Trigger, "trigger", trigger_opts, trigger_idx),
         Field::text(
             FieldId::SystemPrompt,
             "system prompt",
-            col.and_then(|c| c.system_prompt.as_deref()).unwrap_or(""),
+            &v.system_prompt,
             true,
         ),
         Field::choice(
@@ -1121,37 +1350,14 @@ fn column_fields(col: Option<&Column>, columns: &[Column]) -> Vec<Field> {
             fresh_opts,
             fresh_idx,
         ),
-        Field::text(
-            FieldId::ModelOverride,
-            "model override",
-            col.and_then(|c| c.model_override.as_deref()).unwrap_or(""),
-            false,
-        ),
-        Field::choice(
-            FieldId::EffortOverride,
-            "effort override",
-            eff_opts,
-            eff_idx,
-        ),
-        Field::text(
-            FieldId::HarnessOverride,
-            "harness override",
-            col.and_then(|c| c.harness_override.as_deref())
-                .unwrap_or(""),
-            false,
-        ),
-        Field::choice(
-            FieldId::PermissionOverride,
-            "permission override",
-            perm_opts,
-            perm_idx,
-        ),
+        model_override_field,
+        effort_override_field,
+        harness_override_field,
+        permission_override_field,
         Field::text(
             FieldId::Timeout,
             "timeout (minutes)",
-            &col.and_then(|c| c.timeout_minutes)
-                .map(|t| t.to_string())
-                .unwrap_or_default(),
+            &v.timeout.map(|t| t.to_string()).unwrap_or_default(),
             false,
         ),
     ]
@@ -1159,7 +1365,159 @@ fn column_fields(col: Option<&Column>, columns: &[Column]) -> Vec<Field> {
 
 #[cfg(test)]
 mod tests {
-    use super::session_name_from_socket;
+    use super::*;
+    use board_core::capability::{
+        claude_capabilities, pi_capabilities, HarnessCapabilities, ModelInfo,
+    };
+    use board_core::protocol::Effort;
+
+    /// Find a field by id.
+    fn field(form: &Form, id: FieldId) -> &Field {
+        form.fields
+            .iter()
+            .find(|f| f.id == id)
+            .expect("field present")
+    }
+
+    /// Labels of a choice field's options.
+    fn choice_labels(form: &Form, id: FieldId) -> Vec<String> {
+        match &field(form, id).kind {
+            FieldKind::Choice { opts, .. } => opts.iter().map(|o| o.label.clone()).collect(),
+            _ => panic!("field {id:?} is not a choice"),
+        }
+    }
+
+    /// Index of a column-field id in the flat field list (for field_visible).
+    fn idx_of(form: &Form, id: FieldId) -> usize {
+        form.fields.iter().position(|f| f.id == id).unwrap()
+    }
+
+    #[test]
+    fn card_harness_select_consumes_harness_list() {
+        // The card Harness selector draws from the shared `harness.list` source
+        // (Form::harnesses) — the same source as the column harness_override
+        // selector — so config-defined harnesses appear there too, with pi first
+        // (the card default).
+        let mut form = Form::card_create(1);
+        let before = choice_labels(&form, FieldId::Harness);
+        assert_eq!(before, vec!["pi".to_string(), "claude".to_string()]);
+        form.apply_options(
+            None,
+            Some(vec!["pi".into(), "claude".into(), "fake".into()]),
+            None,
+            None,
+        );
+        let after = choice_labels(&form, FieldId::Harness);
+        assert_eq!(
+            after,
+            vec!["pi".to_string(), "claude".to_string(), "fake".to_string()]
+        );
+    }
+
+    #[test]
+    fn column_harness_override_is_select_with_builtins() {
+        // Before any fetch, harness_override is already a Choice (not free text)
+        // seeded with the built-ins + a leading `(none)`.
+        let form = Form::column_create(&[]);
+        let labels = choice_labels(&form, FieldId::HarnessOverride);
+        assert!(labels.first().is_some_and(|l| l == "none"));
+        assert!(labels.contains(&"pi".to_string()));
+        assert!(labels.contains(&"claude".to_string()));
+    }
+
+    #[test]
+    fn column_harness_override_select_includes_config_defined() {
+        // A harness.list fetch advertising a config-defined harness adds it.
+        let mut form = Form::column_create(&[]);
+        form.apply_options(
+            None,
+            Some(vec!["claude".into(), "pi".into(), "fake".into()]),
+            None,
+            None,
+        );
+        let labels = choice_labels(&form, FieldId::HarnessOverride);
+        assert!(labels.contains(&"fake".to_string()));
+    }
+
+    #[test]
+    fn column_permission_override_hidden_for_pi_shown_for_claude() {
+        // Default (no override) resolves to Pi → permission_override hidden.
+        let mut form = Form::column_create(&[]);
+        form.apply_options(Some(pi_capabilities()), None, None, None);
+        assert!(!form.field_visible(idx_of(&form, FieldId::PermissionOverride)));
+
+        // Switching the override to claude (and loading its caps) shows it.
+        form.apply_options(Some(claude_capabilities()), None, None, None);
+        assert!(form.field_visible(idx_of(&form, FieldId::PermissionOverride)));
+        // And its modes come from the catalog, not a hardcoded list.
+        let modes = choice_labels(&form, FieldId::PermissionOverride);
+        assert!(modes.contains(&"acceptEdits".to_string()));
+        assert!(modes.contains(&"plan".to_string()));
+    }
+
+    #[test]
+    fn column_effort_override_follows_catalog() {
+        // A catalog exposing only `low` restricts the effort-override menu.
+        let caps = HarnessCapabilities {
+            harness: "fake".into(),
+            models: vec![ModelInfo {
+                id: "m".into(),
+                efforts: vec![Effort::Low],
+            }],
+            model_freeform: true,
+            default_efforts: vec![Effort::Low],
+            permission_modes: vec![],
+        };
+        let mut form = Form::column_create(&[]);
+        form.apply_options(Some(caps), None, None, None);
+        let labels = choice_labels(&form, FieldId::EffortOverride);
+        // `(default)` plus the single declared effort.
+        assert_eq!(labels, vec!["(default)".to_string(), "low".to_string()]);
+    }
+
+    #[test]
+    fn column_cascading_resets_invalid_effort_on_harness_change() {
+        // Start on claude; its effort-override menu includes xhigh.
+        let mut form = Form::column_create(&[]);
+        form.apply_options(Some(claude_capabilities()), None, None, None);
+        let before = choice_labels(&form, FieldId::EffortOverride);
+        assert!(before.contains(&"xhigh".to_string()));
+
+        // Switch to a harness whose only effort is `low`. After the rebuild the
+        // stale `xhigh` is no longer offered (an invalid selection resets to the
+        // default option), proving the menu follows the new harness.
+        let caps = HarnessCapabilities {
+            harness: "fake".into(),
+            models: vec![ModelInfo {
+                id: "m".into(),
+                efforts: vec![Effort::Low],
+            }],
+            model_freeform: true,
+            default_efforts: vec![Effort::Low],
+            permission_modes: vec!["auto".into()],
+        };
+        form.apply_options(Some(caps), None, None, None);
+        let after = choice_labels(&form, FieldId::EffortOverride);
+        assert!(!after.contains(&"xhigh".to_string()));
+        assert!(after.contains(&"low".to_string()));
+    }
+
+    #[test]
+    fn column_submit_none_harness_override_extracts_none() {
+        // `(none)` harness override extracts to `None` (no override).
+        let mut form = Form::column_create(&[]);
+        form.apply_options(None, None, None, None);
+        // Set a name so submit passes the required-field check.
+        if let Some(f) = form.fields.iter_mut().find(|f| f.id == FieldId::Name) {
+            f.set_text("Col");
+        }
+        match form.submit().unwrap() {
+            Submit::ColumnCreate(p) => assert_eq!(p.harness_override, None),
+            _ => panic!("expected ColumnCreate"),
+        }
+    }
+
+    // -- session socket parsing ---------------------------------------------
 
     #[test]
     fn session_name_from_named_session_socket() {

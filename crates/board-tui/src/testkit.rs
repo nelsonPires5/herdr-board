@@ -3,9 +3,10 @@
 
 use board_core::capability::{claude_capabilities, pi_capabilities};
 use board_core::client::{BoardClient, FakeBoardClient};
+use board_core::harness::BUILTIN_HARNESSES;
 use board_core::protocol::{
-    CardCreateParams, CardStatus, ColumnCreateParams, Effort, Event, RunOutcome, SessionInfo,
-    SessionListResult, SpaceInfo, SpaceKind, SpaceListResult, Trigger,
+    CardCreateParams, CardStatus, ColumnCreateParams, Effort, Event, HarnessListResult, RunOutcome,
+    SessionInfo, SessionListResult, SpaceInfo, SpaceKind, SpaceListResult, Trigger,
 };
 use serde_json::{json, Value};
 
@@ -75,6 +76,9 @@ impl BoardClient for DemoClient {
             "harness.capabilities" => {
                 anyhow::bail!("harness.capabilities: stubbed failure")
             }
+            "harness.list" => Ok(json!(HarnessListResult {
+                harnesses: BUILTIN_HARNESSES.iter().map(|s| (*s).to_string()).collect()
+            })),
             "space.list" => match &self.spaces {
                 Some(_) => {
                     let session = params.get("session").and_then(|v| v.as_str());

@@ -101,7 +101,13 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for FileWriter {
 }
 
 async fn async_main(db_path: PathBuf, socket_path: PathBuf) -> anyhow::Result<()> {
-    let config = Config::load().unwrap_or_default();
+    let mut config = Config::load().unwrap_or_default();
+    // Resolve the Pi agent dir for live model discovery unless the user pinned
+    // it in config.toml. Tests construct Config directly (pi_agent_dir stays
+    // None), so this never runs for them and the pi catalog stays static.
+    if config.pi_agent_dir.is_none() {
+        config.pi_agent_dir = board_core::pi_catalog::default_agent_dir();
+    }
     let settings = DaemonSettings::load(&paths::config_path());
     tracing::info!(
         "spawner={:?} max_concurrent={}",

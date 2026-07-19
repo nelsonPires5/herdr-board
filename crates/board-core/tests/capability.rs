@@ -1,7 +1,8 @@
 //! Harness capability catalog + run-pane naming.
 
 use board_core::capability::{
-    capabilities_for, claude_capabilities, pi_capabilities, run_pane_name, run_pane_name_unique,
+    available_harnesses, capabilities_for, claude_capabilities, meta_for, pi_capabilities,
+    run_pane_name, run_pane_name_unique,
 };
 use board_core::config::Config;
 use board_core::protocol::Effort;
@@ -159,4 +160,98 @@ fn pane_name_truncation_never_ends_on_dash() {
 fn pane_name_unique_adds_run_suffix() {
     assert_eq!(run_pane_name_unique(14, "Execute", 5), "card-14-execute-r5");
     assert_eq!(run_pane_name_unique(3, "", 2), "card-3-r2");
+}
+
+// -- HarnessMeta trait -----------------------------------------------------
+
+#[test]
+fn trait_pi_has_no_models_or_permissions() {
+    let m = meta_for("pi", &Config::default()).unwrap();
+    assert_eq!(m.id(), "pi");
+    assert!(m.models().is_empty());
+    assert!(m.permissions().is_empty());
+    assert!(m.model_freeform());
+    // Default (None) efforts = the full Pi thinking ladder incl. off/minimal.
+    let eff = m.efforts(None);
+    assert!(eff.contains(&Effort::Off) && eff.contains(&Effort::Minimal));
+}
+
+#[test]
+fn trait_claude_model_efforts_authoritative() {
+    let m = meta_for("claude", &Config::default()).unwrap();
+    assert_eq!(m.id(), "claude");
+    // A known model carries its own efforts.
+    let known = m.efforts(Some("sonnet"));
+    assert_eq!(
+        known,
+        vec![
+            Effort::Low,
+            Effort::Medium,
+            Effort::High,
+            Effort::Xhigh,
+            Effort::Max
+        ]
+    );
+    // An unknown/free-form model still gets the default ladder.
+    let unknown = m.efforts(Some("whatever"));
+    assert!(!unknown.is_empty());
+    // Permissions are non-empty → the column permission_override stays visible.
+    assert!(!m.permissions().is_empty());
+}
+
+#[test]
+fn trait_config_harness_resolves_and_is_freeform() {
+    let toml = r#"
+[harness.fake]
+argv = ["bash", "/x.sh"]
+models = ["big", "small"]
+efforts = ["low", "high"]
+permission_modes = ["auto"]
+"#;
+    let cfg = Config::from_toml(toml).unwrap();
+    let m = meta_for("fake", &cfg).unwrap();
+    assert_eq!(m.id(), "fake");
+    assert!(m.model_freeform());
+    assert_eq!(m.permissions(), vec!["auto".to_string()]);
+    // A declared model's efforts come back exactly as declared.
+    assert_eq!(m.efforts(Some("big")), vec![Effort::Low, Effort::High]);
+    // Default efforts (None) are the parsed declared set.
+    assert_eq!(m.efforts(None), vec![Effort::Low, Effort::High]);
+}
+
+#[test]
+fn trait_meta_for_unknown_is_none() {
+    assert!(meta_for("ghost", &Config::default()).is_none());
+}
+
+#[test]
+fn available_harnesses_lists_builtins_and_config() {
+    let toml = r#"
+[harness.zeta]
+argv = ["z"]
+[harness.alpha]
+argv = ["a"]
+"#;
+    let cfg = Config::from_toml(toml).unwrap();
+    // Built-ins first in their default order (pi before claude), then config
+    // keys sorted and de-duplicated.
+    assert_eq!(
+        available_harnesses(&cfg),
+        vec!["pi", "claude", "alpha", "zeta"]
+    );
+}
+
+#[test]
+fn capabilities_match_trait_snapshot() {
+    // The wire snapshot and the trait agree for every built-in.
+    for h in ["pi", "claude"] {
+        let cfg = Config::default();
+        let via_fn = capabilities_for(h, &cfg).unwrap();
+        let via_trait = {
+            let m = meta_for(h, &cfg).unwrap();
+            let snap = board_core::capability::HarnessCapabilities::from_meta(m.as_ref());
+            snap
+        };
+        assert_eq!(via_fn, via_trait);
+    }
 }

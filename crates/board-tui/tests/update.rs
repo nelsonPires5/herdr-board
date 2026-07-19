@@ -781,7 +781,7 @@ fn fetch_failure_falls_back_to_free_text() {
 #[test]
 fn pi_form_defaults_model_hides_permission_and_offers_low() {
     let mut form = Form::card_create(1);
-    form.apply_options(Some(pi_capabilities()), Some(vec![]), None);
+    form.apply_options(Some(pi_capabilities()), None, Some(vec![]), None);
     assert_eq!(
         opt_labels(&form, FieldId::Model),
         vec!["(default)", "(custom)"]
@@ -829,13 +829,13 @@ fn switching_harness_reloads_capabilities() {
 #[test]
 fn switching_from_claude_to_pi_resets_only_permission() {
     let mut form = Form::card_create(1);
-    form.apply_options(Some(claude_capabilities()), Some(vec![]), None);
+    form.apply_options(Some(claude_capabilities()), None, Some(vec![]), None);
     set_choice(&mut form, FieldId::Harness, "claude");
     set_choice(&mut form, FieldId::Model, "sonnet");
     set_choice(&mut form, FieldId::Effort, "high");
     set_choice(&mut form, FieldId::Permission, "acceptEdits");
     set_choice(&mut form, FieldId::Harness, "pi");
-    form.apply_options(Some(pi_capabilities()), Some(vec![]), None);
+    form.apply_options(Some(pi_capabilities()), None, Some(vec![]), None);
 
     assert_eq!(form.current_harness(), "pi");
     assert_eq!(
@@ -872,10 +872,10 @@ fn switching_from_claude_to_pi_resets_only_permission() {
 #[test]
 fn switching_from_pi_to_claude_resets_incompatible_effort() {
     let mut form = Form::card_create(1);
-    form.apply_options(Some(pi_capabilities()), Some(vec![]), None);
+    form.apply_options(Some(pi_capabilities()), None, Some(vec![]), None);
     set_choice(&mut form, FieldId::Effort, "off");
     set_choice(&mut form, FieldId::Harness, "claude");
-    form.apply_options(Some(claude_capabilities()), Some(vec![]), None);
+    form.apply_options(Some(claude_capabilities()), None, Some(vec![]), None);
     assert_eq!(
         form.fields
             .iter()
@@ -889,7 +889,7 @@ fn switching_from_pi_to_claude_resets_incompatible_effort() {
 #[test]
 fn pi_submit_carries_custom_model_low_and_no_permission() {
     let mut form = Form::card_create(7);
-    form.apply_options(Some(pi_capabilities()), Some(vec![]), None);
+    form.apply_options(Some(pi_capabilities()), None, Some(vec![]), None);
     form.fields[0].set_text("pi task");
     set_choice(&mut form, FieldId::Model, "(custom)");
     form.fields
@@ -914,7 +914,7 @@ fn pi_submit_carries_custom_model_low_and_no_permission() {
 #[test]
 fn model_selector_cycles_catalog_plus_custom() {
     let mut form = Form::card_create(1);
-    form.apply_options(Some(split_effort_caps()), Some(vec![]), None);
+    form.apply_options(Some(split_effort_caps()), None, Some(vec![]), None);
     assert_eq!(
         opt_labels(&form, FieldId::Model),
         vec!["(default)", "opus", "haiku", "(custom)"]
@@ -924,7 +924,7 @@ fn model_selector_cycles_catalog_plus_custom() {
 #[test]
 fn effort_options_follow_selected_model_and_reset_when_invalid() {
     let mut form = Form::card_create(1);
-    form.apply_options(Some(split_effort_caps()), Some(vec![]), None);
+    form.apply_options(Some(split_effort_caps()), None, Some(vec![]), None);
     // `(default)` preserves an omitted model; selecting opus narrows efforts.
     set_choice(&mut form, FieldId::Model, "opus");
     form.on_model_changed();
@@ -955,7 +955,7 @@ fn effort_kept_when_still_valid_across_model_change() {
     // Give both models `low`.
     caps.models[1].efforts = vec![Effort::Low, Effort::Medium];
     let mut form = Form::card_create(1);
-    form.apply_options(Some(caps), Some(vec![]), None);
+    form.apply_options(Some(caps), None, Some(vec![]), None);
     set_choice(&mut form, FieldId::Effort, "low");
     set_choice(&mut form, FieldId::Model, "haiku");
     form.on_model_changed();
@@ -970,7 +970,7 @@ fn effort_kept_when_still_valid_across_model_change() {
 #[test]
 fn custom_model_reveals_free_text_and_submits_it() {
     let mut form = Form::card_create(7);
-    form.apply_options(Some(split_effort_caps()), Some(vec![]), None);
+    form.apply_options(Some(split_effort_caps()), None, Some(vec![]), None);
     form.fields[0].set_text("t"); // title required
     set_choice(&mut form, FieldId::Model, "(custom)");
     form.on_model_changed();
@@ -1016,6 +1016,7 @@ fn space_selector_shows_label_but_stores_id() {
     let mut form = Form::card_create(1);
     form.apply_options(
         Some(board_core::capability::claude_capabilities()),
+        None,
         Some(spaces),
         None,
     );
@@ -1041,6 +1042,7 @@ fn space_custom_escape_hatch_stores_free_text() {
     let mut form = Form::card_create(1);
     form.apply_options(
         Some(board_core::capability::claude_capabilities()),
+        None,
         Some(spaces),
         None,
     );
@@ -1113,6 +1115,7 @@ fn new_workspace_submit_carries_name_and_cwd() {
     let mut form = Form::card_create(1);
     form.apply_options(
         Some(board_core::capability::claude_capabilities()),
+        None,
         Some(vec![]),
         None,
     );

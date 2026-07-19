@@ -27,6 +27,7 @@ isolation/safety design, and the **how-to-write-a-scenario** guide, see
 | Built-in Pi mint/retry argv, session fork, protocol prompt, and agent comment through real Herdr | `11-pi-harness.sh` | live, checked-in fake `pi`, zero provider cost |
 | Git-root/CWD board identity, independent pipelines/cards, scoped TUI title, and Global picker entry | `12-cwd-boards.sh` | live |
 | Card-detail `o` focuses a held same-session run pane and closes the real plugin overlay | `13-jump-to-pane.sh` | live |
+| A column `harness_override` (TUI select) drives a run via a config-defined harness; `harness.list` advertises config harnesses; effort/permission overrides flow into the run argv | `14-column-config.sh` | live |
 | **idle-lost watchdog**: an idle agent (no `board done`) is marked `lost` | — | deterministic daemon tests; not sampled by standard live fake |
 
 ### Why idle-lost has no live scenario
