@@ -1,14 +1,14 @@
 ---
 source: crates/board-tui/tests/snapshots.rs
-expression: "render(&mut d, 80, 24)"
+expression: output
 ---
 "┌ Card #9: Silent agent                                          [f Fullscreen]┐"
 "│status────────────────────────────────────────────────────────────────────────│"
-"│? awaiting (idle timeout)   harness: claude   model: default   effort: default│"
+"│? awaiting (idle timeout)                                                     │"
+"│harness: claude   model: default   effort: default                            │"
 "│permission: default   session: default   space: workspace:-                   │"
 "│description───────────────────────────────────────────────────────────────────│"
 "│Went idle without reporting back.                                             │"
-"│                                                                              │"
 "│                                                                              │"
 "│                                                                              │"
 "│                                                                              │"

@@ -1,14 +1,14 @@
 ---
 source: crates/board-tui/tests/snapshots.rs
-expression: "render(&mut d, 80, 24)"
+expression: output
 ---
 "┌ Card #6: Tune retry backoff                                    [f Fullscreen]┐"
 "│status────────────────────────────────────────────────────────────────────────│"
-"│? awaiting (agent reported done)   harness: claude   model: default   effort: │"
+"│? awaiting (agent reported done)                                              │"
+"│harness: claude   model: default   effort: default                            │"
 "│permission: default   session: default   space: workspace:-                   │"
 "│description───────────────────────────────────────────────────────────────────│"
 "│Tune the backoff constants based on the new metrics.                          │"
-"│                                                                              │"
 "│                                                                              │"
 "│                                                                              │"
 "│                                                                              │"

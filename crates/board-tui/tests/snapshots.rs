@@ -248,7 +248,16 @@ fn board_picker_wide_and_narrow() {
 fn help_overlay() {
     let mut d = driver(demo_client().unwrap());
     key(&mut d, KeyCode::Char('?'));
-    insta::assert_snapshot!("help_overlay", render(&mut d, 80, 24));
+    let output = render(&mut d, 80, 24);
+    assert!(!output.contains("archiv forms"));
+    assert!(!output.contains('…'));
+    assert!(!output.contains("boar  Esc"));
+    assert!(!output.contains("column│"));
+    assert!(output
+        .lines()
+        .last()
+        .is_some_and(|line| line.contains("? help")));
+    insta::assert_snapshot!("help_overlay", output);
 }
 
 #[test]
@@ -292,7 +301,26 @@ fn awaiting_card_detail_shows_agent_done_reason() {
     key(&mut d, KeyCode::Right);
     key(&mut d, KeyCode::Down);
     key(&mut d, KeyCode::Enter);
-    insta::assert_snapshot!("awaiting_card_detail", render(&mut d, 80, 24));
+    let output = render(&mut d, 80, 24);
+    assert!(output.contains("? awaiting (agent reported done)"));
+    assert!(output.contains("harness: claude   model: default   effort: default"));
+    assert!(output.contains("permission: default   session: default   space: workspace:-"));
+    insta::assert_snapshot!("awaiting_card_detail", output);
+}
+
+#[test]
+fn awaiting_card_detail_stays_compact_when_wide() {
+    let mut d = driver(demo_client().unwrap());
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Down);
+    key(&mut d, KeyCode::Enter);
+    let output = render(&mut d, 120, 35);
+    assert!(output.contains(
+        "? awaiting (agent reported done)   harness: claude   model: default   effort: default"
+    ));
+    insta::assert_snapshot!("awaiting_card_detail_120x35", output);
 }
 
 #[test]
@@ -354,7 +382,11 @@ fn awaiting_card_detail_shows_idle_timeout_reason() {
     let mut d = driver(client);
     key(&mut d, KeyCode::Down); // second card in Todo
     key(&mut d, KeyCode::Enter);
-    insta::assert_snapshot!("awaiting_idle_detail", render(&mut d, 80, 24));
+    let output = render(&mut d, 80, 24);
+    assert!(output.contains("? awaiting (idle timeout)"));
+    assert!(output.contains("harness: claude   model: default   effort: default"));
+    assert!(output.contains("permission: default   session: default   space: workspace:-"));
+    insta::assert_snapshot!("awaiting_idle_detail", output);
 }
 
 #[test]
