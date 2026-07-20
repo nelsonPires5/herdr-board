@@ -5,7 +5,7 @@ use board_core::capability::{
     claude_capabilities, pi_capabilities, HarnessCapabilities, ModelInfo,
 };
 use board_core::client::BoardClient;
-use board_core::protocol::{Effort, RunOutcome, SpaceInfo};
+use board_core::protocol::{CardStatus, Effort, RunOutcome, SpaceInfo};
 use board_tui::app::{update, App, CardFilter, DetailScrollTarget, Effect, Msg, Screen};
 use board_tui::editor::FakeEditor;
 use board_tui::forms::{ChoiceVal, FieldId, FieldKind, Form, FormKind, Submit};
@@ -175,8 +175,15 @@ fn archive_filter_defaults_active_and_cycles_all_then_archived() {
         .into_iter()
         .find(|column| column.name == "Done")
         .unwrap();
-    let card = client.card_list(Some(done.id)).unwrap()[0].clone();
-    client.card_archive(card.id, true).unwrap();
+    let card_ids: Vec<i64> = client
+        .card_list(Some(done.id))
+        .unwrap()
+        .iter()
+        .map(|card| card.id)
+        .collect();
+    for id in card_ids {
+        client.card_archive(id, true).unwrap();
+    }
     let mut app = App::new(client.board_get().unwrap());
 
     assert_eq!(app.card_filter, CardFilter::Active);
@@ -188,7 +195,7 @@ fn archive_filter_defaults_active_and_cycles_all_then_archived() {
         [Effect::SetPaneTitle(CardFilter::All)]
     ));
     assert_eq!(app.card_filter, CardFilter::All);
-    assert_eq!(app.cards_of(done.id).len(), 1);
+    assert_eq!(app.cards_of(done.id).len(), 2);
 
     let effects = update(&mut app, key(KeyCode::Char('v')));
     assert!(matches!(
@@ -196,7 +203,7 @@ fn archive_filter_defaults_active_and_cycles_all_then_archived() {
         [Effect::SetPaneTitle(CardFilter::Archived)]
     ));
     assert_eq!(app.card_filter, CardFilter::Archived);
-    assert_eq!(app.cards_of(done.id).len(), 1);
+    assert_eq!(app.cards_of(done.id).len(), 2);
 
     let effects = update(&mut app, key(KeyCode::Char('v')));
     assert!(matches!(
@@ -266,12 +273,15 @@ fn deleting_column_accounts_for_archived_cards_hidden_by_filter() {
         .iter()
         .position(|column| column.name == "Done")
         .unwrap();
-    let card = board
+    let card_ids: Vec<i64> = board
         .cards
         .iter()
-        .find(|card| card.column_id == board.columns[done_idx].id)
-        .unwrap();
-    client.card_archive(card.id, true).unwrap();
+        .filter(|card| card.column_id == board.columns[done_idx].id)
+        .map(|card| card.id)
+        .collect();
+    for id in card_ids {
+        client.card_archive(id, true).unwrap();
+    }
     let mut app = App::new(client.board_get().unwrap());
     app.sel_col = done_idx;
     assert!(app.cards_of(board.columns[done_idx].id).is_empty());
@@ -1191,4 +1201,87 @@ fn session_selector_offers_default_plus_running() {
     assert_eq!(labels[0], "(default)");
     assert!(labels.contains(&"default".to_string()));
     assert!(labels.contains(&"feature".to_string()));
+}
+
+// -- awaiting / done ----------------------------------------------------------
+
+/// Open the detail of the first card matching `status` in a fresh demo app.
+fn demo_app_with_detail(status: CardStatus) -> App {
+    let mut client = demo_client().unwrap();
+    let board = client.board_get().unwrap();
+    let card = board
+        .cards
+        .iter()
+        .find(|c| c.status == status)
+        .unwrap_or_else(|| panic!("no demo card with status {}", status.as_str()))
+        .clone();
+    let detail = client.card_get(card.id).unwrap();
+    let mut app = App::new(board);
+    app.screen = Screen::CardDetail;
+    app.detail = Some(detail);
+    app
+}
+
+#[test]
+fn enter_in_detail_confirms_awaiting_card_via_run_done() {
+    let mut app = demo_app_with_detail(CardStatus::Awaiting);
+    let card_id = app.detail.as_ref().unwrap().card.id;
+    let effects = update(&mut app, key(KeyCode::Enter));
+    assert!(
+        matches!(effects.as_slice(), [Effect::RunDone(id, RunOutcome::Ok)] if *id == card_id),
+        "Enter on an awaiting card must emit RunDone(ok) for that card"
+    );
+    // Stays on the detail screen; the driver reloads it after run.done.
+    assert_eq!(app.screen, Screen::CardDetail);
+}
+
+#[test]
+fn enter_in_detail_is_noop_for_done_and_other_statuses() {
+    for status in [
+        CardStatus::Done,
+        CardStatus::Running,
+        CardStatus::Failed,
+        CardStatus::Idle,
+    ] {
+        let mut app = demo_app_with_detail(status);
+        assert!(
+            update(&mut app, key(KeyCode::Enter)).is_empty(),
+            "Enter must be a no-op for status {}",
+            status.as_str()
+        );
+    }
+}
+
+#[test]
+fn archive_guard_blocks_awaiting_card_on_board_and_detail() {
+    // Board screen: Review column (idx 3) has the failed card at 0 and the
+    // awaiting card ("Tune retry backoff") at 1.
+    let mut app = demo_app();
+    app.sel_col = 3;
+    app.sel_card = 1;
+    assert_eq!(app.selected_card_status(), Some(CardStatus::Awaiting));
+    let effects = update(&mut app, key(KeyCode::Char('a')));
+    assert!(effects.is_empty());
+    assert!(app.toast.as_ref().is_some_and(|t| t.is_error));
+
+    // Detail screen: same guard.
+    let mut app = demo_app_with_detail(CardStatus::Awaiting);
+    let effects = update(&mut app, key(KeyCode::Char('a')));
+    assert!(effects.is_empty());
+    assert!(app.toast.as_ref().is_some_and(|t| t.is_error));
+    assert_eq!(app.screen, Screen::CardDetail);
+}
+
+#[test]
+fn done_card_is_final_and_can_be_archived() {
+    // Done column (idx 5): "Ship v0.1" (idle) at 0, "Write changelog" (done) at 1.
+    let mut app = demo_app();
+    app.sel_col = 5;
+    app.sel_card = 1;
+    assert_eq!(app.selected_card_status(), Some(CardStatus::Done));
+    let effects = update(&mut app, key(KeyCode::Char('a')));
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::CardArchive { archived: true, .. }]
+    ));
 }

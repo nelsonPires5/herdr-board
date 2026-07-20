@@ -45,7 +45,7 @@ Boards are independent pipelines keyed by canonical path. `Global` is board `id=
 - `column.create {name, board_id?, position?, system_prompt?, trigger?, on_success_column_id?, on_fail_column_id?, fresh_session?, harness_override?, model_override?, effort_override?, permission_override?, timeout_minutes?}` → `Column`; omitted `board_id` means `Global`.
 - `column.update {id, …any subset of the above}` → `Column` (name/trigger/etc.; unset a nullable by passing `null`)
 - `column.reorder {id, position}` → `[Column…]`
-- `column.delete {id, move_cards_to?}` → `{deleted:true}`; destination must belong to the same board; error 3 if cards lack a destination or any card is `running|queued`.
+- `column.delete {id, move_cards_to?}` → `{deleted:true}`; destination must belong to the same board; error 3 if cards lack a destination or any card has an open run (`queued|running|blocked|awaiting`; `done` is not open).
 - `template.apply {name:"pipeline", board_id?}` → the requested board's full column set (omitted = `Global`; error 3 unless it has only seed `Todo` and no cards).
 
 The store enforces board boundaries: card create/move, column-delete destinations,
@@ -61,12 +61,13 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
     - `new_workspace` — the daemon creates the workspace on first dispatch (label = `space_ref`, cwd = `space_cwd`), reusing an open workspace with that label if one exists. **Requires** non-empty `space_ref` and `space_cwd` on create (else error 1).
   - creating directly into an `auto` column dispatches immediately (same as move)
   - (v2 schema) the legacy `cwd`/`worktree` kinds and `worktree_base` are removed; worktree isolation is now the agent's job via prompt instructions, not a board concept. Existing DBs migrate `cwd`/`worktree` cards to `workspace` (best effort, `space_ref` kept).
-- `card.update {id, …subset}` → `Card` (error 3 while `running|queued` for harness/`session`/space fields)
-- `card.delete {id}` → `{deleted:true}` (error 3 while running; cancel first)
+- `card.update {id, …subset}` → `Card`; harness/model/effort/permission/session/space fields are refused while the card has an open run (`queued|running|blocked|awaiting`). Title/description remain editable; `done` is not open.
+- `card.delete {id}` → `{deleted:true}`; refused while the card has an open run (`queued|running|blocked|awaiting`; cancel first). `done` is not open.
 - `card.archive {id, archived:true|false}` → `Card` — archives or restores without deleting
-  comments/runs. Archiving is refused while `queued|running|blocked`; archived cards must be restored
-  before move/retry.
-- `card.move {id, column_id, position?}` → `Card` — THE trigger: target must belong to the card's board; if it is `auto` and the card is idle/failed, a run is enqueued.
+  comments/runs. Archiving is refused while the card has an open run (`queued|running|blocked|awaiting`); `done` cards can be archived. Archived cards must be restored before move/retry.
+- `card.move {id, column_id, position?}` → `Card` — THE trigger: target must belong to the
+  card's board; if it is `auto` and the card is `idle`, `failed`, or `done`, a run is enqueued.
+  `awaiting` is not re-dispatched because its run remains open.
 - `card.get {id}` → `{card, comments:[…], runs:[…]}`
 - `card.list {board_id?, column_id?}` → `[Card…]`; omitted `board_id` means `Global`, and a column filter must belong to the requested board.
 
@@ -75,7 +76,8 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
   `agent:<run_id>` when `$BOARD_RUN_ID` is set, else `user`.
 - `run.done {card_id, outcome:"ok"|"fail", summary?}` → `{run, card}` — backend of `board done`.
   Closes the card's active run, posts a `system` comment, applies the column transition
-  (`ok`→on_success, `fail`→on_fail; no target → card stays, status `idle`/`failed`).
+  (`ok`→on_success, `fail`→on_fail; no target → card stays, status `done`/`failed`).
+  Also the confirm channel for an `awaiting` card (TUI `Enter` sends the same request).
   Error 2 if no active run.
 - `run.cancel {card_id}` → `{run, card}` — kills the pane (herdr `pane.close`), outcome `cancelled`, card status `failed`, no transition.
 - `run.retry {card_id}` → re-enqueue in current column (fresh run). Claude resumes with
@@ -95,12 +97,62 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
 - `space.list {session?}` → `{spaces:[{id, label}]}` — workspaces in the given session (`null` = default), filled from that session's herdr `workspace.list`. Unknown/not-running session → error 4 listing the known sessions.
 - `session.list` (no params) → `{sessions:[{name, default: bool, running: bool}]}` — the daemon shells out to `herdr session list --json` (session enumeration is not in the herdr socket API; a session only knows itself). Binary resolved via `$HERDR_BIN_PATH`, else `herdr` on `$PATH`. Error 4 if herdr is unavailable / the CLI fails.
 
+## Card statuses & signals
+
+`idle · queued · running · blocked · awaiting · done · failed`
+
+| Status | Meaning |
+|---|---|
+| `idle` | At rest in a column; no active run. |
+| `queued` | Enqueued for dispatch into an auto column. |
+| `running` | A run is active and the agent is working. |
+| `blocked` | The agent/integration reported blocked; the run stays active. |
+| `awaiting` | The agent appears finished (or went idle) **without** `board done`. The run stays OPEN, the column timeout is paused, and the card never fails on its own — it waits for human review. |
+| `done` | Completion confirmed: `run.done ok` (or the TUI confirm, same channel) with no `on_success` target column. Final visual state; moving the card into an auto column re-dispatches it like `idle`/`failed`. |
+| `failed` | The run ended `fail`/`cancelled`, the pane exited, or the column timeout fired. |
+
+`awaiting` carries an `awaiting_reason` (`cards.awaiting_reason`, set on entry,
+cleared to NULL on exit): `agent_done` (herdr reported `agent_status=done`) or
+`idle_expired` (`idle` sustained past `idle_grace_seconds`).
+
+**Golden rule:** herdr's agent status is a HINT. `board done` (`run.done`) is the
+only terminal success truth — no herdr signal ever finalizes a run with `ok`.
+
+### Signal → state machine
+
+Watchers only OBSERVE: herdr pane statuses and idle expiry are translated into
+signals; the pure engine (`board_core::engine::decide_signal`) is the single
+decider, and the daemon applies its decision in one place.
+
+| Signal | Resulting card state |
+|---|---|
+| herdr `working` | `running`; clears `blocked`/`awaiting` (+reason). From `awaiting` this is the review loop: feedback typed into the pane wakes the agent. |
+| herdr `blocked` | `blocked`; run stays active. |
+| herdr `done` (run active, no `board done`) | `awaiting` + `agent_done` (immediate, no grace) + notification. On an already-`awaiting` card it refreshes the reason to `agent_done` without re-notifying. |
+| `idle` past `idle_grace_seconds` (no `board done`) | `awaiting` + `idle_expired` + notification. On an already-`awaiting` card it's a no-op (keeps the more specific reason). |
+| herdr `unknown`, or any signal on a non-live card | ignored. |
+| `pane_exited` without `board done` | run `fail`, card `failed`, **no** transition (unchanged). |
+| column `timeout_minutes` exceeded | **paused while `awaiting`** (the deadline shifts forward by the review span on exit); otherwise run `fail` + `on_fail`. |
+| `run.done ok` | `on_success` target → move; no target → `done`. |
+| `run.done fail` | `on_fail` target → move; no target → `failed`. |
+| `run.cancel` | outcome `cancelled`, card `failed`, no transition. |
+
+Only `running`/`blocked`/`awaiting` cards accept signals (a run may be active);
+anything else is stale and ignored.
+
+Exits from `awaiting`: herdr `working` → `running`; `board done` / TUI confirm →
+finalize ok (`done` or column move); `board cancel` → cancelled.
+
+Note: the run outcome `lost` is retained in the schema and wire enums for
+backward compatibility but is **no longer produced** — the idle-expiry path now
+parks the card in `awaiting` instead of failing the run.
+
 ## Events (streamed to subscribers)
 
 Coarse by design — the TUI refetches only its selected `board.get {board_id}` on any event; payload is for logs/toasts.
 
 - `{"event":"board_changed","reason":"card_moved|card_created|card_updated|card_deleted|card_archived|column_changed|comment_added|run_started|run_ended|run_blocked","card_id"?:N,"column_id"?:N}`
-- `{"event":"run_ended","card_id":N,"run_id":N,"outcome":"ok|fail|cancelled|lost"}` (also emitted as board_changed)
+- `{"event":"run_ended","card_id":N,"run_id":N,"outcome":"ok|fail|cancelled|lost"}` (also emitted as board_changed; `lost` is legacy — no longer produced, see Card statuses)
 
 ## Dispatch semantics (column engine — lives in board-core, pure; daemon executes effects)
 
@@ -116,13 +168,15 @@ Coarse by design — the TUI refetches only its selected `board.get {board_id}` 
    - pane name is `card-<id>-<column-slug>` (e.g. `card-14-execute`); on herdr `agent_name_taken` retry once with the run-scoped fallback `card-<id>-<column-slug>-r<run>`
    - placement: the agent lands in a `kanban` tab of the workspace — find-or-create the tab (first tab labeled `kanban`, lowest `number` on ties). A freshly-created tab is filled unsplit, then its leftover shell pane is closed; an existing tab splits its largest pane (`Right` if that pane's cell width ≥ 2× its height, else `Down`, to keep the mesh ≈ square). `agent_placement_not_found` (tab raced away) redoes find-or-create once.
    - card status `running`, store pane/workspace ids + `session` on run, emit `run_started`
-4. Finish signals, priority order:
+4. Finish signals, priority order (the full signal→state mapping is under
+   [Card statuses & signals](#card-statuses--signals); the engine is the single decider):
    - `run.done` from the agent (primary; semantics above)
    - herdr `pane_exited` while running → outcome `fail`, system comment "pane exited without board done", card status `failed`, **no** transition
-   - herdr agent_status `idle` sustained > `idle_grace_seconds` (default 90) with no `run.done` → outcome `lost`, status `failed`, notification
-   - `timeout_minutes` (column) exceeded → `pane.close`, outcome `fail`, apply on_fail
-   - agent_status `working` → card status `running`, clear idle grace
-   - agent_status `blocked` → card status `blocked`, clear idle grace, board change + Herdr notification (run stays active)
+   - herdr agent_status `done` with no `run.done` → card `awaiting` (reason `agent_done`), run stays OPEN, notification
+   - herdr agent_status `idle` sustained > `idle_grace_seconds` (default 90) with no `run.done` → card `awaiting` (reason `idle_expired`), run stays OPEN, notification
+   - `timeout_minutes` (column) exceeded → `pane.close`, outcome `fail`, apply on_fail; **paused while the card is `awaiting`**
+   - agent_status `working` → card status `running`, clearing blocked/awaiting (idle tracking is disarmed while awaiting)
+   - agent_status `blocked` → card status `blocked`, board change + Herdr notification (run stays active)
 5. Every transition posts a `system` comment (e.g. "Plan ok in 4m12s → Execute").
 6. Manual-trigger columns on entry: status `idle`, herdr notification if entered via auto-transition.
 
@@ -149,5 +203,6 @@ Coarse by design — the TUI refetches only its selected `board.get {board_id}` 
 
 Pi lifecycle status comes from Herdr's official Pi integration and the existing event watcher; there
 is no Pi-specific watcher. Without `herdr integration install pi`, explicit `board done`, spawn
-failure, timeout, and pane exit still work, but working/blocked/idle detection (including idle-lost)
-is unavailable.
+failure, timeout, and pane exit still work, but working/blocked/done detection is
+unavailable and the idle→`awaiting` watchdog does not arm while status remains `unknown`
+(see [Card statuses & signals](#card-statuses--signals)).

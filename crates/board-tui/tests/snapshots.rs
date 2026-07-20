@@ -3,7 +3,7 @@
 //! terminal sizes, and running-card timers pinned by rewriting `updated_at`.
 
 use board_core::client::{BoardClient, FakeBoardClient};
-use board_core::protocol::{CardStatus, RunOutcome};
+use board_core::protocol::{AwaitingReason, CardCreateParams, CardStatus, RunOutcome};
 use board_tui::app::{App, Msg};
 use board_tui::editor::FakeEditor;
 use board_tui::forms::{FieldId, FieldKind};
@@ -29,6 +29,13 @@ fn pin(app: &mut App) {
     for c in &mut app.board.cards {
         if c.status == CardStatus::Running {
             c.updated_at = RUN_START.to_string();
+        }
+    }
+    if let Some(detail) = &mut app.detail {
+        for run in &mut detail.runs {
+            if run.started_at.is_some() && run.ended_at.is_none() {
+                run.started_at = Some(NOW_STR.to_string());
+            }
         }
     }
 }
@@ -241,7 +248,16 @@ fn board_picker_wide_and_narrow() {
 fn help_overlay() {
     let mut d = driver(demo_client().unwrap());
     key(&mut d, KeyCode::Char('?'));
-    insta::assert_snapshot!("help_overlay", render(&mut d, 80, 24));
+    let output = render(&mut d, 80, 24);
+    assert!(!output.contains("archiv forms"));
+    assert!(!output.contains('…'));
+    assert!(!output.contains("boar  Esc"));
+    assert!(!output.contains("column│"));
+    assert!(output
+        .lines()
+        .last()
+        .is_some_and(|line| line.contains("? help")));
+    insta::assert_snapshot!("help_overlay", output);
 }
 
 #[test]
@@ -274,4 +290,113 @@ fn toast_on_client_error() {
     key(&mut d, KeyCode::Char('r'));
     assert!(d.app.toast.as_ref().is_some_and(|t| t.is_error));
     insta::assert_snapshot!("toast_error", render(&mut d, 80, 24));
+}
+
+#[test]
+fn awaiting_card_detail_shows_agent_done_reason() {
+    let mut d = driver(demo_client().unwrap());
+    // Review (idx 3): failed card first, awaiting ("Tune retry backoff") second.
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Down);
+    key(&mut d, KeyCode::Enter);
+    let output = render(&mut d, 80, 24);
+    assert!(output.contains("? awaiting (agent reported done)"));
+    assert!(output.contains("harness: claude   model: default   effort: default"));
+    assert!(output.contains("permission: default   session: default   space: workspace:-"));
+    insta::assert_snapshot!("awaiting_card_detail", output);
+}
+
+#[test]
+fn awaiting_card_detail_stays_compact_when_wide() {
+    let mut d = driver(demo_client().unwrap());
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Down);
+    key(&mut d, KeyCode::Enter);
+    let output = render(&mut d, 120, 35);
+    assert!(output.contains(
+        "? awaiting (agent reported done)   harness: claude   model: default   effort: default"
+    ));
+    insta::assert_snapshot!("awaiting_card_detail_120x35", output);
+}
+
+#[test]
+fn enter_on_awaiting_detail_runs_done_and_refreshes_driver_state() {
+    let mut d = driver(demo_client().unwrap());
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Down);
+    key(&mut d, KeyCode::Enter);
+    assert_eq!(
+        d.app.detail.as_ref().unwrap().card.status,
+        CardStatus::Awaiting
+    );
+
+    key(&mut d, KeyCode::Enter);
+
+    let detail = d.app.detail.as_ref().unwrap();
+    assert_eq!(detail.card.status, CardStatus::Done);
+    assert_eq!(detail.runs.len(), 1);
+    assert_eq!(detail.runs[0].outcome, Some(RunOutcome::Ok));
+    assert_eq!(
+        d.app
+            .board
+            .cards
+            .iter()
+            .find(|card| card.id == detail.card.id)
+            .unwrap()
+            .status,
+        CardStatus::Done
+    );
+}
+
+#[test]
+fn awaiting_card_detail_shows_idle_timeout_reason() {
+    let mut client = demo_client().unwrap();
+    let board = client.board_get().unwrap();
+    let todo = board
+        .columns
+        .iter()
+        .find(|column| column.name == "Todo")
+        .unwrap()
+        .id;
+    let id = client
+        .card_create(&CardCreateParams {
+            title: "Silent agent".into(),
+            description: Some("Went idle without reporting back.".into()),
+            column_id: Some(todo),
+            harness: Some("claude".into()),
+            ..Default::default()
+        })
+        .unwrap()
+        .id;
+    client
+        .db()
+        .set_card_awaiting(id, AwaitingReason::IdleExpired)
+        .unwrap();
+
+    let mut d = driver(client);
+    key(&mut d, KeyCode::Down); // second card in Todo
+    key(&mut d, KeyCode::Enter);
+    let output = render(&mut d, 80, 24);
+    assert!(output.contains("? awaiting (idle timeout)"));
+    assert!(output.contains("harness: claude   model: default   effort: default"));
+    assert!(output.contains("permission: default   session: default   space: workspace:-"));
+    insta::assert_snapshot!("awaiting_idle_detail", output);
+}
+
+#[test]
+fn done_card_detail_is_final() {
+    let mut d = driver(demo_client().unwrap());
+    // Done column (idx 5): "Ship v0.1" (idle) first, "Write changelog" (done) second.
+    for _ in 0..5 {
+        key(&mut d, KeyCode::Right);
+    }
+    key(&mut d, KeyCode::Down);
+    key(&mut d, KeyCode::Enter);
+    insta::assert_snapshot!("done_card_detail", render(&mut d, 80, 24));
 }

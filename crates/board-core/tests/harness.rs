@@ -295,9 +295,32 @@ fn custom_harness_uses_template_and_env() {
     assert!(inv
         .env
         .contains(&("BOARD_PROMPT".into(), "the prompt".into())));
-    assert!(inv
-        .env
-        .contains(&("BOARD_SYSTEM_PROMPT".into(), "PLAN stage".into())));
+    // The protocol trailer rides BOARD_SYSTEM_PROMPT even for custom harnesses.
+    assert!(inv.env.contains(&(
+        "BOARD_SYSTEM_PROMPT".into(),
+        format!("PLAN stage\n\n{BOARD_PROTOCOL_TRAILER}")
+    )));
+}
+
+#[test]
+fn custom_harness_without_column_prompt_still_gets_the_protocol_trailer() {
+    let mut config = Config::default();
+    config.harness.insert(
+        "fake".into(),
+        HarnessDef {
+            argv: vec!["run".into()],
+            ..Default::default()
+        },
+    );
+    let no_prompt = EffectiveSettings {
+        system_prompt: None,
+        ..settings()
+    };
+    let inv = build_invocation("fake", &config, &no_prompt, &SessionPlan::Mint, None, "p").unwrap();
+    assert!(inv.env.contains(&(
+        "BOARD_SYSTEM_PROMPT".into(),
+        BOARD_PROTOCOL_TRAILER.to_string()
+    )));
 }
 
 #[test]

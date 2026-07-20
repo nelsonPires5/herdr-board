@@ -50,8 +50,11 @@ pub trait Spawner: Send + Sync {
 ## Semantics source of truth
 
 `docs/protocol.md` + `docs/design.md` §5–§8. `schema.sql` at repo root is the current fresh schema
-(embedded and versioned with `PRAGMA user_version`). Schema v5 preserves board id=1 as `Global`
-(`scope_path=NULL`); every canonical-path board independently seeds one manual `Todo` column.
+(embedded and versioned with `PRAGMA user_version`). Schema v6 retains v5's preserved board id=1 as
+`Global` (`scope_path=NULL`) and scoped-board rows. Its rebuilt `cards` table preserves existing
+cards, extends `CHECK (status IN (...))` to admit `awaiting` and `done`, and adds
+`awaiting_reason`: `agent_done|idle_expired` while status is `awaiting`, otherwise NULL. Every
+canonical-path board independently seeds one manual `Todo` column.
 
 ## Conventions
 

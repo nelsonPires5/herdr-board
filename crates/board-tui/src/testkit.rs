@@ -5,8 +5,9 @@ use board_core::capability::{claude_capabilities, pi_capabilities};
 use board_core::client::{BoardClient, FakeBoardClient};
 use board_core::harness::BUILTIN_HARNESSES;
 use board_core::protocol::{
-    CardCreateParams, CardStatus, ColumnCreateParams, Effort, Event, HarnessListResult, RunOutcome,
-    SessionInfo, SessionListResult, SpaceInfo, SpaceKind, SpaceListResult, Trigger,
+    AwaitingReason, CardCreateParams, CardStatus, ColumnCreateParams, Effort, Event,
+    HarnessListResult, RunOutcome, SessionInfo, SessionListResult, SpaceInfo, SpaceKind,
+    SpaceListResult, Trigger,
 };
 use serde_json::{json, Value};
 
@@ -284,8 +285,41 @@ pub fn demo_client() -> anyhow::Result<DemoClient> {
     c.db()
         .finish_run(r2.id, RunOutcome::Fail, Some("tests failed"))?;
 
+    // Review — awaiting: agent reported done, no `board done` yet (reason
+    // visible in the detail view; run stays open).
+    let awaiting = c
+        .card_create(&card(
+            "Tune retry backoff",
+            review,
+            "Tune the backoff constants based on the new metrics.",
+        ))?
+        .id;
+    let awaiting_run = c.db().create_run(
+        awaiting,
+        review,
+        "claude",
+        "[\"claude\"]",
+        "p",
+        Some("sess-awaiting"),
+        None,
+    )?;
+    c.db()
+        .start_run(awaiting_run.id, Some("w1"), Some("p-awaiting"))?;
+    c.db()
+        .set_card_awaiting(awaiting, AwaitingReason::AgentDone)?;
+
     // Done — idle
     c.card_create(&card("Ship v0.1", done, "Cut the first release."))?;
+
+    // Done — done: completion confirmed via `board done ok` (final state).
+    let confirmed = c
+        .card_create(&card(
+            "Write changelog",
+            done,
+            "Draft the changelog for the release.",
+        ))?
+        .id;
+    c.db().set_card_status(confirmed, CardStatus::Done)?;
 
     // Additional independent boards feed the board picker while Global remains
     // the selected demo board.

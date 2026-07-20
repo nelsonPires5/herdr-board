@@ -46,6 +46,10 @@ Ensure `~/.local/bin` is on your `PATH`.
 herdr plugin install nelsonPires5/herdr-board
 ```
 
+Precise live lifecycle status also requires Herdr's integration for the harness you dispatch (for
+example, `herdr integration install pi`). Without that integration the board still dispatches and
+accepts `board done`, but runs in degraded mode without precise working/blocked/done signals.
+
 Open the board:
 
 ```bash
@@ -165,6 +169,7 @@ grid.
 | `D` | delete column | | `Tab` | focus comments / runs |
 | `m` | move card picker | | `↑/↓ k/j` | scroll focused detail section |
 | `H / L` | move card left / right | | `o` | jump to latest same-session run pane |
+| | | | `Enter` | confirm done (`awaiting` card) |
 | **forms** | | | `x` / `r` | cancel / retry run |
 | `Tab` / `Shift+Tab` | next / previous field | | `Tab`, `↑/↓` | choose/scroll detail history |
 | `←/→ Space` | cycle a picker field | | **mouse** | |
@@ -173,7 +178,7 @@ grid.
 
 </details>
 
-## Optional setup
+## Integration and optional setup
 
 <details>
 <summary><strong>Add a Herdr keybinding</strong></summary>
@@ -192,12 +197,13 @@ command = "herdr plugin action invoke open-board --plugin herdr-board"
 </details>
 
 <details>
-<summary><strong>Install an optional harness integration and agent skill</strong></summary>
+<summary><strong>Install the harness integration and optional agent skill</strong></summary>
 
-For precise Pi status (`idle`, `working`, `blocked`) and session references, install Herdr's Pi
-integration. Installation changes your personal Pi extension config, so herdr-board never does it
-automatically. Spawn, explicit `board done`, timeout, and pane-exit handling still work without it;
-precise status and the idle-lost watchdog do not.
+For precise Pi status (`idle`, `working`, `blocked`, `done`) and session references, install Herdr's
+Pi integration. Installation changes your personal Pi extension config, so herdr-board never does it
+automatically — it is a user prerequisite. Without it (degraded mode), spawn, explicit `board done`,
+timeout, and pane-exit handling still work, but Herdr's `working`/`blocked`/`done` signals do not
+exist and a card can only reach `awaiting` (pending review) via the idle grace path.
 
 ```bash
 herdr integration install pi
@@ -265,10 +271,11 @@ Configuration lives at `~/.config/herdr-board/config.toml`; override it with
 `HERDR_BOARD_CONFIG`.
 
 ```toml
+max_concurrent = 3         # global cap on concurrent runs
+idle_grace_seconds = 90    # idle without board done before the card is parked in `awaiting` for review
+
 [daemon]
 spawner = "herdr"          # herdr = agent panes (default); local = child processes
-max_concurrent = 3         # global cap on concurrent runs
-idle_grace_seconds = 90    # idle without board done before a run is marked lost
 
 [harness.myharness]
 argv = ["mytool", "--model", "{model}"]

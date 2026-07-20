@@ -2,7 +2,10 @@
 #![cfg(feature = "fake-client")]
 
 use board_core::client::{BoardClient, FakeBoardClient};
-use board_core::protocol::{CardCreateParams, CardMoveParams, ColumnCreateParams, Trigger};
+use board_core::protocol::{
+    AwaitingReason, CardCreateParams, CardMoveParams, CardStatus, ColumnCreateParams, RunOutcome,
+    Trigger,
+};
 
 #[test]
 fn fake_seeds_board_and_supports_crud() {
@@ -105,6 +108,38 @@ fn fake_run_focus_uses_latest_recorded_pane() {
         })
         .unwrap();
     assert!(c.run_focus(no_pane.id, "/tmp/herdr.sock").is_err());
+}
+
+#[test]
+fn fake_run_done_applies_the_real_transition_decision() {
+    let mut c = FakeBoardClient::new().unwrap();
+    let card = c
+        .card_create(&CardCreateParams {
+            title: "confirm".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let run = c
+        .db()
+        .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
+        .unwrap();
+    c.db().start_run(run.id, Some("w"), Some("p")).unwrap();
+    c.db()
+        .set_card_awaiting(card.id, AwaitingReason::AgentDone)
+        .unwrap();
+
+    let result = c.run_done(card.id, RunOutcome::Ok, None).unwrap();
+
+    assert_eq!(result.run.id, run.id);
+    assert_eq!(result.run.outcome, Some(RunOutcome::Ok));
+    assert_eq!(result.card.status, CardStatus::Done);
+    assert_eq!(result.card.awaiting_reason, None);
+    assert!(c
+        .card_get(card.id)
+        .unwrap()
+        .comments
+        .iter()
+        .any(|comment| comment.author == "system" && comment.body.contains("no target column")));
 }
 
 #[test]

@@ -319,7 +319,6 @@ mod fake {
     use super::*;
     use crate::db::{Db, BOARD_ID};
     use crate::engine;
-    use crate::protocol::CardStatus;
 
     /// In-memory board state machine for TUI tests. Backed by an in-memory
     /// SQLite db, so CRUD/move/positions/comments behave exactly like the real
@@ -382,10 +381,12 @@ mod fake {
                 "column.delete" => {
                     let p: ColumnDeleteParams = serde_json::from_value(params)?;
                     let cards = db.list_cards_in_column(p.id)?;
-                    let has_active = cards
-                        .iter()
-                        .any(|c| matches!(c.status, CardStatus::Running | CardStatus::Queued));
-                    engine::validate_column_delete(!cards.is_empty(), has_active, p.move_cards_to)?;
+                    let has_open_run = db.column_has_open_run(p.id)?;
+                    engine::validate_column_delete(
+                        !cards.is_empty(),
+                        has_open_run,
+                        p.move_cards_to,
+                    )?;
                     db.delete_column(p.id, p.move_cards_to)?;
                     serde_json::to_value(DeletedResult { deleted: true })?
                 }
@@ -448,6 +449,28 @@ mod fake {
                         None => db.list_cards(board_id)?,
                     };
                     serde_json::to_value(cards)?
+                }
+                "run.done" => {
+                    let p: RunDoneParams = serde_json::from_value(params)?;
+                    let run = db
+                        .active_run_for_card(p.card_id)?
+                        .ok_or_else(|| anyhow::anyhow!("no active run for card {}", p.card_id))?;
+                    let card = db
+                        .get_card(p.card_id)?
+                        .ok_or_else(|| anyhow::anyhow!("card {} not found", p.card_id))?;
+                    let column = db
+                        .get_column(run.column_id)?
+                        .ok_or_else(|| anyhow::anyhow!("column {} not found", run.column_id))?;
+                    let columns = db.list_columns(card.board_id)?;
+                    let decision = engine::decide_transition(&column, &columns, p.outcome, None);
+
+                    let run = db.finish_run(run.id, p.outcome, p.summary.as_deref())?;
+                    db.add_comment(p.card_id, "system", &decision.system_comment)?;
+                    if let Some(target) = decision.target_column_id {
+                        db.set_card_column(p.card_id, target)?;
+                    }
+                    let card = db.set_card_status(p.card_id, decision.new_status)?;
+                    serde_json::to_value(RunActionResult { run, card })?
                 }
                 "run.focus" => {
                     let p: RunFocusParams = serde_json::from_value(params)?;

@@ -8,8 +8,8 @@ use rusqlite::{params, Connection, Row};
 
 use crate::model::{Board, Card, Column, Comment, Run};
 use crate::protocol::{
-    CardCreateParams, CardStatus, CardUpdateParams, ColumnCreateParams, ColumnUpdateParams, Effort,
-    RunOutcome, SpaceKind, Trigger,
+    AwaitingReason, CardCreateParams, CardStatus, CardUpdateParams, ColumnCreateParams,
+    ColumnUpdateParams, Effort, RunOutcome, SpaceKind, Trigger,
 };
 use crate::{Error, Result};
 
@@ -18,7 +18,7 @@ use crate::{Error, Result};
 const SCHEMA_SQL: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../schema.sql"));
 
 /// The latest schema version embedded in [`SCHEMA_SQL`].
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// v1 → v2 migration. SQLite cannot alter a CHECK constraint or drop a column
 /// in place, so `cards` is rebuilt. Legacy `space_kind` values `cwd`/`worktree`
@@ -29,6 +29,8 @@ const SCHEMA_VERSION: i64 = 5;
 /// `runs.session` are added (NULL = daemon's default session); `worktree_base`
 /// is dropped.
 const V2_MIGRATION_SQL: &str = "
+PRAGMA foreign_keys = OFF;
+BEGIN;
 CREATE TABLE cards_v2 (
   id              INTEGER PRIMARY KEY,
   board_id        INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
@@ -65,6 +67,8 @@ DROP TABLE cards;
 ALTER TABLE cards_v2 RENAME TO cards;
 CREATE INDEX idx_cards_column ON cards(column_id, position);
 ALTER TABLE runs ADD COLUMN session TEXT;
+COMMIT;
+PRAGMA foreign_keys = ON;
 ";
 
 /// v2 → v3 migration: archived cards remain in their column and preserve all
@@ -122,6 +126,59 @@ const V5_MIGRATION_SQL: &str = "
 ALTER TABLE boards ADD COLUMN scope_path TEXT;
 UPDATE boards SET name='Global' WHERE id=1;
 CREATE UNIQUE INDEX idx_boards_scope_path ON boards(scope_path) WHERE scope_path IS NOT NULL;
+";
+
+/// v5 → v6 migration: admit the `awaiting`/`done` card statuses and add
+/// `cards.awaiting_reason`. Rebuilding is required because SQLite cannot alter
+/// a CHECK constraint in place (same pattern as v4). Existing rows are copied
+/// unchanged with `awaiting_reason = NULL` — idle cards with a last `ok` run
+/// are deliberately NOT backfilled to `done`.
+const V6_MIGRATION_SQL: &str = "
+PRAGMA foreign_keys = OFF;
+BEGIN;
+CREATE TABLE cards_v6 (
+  id              INTEGER PRIMARY KEY,
+  board_id        INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+  column_id       INTEGER NOT NULL REFERENCES columns(id),
+  position        INTEGER NOT NULL,
+  title           TEXT NOT NULL,
+  description     TEXT NOT NULL DEFAULT '',
+  harness         TEXT NOT NULL DEFAULT 'pi',
+  model           TEXT,
+  effort          TEXT CHECK (effort IN (NULL,'off','minimal','low','medium','high','xhigh','max')),
+  permission_mode TEXT,
+  session         TEXT,
+  space_kind      TEXT NOT NULL DEFAULT 'workspace'
+                    CHECK (space_kind IN ('workspace','new_workspace')),
+  space_ref       TEXT,
+  space_cwd       TEXT,
+  status          TEXT NOT NULL DEFAULT 'idle'
+                    CHECK (status IN ('idle','queued','running','blocked','failed','awaiting','done')),
+  awaiting_reason TEXT,
+  session_id      TEXT,
+  created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+  archived_at     TEXT,
+  CHECK (
+    (status = 'awaiting' AND awaiting_reason IS NOT NULL
+      AND awaiting_reason IN ('agent_done','idle_expired'))
+    OR
+    (status <> 'awaiting' AND awaiting_reason IS NULL)
+  )
+);
+INSERT INTO cards_v6
+  (id,board_id,column_id,position,title,description,harness,model,effort,
+   permission_mode,session,space_kind,space_ref,space_cwd,status,awaiting_reason,
+   session_id,created_at,updated_at,archived_at)
+  SELECT id,board_id,column_id,position,title,description,harness,model,effort,
+    permission_mode,session,space_kind,space_ref,space_cwd,status,NULL,
+    session_id,created_at,updated_at,archived_at
+  FROM cards;
+DROP TABLE cards;
+ALTER TABLE cards_v6 RENAME TO cards;
+CREATE INDEX idx_cards_column ON cards(column_id, position);
+COMMIT;
+PRAGMA foreign_keys = ON;
 ";
 
 /// The preserved Global board id and legacy protocol default.
@@ -206,6 +263,9 @@ impl Db {
             }
             if version < 5 {
                 self.conn.execute_batch(V5_MIGRATION_SQL)?;
+            }
+            if version < 6 {
+                self.conn.execute_batch(V6_MIGRATION_SQL)?;
             }
             self.conn
                 .execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
@@ -451,6 +511,7 @@ impl Db {
     /// Delete a column, optionally moving its cards to `move_cards_to` first.
     /// Callers should validate with the engine beforehand.
     pub fn delete_column(&self, id: i64, move_cards_to: Option<i64>) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
         let board_id = self.require_column(id)?.board_id;
         if let Some(dst) = move_cards_to {
             let destination = self.require_column(dst)?;
@@ -482,6 +543,7 @@ impl Db {
                 params![i as i64, cid],
             )?;
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -723,10 +785,30 @@ impl Db {
         Ok(())
     }
 
+    /// Set the card's status. Any status other than `awaiting` clears
+    /// `awaiting_reason` (the reason is only meaningful while awaiting);
+    /// use [`Db::set_card_awaiting`] to enter `awaiting` with a reason.
     pub fn set_card_status(&self, id: i64, status: CardStatus) -> Result<Card> {
+        if status == CardStatus::Awaiting {
+            return Err(Error::InvalidState(
+                "enter awaiting with Db::set_card_awaiting so a reason is recorded".into(),
+            ));
+        }
         self.conn.execute(
-            "UPDATE cards SET status=?1, updated_at=datetime('now') WHERE id=?2",
+            "UPDATE cards SET status=?1, awaiting_reason=NULL, updated_at=datetime('now')
+             WHERE id=?2",
             params![status.as_str(), id],
+        )?;
+        self.require_card(id)
+    }
+
+    /// Enter (or re-enter, refreshing the reason) `awaiting` with `reason`.
+    /// The active run stays open; the column timeout is paused upstream.
+    pub fn set_card_awaiting(&self, id: i64, reason: AwaitingReason) -> Result<Card> {
+        self.conn.execute(
+            "UPDATE cards SET status='awaiting', awaiting_reason=?1, updated_at=datetime('now')
+             WHERE id=?2",
+            params![reason.as_str(), id],
         )?;
         self.require_card(id)
     }
@@ -854,6 +936,28 @@ impl Db {
         Ok(rows)
     }
 
+    /// The card's open (queued or started, not ended) run, if any.
+    pub fn open_run_for_card(&self, card_id: i64) -> Result<Option<Run>> {
+        opt(self.conn.query_row(
+            "SELECT * FROM runs WHERE card_id=?1 AND ended_at IS NULL
+             ORDER BY id DESC LIMIT 1",
+            params![card_id],
+            row_to_run,
+        ))
+    }
+
+    /// Whether any card currently in `column_id` has an open run.
+    pub fn column_has_open_run(&self, column_id: i64) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM runs r JOIN cards c ON c.id=r.card_id
+               WHERE c.column_id=?1 AND r.ended_at IS NULL
+             )",
+            params![column_id],
+            |row| row.get(0),
+        )?)
+    }
+
     /// The card's active (started, not ended) run, if any.
     pub fn active_run_for_card(&self, card_id: i64) -> Result<Option<Run>> {
         opt(self.conn.query_row(
@@ -966,6 +1070,11 @@ fn row_to_card(row: &Row) -> rusqlite::Result<Card> {
     };
     let space_s: String = row.get("space_kind")?;
     let status_s: String = row.get("status")?;
+    let reason_s: Option<String> = row.get("awaiting_reason")?;
+    let awaiting_reason = match reason_s {
+        Some(s) => Some(AwaitingReason::parse_str(&s).ok_or_else(|| conv_err("awaiting_reason"))?),
+        None => None,
+    };
     Ok(Card {
         id: row.get("id")?,
         board_id: row.get("board_id")?,
@@ -982,6 +1091,7 @@ fn row_to_card(row: &Row) -> rusqlite::Result<Card> {
         space_ref: row.get("space_ref")?,
         space_cwd: row.get("space_cwd")?,
         status: CardStatus::parse_str(&status_s).ok_or_else(|| conv_err("status"))?,
+        awaiting_reason,
         session_id: row.get("session_id")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,

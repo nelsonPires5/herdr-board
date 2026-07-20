@@ -13,7 +13,8 @@ pub const MAX_PROMPT_COMMENTS: usize = 20;
 /// haiku completed a stage but never called `board done` without this).
 pub const PROMPT_CLOSEOUT: &str = "(When the stage goal is met, finish with \
 `board comment \"<results>\"` then `board done --outcome ok` — or `--outcome fail` \
-if the goal was not met.)";
+if the goal was not met. Without `board done` the card stays in `awaiting` \
+pending human review.)";
 
 /// Build the run prompt: the card description, plus a `## Card comments` section
 /// listing the last [`MAX_PROMPT_COMMENTS`] comments as `author (ts): body`

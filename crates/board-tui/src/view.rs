@@ -4,7 +4,7 @@
 
 use board_core::engine::format_duration;
 use board_core::model::{Board, Card};
-use board_core::protocol::{CardDetail, CardStatus};
+use board_core::protocol::{AwaitingReason, CardDetail, CardStatus};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -17,6 +17,9 @@ use crate::forms::{FieldKind, Form};
 const MIN_COL_W: u16 = 26;
 const CARD_H: u16 = 3;
 const MAX_SCOPE_LABEL: usize = 32;
+const NARROW_DETAIL_WIDTH: u16 = 100;
+const HELP_GUTTER_WIDTH: u16 = 2;
+const HELP_KEY_WIDTH: u16 = 13;
 
 pub fn board_scope_label(board: &Board) -> String {
     let raw = match board.scope_path.as_deref() {
@@ -159,7 +162,24 @@ fn status_glyph(status: CardStatus) -> (char, Color) {
         CardStatus::Blocked => ('⏸', Color::LightYellow),
         CardStatus::Failed => ('✗', Color::LightRed),
         CardStatus::Queued => ('⧗', Color::LightCyan),
+        // awaiting = agent finished(?) without `board done`; pending review.
+        CardStatus::Awaiting => ('?', Color::Yellow),
+        // done = completion confirmed; final state.
+        CardStatus::Done => ('✓', Color::Green),
         CardStatus::Idle => ('·', Color::Gray),
+    }
+}
+
+/// Status label for the detail view: `awaiting` explains *why* it is waiting.
+fn status_label(card: &Card) -> String {
+    match (card.status, card.awaiting_reason) {
+        (CardStatus::Awaiting, Some(AwaitingReason::AgentDone)) => {
+            "awaiting (agent reported done)".to_string()
+        }
+        (CardStatus::Awaiting, Some(AwaitingReason::IdleExpired)) => {
+            "awaiting (idle timeout)".to_string()
+        }
+        (status, _) => status.as_str().to_string(),
     }
 }
 
@@ -407,13 +427,21 @@ pub fn detail_layout(app: &App, area: Rect) -> DetailLayout {
             runs: inner,
         };
     };
-    let content_budget = inner.height.saturating_sub(3);
+    // Narrow detail panels dedicate one line to the status/reason and two to
+    // metadata. This keeps every value visible without stealing the minimum
+    // content rows from description, comments, or runs.
+    let status_h = if panel.width < NARROW_DETAIL_WIDTH {
+        4
+    } else {
+        3
+    };
+    let content_budget = inner.height.saturating_sub(status_h);
     let (section_h, spacer_h) =
         detail_section_heights(detail, inner.width.saturating_sub(1), content_budget);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(status_h),
             Constraint::Length(section_h[0]),
             Constraint::Length(spacer_h),
             Constraint::Length(section_h[1]),
@@ -479,35 +507,35 @@ fn draw_detail(app: &App, f: &mut Frame, area: Rect) {
     f.render_widget(block, panel);
 
     let (gl, gc) = status_glyph(card.status);
-    let mut status_line = vec![
-        Span::styled(
-            format!("{} {}", gl, card.status.as_str()),
-            Style::default().fg(gc).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("   "),
-    ];
+    let narrow = panel.width < NARROW_DETAIL_WIDTH;
+    let mut status_line = vec![Span::styled(
+        format!("{} {}", gl, status_label(card)),
+        Style::default().fg(gc).add_modifier(Modifier::BOLD),
+    )];
     if card.archived_at.is_some() {
+        status_line.push(Span::raw("   "));
         status_line.push(Span::styled(
-            "▣ ARCHIVED   ",
+            "▣ ARCHIVED",
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::BOLD),
         ));
     }
+    let mut runtime_line = Vec::new();
     push_detail_field(
-        &mut status_line,
+        &mut runtime_line,
         "harness: ",
         card.harness.clone(),
         Color::LightBlue,
     );
     push_detail_field(
-        &mut status_line,
+        &mut runtime_line,
         "model: ",
         card.model.clone().unwrap_or_else(|| "default".into()),
         Color::LightBlue,
     );
     push_detail_field(
-        &mut status_line,
+        &mut runtime_line,
         "effort: ",
         card.effort
             .map(|effort| effort.as_str().to_string())
@@ -539,7 +567,18 @@ fn draw_detail(app: &App, f: &mut Frame, area: Rect) {
         ),
         Color::LightBlue,
     );
-    let status = Paragraph::new(vec![Line::from(status_line), Line::from(config_line)]).block(
+    let status_lines = if narrow {
+        vec![
+            Line::from(status_line),
+            Line::from(runtime_line),
+            Line::from(config_line),
+        ]
+    } else {
+        status_line.push(Span::raw("   "));
+        status_line.append(&mut runtime_line);
+        vec![Line::from(status_line), Line::from(config_line)]
+    };
+    let status = Paragraph::new(status_lines).block(
         Block::default()
             .borders(Borders::TOP)
             .border_style(Style::default().fg(Color::Gray))
@@ -812,12 +851,19 @@ fn draw_help(f: &mut Frame, area: Rect) {
     f.render_widget(block, box_area);
 
     let mid = HELP_KEYS.len().div_ceil(2);
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(inner);
-    render_help_column(f, cols[0], &HELP_KEYS[..mid]);
-    render_help_column(f, cols[1], &HELP_KEYS[mid..]);
+    let gutter = HELP_GUTTER_WIDTH.min(inner.width.saturating_sub(2));
+    let columns_width = inner.width.saturating_sub(gutter);
+    let left_width = columns_width / 2;
+    let right_width = columns_width.saturating_sub(left_width);
+    let left = Rect::new(inner.x, inner.y, left_width, inner.height);
+    let right = Rect::new(
+        inner.x.saturating_add(left_width).saturating_add(gutter),
+        inner.y,
+        right_width,
+        inner.height,
+    );
+    render_help_column(f, left, &HELP_KEYS[..mid]);
+    render_help_column(f, right, &HELP_KEYS[mid..]);
 }
 
 fn render_help_column(f: &mut Frame, area: Rect, keys: &[(&str, &str)]) {
@@ -832,9 +878,10 @@ fn render_help_column(f: &mut Frame, area: Rect, keys: &[(&str, &str)]) {
                         .add_modifier(Modifier::BOLD),
                 ))
             } else {
+                let description_width = area.width.saturating_sub(HELP_KEY_WIDTH) as usize;
                 Line::from(vec![
                     Span::styled(format!("  {:<11}", k), Style::default().fg(Color::Yellow)),
-                    Span::raw(*d),
+                    Span::raw(truncate(d, description_width)),
                 ])
             }
         })
@@ -852,17 +899,18 @@ pub const HELP_KEYS: &[(&str, &str)] = &[
     ("e", "edit card"),
     ("E", "edit focused column"),
     ("a", "archive / restore card"),
-    ("v", "view active / all / archived"),
+    ("v", "cycle active/all/archived"),
     ("d", "delete card"),
-    ("D", "delete column (move cards / refuse if running)"),
+    ("D", "delete/move column cards"),
     ("m", "move card (column picker)"),
     ("H / L", "shove card left / right"),
     ("Enter", "card detail"),
-    ("T", "apply template (empty board only)"),
+    ("T", "apply template (empty)"),
     ("r", "refresh board"),
     ("?", "this help"),
     ("q / Esc", "back / quit"),
     ("--", "-- card detail --"),
+    ("Enter", "confirm done (awaiting)"),
     ("e", "edit card"),
     ("a", "archive / restore card"),
     ("c", "add comment"),
@@ -882,7 +930,7 @@ pub const HELP_KEYS: &[(&str, &str)] = &[
     ("--", "-- mouse --"),
     ("click", "focus card/column"),
     ("dbl-click", "open card detail"),
-    ("drag", "move card / reorder column"),
+    ("drag", "move card/reorder column"),
     ("wheel", "scroll cards"),
 ];
 
@@ -969,7 +1017,10 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{board_picker_label, detail_section_title, pane_title};
+    use super::{
+        board_picker_label, detail_section_title, pane_title, HELP_GUTTER_WIDTH, HELP_KEYS,
+        HELP_KEY_WIDTH,
+    };
     use crate::app::CardFilter;
     use board_core::model::Board;
 
@@ -1006,5 +1057,20 @@ mod tests {
         assert_eq!(detail_section_title("comments", 8, 0, 3), "comments ↓");
         assert_eq!(detail_section_title("comments", 8, 2, 3), "comments ↑↓");
         assert_eq!(detail_section_title("runs", 8, 5, 3), "runs ↑");
+    }
+
+    #[test]
+    fn help_descriptions_fit_each_80_column_panel_column() {
+        let inner_width = 80_u16 - 2;
+        let column_width = (inner_width - HELP_GUTTER_WIDTH) / 2;
+        let description_width = column_width - HELP_KEY_WIDTH;
+        for (key, description) in HELP_KEYS {
+            if *key != "--" {
+                assert!(
+                    description.chars().count() <= description_width as usize,
+                    "{key} description does not fit: {description}"
+                );
+            }
+        }
     }
 }

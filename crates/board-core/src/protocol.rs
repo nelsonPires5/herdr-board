@@ -35,6 +35,12 @@ pub enum SpaceKind {
 }
 
 /// Live card status.
+///
+/// - [`CardStatus::Awaiting`] — the agent finished (or went idle past the
+///   grace period) without an explicit `board done`; the run stays OPEN and
+///   the column timeout is paused. Never becomes a failure on its own.
+/// - [`CardStatus::Done`] — completion confirmed via `board done ok` with no
+///   target column (with a target column the card moves instead).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CardStatus {
@@ -43,6 +49,19 @@ pub enum CardStatus {
     Running,
     Blocked,
     Failed,
+    Awaiting,
+    Done,
+}
+
+/// Why a card entered [`CardStatus::Awaiting`]. Set on entry, cleared (NULL)
+/// on exit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AwaitingReason {
+    /// herdr reported `agent_status=done` and no `board done` arrived.
+    AgentDone,
+    /// `agent_status=idle` sustained past `idle_grace_seconds`, no `board done`.
+    IdleExpired,
 }
 
 /// Terminal outcome of a run.
@@ -93,6 +112,10 @@ str_enum!(SpaceKind { Workspace => "workspace", NewWorkspace => "new_workspace" 
 str_enum!(CardStatus {
     Idle => "idle", Queued => "queued", Running => "running",
     Blocked => "blocked", Failed => "failed",
+    Awaiting => "awaiting", Done => "done",
+});
+str_enum!(AwaitingReason {
+    AgentDone => "agent_done", IdleExpired => "idle_expired",
 });
 str_enum!(RunOutcome {
     Ok => "ok", Fail => "fail", Cancelled => "cancelled", Lost => "lost",

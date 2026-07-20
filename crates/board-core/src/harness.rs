@@ -66,16 +66,29 @@ pub enum HarnessError {
     PiPermissionModeUnsupported,
 }
 
-/// Board-protocol trailer appended to every built-in harness system prompt: the
-/// close-out contract must not depend on users remembering it in each column's
-/// prompt. `board comment`/`done` read `$BOARD_CARD_ID` from the run env.
+/// Board-protocol trailer appended to EVERY run's system prompt (built-in argv
+/// and custom-harness `BOARD_SYSTEM_PROMPT` alike): the close-out contract must
+/// not depend on users remembering it in each column's prompt.
+/// `board comment`/`done` read `$BOARD_CARD_ID` from the run env.
 pub const BOARD_PROTOCOL_TRAILER: &str = "\
 ## herdr-board protocol
 You are running a herdr-board card ($BOARD_CARD_ID is preset). When this stage's goal \
 is met you MUST finish with exactly two commands: first `board comment \"<your results, \
 files touched, findings>\"`, then `board done --outcome ok`. If the stage goal was NOT \
-met, use `board done --outcome fail --summary \"<why>\"` instead. Always comment before \
-done. Never use `board move`/`cancel`/`retry` on your own card.";
+met — something failed or you got lost — use `board done --outcome fail --summary \
+\"<why>\"` instead. Always comment before done. Never use `board move`/`cancel`/`retry` \
+on your own card. Finishing or going idle WITHOUT `board done` leaves the card in \
+`awaiting` for human review — a run is never auto-completed.";
+
+/// Compose the effective system prompt for a run: the column's (if any) plus
+/// the unconditional [`BOARD_PROTOCOL_TRAILER`]. Every dispatch — independent
+/// of column config — carries the close-out protocol.
+pub fn protocol_system_prompt(column_prompt: Option<&str>) -> String {
+    match column_prompt {
+        Some(sp) => format!("{sp}\n\n{BOARD_PROTOCOL_TRAILER}"),
+        None => BOARD_PROTOCOL_TRAILER.to_string(),
+    }
+}
 
 /// Build the argv for the builtin `claude` harness.
 ///
@@ -104,12 +117,8 @@ pub fn claude_argv(
         argv.push("--permission-mode".to_string());
         argv.push(p.clone());
     }
-    let system_prompt = match &settings.system_prompt {
-        Some(sp) => format!("{sp}\n\n{BOARD_PROTOCOL_TRAILER}"),
-        None => BOARD_PROTOCOL_TRAILER.to_string(),
-    };
     argv.push("--append-system-prompt".to_string());
-    argv.push(system_prompt);
+    argv.push(protocol_system_prompt(settings.system_prompt.as_deref()));
     argv.push("--allowedTools".to_string());
     argv.push("Bash(board:*)".to_string());
 
@@ -159,12 +168,8 @@ pub fn pi_argv(
         argv.push("--thinking".to_string());
         argv.push(effort.as_str().to_string());
     }
-    let system_prompt = match &settings.system_prompt {
-        Some(sp) => format!("{sp}\n\n{BOARD_PROTOCOL_TRAILER}"),
-        None => BOARD_PROTOCOL_TRAILER.to_string(),
-    };
     argv.push("--append-system-prompt".to_string());
-    argv.push(system_prompt);
+    argv.push(protocol_system_prompt(settings.system_prompt.as_deref()));
 
     let resulting_session_id = match session {
         SessionPlan::Mint => {
@@ -229,10 +234,15 @@ pub fn build_invocation(
 
     let argv = substitute_template(&def.argv, settings);
 
-    let mut env = vec![("BOARD_PROMPT".to_string(), prompt.to_string())];
-    if let Some(sp) = &settings.system_prompt {
-        env.push(("BOARD_SYSTEM_PROMPT".to_string(), sp.clone()));
-    }
+    // The protocol trailer is unconditional: custom harnesses get it via
+    // BOARD_SYSTEM_PROMPT even when the column sets no system prompt.
+    let env = vec![
+        ("BOARD_PROMPT".to_string(), prompt.to_string()),
+        (
+            "BOARD_SYSTEM_PROMPT".to_string(),
+            protocol_system_prompt(settings.system_prompt.as_deref()),
+        ),
+    ];
 
     Ok(HarnessInvocation {
         argv,

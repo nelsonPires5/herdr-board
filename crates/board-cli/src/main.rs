@@ -65,6 +65,10 @@ enum Cmd {
         json: bool,
     },
     /// Close the active run (`board done [CARD_ID] --outcome ok|fail`).
+    ///
+    /// `ok` with no on_success column marks the card `done` (with a target it
+    /// moves instead). If the agent reports done or goes idle without this
+    /// command, the card becomes `awaiting`; timeout and pane exit still fail.
     Done {
         /// Card id; defaults to $BOARD_CARD_ID.
         card_id: Option<i64>,
@@ -149,7 +153,7 @@ enum CardCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Archive an idle/failed card without deleting its history.
+    /// Archive an idle/done/failed card without deleting its history.
     Archive {
         id: i64,
         #[arg(long)]

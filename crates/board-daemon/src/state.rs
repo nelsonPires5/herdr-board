@@ -30,6 +30,9 @@ pub struct ActiveRun {
     pub timeout_deadline: Option<Instant>,
     /// When the agent last went idle (herdr status), for idle-grace detection.
     pub idle_since: Option<Instant>,
+    /// When the card entered `awaiting`. While set the column timeout is
+    /// paused; on exit the deadline is shifted forward by the awaiting span.
+    pub awaiting_since: Option<Instant>,
     pub is_local: bool,
     pub pane_id: Option<String>,
 }
@@ -39,8 +42,34 @@ pub struct ActiveRun {
 pub struct Sched {
     /// Started runs by run id.
     pub active: HashMap<i64, ActiveRun>,
+    /// Cards whose ended run is still applying its transition. The value is the
+    /// owning run id, so a duplicate finalizer cannot clear another claim.
+    pub finalizing_cards: HashMap<i64, i64>,
     /// Consecutive auto-hops per card (reset on human action / chain end).
     pub chain_hops: HashMap<i64, u32>,
+}
+
+impl Sched {
+    /// Reject a public mutation that could conflict with a pending transition.
+    pub fn ensure_card_not_finalizing(&self, card_id: i64) -> board_core::Result<()> {
+        if self.finalizing_cards.contains_key(&card_id) {
+            return Err(board_core::Error::InvalidState(
+                "card finalization is in progress; retry after it completes".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Reject a column mutation that could invalidate a finalizer's transition
+    /// snapshot, regardless of which card's source or target it touches.
+    pub fn ensure_no_finalizing_cards(&self, action: &str) -> board_core::Result<()> {
+        if !self.finalizing_cards.is_empty() {
+            return Err(board_core::Error::InvalidState(format!(
+                "card finalization is in progress; cannot {action}"
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// The panes the herdr event watcher should subscribe to, grouped by the herdr

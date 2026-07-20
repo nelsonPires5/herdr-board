@@ -230,10 +230,11 @@ async fn adopt_runs(d: &Arc<Daemon>) {
 
         if alive {
             tracing::info!("adopting live run {} (card {})", run.id, card.id);
+            let adopted_at = std::time::Instant::now();
             let deadline = {
                 let col = d.store.lock().get_column(run.column_id).ok().flatten();
                 col.and_then(|c| c.timeout_minutes).map(|m| {
-                    std::time::Instant::now()
+                    adopted_at
                         + std::time::Duration::from_secs(
                             m.max(0) as u64 * d.settings.timeout_unit_secs,
                         )
@@ -245,9 +246,11 @@ async fn adopt_runs(d: &Arc<Daemon>) {
                 crate::state::ActiveRun {
                     card_id: card.id,
                     handle,
-                    started: std::time::Instant::now(),
+                    started: adopted_at,
                     timeout_deadline: deadline,
                     idle_since: None,
+                    awaiting_since: (card.status == board_core::protocol::CardStatus::Awaiting)
+                        .then_some(adopted_at),
                     is_local: false,
                     pane_id: run.herdr_pane_id.clone(),
                 },
@@ -293,4 +296,93 @@ fn spawn_signal_handler(d: Arc<Daemon>) {
         }
         d.trigger_shutdown();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    use board_core::engine::AgentSignal;
+    use board_core::protocol::{AwaitingReason, CardCreateParams, CardStatus, ColumnUpdateParams};
+    use board_core::spawn::{SpawnReq, Spawner};
+
+    struct AliveSpawner;
+
+    impl Spawner for AliveSpawner {
+        fn spawn(&self, _req: &SpawnReq) -> anyhow::Result<SpawnHandle> {
+            unreachable!("adoption test does not spawn")
+        }
+
+        fn kill(&self, _handle: &SpawnHandle) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn is_alive(&self, _handle: &SpawnHandle) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+    }
+
+    #[tokio::test]
+    async fn adopted_awaiting_run_keeps_timeout_paused_until_work_resumes() {
+        let db = Db::open_in_memory().unwrap();
+        let card = db
+            .create_card(&CardCreateParams {
+                title: "review across restart".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        db.update_column(&ColumnUpdateParams {
+            id: card.column_id,
+            timeout_minutes: Some(1),
+            ..Default::default()
+        })
+        .unwrap();
+        let run = db
+            .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
+            .unwrap();
+        db.start_run(run.id, Some("w1"), Some("p1")).unwrap();
+        db.set_card_awaiting(card.id, AwaitingReason::AgentDone)
+            .unwrap();
+
+        let (events_tx, _events_rx) = broadcast::channel(16);
+        let (dispatch_tx, _dispatch_rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let d = Arc::new(Daemon::new(
+            Store::new(db),
+            Config::default(),
+            DaemonSettings::default(),
+            PathBuf::from("/tmp/board-adopt.db"),
+            PathBuf::from("/tmp/board-adopt.sock"),
+            Arc::new(AliveSpawner),
+            None,
+            None,
+            events_tx,
+            dispatch_tx,
+            shutdown_tx,
+        ));
+
+        adopt_runs(&d).await;
+        let original_deadline = {
+            let mut sched = d.sched.lock().unwrap();
+            let active = sched.active.get_mut(&run.id).unwrap();
+            assert!(active.awaiting_since.is_some());
+            let deadline = active.timeout_deadline.unwrap();
+            active.awaiting_since =
+                Some(active.awaiting_since.unwrap() - Duration::from_secs(3600));
+            deadline
+        };
+
+        watchers::apply_signal(&d, run.id, card.id, AgentSignal::Working);
+
+        let resumed = d.store.lock().get_card(card.id).unwrap().unwrap();
+        assert_eq!(resumed.status, CardStatus::Running);
+        let sched = d.sched.lock().unwrap();
+        let active = sched.active.get(&run.id).unwrap();
+        assert!(active.awaiting_since.is_none());
+        assert!(
+            active.timeout_deadline.unwrap() >= original_deadline + Duration::from_secs(3599),
+            "long post-restart review must be excluded from elapsed timeout"
+        );
+    }
 }
