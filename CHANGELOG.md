@@ -22,9 +22,6 @@ All notable changes to this project are documented here. The format is based on
   flow.
 
 ### Changed
-- Run finalization now holds an in-memory per-card claim from the atomic run close through its
-  transition and optional auto-enqueue. Concurrent retry/enqueue and conflicting card or column
-  mutations are rejected until the final status is committed.
 - The hermetic TUI demo now carries a real open run for its `awaiting` card, and the fake client
   executes `run.done` through the same pure transition engine used by the daemon.
 - Idle past `idle_grace_seconds` no longer fails the run as `lost`; it parks the card in
@@ -61,19 +58,14 @@ All notable changes to this project are documented here. The format is based on
   `$PI_CODING_AGENT_DIR`/`~/.pi/agent` (`auth.json` + `models-store.json`), filters to authenticated
   providers, and falls back to `pi --list-models` then the static catalog. `model_freeform` stays
   `true`.
-
-### Changed
 - Scope-sensitive CLI commands use Git root/CWD (overridable with `BOARD_SCOPE_PATH`), while
   card-id operations and `move` infer the card's own board. Legacy protocol requests without
   `board_id` continue to target `Global`.
-- The card-create/edit and column-config forms now share one harness-metadata source
-  (`harness.capabilities` + `harness.list`): the card `harness` selector draws from the same
-  default-first list as the column `harness_override` selector (so config-defined harnesses are
-  selectable on cards too). In the column config form, `harness_override` is a
-  **select** over the available harnesses (built-ins + config-defined, `(none)` = no override)
-  instead of free text, `effort_override` follows the override harness's catalog, and
-  `permission_override` is **hidden** for permission-less harnesses (e.g. Pi). Changing the
-  override harness refetches capabilities and resets only the overrides that became invalid.
+
+### Fixed
+- Run finalization now holds an in-memory per-card claim from the atomic run close through its
+  transition and optional auto-enqueue. Concurrent retry/enqueue and conflicting card or column
+  mutations are rejected until the final status is committed.
 
 ## [0.5.0] - 2026-07-18
 
