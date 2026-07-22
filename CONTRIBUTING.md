@@ -6,8 +6,9 @@ welcome. For the full cross-agent contributor guide (crate ownership, herdr gotc
 
 ## Development setup
 
-Requirements: a **Rust toolchain** (stable, edition 2021) and **herdr 0.7.3+** on `PATH` for the
-end-to-end path (unit and integration tests need neither herdr nor an agent harness).
+Requirements: a **Rust toolchain** (stable, edition 2021) and exactly **Herdr 0.7.5 with
+socket protocol 17** on `PATH` for the end-to-end path (unit and integration tests need neither
+herdr nor an agent harness).
 
 ```bash
 git clone https://github.com/nelsonPires5/herdr-board

@@ -14,7 +14,7 @@ fn mem() -> Db {
 #[test]
 fn migration_seeds_board_and_todo_column() {
     let db = mem();
-    assert_eq!(db.user_version().unwrap(), 6);
+    assert_eq!(db.user_version().unwrap(), 7);
     let board = db.get_board(BOARD_ID).unwrap();
     assert_eq!(board.name, "Global");
     assert_eq!(board.scope_path, None);
@@ -36,7 +36,7 @@ fn migration_idempotent_on_reopen() {
     // Reopen: must not re-seed (still exactly one board, one column).
     {
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.user_version().unwrap(), 6);
+        assert_eq!(db.user_version().unwrap(), 7);
         assert_eq!(db.list_columns(BOARD_ID).unwrap().len(), 1);
         assert_eq!(db.get_board(BOARD_ID).unwrap().name, "Global");
     }
@@ -124,9 +124,9 @@ fn migration_v2_upgrades_v1_database() {
         .unwrap();
         conn.execute_batch("PRAGMA user_version = 1;").unwrap();
     }
-    // Open via Db → runs the v2 through v6 migrations.
+    // Open via Db → runs the v2 through v7 migrations.
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 6);
+    assert_eq!(db.user_version().unwrap(), 7);
     let cards = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(cards.len(), 2);
     for c in &cards {
@@ -369,7 +369,7 @@ fn migration_v4_preserves_claude_cards_and_accepts_pi_efforts() {
     }
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 6);
+    assert_eq!(db.user_version().unwrap(), 7);
     let existing = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(existing[0].harness, "claude");
     assert_eq!(db.list_comments(existing[0].id).unwrap().len(), 1);
@@ -391,14 +391,14 @@ fn migration_does_not_downgrade_future_schema_version() {
     let path = tmp.path().to_path_buf();
     {
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.user_version().unwrap(), 6);
+        assert_eq!(db.user_version().unwrap(), 7);
     }
     {
         let conn = Connection::open(&path).unwrap();
-        conn.execute_batch("PRAGMA user_version = 7;").unwrap();
+        conn.execute_batch("PRAGMA user_version = 8;").unwrap();
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 7);
+    assert_eq!(db.user_version().unwrap(), 8);
 }
 
 #[test]
@@ -423,10 +423,77 @@ fn migration_v3_adds_archived_at_to_v2_database() {
         .unwrap();
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 6);
+    assert_eq!(db.user_version().unwrap(), 7);
     let cards = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(cards.len(), 1);
     assert!(cards[0].archived_at.is_none());
+}
+
+#[test]
+fn run_system_prompt_snapshot_roundtrips_across_file_reopen() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    let exact = "old instructions\\n\\nsecond line\\ntrailing spaces  ";
+    let (card_id, run_id) = {
+        let db = Db::open(&path).unwrap();
+        let card = db
+            .create_card(&CardCreateParams {
+                title: "snapshot".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let run = db
+            .create_run_with_prompt_snapshots(
+                card.id,
+                card.column_id,
+                "pi",
+                r#"["pi","--model","x"]"#,
+                "Card task:\nwork",
+                Some(exact),
+                None,
+                None,
+            )
+            .unwrap();
+        (card.id, run.id)
+    };
+    let db = Db::open(&path).unwrap();
+    let run = db.get_run(run_id).unwrap();
+    assert_eq!(run.card_id, card_id);
+    assert_eq!(run.system_prompt_snapshot.as_deref(), Some(exact));
+}
+
+#[test]
+fn v6_to_v7_migration_preserves_legacy_queued_run_byte_for_byte() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    let argv = r#"["pi","--append-system-prompt","legacy\\nexact","Card task:\\nhello"]"#;
+    let prompt = "legacy prompt\\nwith exact bytes  ";
+    {
+        let db = Db::open(&path).unwrap();
+        let card = db
+            .create_card(&CardCreateParams {
+                title: "legacy".into(),
+                harness: Some("pi".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        db.create_run(card.id, card.column_id, "pi", argv, prompt, None, None)
+            .unwrap();
+        // Make this a genuine v6 shape: the migration must add the nullable
+        // column rather than relying on a pre-existing empty value.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE runs DROP COLUMN system_prompt_snapshot;
+             PRAGMA user_version = 6;",
+        )
+        .unwrap();
+    }
+    let db = Db::open(&path).unwrap();
+    assert_eq!(db.user_version().unwrap(), 7);
+    let run = &db.list_runs(1).unwrap()[0];
+    assert_eq!(run.argv_json, argv);
+    assert_eq!(run.prompt_snapshot, prompt);
+    assert_eq!(run.system_prompt_snapshot, None);
 }
 
 #[test]
@@ -706,7 +773,7 @@ fn migration_v5_preserves_global_data_and_renames_it() {
 
     let db = Db::open(&path).unwrap();
     let global = db.get_board(BOARD_ID).unwrap();
-    assert_eq!(db.user_version().unwrap(), 6);
+    assert_eq!(db.user_version().unwrap(), 7);
     assert_eq!(global.name, "Global");
     assert!(global.scope_path.is_none());
     let cards = db.list_cards(BOARD_ID).unwrap();
@@ -848,7 +915,7 @@ fn migration_v6_rebuilds_cards_check_and_preserves_data() {
     }
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 6);
+    assert_eq!(db.user_version().unwrap(), 7);
     let cards = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(cards.len(), 2);
     let kept = &cards[0];

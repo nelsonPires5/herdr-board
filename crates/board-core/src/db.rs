@@ -18,7 +18,7 @@ use crate::{Error, Result};
 const SCHEMA_SQL: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../schema.sql"));
 
 /// The latest schema version embedded in [`SCHEMA_SQL`].
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 /// v1 → v2 migration. SQLite cannot alter a CHECK constraint or drop a column
 /// in place, so `cards` is rebuilt. Legacy `space_kind` values `cwd`/`worktree`
@@ -181,6 +181,11 @@ COMMIT;
 PRAGMA foreign_keys = ON;
 ";
 
+/// v6 → v7 migration: snapshot the fully resolved system prompt for future
+/// queued runs. Existing rows deliberately remain NULL so their persisted
+/// all-in-one argv keeps its legacy launch semantics.
+const V7_MIGRATION_SQL: &str = "ALTER TABLE runs ADD COLUMN system_prompt_snapshot TEXT;";
+
 /// The preserved Global board id and legacy protocol default.
 pub const BOARD_ID: i64 = 1;
 
@@ -266,6 +271,22 @@ impl Db {
             }
             if version < 6 {
                 self.conn.execute_batch(V6_MIGRATION_SQL)?;
+            }
+            if version < 7 {
+                // Normally every pre-v7 database lacks this column. The guard
+                // also makes migration resilient to databases whose shape was
+                // upgraded before their user_version stamp was persisted.
+                let has_snapshot: bool = self.conn.query_row(
+                    "SELECT EXISTS(
+                       SELECT 1 FROM pragma_table_info('runs')
+                       WHERE name='system_prompt_snapshot'
+                     )",
+                    [],
+                    |row| row.get(0),
+                )?;
+                if !has_snapshot {
+                    self.conn.execute_batch(V7_MIGRATION_SQL)?;
+                }
             }
             self.conn
                 .execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
@@ -854,7 +875,11 @@ impl Db {
 
     // -- runs ----------------------------------------------------------------
 
-    /// Create a queued run (`started_at`/`outcome` NULL).
+    /// Create a queued legacy-compatible run (`started_at`/`outcome` NULL).
+    ///
+    /// The absent system snapshot intentionally gives direct callers the same
+    /// shape as a pre-v7 row. Production enqueue uses
+    /// [`Db::create_run_with_prompt_snapshots`] instead.
     #[allow(clippy::too_many_arguments)]
     pub fn create_run(
         &self,
@@ -863,6 +888,33 @@ impl Db {
         harness: &str,
         argv_json: &str,
         prompt_snapshot: &str,
+        session_id: Option<&str>,
+        session: Option<&str>,
+    ) -> Result<Run> {
+        self.create_run_with_prompt_snapshots(
+            card_id,
+            column_id,
+            harness,
+            argv_json,
+            prompt_snapshot,
+            None,
+            session_id,
+            session,
+        )
+    }
+
+    /// Create a queued run with both enqueue-time prompt channels persisted in
+    /// the same row. `system_prompt_snapshot` is already protocol-trailer
+    /// inclusive and is stored byte-for-byte.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_run_with_prompt_snapshots(
+        &self,
+        card_id: i64,
+        column_id: i64,
+        harness: &str,
+        argv_json: &str,
+        prompt_snapshot: &str,
+        system_prompt_snapshot: Option<&str>,
         session_id: Option<&str>,
         session: Option<&str>,
     ) -> Result<Run> {
@@ -875,14 +927,16 @@ impl Db {
         }
         self.conn.execute(
             "INSERT INTO runs
-             (card_id,column_id,harness,argv_json,prompt_snapshot,session_id,session)
-             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+             (card_id,column_id,harness,argv_json,prompt_snapshot,system_prompt_snapshot,
+              session_id,session)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
             params![
                 card_id,
                 column_id,
                 harness,
                 argv_json,
                 prompt_snapshot,
+                system_prompt_snapshot,
                 session_id,
                 session
             ],
@@ -1122,6 +1176,7 @@ fn row_to_run(row: &Row) -> rusqlite::Result<Run> {
         harness: row.get("harness")?,
         argv_json: row.get("argv_json")?,
         prompt_snapshot: row.get("prompt_snapshot")?,
+        system_prompt_snapshot: row.get("system_prompt_snapshot")?,
         herdr_workspace_id: row.get("herdr_workspace_id")?,
         herdr_pane_id: row.get("herdr_pane_id")?,
         session_id: row.get("session_id")?,

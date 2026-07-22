@@ -8,6 +8,16 @@ use std::path::PathBuf;
 pub struct SpawnReq {
     /// herdr agent/pane label, e.g. `card-42-execute`.
     pub name: String,
+    /// Explicit Herdr managed-agent kind (`pi` or `claude`). `None` means a
+    /// configured, unmanaged command; callers must never infer this from argv.
+    pub agent_kind: Option<String>,
+    /// Card task to submit after a managed agent becomes interactive. `None`
+    /// for configured harnesses, which receive `BOARD_PROMPT` in `env`.
+    pub initial_prompt: Option<String>,
+    /// Authoritative system instructions for a managed agent, transported
+    /// separately from startup argv. `None` for configured harnesses, which
+    /// receive `BOARD_SYSTEM_PROMPT` in `env`.
+    pub system_prompt: Option<String>,
     /// Fallback agent name to retry with when `name` is already taken (herdr
     /// agent names are exclusive while a pane using one is open). `None` skips
     /// the retry.

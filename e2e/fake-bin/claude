@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# Hermetic, no-provider Claude stand-in for protocol-17 managed launches.
+# The card prompt is forbidden in startup argv and must arrive through the
+# interactive terminal only after the system-prompt file has been consumed.
+set -euo pipefail
+
+: "${BOARD_CARD_ID:?BOARD_CARD_ID required}"
+: "${BOARD_RUN_ID:?BOARD_RUN_ID required}"
+: "${BOARD_SOCKET:?BOARD_SOCKET required}"
+: "${HERDR_SOCKET_PATH:?HERDR_SOCKET_PATH required}"
+
+argv=("$@")
+model=""; effort=""; permission=""; allowed_tools=""; session_id=""
+resume_id=""; fork_session=false; system_file=""
+while (($#)); do
+  case "$1" in
+    --model)
+      (($# >= 2)) || { echo 'fake claude: --model missing value' >&2; exit 2; }
+      model="$2"; shift 2 ;;
+    --effort)
+      (($# >= 2)) || { echo 'fake claude: --effort missing value' >&2; exit 2; }
+      effort="$2"; shift 2 ;;
+    --permission-mode)
+      (($# >= 2)) || { echo 'fake claude: --permission-mode missing value' >&2; exit 2; }
+      permission="$2"; shift 2 ;;
+    --allowedTools)
+      (($# >= 2)) || { echo 'fake claude: --allowedTools missing value' >&2; exit 2; }
+      allowed_tools="$2"; shift 2 ;;
+    --session-id)
+      (($# >= 2)) || { echo 'fake claude: --session-id missing value' >&2; exit 2; }
+      session_id="$2"; shift 2 ;;
+    --resume)
+      (($# >= 2)) || { echo 'fake claude: --resume missing value' >&2; exit 2; }
+      resume_id="$2"; shift 2 ;;
+    --fork-session)
+      fork_session=true; shift ;;
+    --append-system-prompt-file)
+      (($# >= 2)) || { echo 'fake claude: --append-system-prompt-file missing path' >&2; exit 2; }
+      [ -z "$system_file" ] || { echo 'fake claude: duplicate system-prompt file' >&2; exit 2; }
+      system_file="$2"; shift 2 ;;
+    --append-system-prompt|--)
+      echo "fake claude: invalid protocol-17 startup option: $1" >&2; exit 2 ;;
+    -*) echo "fake claude: unexpected startup option: $1" >&2; exit 2 ;;
+    *) echo "fake claude: card prompt leaked into startup argv: $1" >&2; exit 2 ;;
+  esac
+done
+[ -n "$session_id$resume_id" ] || { echo 'fake claude: session id or resume required' >&2; exit 2; }
+[ -n "$system_file" ] || { echo 'fake claude: --append-system-prompt-file PATH required' >&2; exit 2; }
+[ -f "$system_file" ] || { echo "fake claude: system-prompt file absent at startup: $system_file" >&2; exit 2; }
+
+record="$(dirname "$BOARD_SOCKET")/fake-claude-run-$BOARD_RUN_ID.json"
+python3 - "$record" "$BOARD_RUN_ID" "$PWD" "$BOARD_CARD_ID" "$BOARD_SOCKET" \
+  "$HERDR_SOCKET_PATH" "$model" "$effort" "$permission" "$allowed_tools" \
+  "$session_id" "$resume_id" "$fork_session" "$system_file" "${argv[@]}" <<'PY'
+import json, os, stat, sys
+(path, run_id, cwd, card_id, board_socket, herdr_socket, model, effort,
+ permission, allowed_tools, session_id, resume_id, fork_session, system_file,
+ *argv) = sys.argv[1:]
+metadata = os.stat(system_file)
+mode = stat.S_IMODE(metadata.st_mode)
+with open(system_file, "r", encoding="utf-8", newline="") as source:
+    system_prompt = source.read()
+protocol = """## herdr-board protocol
+You are running a herdr-board card ($BOARD_CARD_ID is preset). When this stage's goal is met you MUST finish with exactly two commands: first `board comment \"<your results, files touched, findings>\"`, then `board done --outcome ok`. If the stage goal was NOT met — something failed or you got lost — use `board done --outcome fail --summary \"<why>\"` instead. Always comment before done. Never use `board move`/`cancel`/`retry` on your own card. Finishing or going idle WITHOUT `board done` leaves the card in `awaiting` for human review — a run is never auto-completed."""
+assert mode == 0o600, f"system-prompt mode is {oct(mode)}, expected 0o600"
+assert system_prompt == protocol or system_prompt.endswith("\n\n" + protocol), system_prompt
+with open(path, "w", encoding="utf-8") as target:
+    json.dump({
+        "run_id": int(run_id), "card_id": int(card_id), "cwd": cwd,
+        "board_socket": board_socket, "herdr_socket": herdr_socket,
+        "model": model, "effort": effort, "permission_mode": permission,
+        "allowed_tools": allowed_tools, "session_id": session_id or None,
+        "resume_id": resume_id or None, "fork_session": fork_session == "true",
+        "argv": argv, "system_prompt_file": system_file,
+        "system_prompt_exists_at_read": True, "system_prompt_mode": mode,
+        "system_prompt": system_prompt,
+    }, target, ensure_ascii=False, indent=2)
+    target.write("\n")
+PY
+
+# Claude's SessionStart hook reports both its session id and transcript path
+# before lifecycle state. Reproduce that ordering and its idle OSC/prompt
+# markers so managed readiness is exercised rather than bypassed.
+reported_session_id="${session_id:-$resume_id}"
+session_dir="$(dirname "$BOARD_SOCKET")/fake-claude-sessions"
+mkdir -p "$session_dir"
+session_path="$session_dir/${reported_session_id}-${BOARD_RUN_ID}.jsonl"
+python3 - "$session_path" "$reported_session_id" "$BOARD_RUN_ID" <<'PY'
+import json, os, sys
+path, session_id, run_id = sys.argv[1:]
+with open(path, "x", encoding="utf-8") as target:
+    json.dump({"type": "session", "session_id": session_id, "run_id": int(run_id)}, target)
+    target.write("\n")
+os.chmod(path, 0o600)
+PY
+printf '\033]0;✳ Claude Code\007'
+printf '\n──────────────────────────────────────────────────────\n❯ \n──────────────────────────────────────────────────────\n'
+python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/managed-agent-report.py" \
+  "$record" claude "$reported_session_id" "$session_path" startup
+
+FAKE_MANAGED_KIND=claude \
+  python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/managed-terminal-shim.py" "$record"
+sleep "${FAKE_CLAUDE_SLEEP:-1.5}"
+"${BOARD_BIN:?BOARD_BIN required}" comment "fake claude: protocol-17 system file and agent.prompt validated"
+"$BOARD_BIN" done --outcome ok
+sleep "${FAKE_MANAGED_HOLD:-60}"

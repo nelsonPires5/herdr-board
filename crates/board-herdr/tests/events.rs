@@ -5,7 +5,7 @@ use board_herdr::{parse_event_line, watch_subscriptions, AgentStatus, HerdrEvent
 #[test]
 fn parses_agent_status_changed_envelope() {
     // The wire shape herdr emits: EventEnvelope with underscore kind names.
-    let line = r#"{"event":"pane_agent_status_changed","data":{"type":"pane_agent_status_changed","pane_id":"w1:p2","workspace_id":"w1","agent_status":"working","agent":"claude","custom_status":null,"state_labels":{}}}"#;
+    let line = r#"{"event":"pane_agent_status_changed","data":{"type":"pane_agent_status_changed","pane_id":"w1:p2","workspace_id":"w1","agent_status":"working","agent":"claude","state_labels":{}}}"#;
     match parse_event_line(line).expect("event") {
         HerdrEvent::AgentStatusChanged {
             pane_id,
@@ -81,6 +81,27 @@ fn unknown_event_kind_becomes_other() {
 }
 
 #[test]
+fn tolerates_protocol_17_additive_status_fields() {
+    // Additive protocol-17 metadata must not be required by the client model.
+    let line = r#"{"event":"pane_agent_status_changed","data":{"type":"pane_agent_status_changed","pane_id":"p","workspace_id":"w","agent_status":"working","agent":"pi","display_agent":"Pi","title":"Build","state_labels":{"phase":"coding","priority":"high"},"future_field":true}}"#;
+    match parse_event_line(line).expect("event") {
+        HerdrEvent::AgentStatusChanged {
+            pane_id,
+            workspace_id,
+            status,
+            agent,
+            ..
+        } => {
+            assert_eq!(pane_id, "p");
+            assert_eq!(workspace_id.as_deref(), Some("w"));
+            assert_eq!(status, AgentStatus::Working);
+            assert_eq!(agent.as_deref(), Some("pi"));
+        }
+        other => panic!("wrong variant: {other:?}"),
+    }
+}
+
+#[test]
 fn ignores_unknown_fields_in_status_event() {
     let line = r#"{"event":"pane_agent_status_changed","data":{"type":"pane_agent_status_changed","pane_id":"p","workspace_id":"w","agent_status":"idle","future_field":123,"display_agent":"Claude"}}"#;
     assert!(matches!(
@@ -122,8 +143,8 @@ fn watch_subscriptions_builds_expected_set() {
 
 #[test]
 fn parses_dotted_event_key_without_data_type() {
-    // Exact shape captured live from herdr 0.7.3: kind only in the top-level
-    // `event` key, dotted, with no `type` inside `data`.
+    // Protocol-17 also accepts the dotted event key with no `type` inside
+    // `data`.
     let line = r#"{"data":{"agent":"claude","agent_status":"done","pane_id":"w1:pB","workspace_id":"w1"},"event":"pane.agent_status_changed"}"#;
     match parse_event_line(line).unwrap() {
         HerdrEvent::AgentStatusChanged {

@@ -5,13 +5,14 @@
 # a real AI coding agent into a visible herdr pane. This manifest wires the board
 # TUI into herdr as an overlay pane plus a keybindable action to summon it.
 #
-# Field reference validated against `herdr plugin` (herdr 0.7.3) and the installed
-# herdr-file-viewer manifest (platforms use OS names, not target triples).
+# Field reference validated against `herdr plugin` in Herdr 0.7.5. The manifest
+# enforces the install-time version floor; runtime also requires exactly 0.7.5
+# and rejects every socket protocol other than 17.
 id = "herdr-board"
 name = "Herdr Board"
 version = "0.6.0"
 description = "Kanban board for AI coding agents: cards are prompts, columns are pipeline stages; moving a card dispatches an agent into a herdr pane."
-min_herdr_version = "0.7.0"
+min_herdr_version = "0.7.5"
 platforms = ["linux", "macos"]
 
 # Build the `board` binary at install time (idempotent: cargo no-ops when nothing
@@ -25,9 +26,9 @@ command = ["./scripts/build.sh"]
 [[build]]
 command = ["./scripts/install-cli.sh"]
 
-# The kanban TUI, spawned by herdr in an overlay pane. `overlay` is an accepted
-# placement (herdr 0.7.3: overlay|split|tab|zoomed). The same binary auto-starts
-# the boardd daemon if it is not already running.
+# The kanban TUI, spawned by Herdr in an overlay pane. `overlay` is accepted by
+# Herdr 0.7.5 / protocol 17. The same binary auto-starts the boardd daemon if it
+# is not already running.
 [[panes]]
 id = "board"
 title = "Board"

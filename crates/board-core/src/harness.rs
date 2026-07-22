@@ -43,6 +43,18 @@ pub fn plan_session(existing: Option<&str>, fresh_session: bool, is_retry: bool)
 /// A fully-resolved process invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HarnessInvocation {
+    /// Explicit Herdr managed-agent kind. Configured harnesses are unmanaged,
+    /// even when their executable happens to be named `pi` or `claude`.
+    pub agent_kind: Option<String>,
+    /// Card task submitted after a managed agent becomes interactive. Custom
+    /// harnesses receive the same value through `BOARD_PROMPT` instead.
+    pub initial_prompt: Option<String>,
+    /// Authoritative managed-agent system instructions. The daemon transports
+    /// these separately from startup argv. Custom harnesses receive them
+    /// through `BOARD_SYSTEM_PROMPT` instead.
+    pub system_prompt: Option<String>,
+    /// Startup command and flags. Managed invocations contain no prompt text;
+    /// configured harnesses retain their exact configured argv.
     pub argv: Vec<String>,
     /// Extra env pairs the harness itself needs (e.g. `BOARD_PROMPT` for custom
     /// harnesses). The daemon adds `BOARD_CARD_ID`/`BOARD_RUN_ID`/`BOARD_SOCKET`.
@@ -90,7 +102,10 @@ pub fn protocol_system_prompt(column_prompt: Option<&str>) -> String {
     }
 }
 
-/// Build the argv for the builtin `claude` harness.
+/// Build the legacy all-in-one argv for the builtin `claude` harness.
+///
+/// This public helper is retained for existing callers; protocol-17 dispatch
+/// uses [`build_invocation`] so prompts are not included in startup argv.
 ///
 /// `claude [--model M] [--effort E] [--permission-mode P] --append-system-prompt SP
 /// --allowedTools "Bash(board:*)" (--session-id UUID | --resume ID) [--fork-session]
@@ -144,8 +159,10 @@ pub fn claude_argv(
     Ok(argv)
 }
 
-/// Build the argv/session result for the built-in Pi harness.
+/// Build the legacy all-in-one argv/session result for the built-in Pi harness.
 ///
+/// This public helper is retained for existing callers; protocol-17 dispatch
+/// uses [`build_invocation`] so prompts are not included in startup argv.
 /// Pi takes a normal positional prompt (no Claude `--` delimiter). Prefixing it
 /// with non-flag text ensures a card description beginning with `-` cannot be
 /// interpreted as another CLI option.
@@ -195,6 +212,9 @@ pub fn pi_argv(
     argv.push(format!("Card task:\n{prompt}"));
 
     Ok(HarnessInvocation {
+        agent_kind: Some("pi".to_string()),
+        initial_prompt: Some(prompt.to_string()),
+        system_prompt: Some(protocol_system_prompt(settings.system_prompt.as_deref())),
         argv,
         env: Vec::new(),
         resulting_session_id: Some(resulting_session_id),
@@ -212,19 +232,10 @@ pub fn build_invocation(
     prompt: &str,
 ) -> Result<HarnessInvocation, HarnessError> {
     if harness_name == "pi" {
-        return pi_argv(settings, session, minted_uuid, prompt);
+        return managed_pi_invocation(settings, session, minted_uuid, prompt);
     }
     if harness_name == "claude" {
-        let argv = claude_argv(settings, session, minted_uuid, prompt)?;
-        let resulting_session_id = match session {
-            SessionPlan::Mint => minted_uuid.map(str::to_string),
-            SessionPlan::Resume(id) | SessionPlan::Fork(id) => Some(id.clone()),
-        };
-        return Ok(HarnessInvocation {
-            argv,
-            env: Vec::new(),
-            resulting_session_id,
-        });
+        return managed_claude_invocation(settings, session, minted_uuid, prompt);
     }
 
     let def = config
@@ -245,9 +256,115 @@ pub fn build_invocation(
     ];
 
     Ok(HarnessInvocation {
+        agent_kind: None,
+        initial_prompt: None,
+        system_prompt: None,
         argv,
         env,
         resulting_session_id: None,
+    })
+}
+
+/// Build a protocol-17 managed Pi launch. Unlike the legacy argv helper above,
+/// this keeps both prompt channels out of startup argv so Herdr can start the
+/// agent first and submit the card task only after it is interactive.
+fn managed_pi_invocation(
+    settings: &EffectiveSettings,
+    session: &SessionPlan,
+    target_uuid: Option<&str>,
+    prompt: &str,
+) -> Result<HarnessInvocation, HarnessError> {
+    if settings.permission_mode.is_some() {
+        return Err(HarnessError::PiPermissionModeUnsupported);
+    }
+
+    let mut argv = vec!["pi".to_string()];
+    if let Some(model) = &settings.model {
+        argv.extend(["--model".to_string(), model.clone()]);
+    }
+    if let Some(effort) = settings.effort {
+        argv.extend(["--thinking".to_string(), effort.as_str().to_string()]);
+    }
+
+    let resulting_session_id = match session {
+        SessionPlan::Mint => {
+            let id = target_uuid.ok_or(HarnessError::MissingMintedSession)?;
+            argv.extend(["--session-id".to_string(), id.to_string()]);
+            id.to_string()
+        }
+        SessionPlan::Resume(id) => {
+            argv.extend(["--session-id".to_string(), id.clone()]);
+            id.clone()
+        }
+        SessionPlan::Fork(source) => {
+            let target = target_uuid.ok_or(HarnessError::MissingForkTargetSession)?;
+            argv.extend([
+                "--fork".to_string(),
+                source.clone(),
+                "--session-id".to_string(),
+                target.to_string(),
+            ]);
+            target.to_string()
+        }
+    };
+
+    Ok(HarnessInvocation {
+        agent_kind: Some("pi".to_string()),
+        initial_prompt: Some(prompt.to_string()),
+        system_prompt: Some(protocol_system_prompt(settings.system_prompt.as_deref())),
+        argv,
+        env: Vec::new(),
+        resulting_session_id: Some(resulting_session_id),
+    })
+}
+
+/// Build a protocol-17 managed Claude launch while preserving the established
+/// model/effort/permission/session flag ordering exactly.
+fn managed_claude_invocation(
+    settings: &EffectiveSettings,
+    session: &SessionPlan,
+    minted_uuid: Option<&str>,
+    prompt: &str,
+) -> Result<HarnessInvocation, HarnessError> {
+    let mut argv = vec!["claude".to_string()];
+    if let Some(model) = &settings.model {
+        argv.extend(["--model".to_string(), model.clone()]);
+    }
+    if let Some(effort) = settings.effort {
+        argv.extend(["--effort".to_string(), effort.as_str().to_string()]);
+    }
+    if let Some(permission) = &settings.permission_mode {
+        argv.extend(["--permission-mode".to_string(), permission.clone()]);
+    }
+    argv.extend(["--allowedTools".to_string(), "Bash(board:*)".to_string()]);
+
+    let resulting_session_id = match session {
+        SessionPlan::Mint => {
+            let id = minted_uuid.ok_or(HarnessError::MissingMintedSession)?;
+            argv.extend(["--session-id".to_string(), id.to_string()]);
+            Some(id.to_string())
+        }
+        SessionPlan::Resume(id) => {
+            argv.extend(["--resume".to_string(), id.clone()]);
+            Some(id.clone())
+        }
+        SessionPlan::Fork(id) => {
+            argv.extend([
+                "--resume".to_string(),
+                id.clone(),
+                "--fork-session".to_string(),
+            ]);
+            Some(id.clone())
+        }
+    };
+
+    Ok(HarnessInvocation {
+        agent_kind: Some("claude".to_string()),
+        initial_prompt: Some(prompt.to_string()),
+        system_prompt: Some(protocol_system_prompt(settings.system_prompt.as_deref())),
+        argv,
+        env: Vec::new(),
+        resulting_session_id,
     })
 }
 

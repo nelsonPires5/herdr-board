@@ -4,7 +4,8 @@
 # down, and exit non-zero if ANY scenario FAILED.
 #
 # Ephemeral session: the suite never touches your real sessions. This boots a
-# throwaway `hb-e2e-<pid>` session (via `herdr --session <name> server &`), and
+# throwaway `hb-e2e-<pid>-<random>-<random>` session
+# (via `herdr --session <name> server &`), and
 # every scenario's isolated boardd binds to it (see lib.sh's session model), so
 # no second running session is needed anymore. Cost: ~2s to boot the session.
 #
@@ -35,9 +36,14 @@ for arg in "$@"; do
 done
 if [ -n "${E2E_KEEP:-}" ] && [ "$E2E_KEEP" = "1" ]; then KEEP=1; fi
 
-# The suite's disposable Herdr server inherits this PATH before it boots. Pi
-# scenarios therefore use the hermetic fake executable and never a real model.
+# The suite's disposable Herdr server inherits this PATH before it boots. Pi and
+# Claude scenarios therefore use hermetic fake executables and never a real model.
 e2e_enable_fake_pi
+# Reserve ownership and install the root-only guard before require/build/boot.
+# Until the server owns teardown, this is the only cleanup path for a failure.
+RUN_SESSION="$(e2e_session_name 'hb-e2e-')"
+export E2E_MANAGED_ROOT_OWNER="$RUN_SESSION"
+trap 'e2e_managed_root_remove_owned "$RUN_SESSION"' EXIT
 e2e_require
 e2e_build   # build once; scenarios' own e2e_build is then a no-op
 
@@ -57,6 +63,8 @@ SCENARIOS=(
   13-jump-to-pane.sh
   14-column-config.sh
   15-awaiting.sh
+  16-managed-p17.sh
+  17-configured-p17-runner.sh
 )
 
 # apply filters (substring match on the filename); empty = run all
@@ -68,19 +76,27 @@ run_this() {
 }
 
 # --- boot ONE ephemeral session for the whole run ---------------------------
-RUN_SESSION="hb-e2e-$$"
 [ "$KEEP" = 1 ] && export E2E_KEEP=1
 step "Booting ephemeral herdr session '$RUN_SESSION' for the run (~2s)"
-e2e_session_boot "$RUN_SESSION" E2E_SESSION_SOCKET RUN_SESSION_PID
+e2e_session_boot "$RUN_SESSION" E2E_SESSION_SOCKET RUN_SESSION_PID RUN_SESSION_IDENTITY
 export E2E_SESSION="$RUN_SESSION"
-export E2E_SESSION_SOCKET
+export E2E_SESSION_SOCKET E2E_SESSION_PID="$RUN_SESSION_PID" E2E_SESSION_IDENTITY="$RUN_SESSION_IDENTITY"
 echo "  session socket: $E2E_SESSION_SOCKET (server pid $RUN_SESSION_PID)"
 
 # Trap tears the session down on ANY exit (safety net for an aborted run). The
 # normal path also calls it explicitly BEFORE the no-sessions-remain check, then
 # clears the trap. e2e_session_teardown is a no-op under keep mode.
 _run_torn=0
-run_teardown() { [ "$_run_torn" = 1 ] && return 0; _run_torn=1; e2e_session_teardown "$RUN_SESSION" "$RUN_SESSION_PID"; }
+run_teardown() {
+  [ "$_run_torn" = 1 ] && return 0
+  _run_torn=1
+  e2e_session_teardown "$RUN_SESSION" "$RUN_SESSION_PID" "$RUN_SESSION_IDENTITY"
+  local rc=$?
+  # A dead owner must never cause session deletion, but its root was still
+  # created by this shell and remains safe to remove outside keep mode.
+  [ "${E2E_KEEP:-0}" = 1 ] || e2e_managed_root_remove_owned "$RUN_SESSION" || true
+  return "$rc"
+}
 trap run_teardown EXIT
 
 declare -a NAMES RESULTS
@@ -116,8 +132,11 @@ done
 if [ "$KEEP" = 1 ]; then
   printf '\n--- KEEP MODE: sessions + workspaces left for review -------\n'
   "$HERDR_BIN" session list --json 2>/dev/null | python3 -c '
-import json, sys
+import json, os, shlex, sys
 kept = [s for s in json.load(sys.stdin).get("sessions", []) if s.get("name","").startswith("hb-e2e-")]
+owner = os.environ.get("E2E_MANAGED_ROOT_OWNER", "")
+root = os.environ.get("E2E_MANAGED_ROOT", "")
+marker = ".herdr-board-fake-managed"
 if not kept:
     print("  (no hb-e2e-* sessions found)"); sys.exit(0)
 for s in kept:
@@ -125,7 +144,14 @@ for s in kept:
     running = s.get("running")
     print("  session {}  (running={})".format(n, running))
     print("    attach : herdr session attach {}".format(n))
-    print("    cleanup: herdr session stop {} && herdr session delete {}".format(n, n))
+    cleanup = "herdr session stop {} && herdr session delete {}".format(shlex.quote(n), shlex.quote(n))
+    if n == owner:
+        # This is executable as printed: deletion happens before guarded removal
+        # of the one marker-bearing root owned by this primary session.
+        qroot = shlex.quote(root)
+        qmarker = shlex.quote(marker)
+        cleanup += " && { root=%s; case \"$root\" in /tmp/hb-e2e-managed.*) [ -f \"$root/%s\" ] && rm -rf -- \"$root\" ;; *) exit 1 ;; esac; }" % (qroot, qmarker)
+    print("    cleanup: " + cleanup)
 '
   echo "  (each kept session holds this run's disposable workspace(s) — review, then run the cleanup line)"
 else

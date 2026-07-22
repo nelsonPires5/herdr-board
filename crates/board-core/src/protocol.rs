@@ -479,6 +479,15 @@ pub struct RunDoneParams {
     pub outcome: RunOutcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<i64>,
+}
+
+/// Internal `run.pane_exited` params.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunPaneExitedParams {
+    pub card_id: i64,
+    pub run_id: i64,
 }
 
 /// `run.cancel` / `run.retry` params.

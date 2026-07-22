@@ -13,8 +13,9 @@ use std::path::PathBuf;
 use std::thread;
 
 use board_herdr::{
-    HerdrClient, HerdrError, HerdrEvent, HerdrEvents, ReadSource, Subscription,
-    WorkspaceCreateParams,
+    AgentPromptParams, AgentStartParams, AgentStatus, AgentWaitParams, HerdrClient, HerdrError,
+    HerdrEvent, HerdrEvents, PaneRenameParams, PaneSplitParams, ReadSource, SplitDirection,
+    Subscription, WorkspaceCreateParams,
 };
 use serde_json::Value;
 
@@ -87,11 +88,79 @@ fn reply_for(req: &Value, result_json: &str) -> Action {
 }
 
 #[test]
+fn protocol_gate_accepts_only_protocol_17() {
+    let path = serve_calls(|req| {
+        assert_eq!(req["method"], "ping");
+        reply_for(
+            req,
+            r#"{"type":"pong","version":"0.7.5","protocol":17,"capabilities":{}}"#,
+        )
+    });
+
+    let mut c = HerdrClient::connect(&path).unwrap();
+    let pong = c
+        .require_protocol(17)
+        .expect("protocol 17 must be accepted");
+    assert_eq!(pong.protocol, 17);
+}
+
+#[test]
+fn protocol_gate_rejects_herdr_074_even_with_protocol_17() {
+    let path = serve_calls(|req| {
+        reply_for(
+            req,
+            r#"{"type":"pong","version":"0.7.4","protocol":17,"capabilities":{}}"#,
+        )
+    });
+
+    let mut c = HerdrClient::connect(&path).unwrap();
+    let err = c
+        .require_protocol(17)
+        .expect_err("wrong Herdr version must be rejected");
+    let text = err.to_string();
+    assert!(
+        text.contains("Herdr 0.7.5 with protocol 17 is required"),
+        "{text}"
+    );
+}
+
+#[test]
+fn protocol_gate_rejects_v16_with_herdr_075_message() {
+    let path = serve_calls(|req| {
+        reply_for(
+            req,
+            r#"{"type":"pong","version":"0.7.4","protocol":16,"capabilities":{}}"#,
+        )
+    });
+
+    let mut c = HerdrClient::connect(&path).unwrap();
+    let err = c
+        .require_protocol(17)
+        .expect_err("protocol 16 must be rejected");
+    let text = err.to_string();
+    assert!(text.contains("protocol 17"), "{text}");
+    assert!(text.contains("0.7.5"), "{text}");
+}
+
+#[test]
+fn protocol_gate_rejects_unknown_future_protocol() {
+    let path = serve_calls(|req| {
+        reply_for(
+            req,
+            r#"{"type":"pong","version":"0.8.0","protocol":99,"capabilities":{}}"#,
+        )
+    });
+
+    let mut c = HerdrClient::connect(&path).unwrap();
+    assert!(c.require_protocol(17).is_err());
+}
+
+#[test]
 fn call_happy_path_ping_and_workspace_list() {
     let path = serve_calls(|req| match req["method"].as_str().unwrap() {
         "ping" => reply_for(
             req,
-            r#"{"type":"pong","version":"9.9.9","protocol":16,"capabilities":{}}"#,
+            r#"{"type":"pong","version":"9.9.9","protocol":17,"capabilities":{}}"#,
         ),
         "workspace.list" => reply_for(
             req,
@@ -112,7 +181,12 @@ fn call_happy_path_ping_and_workspace_list() {
 
 #[test]
 fn is_live_true_on_pong() {
-    let path = serve_calls(|req| reply_for(req, r#"{"type":"pong","version":"1","protocol":16}"#));
+    let path = serve_calls(|req| {
+        reply_for(
+            req,
+            r#"{"type":"pong","version":"0.7.5","protocol":17,"capabilities":{}}"#,
+        )
+    });
     let mut c = HerdrClient::connect(&path).unwrap();
     assert!(c.is_live());
     // Second call proves per-call reconnection works.
@@ -126,7 +200,7 @@ fn typed_result_extraction_workspace_create() {
         assert_eq!(req["params"]["label"], "card-42");
         reply_for(
             req,
-            r#"{"type":"workspace_created","workspace":{"workspace_id":"w7","label":"card-42","number":7,"focused":false,"active_tab_id":"w7:t1","agent_status":"unknown"},"tab":{"tab_id":"w7:t1","workspace_id":"w7","label":"tab","agent_status":"unknown"},"root_pane":{"pane_id":"w7:p1","terminal_id":"term-9","workspace_id":"w7","tab_id":"w7:t1","agent_status":"unknown"}}"#,
+            r#"{"type":"workspace_created","workspace":{"workspace_id":"w7","label":"card-42","number":7,"focused":false,"active_tab_id":"w7:t1","agent_status":"unknown"},"tab":{"tab_id":"w7:t1","workspace_id":"w7","label":"tab","focused":false,"number":1,"pane_count":1,"agent_status":"unknown"},"root_pane":{"pane_id":"w7:p1","terminal_id":"term-9","workspace_id":"w7","tab_id":"w7:t1","focused":true,"revision":0,"agent_status":"unknown"}}"#,
         )
     });
 
@@ -143,7 +217,7 @@ fn typed_result_extraction_workspace_create() {
 
 #[test]
 fn tab_list_parses_live_payload() {
-    // Captured from a live herdr 0.7.3 socket (`tab.list`).
+    // Captured from the protocol-17 herdr socket (`tab.list`).
     let path = serve_calls(|req| {
         assert_eq!(req["method"], "tab.list");
         // `None` workspace is sent explicitly as null.
@@ -166,13 +240,148 @@ fn tab_list_parses_live_payload() {
 }
 
 #[test]
+fn agent_start_uses_protocol_17_startup_args() {
+    let path = serve_calls(|req| {
+        assert_eq!(req["method"], "agent.start");
+        assert_eq!(
+            req["params"],
+            serde_json::json!({
+                "name": "card-42-execute",
+                "kind": "pi",
+                "pane_id": "w1:p2",
+                "args": ["--thinking", "low", "--session-id", "p17-session"],
+                "timeout_ms": 15000,
+            })
+        );
+        reply_for(
+            req,
+            r#"{"type":"agent_started","agent":{"agent":"pi","agent_status":"idle","cwd":"/tmp/card","focused":false,"foreground_cwd":"/tmp/card","interactive_ready":true,"name":"card-42-execute","pane_id":"w1:p2","revision":1,"screen_detection_skipped":true,"state_change_seq":1,"tab_id":"w1:t1","terminal_id":"term-2","terminal_title":"π - workspace","terminal_title_stripped":"π - workspace","workspace_id":"w1"},"argv":["pi","--thinking","low","--session-id","p17-session"]}"#,
+        )
+    });
+
+    let mut c = HerdrClient::connect(&path).unwrap();
+    c.agent_start(&AgentStartParams {
+        name: "card-42-execute".into(),
+        kind: "pi".into(),
+        pane_id: "w1:p2".into(),
+        args: vec![
+            "--thinking".into(),
+            "low".into(),
+            "--session-id".into(),
+            "p17-session".into(),
+        ],
+        timeout_ms: Some(15000),
+    })
+    .unwrap();
+}
+
+#[test]
+fn pane_split_targets_pane_and_returns_new_pane() {
+    let path = serve_calls(|req| {
+        assert_eq!(req["method"], "pane.split");
+        assert_eq!(req["params"]["workspace_id"], "w1");
+        assert_eq!(req["params"]["target_pane_id"], "w1:p1");
+        assert_eq!(req["params"]["cwd"], "/tmp/card");
+        assert_eq!(req["params"]["direction"], "right");
+        assert_eq!(req["params"]["focus"], false);
+        assert_eq!(req["params"]["env"]["CARD"], "42");
+        reply_for(
+            req,
+            r#"{"type":"pane_info","pane":{"pane_id":"w1:p2","terminal_id":"term-2","workspace_id":"w1","tab_id":"w1:t1","focused":false,"revision":0,"agent_status":"unknown"}}"#,
+        )
+    });
+
+    let mut c = HerdrClient::connect(&path).unwrap();
+    let pane = c
+        .pane_split(&PaneSplitParams {
+            workspace_id: Some("w1".into()),
+            target_pane_id: "w1:p1".into(),
+            cwd: Some("/tmp/card".into()),
+            env: [("CARD".into(), "42".into())].into_iter().collect(),
+            direction: SplitDirection::Right,
+            focus: false,
+        })
+        .unwrap();
+    assert_eq!(pane.pane_id, "w1:p2");
+}
+
+#[test]
+fn agent_prompt_preserves_multiline_text() {
+    let path = serve_calls(|req| {
+        assert_eq!(req["method"], "agent.prompt");
+        assert_eq!(req["params"]["target"], "w1:p2");
+        assert_eq!(req["params"]["text"], "first line\nsecond line\n\nfinal");
+        reply_for(
+            req,
+            r#"{"type":"agent_prompted","agent":{"agent":"pi","agent_status":"idle","cwd":"/tmp/card","focused":false,"foreground_cwd":"/tmp/card","interactive_ready":true,"name":"card-42-execute","pane_id":"w1:p2","revision":1,"screen_detection_skipped":true,"state_change_seq":1,"tab_id":"w1:t1","terminal_id":"term-2","terminal_title":"π - workspace","terminal_title_stripped":"π - workspace","workspace_id":"w1"}}"#,
+        )
+    });
+    let mut c = HerdrClient::connect(&path).unwrap();
+    c.agent_prompt(&AgentPromptParams {
+        target: "w1:p2".into(),
+        text: "first line\nsecond line\n\nfinal".into(),
+        wait: None,
+    })
+    .unwrap();
+}
+
+#[test]
+fn agent_wait_sends_target_until_and_timeout() {
+    let path = serve_calls(|req| {
+        assert_eq!(req["method"], "agent.wait");
+        assert_eq!(
+            req["params"],
+            serde_json::json!({
+                "target": "w1:p2", "until": ["idle", "done"], "timeout_ms": 30000
+            })
+        );
+        reply_for(
+            req,
+            r#"{"type":"agent_info","agent":{"agent":"pi","agent_status":"idle","cwd":"/tmp/card","focused":false,"foreground_cwd":"/tmp/card","interactive_ready":true,"name":"card-42-execute","pane_id":"w1:p2","revision":1,"screen_detection_skipped":true,"state_change_seq":1,"tab_id":"w1:t1","terminal_id":"term-2","terminal_title":"π - workspace","terminal_title_stripped":"π - workspace","workspace_id":"w1"}}"#,
+        )
+    });
+    let mut c = HerdrClient::connect(&path).unwrap();
+    c.agent_wait(&AgentWaitParams {
+        target: "w1:p2".into(),
+        until: vec![AgentStatus::Idle, AgentStatus::Done],
+        timeout_ms: Some(30000),
+    })
+    .unwrap();
+}
+
+#[test]
+fn pane_rename_serializes_typed_params_and_parses_pane_info() {
+    let path = serve_calls(|req| {
+        assert_eq!(req["method"], "pane.rename");
+        assert_eq!(
+            req["params"],
+            serde_json::json!({"pane_id": "w1:p2", "label": "card-42-execute"})
+        );
+        reply_for(
+            req,
+            r#"{"type":"pane_info","pane":{"pane_id":"w1:p2","terminal_id":"term-2","workspace_id":"w1","tab_id":"w1:t1","label":"card-42-execute","focused":false,"revision":2,"agent_status":"unknown"}}"#,
+        )
+    });
+
+    let mut c = HerdrClient::connect(&path).unwrap();
+    let pane = c
+        .pane_rename(&PaneRenameParams {
+            pane_id: "w1:p2".into(),
+            label: "card-42-execute".into(),
+        })
+        .unwrap();
+    assert_eq!(pane.pane_id, "w1:p2");
+    assert_eq!(pane.revision, 2);
+}
+
+#[test]
 fn pane_focus_returns_pane_info() {
     let path = serve_calls(|req| {
         assert_eq!(req["method"], "pane.focus");
         assert_eq!(req["params"]["pane_id"], "w4:p2");
         reply_for(
             req,
-            r#"{"type":"pane_info","pane":{"pane_id":"w4:p2","terminal_id":"term-2","workspace_id":"w4","tab_id":"w4:t1","agent_status":"idle"}}"#,
+            r#"{"type":"pane_info","pane":{"pane_id":"w4:p2","terminal_id":"term-2","workspace_id":"w4","tab_id":"w4:t1","focused":true,"revision":0,"agent_status":"idle"}}"#,
         )
     });
 
@@ -184,7 +393,7 @@ fn pane_focus_returns_pane_info() {
 
 #[test]
 fn pane_layout_parses_live_payload() {
-    // Captured verbatim from a live herdr 0.7.3 socket (`pane.layout`, focused tab).
+    // Captured verbatim from the protocol-17 herdr socket (`pane.layout`, focused tab).
     let path = serve_calls(|req| {
         assert_eq!(req["method"], "pane.layout");
         reply_for(

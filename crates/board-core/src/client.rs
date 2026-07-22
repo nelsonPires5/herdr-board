@@ -13,8 +13,8 @@ use crate::protocol::{
     CardCreateParams, CardDetail, CardListParams, CardMoveParams, CardUpdateParams,
     ColumnCreateParams, ColumnDeleteParams, ColumnReorderParams, ColumnUpdateParams,
     CommentAddParams, DaemonStatus, DeletedResult, Event, Request, Response, RunActionResult,
-    RunCardParams, RunDoneParams, RunFocusParams, RunFocusResult, RunOutcome, StopResult,
-    TemplateApplyParams,
+    RunCardParams, RunDoneParams, RunFocusParams, RunFocusResult, RunOutcome, RunPaneExitedParams,
+    StopResult, TemplateApplyParams,
 };
 
 /// Blocking client to boardd. Object-safe so the TUI can hold `Box<dyn BoardClient>`.
@@ -177,13 +177,29 @@ pub trait BoardClient {
         outcome: RunOutcome,
         summary: Option<&str>,
     ) -> anyhow::Result<RunActionResult> {
+        self.run_done_for_run(card_id, outcome, summary, None)
+    }
+    fn run_done_for_run(
+        &mut self,
+        card_id: i64,
+        outcome: RunOutcome,
+        summary: Option<&str>,
+        run_id: Option<i64>,
+    ) -> anyhow::Result<RunActionResult> {
         let p = RunDoneParams {
             card_id,
             outcome,
             summary: summary.map(str::to_string),
+            run_id,
         };
         Ok(serde_json::from_value(
             self.call("run.done", serde_json::to_value(p)?)?,
+        )?)
+    }
+    fn run_pane_exited(&mut self, card_id: i64, run_id: i64) -> anyhow::Result<RunActionResult> {
+        let p = RunPaneExitedParams { card_id, run_id };
+        Ok(serde_json::from_value(
+            self.call("run.pane_exited", serde_json::to_value(p)?)?,
         )?)
     }
     fn run_cancel(&mut self, card_id: i64) -> anyhow::Result<RunActionResult> {

@@ -79,6 +79,13 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    #[command(name = "__pane-exited", hide = true)]
+    PaneExited {
+        /// Card id; defaults to $BOARD_CARD_ID.
+        card_id: Option<i64>,
+        #[arg(long)]
+        run_id: i64,
+    },
     /// Move a card to a column (name — case-insensitive — or id).
     Move {
         card_id: i64,
@@ -276,6 +283,7 @@ fn real_main() -> Result<()> {
             summary,
             json,
         } => cmd_done(card_id, outcome, summary, json),
+        Cmd::PaneExited { card_id, run_id } => cmd_pane_exited(card_id, run_id),
         Cmd::Move {
             card_id,
             column,
@@ -585,8 +593,19 @@ fn cmd_done(
         None => env_card_id()?,
     };
     let outcome = RunOutcome::parse_str(&outcome).ok_or_else(|| anyhow!("invalid outcome"))?;
+    let run_id = match std::env::var("BOARD_RUN_ID") {
+        Ok(value) => Some(
+            value
+                .parse::<i64>()
+                .map_err(|_| anyhow!("invalid $BOARD_RUN_ID '{value}': expected an integer"))?,
+        ),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            bail!("invalid $BOARD_RUN_ID: value is not valid UTF-8")
+        }
+    };
     let mut c = connect_or_start()?;
-    let res = c.run_done(card_id, outcome, summary.as_deref())?;
+    let res = c.run_done_for_run(card_id, outcome, summary.as_deref(), run_id)?;
     if json {
         print_json(&res)?;
     } else {
@@ -595,6 +614,15 @@ fn cmd_done(
             res.run.id, outcome, res.card.id, res.card.status, res.card.column_id
         );
     }
+    Ok(())
+}
+
+fn cmd_pane_exited(card_id: Option<i64>, run_id: i64) -> Result<()> {
+    let card_id = match card_id {
+        Some(id) => id,
+        None => env_card_id()?,
+    };
+    connect_or_start()?.run_pane_exited(card_id, run_id)?;
     Ok(())
 }
 

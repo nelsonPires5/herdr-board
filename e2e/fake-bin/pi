@@ -1,77 +1,100 @@
 #!/usr/bin/env bash
-# Hermetic Pi stand-in for e2e/11-pi-harness.sh. This file is used only when
-# e2e_enable_fake_pi prepends e2e/fake-bin to the disposable Herdr server PATH.
+# Hermetic, no-provider Pi stand-in for protocol-17 managed launches.
+# It validates the authoritative startup-only system-prompt file, rejects card
+# prompt material in argv, reports through HERDR_PANE_ID, and then blocks on its
+# interactive tty until Herdr's agent.prompt delivers the card task on stdin.
 set -euo pipefail
 
 : "${BOARD_CARD_ID:?BOARD_CARD_ID required}"
 : "${BOARD_RUN_ID:?BOARD_RUN_ID required}"
 : "${BOARD_SOCKET:?BOARD_SOCKET required}"
+: "${HERDR_SOCKET_PATH:?HERDR_SOCKET_PATH required}"
 
-model=""
-thinking=""
-system_prompt=""
-session_id=""
-fork_id=""
-prompt=""
 argv=("$@")
-
+model=""; thinking=""; session_id=""; fork_id=""; system_file=""
 while (($#)); do
   case "$1" in
     --model)
-      (($# >= 2)) || { echo "fake pi: --model missing value" >&2; exit 2; }
+      (($# >= 2)) || { echo 'fake pi: --model missing value' >&2; exit 2; }
       model="$2"; shift 2 ;;
     --thinking)
-      (($# >= 2)) || { echo "fake pi: --thinking missing value" >&2; exit 2; }
+      (($# >= 2)) || { echo 'fake pi: --thinking missing value' >&2; exit 2; }
       thinking="$2"; shift 2 ;;
-    --append-system-prompt)
-      (($# >= 2)) || { echo "fake pi: --append-system-prompt missing value" >&2; exit 2; }
-      system_prompt="$2"; shift 2 ;;
     --session-id)
-      (($# >= 2)) || { echo "fake pi: --session-id missing value" >&2; exit 2; }
+      (($# >= 2)) || { echo 'fake pi: --session-id missing value' >&2; exit 2; }
       session_id="$2"; shift 2 ;;
     --fork)
-      (($# >= 2)) || { echo "fake pi: --fork missing value" >&2; exit 2; }
+      (($# >= 2)) || { echo 'fake pi: --fork missing value' >&2; exit 2; }
       fork_id="$2"; shift 2 ;;
-    --)
-      echo "fake pi: Claude prompt delimiter is forbidden" >&2
-      exit 2 ;;
-    -*)
-      echo "fake pi: unexpected option: $1" >&2
-      exit 2 ;;
-    *)
-      [ -z "$prompt" ] || { echo "fake pi: multiple positional prompts" >&2; exit 2; }
-      prompt="$1"; shift ;;
+    --append-system-prompt)
+      (($# >= 2)) || { echo 'fake pi: --append-system-prompt missing path' >&2; exit 2; }
+      [ -z "$system_file" ] || { echo 'fake pi: duplicate --append-system-prompt' >&2; exit 2; }
+      system_file="$2"; shift 2 ;;
+    --append-system-prompt-file|--)
+      echo "fake pi: invalid protocol-17 startup option: $1" >&2; exit 2 ;;
+    -*) echo "fake pi: unexpected startup option: $1" >&2; exit 2 ;;
+    *) echo "fake pi: card prompt leaked into startup argv: $1" >&2; exit 2 ;;
   esac
 done
+[ -n "$session_id" ] || { echo 'fake pi: session id required' >&2; exit 2; }
+[ -n "$system_file" ] || { echo 'fake pi: --append-system-prompt PATH required' >&2; exit 2; }
+[ -f "$system_file" ] || { echo "fake pi: system-prompt file absent at startup: $system_file" >&2; exit 2; }
 
-[ -n "$system_prompt" ] || { echo "fake pi: system prompt required" >&2; exit 2; }
-[ -n "$session_id" ] || { echo "fake pi: session id required" >&2; exit 2; }
-[ -n "$prompt" ] || { echo "fake pi: positional prompt required" >&2; exit 2; }
-[[ "$system_prompt" == *"## herdr-board protocol"* ]] \
-  || { echo "fake pi: board protocol trailer missing" >&2; exit 2; }
-[[ "$prompt" == "Card task:"$'\n'* ]] \
-  || { echo "fake pi: card prompt lacks safe non-flag prefix" >&2; exit 2; }
-
-record_dir="$(dirname "$BOARD_SOCKET")"
-record="$record_dir/fake-pi-run-$BOARD_RUN_ID.json"
-python3 - "$record" "$BOARD_RUN_ID" "$model" "$thinking" "$system_prompt" \
-  "$session_id" "$fork_id" "$prompt" "${argv[@]}" <<'PY'
-import json, sys
-path, run_id, model, thinking, system, session_id, fork_id, prompt, *argv = sys.argv[1:]
-with open(path, "w", encoding="utf-8") as f:
+record="$(dirname "$BOARD_SOCKET")/fake-pi-run-$BOARD_RUN_ID.json"
+python3 - "$record" "$BOARD_RUN_ID" "$PWD" "$BOARD_CARD_ID" "$BOARD_SOCKET" \
+  "$HERDR_SOCKET_PATH" "$model" "$thinking" "$session_id" "$fork_id" \
+  "$system_file" "${argv[@]}" <<'PY'
+import json, os, stat, sys
+(path, run_id, cwd, card_id, board_socket, herdr_socket, model, thinking,
+ session_id, fork_id, system_file, *argv) = sys.argv[1:]
+metadata = os.stat(system_file)
+mode = stat.S_IMODE(metadata.st_mode)
+with open(system_file, "r", encoding="utf-8", newline="") as source:
+    system_prompt = source.read()
+protocol = """## herdr-board protocol
+You are running a herdr-board card ($BOARD_CARD_ID is preset). When this stage's goal is met you MUST finish with exactly two commands: first `board comment \"<your results, files touched, findings>\"`, then `board done --outcome ok`. If the stage goal was NOT met — something failed or you got lost — use `board done --outcome fail --summary \"<why>\"` instead. Always comment before done. Never use `board move`/`cancel`/`retry` on your own card. Finishing or going idle WITHOUT `board done` leaves the card in `awaiting` for human review — a run is never auto-completed."""
+assert mode == 0o600, f"system-prompt mode is {oct(mode)}, expected 0o600"
+assert system_prompt == protocol or system_prompt.endswith("\n\n" + protocol), system_prompt
+with open(path, "w", encoding="utf-8") as target:
     json.dump({
-        "run_id": int(run_id),
-        "model": model,
-        "thinking": thinking,
-        "system_prompt": system,
-        "session_id": session_id,
-        "fork_id": fork_id or None,
-        "prompt": prompt,
-        "argv": argv,
-    }, f, ensure_ascii=False, indent=2)
+        "run_id": int(run_id), "card_id": int(card_id), "cwd": cwd,
+        "board_socket": board_socket, "herdr_socket": herdr_socket,
+        "model": model, "thinking": thinking, "session_id": session_id,
+        "fork_id": fork_id or None, "argv": argv,
+        "system_prompt_file": system_file,
+        "system_prompt_exists_at_read": True,
+        "system_prompt_mode": mode,
+        "system_prompt": system_prompt,
+    }, target, ensure_ascii=False, indent=2)
+    target.write("\n")
 PY
 
-# Avoid the run-start/done race, then exercise the real isolated board CLI path.
+# Mirror the real Pi startup ordering: establish a real, unique transcript
+# path, emit Pi's terminal identity/idle surface, report session identity, and
+# only then report idle lifecycle state. Herdr must accept this before it sends
+# agent.prompt; no fixture path calls board done early.
+session_dir="$(dirname "$BOARD_SOCKET")/fake-pi-sessions"
+mkdir -p "$session_dir"
+session_path="$session_dir/${session_id}-${BOARD_RUN_ID}.jsonl"
+python3 - "$session_path" "$session_id" "$BOARD_RUN_ID" <<'PY'
+import json, os, sys
+path, session_id, run_id = sys.argv[1:]
+with open(path, "x", encoding="utf-8") as target:
+    json.dump({"type": "session", "id": session_id, "run_id": int(run_id)}, target)
+    target.write("\n")
+os.chmod(path, 0o600)
+PY
+printf '\033]0;π - %s\007' "$(basename "$PWD")"
+printf '\n /help\n\n──────────────────────────────────────────────────────\n\n──────────────────────────────────────────────────────\n%s\n' "$PWD"
+python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/managed-agent-report.py" \
+  "$record" pi "" "$session_path" startup
+
+FAKE_MANAGED_KIND=pi \
+  python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/managed-terminal-shim.py" "$record"
+
+# Spawn registration commits only after readiness polling + agent.prompt return.
+# Keep the pre-done delay, then retain the pane for bounded structural asserts.
 sleep "${FAKE_PI_SLEEP:-1.5}"
-board comment "fake pi: argv validated for run $BOARD_RUN_ID"
-board done --outcome ok
+"${BOARD_BIN:?BOARD_BIN required}" comment "fake pi: protocol-17 system file and agent.prompt validated"
+"$BOARD_BIN" done --outcome ok
+sleep "${FAKE_MANAGED_HOLD:-60}"

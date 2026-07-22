@@ -1,6 +1,6 @@
 -- herdr-board SQLite schema (WAL mode; boardd is the only writer).
--- This file is the CURRENT (schema v6) shape: a fresh DB is created directly
--- from it and stamped `PRAGMA user_version = 6`. Existing databases are upgraded
+-- This file is the CURRENT (schema v7) shape: a fresh DB is created directly
+-- from it and stamped `PRAGMA user_version = 7`. Existing databases are upgraded
 -- by migrations in board-core/src/db.rs (kept in sync with this file).
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -83,6 +83,7 @@ CREATE TABLE runs (
   harness            TEXT NOT NULL,
   argv_json          TEXT NOT NULL,
   prompt_snapshot    TEXT NOT NULL,
+  system_prompt_snapshot TEXT,                    -- NULL marks a legacy pre-v7 launch
   herdr_workspace_id TEXT,
   herdr_pane_id      TEXT,
   session_id         TEXT,                     -- harness conversation id (--resume)

@@ -12,7 +12,8 @@
 8. Cleanup and recovery
 9. Common failures
 
-Commands below were exercised with Herdr 0.7.4 / protocol 16. Re-verify before use.
+Commands below were exercised with Herdr 0.7.5 / protocol 17. This repository
+requires that exact pair; re-verify the installed CLI and session socket before use.
 
 ## 1. Preflight
 
@@ -20,9 +21,9 @@ Commands below were exercised with Herdr 0.7.4 / protocol 16. Re-verify before u
 REPO="$(git rev-parse --show-toplevel)"
 cd "$REPO"
 git status --short
-herdr --version
+test "$(herdr --version)" = "herdr 0.7.5"
 herdr status
-herdr api schema --json | jq '{protocol,schema_version}'
+herdr api schema --json | jq -e 'select(.protocol == 17) | {protocol,schema_version}'
 herdr plugin list --plugin herdr-board --json | jq '.result.plugins[0] | {version,plugin_root,source}'
 ~/.cargo/bin/cargo test -p board-tui --features fake-client --test snapshots
 ```
@@ -42,7 +43,12 @@ The snapshot command is read-only against the current session. Do not mutate tha
 
 ```bash
 RUN_ID="$$"
-SESSION="hb-visual-$RUN_ID"
+HERDR_BIN="$(command -v herdr)"
+# Reuse the standard E2E identity/name helpers without starting its stack.
+# shellcheck disable=SC1091
+. "$REPO/e2e/lib.sh"
+SESSION="$(e2e_session_name 'hb-visual-')"
+e2e_session_name_absent "$SESSION"
 TMP="$(mktemp -d /tmp/hb-visual.XXXXXX)"
 WT="/tmp/herdr-board-visual-$RUN_ID"
 TARGET="/tmp/herdr-board-target-$RUN_ID"
@@ -54,6 +60,8 @@ CARGO_TARGET_DIR="$TARGET" ~/.cargo/bin/cargo build \
 ln -s "$TARGET" "$WT/target"
 
 cat >"$STATE" <<EOF
+REPO=$REPO
+HERDR_BIN=$HERDR_BIN
 SESSION=$SESSION
 TMP=$TMP
 WT=$WT
@@ -86,6 +94,22 @@ for _ in $(seq 1 50); do
 done
 herdr session list --json | jq -e --arg s "$SESSION" \
   '.sessions[] | select(.name==$s and .running==true)' >/dev/null
+
+SERVER_IDENTITY=""
+for _ in $(seq 1 20); do
+  SERVER_IDENTITY="$(e2e_process_identity_capture \
+    "$SERVER_PID" "$SESSION" "$SESSION" "$HERDR_BIN" 2>/dev/null || true)"
+  [ -n "$SERVER_IDENTITY" ] && break
+  sleep .05
+done
+if [ -z "$SERVER_IDENTITY" ]; then
+  # Capture failed, but this remains the direct child just spawned by this shell.
+  kill "$SERVER_PID" 2>/dev/null || true
+  wait "$SERVER_PID" 2>/dev/null || true
+  echo "refusing prototype stack without a Herdr process-identity token" >&2
+  exit 1
+fi
+printf 'SERVER_IDENTITY=%q\n' "$SERVER_IDENTITY" >>"$STATE"
 ```
 
 Link and open only inside that session:
@@ -104,9 +128,19 @@ WS_JSON="$(herdr --session "$SESSION" workspace create \
 WS="$(printf '%s' "$WS_JSON" | jq -r '.result.workspace.workspace_id')"
 printf 'WS=%s\n' "$WS" >>"$STATE"
 
-printf 'HERDR MUTATION: invoke real plugin action\n'
+printf 'HERDR MUTATION: invoke real plugin action (opens protocol-17 plugin pane)\n'
 herdr --session "$SESSION" plugin action invoke open-board --plugin herdr-board
+
+BOARD_PID="$(lsof -t "$TMP/board.sock" 2>/dev/null | head -1 || true)"
+[ -n "$BOARD_PID" ] || { echo "board daemon pid not found" >&2; exit 1; }
+BOARD_IDENTITY="$(e2e_process_identity_capture \
+  "$BOARD_PID" daemon daemon "$WT/target/release/board")" \
+  || { echo "refusing unowned board daemon" >&2; exit 1; }
+printf 'BOARD_PID=%q\nBOARD_IDENTITY=%q\n' \
+  "$BOARD_PID" "$BOARD_IDENTITY" >>"$STATE"
 ```
+
+`lsof` only discovers the candidate PID; the full `/proc` token authorizes any later signal.
 
 Verify placement and process paths:
 
@@ -255,23 +289,35 @@ Reload variables from the state file if needed, then clean exact resources:
 ```bash
 # shellcheck disable=SC1090
 . "$STATE"
+# shellcheck disable=SC1091
+. "$REPO/e2e/lib.sh"
 
 [ -z "${PANE:-}" ] || env -u WEZTERM_UNIX_SOCKET wezterm cli kill-pane \
   --pane-id "$PANE" 2>/dev/null || true
 
+# A candidate PID from a socket or state file never authorizes a signal alone.
+if ! e2e_process_identity_verify "$BOARD_PID" "$BOARD_IDENTITY"; then
+  echo "refusing board-daemon signal: /proc identity changed" >&2
+  exit 1
+fi
+kill "$BOARD_PID" 2>/dev/null || true
+wait "$BOARD_PID" 2>/dev/null || true
+
+# One exact server verification authorizes this contiguous workspace/session
+# teardown; session stop normally removes /proc before delete runs.
+if ! e2e_process_identity_verify "$SERVER_PID" "$SERVER_IDENTITY"; then
+  echo "refusing Herdr mutations: recorded server identity changed" >&2
+  exit 1
+fi
 [ -z "${WS:-}" ] || {
   printf 'HERDR MUTATION: close disposable workspace %s\n' "$WS"
-  herdr --session "$SESSION" workspace close "$WS" 2>/dev/null || true
+  "$HERDR_BIN" --session "$SESSION" workspace close "$WS"
 }
-
-BOARD_PID="$(lsof -t "$TMP/board.sock" 2>/dev/null | head -1 || true)"
-[ -z "$BOARD_PID" ] || kill "$BOARD_PID" 2>/dev/null || true
-
 printf 'HERDR MUTATION: stop/delete disposable session %s\n' "$SESSION"
-herdr session stop "$SESSION" 2>/dev/null || true
-herdr session delete "$SESSION" 2>/dev/null || true
+"$HERDR_BIN" session stop "$SESSION"
+"$HERDR_BIN" session delete "$SESSION"
 
-git worktree remove --force "$WT" 2>/dev/null || true
+git worktree remove --force "$WT"
 rm -rf "$TARGET" "$TMP"
 rm -f "$STATE"
 

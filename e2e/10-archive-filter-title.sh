@@ -19,7 +19,7 @@ tab_json="$("$HERDR_BIN" tab create --workspace "$WS_ID" --label archive-filter 
 PANE_ID="$(printf '%s' "$tab_json" | jget pane_id)"
 [ -n "$PANE_ID" ] || fail "could not find pane for archive-filter tab"
 
-# Verified against herdr 0.7.4 / protocol 16: `pane rename <pane_id> <label>`.
+# Verified against Herdr 0.7.5 / protocol 17: `pane rename <pane_id> <label>`.
 # The plugin variables reproduce the real pane context without linking a plugin
 # into anything except this disposable session/workspace.
 mut "pane run $PANE_ID '<board> tui' with isolated plugin context"

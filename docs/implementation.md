@@ -50,11 +50,19 @@ pub trait Spawner: Send + Sync {
 ## Semantics source of truth
 
 `docs/protocol.md` + `docs/design.md` §5–§8. `schema.sql` at repo root is the current fresh schema
-(embedded and versioned with `PRAGMA user_version`). Schema v6 retains v5's preserved board id=1 as
-`Global` (`scope_path=NULL`) and scoped-board rows. Its rebuilt `cards` table preserves existing
-cards, extends `CHECK (status IN (...))` to admit `awaiting` and `done`, and adds
-`awaiting_reason`: `agent_done|idle_expired` while status is `awaiting`, otherwise NULL. Every
-canonical-path board independently seeds one manual `Todo` column.
+(embedded and versioned with `PRAGMA user_version`). Schema v7 is current: it retains v5's preserved
+board id=1 as `Global` (`scope_path=NULL`) and scoped-board rows, v6's `awaiting`/`done` status
+invariants, and adds nullable `runs.system_prompt_snapshot`. New v7 queued runs store the exact
+resolved, trailer-inclusive system prompt; pre-v7 rows remain `NULL` with no backfill. That legacy
+`NULL` is intentional: built-ins keep their persisted all-in-one argv, while configured rows keep
+their historical spawn-time reconstruction. The internal snapshot is omitted from boardd wire
+responses. Every canonical-path board independently seeds one manual `Todo` column.
+
+The completion race is harness-specific: `RunDoneParams.run_id` is optional so manual/TUI
+completion remains compatible, while the CLI forwards `BOARD_RUN_ID` when present. An immediate
+configured-harness `board done` may finalize only its exact queued run before runner registration;
+a queued built-in Pi/Claude run is rejected until its managed pane is registered. A supplied
+mismatched id is rejected, preventing stale children from completing replacement runs.
 
 ## Conventions
 

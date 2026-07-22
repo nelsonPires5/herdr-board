@@ -6,6 +6,49 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- Provider-free fake Pi/Claude fixtures and live E2E scenarios 16 and 17 cover managed
+  protocol-17 launch and the configured runner bridge. The full forced-build standard E2E suite
+  scenarios 01–17 pass with no model-provider calls, using isolated controlled shell state and
+  cleanup scoped to the owning session root.
+- A separate fail-closed `real-claude-haiku-smoke.sh` defines an explicitly opted-in contract for
+  one authorized Claude Haiku/low attempt against disposable board, Herdr, workspace, and staged
+  Claude state; it never runs in the standard suite and has no retry or fallback provider path.
+
+### Changed
+- Herdr support is protocol-17-only: install metadata requires 0.7.5, and runtime rejects every
+  Herdr version other than 0.7.5 and every protocol other than 17 before discovery or placement.
+  There is no protocol-16 compatibility path.
+- Managed Pi and Claude dispatch is pane-first. The daemon creates or splits a pane with cwd/env,
+  starts the explicit managed kind in that pane, waits for interactive readiness, and only then
+  sends the card prompt with `agent.prompt`.
+- Managed system instructions use a separate temporary `0600` file, removed after startup; they
+  never share startup argv or the post-readiness card-prompt channel.
+- Schema v7 snapshots the resolved system prompt when a run is enqueued, so queued/restarted work
+  is unaffected by later column edits. Pre-v7 rows remain `NULL` with no backfill and retain their
+  persisted legacy all-in-one argv behavior.
+- Configured harnesses now run in a board-owned pane through the selected socket's `herdr pane run`
+  bridge and a self-removing `0700` argv-safe script. The configured-only callback accepts the exact
+  open queued/started run (including callback-before-registration), and an immediate configured
+  `board done` may likewise finalize that exact queued run before registration. `RunDoneParams.run_id`
+  is optional for manual/TUI compatibility; the CLI forwards `BOARD_RUN_ID` when present, and a
+  mismatched id rejects the active run, including the exact queued configured exception. Queued
+  built-in Pi/Claude runs are rejected until their managed pane is registered; stale or built-in
+  callbacks are rejected and silent exits never transition. Its runner honors nonempty
+  `HERDR_BIN_PATH`, else `herdr`. A scheduled configured script can remain as the documented
+  residual orphan if its pane never opens it.
+- Enqueue snapshots card/column/comments/settings/task/system/session data atomically under the
+  scheduler→store lock. Existing, reused, and newly created workspaces must provide a live snapshot
+  cwd; dispatch fails rather than using a requested, stale, or process cwd. Watcher identity includes
+  both session socket and pane id. E2E session names are collision-resistant and exact-name
+  preflighted; boot, adoption, and teardown are gated by captured Linux `/proc` identity tokens
+  (start time, executable, complete
+  argv, expected session/name), never PID liveness alone. The token gates primary/secondary
+  workspace close, board-daemon signals, and session stop/delete across run-all, standalone, and
+  future real-Claude smoke paths; the real-Claude daemon identity is independent. Cleanup failures
+  propagate so a successful scenario cannot hide failed cleanup. Board state is isolated under a
+  short `/tmp` root and managed-shell cleanup is restricted to its marked owner root.
+
 ## [0.6.0] - 2026-07-21
 
 ### Added

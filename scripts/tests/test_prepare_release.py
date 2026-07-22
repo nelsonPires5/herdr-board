@@ -57,7 +57,7 @@ class PrepareReleaseTests(unittest.TestCase):
                 name = "Herdr Board"
                 version = "{plugin_version}"
                 description = "Kanban board for AI coding agents."
-                min_herdr_version = "0.7.0"
+                min_herdr_version = "0.7.5"
                 platforms = ["linux"]
                 """
             ).lstrip(),
