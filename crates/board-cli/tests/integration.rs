@@ -2,13 +2,21 @@
 //! the `LocalSpawner` and the fake harness (no herdr, no Claude cost). Each test
 //! gets its own temp DB, socket, config, and daemon process.
 
-use std::path::PathBuf;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use board_core::client::{BoardClient, UnixClient};
 use board_core::protocol::{
-    CardCreateParams, CardMoveParams, CardStatus, ColumnCreateParams, Event, RunOutcome, Trigger,
+    CardCreateParams, CardMoveParams, CardStatus, ColumnCreateParams, DaemonStatus, Event, Request,
+    Response, RunOutcome, Trigger,
 };
 
 const BOARD_BIN: &str = env!("CARGO_BIN_EXE_board");
@@ -220,6 +228,136 @@ fn poll(c: &mut UnixClient, secs: u64, mut pred: impl FnMut(&mut UnixClient) -> 
         }
         std::thread::sleep(Duration::from_millis(80));
     }
+}
+
+#[derive(Clone, Copy)]
+enum FakeStop {
+    Error,
+    StayLive,
+    Disappear,
+    Replace,
+}
+
+/// Minimal boardd-shaped listener for daemon-stop state-machine tests.
+struct FakeListener {
+    path: PathBuf,
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl FakeListener {
+    fn bind(dir: &Path, mode: FakeStop) -> Self {
+        let path = dir.join("fake-boardd.sock");
+        let listener = UnixListener::bind(&path).expect("bind fake boardd listener");
+        listener
+            .set_nonblocking(true)
+            .expect("set fake listener nonblocking");
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let thread_path = path.clone();
+        let thread = std::thread::spawn(move || {
+            while !thread_stop.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        if handle_fake_connection(stream, &thread_path, mode) {
+                            break;
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Self {
+            path,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for FakeListener {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        // Wake accept so the test thread can be joined without removing the
+        // socket path (stale-socket tests intentionally inspect that path).
+        let _ = UnixStream::connect(&self.path);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn handle_fake_connection(mut stream: UnixStream, path: &Path, mode: FakeStop) -> bool {
+    stream
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .expect("set fake stream timeout");
+    let mut line = String::new();
+    let request = {
+        let mut reader = BufReader::new(stream.try_clone().expect("clone fake stream"));
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => return false,
+            Ok(_) => match serde_json::from_str::<Request>(line.trim_end()) {
+                Ok(request) => request,
+                Err(_) => return false,
+            },
+        }
+    };
+    let response = match request.method.as_str() {
+        "daemon.stop" => match mode {
+            FakeStop::Error => Response::err(request.id, 9, "stop rejected"),
+            FakeStop::StayLive | FakeStop::Disappear | FakeStop::Replace => {
+                Response::ok(request.id, serde_json::json!({"stopping": true}))
+            }
+        },
+        "daemon.status" => Response::ok(
+            request.id,
+            serde_json::to_value(DaemonStatus {
+                version: "fake".to_string(),
+                db_path: "fake".to_string(),
+                herdr_connected: false,
+                active_runs: 0,
+                queued_runs: 0,
+            })
+            .expect("serialize fake status"),
+        ),
+        _ => Response::err(request.id, 1, "unknown fake method"),
+    };
+    let mut wire = serde_json::to_string(&response).expect("serialize fake response");
+    wire.push('\n');
+    stream
+        .write_all(wire.as_bytes())
+        .expect("write fake response");
+    stream.flush().expect("flush fake response");
+
+    match mode {
+        FakeStop::Disappear if response.error.is_none() && response.result.is_some() => {
+            let _ = std::fs::remove_file(path);
+            true
+        }
+        FakeStop::Replace if response.error.is_none() && response.result.is_some() => {
+            let replacement = path.with_extension("replacement");
+            std::fs::write(&replacement, b"replacement daemon socket").expect("write replacement");
+            std::fs::remove_file(path).expect("remove original socket");
+            std::fs::rename(replacement, path).expect("install replacement");
+            true
+        }
+        _ => false,
+    }
+}
+
+fn run_board_stop(socket: &Path) -> std::process::Output {
+    Command::new(BOARD_BIN)
+        .args(["daemon", "--stop"])
+        .env("BOARD_SOCKET", socket)
+        .output()
+        .expect("run board daemon --stop")
 }
 
 // -- tests -------------------------------------------------------------------
@@ -513,6 +651,85 @@ fn template_refused_on_non_empty_board() {
     assert!(
         err.to_string().contains("error 3"),
         "expected invalid-state error, got: {err}"
+    );
+}
+
+#[test]
+fn daemon_stop_rpc_error_preserves_live_socket_for_new_rpc() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = FakeListener::bind(dir.path(), FakeStop::Error);
+
+    let out = run_board_stop(fake.path());
+    assert!(!out.status.success(), "RPC stop error must be non-zero");
+    assert!(
+        fake.path().exists(),
+        "RPC failure must preserve live socket"
+    );
+
+    let mut client = UnixClient::connect(fake.path()).expect("live socket accepts a new RPC");
+    let status = client.daemon_status().expect("new RPC after stop error");
+    assert_eq!(status.version, "fake");
+}
+
+#[test]
+fn daemon_stop_ack_with_live_listener_times_out_without_unlinking() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = FakeListener::bind(dir.path(), FakeStop::StayLive);
+
+    let out = run_board_stop(fake.path());
+    assert!(
+        !out.status.success(),
+        "live listener timeout must be non-zero"
+    );
+    assert!(fake.path().exists(), "timeout must preserve live socket");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("still listening") || stderr.contains("timed out"));
+}
+
+#[test]
+fn daemon_stop_real_disappearance_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = FakeListener::bind(dir.path(), FakeStop::Disappear);
+
+    let out = run_board_stop(fake.path());
+    assert!(
+        out.status.success(),
+        "disappeared listener should stop cleanly"
+    );
+    assert!(
+        !fake.path().exists(),
+        "disappeared listener leaves no socket"
+    );
+}
+
+#[test]
+fn daemon_stop_removes_stale_socket_only_after_failed_connect() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = FakeListener::bind(dir.path(), FakeStop::StayLive);
+    let socket = fake.path().to_path_buf();
+    drop(fake);
+    assert!(
+        socket.exists(),
+        "dropped listener leaves stale socket inode"
+    );
+
+    let out = run_board_stop(&socket);
+    assert!(out.status.success(), "stale socket should be cleaned up");
+    assert!(!socket.exists(), "stale socket should be removed");
+}
+
+#[test]
+fn daemon_stop_preserves_inode_replacement_after_ack() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = FakeListener::bind(dir.path(), FakeStop::Replace);
+    let socket = fake.path().to_path_buf();
+
+    let out = run_board_stop(&socket);
+    assert!(!out.status.success(), "replacement must fail closed");
+    assert!(socket.exists(), "replacement path must be preserved");
+    assert_eq!(
+        std::fs::read(&socket).unwrap(),
+        b"replacement daemon socket"
     );
 }
 

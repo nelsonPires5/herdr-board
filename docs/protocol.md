@@ -39,7 +39,7 @@ daemon on the same DB must exit 0 silently (lost the race = someone else serves)
 
 ### daemon
 - `daemon.status` → `{version, db_path, herdr_connected: bool, active_runs: int, queued_runs: int}`
-- `daemon.stop` → `{stopping:true}` (graceful: cancels nothing; running panes keep running, runs are re-adopted on next start via herdr pane liveness check)
+- `daemon.stop` → `{stopping:true}` (graceful: cancels nothing; running panes keep running, runs are re-adopted on next start via herdr pane liveness check). The CLI stop command treats this as an acknowledgement, not completion: it returns success only after the listener disappears. RPC errors, a listener that remains live past the bounded wait, and socket-path replacement are errors and preserve the socket. If the initial connect fails, a stale socket is removed only after a fresh failed connect and matching device/inode/socket-type identity checks; a replacement path is preserved.
 
 ### board / columns
 

@@ -314,19 +314,19 @@ existing plugin:
 herdr plugin install nelsonPires5/herdr-board --yes
 ```
 
-The build step stops the running daemon (`board daemon --stop`) before recompiling, so the new
+The build step requests a graceful stop (`board daemon --stop`) before recompiling, so the new
 binary replaces a stopped process instead of overwriting one the old daemon still has mapped in
-memory. The next `board` command auto-starts a fresh daemon from the new binary.
+memory. The command succeeds only after the daemon listener disappears. Stop failures and timeouts
+are non-zero and preserve the socket; stale-socket cleanup is only performed after a fresh failed
+connect and an identity check. The next `board` command auto-starts a fresh daemon from the new
+binary.
 
 Run the install once from each named Herdr session where the plugin is registered.
 
 If you are updating from a version older than the `--stop` flag and a stale daemon is still
-serving the old code, stop it manually first, then reinstall:
-
-```bash
-pkill -f 'board daemon'
-herdr plugin install nelsonPires5/herdr-board --yes
-```
+serving the old code, use your platform's process manager to stop that specific board process
+(after verifying its PID and command) before reinstalling. Do not remove the socket or use a broad
+process-name kill.
 
 </details>
 
@@ -339,7 +339,10 @@ reinstall, serving stale code). Stop it first, then remove the CLI Herdr can't m
 its checksum still matches the managed marker), then unregister the plugin:
 
 ```bash
-board daemon --stop 2>/dev/null || pkill -f 'board daemon'
+if ! board daemon --stop; then
+  echo "board daemon did not stop safely; socket preserved" >&2
+  exit 1
+fi
 (
   if [ "${HERDR_BOARD_CLI_INSTALL_DIR+x}" = x ]; then
     install_dir="$HERDR_BOARD_CLI_INSTALL_DIR"

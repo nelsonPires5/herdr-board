@@ -5,7 +5,9 @@
 //! `column`). Every connecting command auto-starts the daemon if it is absent.
 
 use std::fs::OpenOptions;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::CommandExt;
+use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -343,50 +345,108 @@ fn spawn_daemon() -> Result<()> {
     Ok(())
 }
 
-/// `board daemon --stop`: gracefully shut down the running daemon over the
-/// socket, then wait for its listener to vanish. Idempotent — if nothing is
-/// running (or only a stale socket file remains) it cleans up and succeeds.
-/// Used by the plugin build step before a reinstall.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+    file_type: u32,
+}
+
+const SOCKET_FILE_TYPE: u32 = 0o140000;
+
+fn file_identity(path: &Path) -> Option<FileIdentity> {
+    std::fs::symlink_metadata(path)
+        .ok()
+        .map(|metadata| FileIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            file_type: metadata.mode() & 0o170000,
+        })
+}
+
+enum ListenerCheck {
+    Live,
+    Gone,
+    Replaced,
+}
+
+/// Confirm that a failed fresh connect means this exact socket is stale. The
+/// identity is checked again immediately before unlinking; a missing path is
+/// already clean, while a replacement (including a non-socket) fails closed.
+fn check_listener_after_connect_failure(
+    path: &Path,
+    original: Option<FileIdentity>,
+) -> ListenerCheck {
+    if UnixClient::connect(path).is_ok() {
+        return ListenerCheck::Live;
+    }
+
+    let Some(current) = file_identity(path) else {
+        return ListenerCheck::Gone;
+    };
+    if original != Some(current) || current.file_type != SOCKET_FILE_TYPE {
+        return ListenerCheck::Replaced;
+    }
+    if file_identity(path) != Some(current) {
+        return ListenerCheck::Replaced;
+    }
+    if std::fs::remove_file(path).is_ok() && file_identity(path).is_none() {
+        ListenerCheck::Gone
+    } else {
+        ListenerCheck::Replaced
+    }
+}
+
+/// `board daemon --stop`: request a graceful shutdown over the socket, then
+/// wait for its listener to vanish. Cleanup is deliberately fail-closed: RPC
+/// errors, live listeners, and path replacements are never unlinked.
 fn stop_daemon() -> Result<()> {
     let path = paths::socket_path();
+    let original = file_identity(&path);
 
     let mut client = match UnixClient::connect(&path) {
         Ok(c) => c,
-        Err(_) => {
-            // No live listener: clear any stale socket file left by a crash.
-            let _ = std::fs::remove_file(&path);
-            println!("boardd not running");
-            return Ok(());
-        }
+        Err(_) => match check_listener_after_connect_failure(&path, original) {
+            ListenerCheck::Gone => {
+                println!("boardd not running");
+                return Ok(());
+            }
+            ListenerCheck::Live | ListenerCheck::Replaced => {
+                bail!(
+                    "could not connect to boardd at {}; socket preserved",
+                    path.display()
+                );
+            }
+        },
     };
 
-    // Ask the daemon to shut itself down. A daemon older than `daemon.stop`
-    // rejects it; tell the user to stop it manually in that case.
     let stop_result = client.daemon_stop();
     drop(client);
-    if let Err(e) = stop_result {
-        let _ = std::fs::remove_file(&path);
-        bail!(
-            "could not stop boardd gracefully ({e}); it may predate `daemon.stop` — \
-             stop it manually, e.g. `pkill -f 'board daemon'`"
-        );
+    let stop_result = stop_result.context("could not stop boardd gracefully; socket preserved")?;
+    if !stop_result.stopping {
+        bail!("boardd did not acknowledge stopping; socket preserved");
     }
 
-    // Wait for the listener to disappear (the daemon removes the socket on
-    // exit), so the next launch spawns a fresh process rather than racing a
-    // half-dead one still holding the single-instance lock.
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut delay = Duration::from_millis(25);
     while Instant::now() < deadline {
         if UnixClient::connect(&path).is_err() {
-            break;
+            match check_listener_after_connect_failure(&path, original) {
+                ListenerCheck::Gone => {
+                    println!("boardd stopped");
+                    return Ok(());
+                }
+                ListenerCheck::Replaced => {
+                    bail!("boardd socket identity changed; socket preserved");
+                }
+                ListenerCheck::Live => {}
+            }
         }
         std::thread::sleep(delay);
         delay = (delay * 2).min(Duration::from_millis(200));
     }
-    let _ = std::fs::remove_file(&path);
-    println!("boardd stopped");
-    Ok(())
+
+    bail!("boardd acknowledged stop but is still listening; socket preserved")
 }
 
 // -- command bodies ----------------------------------------------------------

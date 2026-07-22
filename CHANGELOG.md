@@ -7,6 +7,8 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Changed
+- `board daemon --stop` now stops safely: it reports success only after the listener disappears,
+  preserves the socket on RPC errors/timeouts, and removes stale sockets only after identity checks.
 - The opt-in real-Claude Haiku smoke now stages only completed onboarding/theme, exact workspace
   trust, the installed Herdr hook, credentials, and approved `remote-settings.json` bytes. This
   prevents startup dialogs from consuming `agent.prompt` without copying broad personal Claude
