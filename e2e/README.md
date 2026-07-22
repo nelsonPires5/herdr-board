@@ -115,8 +115,10 @@ and the `herdr session stop <n> && herdr session delete <n>` cleanup one-liner.
 Exit codes: scenario `0` = PASS, `3` = SKIP (missing precondition), anything else =
 FAIL. `run-all.sh` exits non-zero if any scenario FAILED. The suite is **not** part
 of CI (it needs Herdr 0.7.5 to boot a real ephemeral protocol-17 server) — it is
-run by a human/orchestrator. The real-Claude smoke's intended contract is one
-authorized attempt with no retry or fallback.
+run by a human/orchestrator. The real-Claude smoke stages only completed onboarding/theme,
+exact workspace trust, the installed Herdr hook, credentials, and approved
+`remote-settings.json`, so startup dialogs cannot consume `agent.prompt`; it copies no broad
+personal Claude state. Its intended contract is one authorized attempt with no retry or fallback.
 
 ## Files
 
@@ -128,7 +130,7 @@ authorized attempt with no retry or fallback.
 | `16-managed-p17.sh` | Managed pane-first Pi/Claude protocol-17 launch and no-provider boundary. |
 | `17-configured-p17-runner.sh` | Unmanaged configured-command `pane run` bridge and exact argv/env evidence. |
 | `real-pi-smoke.sh` | Fail-closed real-provider poem smoke. Detects Pi's runtime default model, passes low thinking, isolates board/Pi session output under `/tmp`, verifies integration/WezTerm, poem/comments/argv/git/settings, and supports keep mode for visual audit. Not in `run-all.sh`. |
-| `real-claude-haiku-smoke.sh` | Fail-closed intended-contract smoke. Requires exact opt-in, authorizes one Claude Haiku/low attempt with no retry/fallback, stages writable Claude state under `/tmp`, independently identity-gates the daemon and Herdr server, and cleans exact resources. Not in `run-all.sh`. |
+| `real-claude-haiku-smoke.sh` | Fail-closed intended-contract smoke. Requires exact opt-in, authorizes one Claude Haiku/low attempt with no retry/fallback, stages only completed onboarding/theme, exact workspace trust, the installed Herdr hook, credentials, and approved remote-settings bytes under `/tmp` so startup dialogs cannot consume `agent.prompt`; no broad personal Claude state is copied. Independently identity-gates the daemon and Herdr server and cleans exact resources. Not in `run-all.sh`. |
 | `hrpc.py` | One-shot raw **herdr** socket RPC (honours `HERDR_SOCKET_PATH`) for structural asserts (`tab.list`/`pane.list`/`pane.layout`). |
 | `12-cwd-boards.sh` | Scoped board identity/isolation plus real TUI title/picker. |
 | `13-jump-to-pane.sh` | Same-session pane focus through a real plugin overlay. |

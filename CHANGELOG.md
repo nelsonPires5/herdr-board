@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- The opt-in real-Claude Haiku smoke now stages only completed onboarding/theme, exact workspace
+  trust, the installed Herdr hook, credentials, and approved `remote-settings.json` bytes. This
+  prevents startup dialogs from consuming `agent.prompt` without copying broad personal Claude
+  state; it still permits exactly one no-retry Haiku/low attempt.
+
 ## [0.7.0] - 2026-07-22
 
 ### Added
