@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-22
+
 ### Added
 - Provider-free fake Pi/Claude fixtures and live E2E scenarios 16 and 17 cover managed
   protocol-17 launch and the configured runner bridge. The full forced-build standard E2E suite
@@ -227,7 +229,8 @@ a visible herdr pane. Ships as a single `board` binary (TUI + daemon + CLI) and 
 - **Packaging.** `herdr-plugin.toml` manifest, and `scripts/` for build, install (guarded behind
   `--yes`), the open-or-focus launcher, a raw protocol client, and a live-herdr e2e smoke test.
 
-[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.7.0
 [0.6.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.6.0
 [0.5.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.5.0
 [0.4.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.4.0
