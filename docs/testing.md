@@ -113,7 +113,7 @@ case ↔ scenario ↔ status catalog):
 | `16-managed-p17.sh` | Pane-first protocol-17 Pi + Claude launch through checked-in no-provider fixtures: exact 0600 system files, readiness, session/idle reports, `agent.prompt`, and held layout. |
 | `17-configured-p17-runner.sh` | Unmanaged protocol-17 configured-harness bridge: exact argv/multiline env/cwd/socket values, `pane run`, held layout, and explicit `board done`. |
 | `real-pi-smoke.sh` | Separate opt-in (`E2E_REAL_PI=1`) real-provider poem smoke; never included by `run-all.sh`. |
-| `real-claude-haiku-smoke.sh` | Opt-in intended-contract smoke (`E2E_REAL_CLAUDE_HAIKU=1`): exactly one authorized Claude Haiku/low attempt, staged temporary Claude config, no retry/fallback, and exact cleanup; never included by `run-all.sh`. |
+| `real-claude-haiku-smoke.sh` | Opt-in intended-contract smoke (`E2E_REAL_CLAUDE_HAIKU=1`): exactly one authorized Claude Haiku/low attempt, stages only completed onboarding/theme, exact workspace trust, the installed Herdr hook, credentials, and approved remote-settings bytes, preventing startup dialogs from consuming `agent.prompt`; no broad personal Claude state, retry/fallback, or standard-suite inclusion. |
 | `run-all.sh` | Builds once, runs every standard no-cost scenario, prints a PASS/FAIL/SKIP summary. |
 
 Deterministic daemon tests cover working→running, blocked, Herdr's output-only `done` event →
@@ -131,8 +131,10 @@ terminal fixtures, not provider stubs that can pass at process startup: each rep
 session identity then idle, waits for Herdr readiness, and refuses to call `board done` until the
 exact card prompt arrives through `agent.prompt`. Scenario 17 proves configured harnesses remain
 unmanaged and receive exact `BOARD_PROMPT`/`BOARD_SYSTEM_PROMPT` values through the generated
-`pane run` bridge. The real-Claude smoke is separate: its intended contract is one authorized
-Haiku/low attempt with no retry or fallback.
+`pane run` bridge. The real-Claude smoke is separate: it stages only completed onboarding/theme, exact
+workspace trust, the installed Herdr hook, credentials, and approved `remote-settings.json`,
+so startup dialogs cannot consume `agent.prompt`; no broad personal Claude state is copied.
+Its intended contract is one authorized Haiku/low attempt with no retry or fallback.
 
 `scripts/e2e.sh` is a thin compat wrapper that `exec`s `run-all.sh`.
 
@@ -275,7 +277,7 @@ E2E_REAL_PI=1 e2e/real-pi-smoke.sh  # explicit real-provider opt-in; may incur c
 E2E_REAL_CLAUDE_HAIKU=1 e2e/real-claude-haiku-smoke.sh  # one authorized Haiku/low attempt; may incur cost
 ```
 
-- Standard suite requires **exactly Herdr 0.7.5 / socket protocol 17**, `python3`, and `cargo`. Every scenario preflights both `herdr --version` and a socket `ping`; protocol 16 and unknown/future protocols fail before dispatch. The forced-build standard suite scenarios 01–17 pass with no provider calls. The real-Pi smoke additionally verifies Pi's runtime default model, current Herdr integration, and WezTerm. The real-Claude smoke is an intended-contract validation only: it requires a logged-in real Claude CLI plus current Herdr Claude integration v7, stages credentials/settings under `/tmp`, authorizes exactly one Haiku/low attempt, and has no retry or fallback. Both opt-ins compare user/repository state and clean exact resources. `run-all.sh` builds
+- Standard suite requires **exactly Herdr 0.7.5 / socket protocol 17**, `python3`, and `cargo`. Every scenario preflights both `herdr --version` and a socket `ping`; protocol 16 and unknown/future protocols fail before dispatch. The forced-build standard suite scenarios 01–17 pass with no provider calls. The real-Pi smoke additionally verifies Pi's runtime default model, current Herdr integration, and WezTerm. The real-Claude smoke is an intended-contract validation only: it requires a logged-in real Claude CLI plus current Herdr Claude integration v7, stages minimal completed onboarding/theme, exact workspace trust, the installed Herdr hook, credentials, and approved `remote-settings.json` under `/tmp` so startup dialogs cannot consume `agent.prompt`; no broad personal Claude state is copied, and it has no retry or fallback. Both opt-ins compare user/repository state and clean exact resources. `run-all.sh` builds
   the release binary once; scenarios reuse it. **No second session** is needed —
   the suite boots its own ephemeral session(s) and cleans them up.
 - Exit codes: scenario `0` = PASS, `3` = SKIP, other = FAIL; `run-all.sh` exits

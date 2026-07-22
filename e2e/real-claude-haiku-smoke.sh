@@ -12,7 +12,6 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd -P)"
 RUN_ID="$$"
 SESSION="hb-claude-$RUN_ID"
 EVIDENCE="/tmp/herdr-board-real-claude-haiku-evidence-$RUN_ID"
-STATE="/tmp/hb-claude-$RUN_ID.env"
 TMP=""
 WORKSPACE_DIR=""
 STAGED_CLAUDE_DIR=""
@@ -27,6 +26,7 @@ CARGO_BIN=""
 REAL_CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 REAL_CREDENTIALS=""
 REAL_SETTINGS=""
+REAL_REMOTE_SETTINGS=""
 REAL_HOOK=""
 REAL_HASHES_BEFORE=""
 BASE_STATUS=""
@@ -102,7 +102,7 @@ PY
 }
 
 hash_real_files() {
-  python3 - "$REAL_CREDENTIALS" "$REAL_SETTINGS" "$REAL_HOOK" <<'PY'
+  python3 - "$REAL_CREDENTIALS" "$REAL_SETTINGS" "$REAL_REMOTE_SETTINGS" "$REAL_HOOK" <<'PY'
 import hashlib, json, pathlib, sys
 out = {}
 for raw in sys.argv[1:]:
@@ -211,7 +211,7 @@ cleanup() {
   fi
 
   [ -z "$TMP" ] || rm -rf -- "$TMP"
-  rm -f -- "$STATE"
+  [ -z "${STATE:-}" ] || rm -f -- "$STATE"
 
   local sessions_json=""
   if ! sessions_json="$("$HERDR_BIN" session list --json 2>/dev/null)"; then
@@ -224,7 +224,7 @@ cleanup() {
   fi
   if [ -n "$TMP" ] && [ -e "$TMP" ]; then cleanup_error+="temp_remains;"; fi
   if [ -n "${SOCK:-}" ] && [ -e "${SOCK:-}" ]; then cleanup_error+="socket_remains;"; fi
-  [ ! -e "$STATE" ] || cleanup_error+="state_remains;"
+  [ -z "${STATE:-}" ] || [ ! -e "$STATE" ] || cleanup_error+="state_remains;"
 
   if [ -n "$BASE_STATUS" ] || [ -d "$ROOT/.git" ]; then
     if ! final_status="$(git -C "$ROOT" status --porcelain=v1 --untracked-files=all 2>/dev/null)"; then
@@ -237,7 +237,8 @@ cleanup() {
     cleanup_error+="repo_status_baseline_missing;"
   fi
   if [ -n "$REAL_HASHES_BEFORE" ] && [ -n "$REAL_CREDENTIALS" ] \
-      && [ -f "$REAL_CREDENTIALS" ] && [ -f "$REAL_SETTINGS" ] && [ -f "$REAL_HOOK" ]; then
+      && [ -f "$REAL_CREDENTIALS" ] && [ -f "$REAL_SETTINGS" ] \
+      && [ -f "$REAL_REMOTE_SETTINGS" ] && [ -f "$REAL_HOOK" ]; then
     hashes_after="$(hash_real_files 2>/dev/null)"
     printf '%s\n' "$hashes_after" | jq . >"$EVIDENCE/real-claude-hashes-after.json" 2>/dev/null
     if [ "$hashes_after" != "$REAL_HASHES_BEFORE" ]; then cleanup_error+="real_claude_files_changed;"; fi
@@ -317,6 +318,7 @@ if "$HERDR_BIN" session list --json | jq -e --arg session "$SESSION" \
 fi
 
 TMP="$(mktemp -d /tmp/hb-claude.XXXXXX)"
+STATE="$TMP/state.env"
 WORKSPACE_DIR="$TMP/workspace"
 STAGED_CLAUDE_DIR="$TMP/claude"
 DB="$TMP/board.db"
@@ -330,92 +332,24 @@ write_state
 
 REAL_CREDENTIALS="$REAL_CLAUDE_DIR/.credentials.json"
 REAL_SETTINGS="$REAL_CLAUDE_DIR/settings.json"
+REAL_REMOTE_SETTINGS="$REAL_CLAUDE_DIR/remote-settings.json"
 [ -f "$REAL_CREDENTIALS" ] || fail "missing real Claude credentials: $REAL_CREDENTIALS"
 [ -f "$REAL_SETTINGS" ] || fail "missing real Claude settings: $REAL_SETTINGS"
+[ -f "$REAL_REMOTE_SETTINGS" ] || fail "missing real Claude remote settings: $REAL_REMOTE_SETTINGS"
 
-# Retain only the installed Herdr SessionStart command and the user's explicit
-# dangerous-mode acknowledgement. The hook command is preserved byte-for-byte;
-# its script token must already be an absolute path.
-python3 - "$REAL_SETTINGS" "$STAGED_CLAUDE_DIR/settings.json" "$TMP/hook-path" <<'PY'
-import json, os, pathlib, shlex, sys
-src_path, out_path, hook_path_file = sys.argv[1:]
-with open(src_path, encoding="utf-8") as stream:
-    src = json.load(stream)
-if src.get("skipDangerousModePermissionPrompt") is not True:
-    raise SystemExit("real settings must acknowledge dangerous permission mode")
-session_start = src.get("hooks", {}).get("SessionStart")
-if not isinstance(session_start, list):
-    raise SystemExit("real settings have no SessionStart hook list")
-kept_groups = []
-script_paths = []
-for group in session_start:
-    if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
-        continue
-    kept_hooks = []
-    for hook in group["hooks"]:
-        if not isinstance(hook, dict) or hook.get("type") != "command":
-            continue
-        command = hook.get("command")
-        if not isinstance(command, str):
-            continue
-        try:
-            words = shlex.split(command)
-        except ValueError:
-            continue
-        matches = [word for word in words if word.endswith("/herdr-agent-state.sh")]
-        if not matches:
-            continue
-        if len(matches) != 1 or not os.path.isabs(matches[0]):
-            raise SystemExit("Herdr SessionStart hook path must be exactly one absolute script path")
-        kept_hooks.append(hook)
-        script_paths.append(matches[0])
-    if kept_hooks:
-        clean_group = {key: value for key, value in group.items() if key != "hooks"}
-        clean_group["hooks"] = kept_hooks
-        kept_groups.append(clean_group)
-if len(script_paths) != 1:
-    raise SystemExit(f"expected exactly one Herdr SessionStart command, found {len(script_paths)}")
-script = pathlib.Path(script_paths[0])
-if not script.is_file():
-    raise SystemExit(f"Herdr hook is not a file: {script}")
-out = {
-    "hooks": {"SessionStart": kept_groups},
-    "skipDangerousModePermissionPrompt": True,
-}
-with open(out_path, "w", encoding="utf-8") as stream:
-    json.dump(out, stream, indent=2)
-    stream.write("\n")
-os.chmod(out_path, 0o600)
-with open(hook_path_file, "w", encoding="utf-8") as stream:
-    stream.write(str(script))
-    stream.write("\n")
-os.chmod(hook_path_file, 0o600)
-PY
-REAL_HOOK="$(<"$TMP/hook-path")"
+# Stage only completed onboarding, the exact disposable workspace trust, the
+# dark startup theme, the installed Herdr hook, and already-approved remote settings.
+STAGED_HOOK_INFO="$(python3 "$ROOT/scripts/stage_claude_config.py" \
+  --source-config-dir "$REAL_CLAUDE_DIR" \
+  --workspace-dir "$WORKSPACE_DIR" \
+  --staged-config-dir "$STAGED_CLAUDE_DIR")"
+REAL_HOOK="$(printf '%s' "$STAGED_HOOK_INFO" | jq -er '.hook_path')"
 [ -f "$REAL_HOOK" ] || fail "configured Herdr hook is missing: $REAL_HOOK"
 
 BASE_STATUS="$(git -C "$ROOT" status --porcelain=v1 --untracked-files=all)"
 printf '%s\n' "$BASE_STATUS" >"$EVIDENCE/git-status-before.txt"
 REAL_HASHES_BEFORE="$(hash_real_files)"
 printf '%s\n' "$REAL_HASHES_BEFORE" | jq . >"$EVIDENCE/real-claude-hashes-before.json"
-
-cp -- "$REAL_CREDENTIALS" "$STAGED_CLAUDE_DIR/.credentials.json"
-chmod 600 "$STAGED_CLAUDE_DIR/.credentials.json" "$STAGED_CLAUDE_DIR/settings.json"
-python3 - "$STAGED_CLAUDE_DIR" <<'PY'
-import os, pathlib, stat, sys
-root = pathlib.Path(sys.argv[1])
-for name in (".credentials.json", "settings.json"):
-    path = root / name
-    assert path.is_file(), path
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600, (path, oct(stat.S_IMODE(path.stat().st_mode)))
-PY
-jq -e '
-  (keys | sort) == ["hooks", "skipDangerousModePermissionPrompt"] and
-  .skipDangerousModePermissionPrompt == true and
-  (.hooks | keys) == ["SessionStart"] and
-  ([.hooks.SessionStart[].hooks[]] | length) == 1
-' "$STAGED_CLAUDE_DIR/settings.json" >/dev/null \
-  || fail "staged Claude settings are not minimal"
 
 if ! CLAUDE_CONFIG_DIR="$STAGED_CLAUDE_DIR" \
     "$CLAUDE_BIN" auth status --json >"$TMP/claude-auth-status.json" 2>"$TMP/claude-auth-status.err"; then
