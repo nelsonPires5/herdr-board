@@ -379,7 +379,7 @@ pub fn herdr_event_thread(d: Arc<Daemon>) {
         let mut broken: Vec<PathBuf> = Vec::new();
         for (sock, ev) in conns.iter_mut() {
             match ev.poll_event(Duration::from_millis(200)) {
-                Ok(Some(event)) => handle_event(&d, event),
+                Ok(Some(event)) => handle_event_from_socket(&d, sock, event),
                 Ok(None) => {}
                 Err(e) => {
                     tracing::debug!("herdr events {sock:?} ended: {e}");
@@ -396,11 +396,30 @@ pub fn herdr_event_thread(d: Arc<Daemon>) {
     }
 }
 
-fn find_run_by_pane(d: &Arc<Daemon>, pane_id: &str) -> Option<i64> {
+/// Resolve the socket a run belongs to. `None` is the daemon's default
+/// session, just as it is for the spawn handle and the watch set.
+fn effective_herdr_socket(d: &Arc<Daemon>, socket: Option<&std::path::Path>) -> PathBuf {
+    socket
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| d.default_herdr_socket())
+}
+
+/// Find an active run only when both Herdr identity components match. Pane ids
+/// are scoped to a session socket; matching on the pane alone can route an
+/// event from one session to another when two sessions reuse the same id.
+fn find_run_by_pane(
+    d: &Arc<Daemon>,
+    pane_id: &str,
+    source_socket: &std::path::Path,
+) -> Option<i64> {
+    let source_socket = effective_herdr_socket(d, Some(source_socket));
     let s = d.sched.lock().unwrap();
     s.active
         .iter()
-        .find(|(_, a)| a.pane_id.as_deref() == Some(pane_id))
+        .find(|(_, a)| {
+            a.pane_id.as_deref() == Some(pane_id)
+                && effective_herdr_socket(d, a.handle.herdr_socket.as_deref()) == source_socket
+        })
         .map(|(id, _)| *id)
 }
 
@@ -423,13 +442,13 @@ fn clear_idle(d: &Arc<Daemon>, run_id: i64) {
 /// Map one herdr event onto an [`AgentSignal`] (or idle arming) for its run.
 /// Events without a matching active run are stale and ignored; the engine
 /// additionally no-ops signals that don't apply to the card's live status.
-fn handle_event(d: &Arc<Daemon>, ev: HerdrEvent) {
+fn handle_event_from_socket(d: &Arc<Daemon>, source_socket: &std::path::Path, ev: HerdrEvent) {
     use board_herdr::AgentStatus;
     match ev {
         HerdrEvent::AgentStatusChanged {
             pane_id, status, ..
         } => {
-            let Some(run_id) = find_run_by_pane(d, &pane_id) else {
+            let Some(run_id) = find_run_by_pane(d, &pane_id, source_socket) else {
                 return;
             };
             let Some(card_id) = card_of(d, run_id) else {
@@ -452,10 +471,17 @@ fn handle_event(d: &Arc<Daemon>, ev: HerdrEvent) {
                     apply_signal(d, run_id, card_id, AgentSignal::Done);
                 }
                 // `idle` only arms the grace timer; expiry is the ticker's job.
+                // A trailing idle after `done` must not rearm an awaiting run.
                 AgentStatus::Idle => {
                     let mut s = d.sched.lock().unwrap();
+                    let store = d.store.lock();
                     if let Some(a) = s.active.get_mut(&run_id) {
-                        if a.idle_since.is_none() {
+                        let awaiting = store
+                            .get_card(a.card_id)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|card| card.status == CardStatus::Awaiting);
+                        if !awaiting && a.idle_since.is_none() {
                             a.idle_since = Some(Instant::now());
                         }
                     }
@@ -464,7 +490,7 @@ fn handle_event(d: &Arc<Daemon>, ev: HerdrEvent) {
             }
         }
         HerdrEvent::PaneExited { pane_id, .. } => {
-            if let Some(run_id) = find_run_by_pane(d, &pane_id) {
+            if let Some(run_id) = find_run_by_pane(d, &pane_id, source_socket) {
                 if run_open(d, run_id) {
                     let msg = "pane exited without board done".to_string();
                     let _ = finalize_run(
@@ -481,6 +507,15 @@ fn handle_event(d: &Arc<Daemon>, ev: HerdrEvent) {
         }
         HerdrEvent::Other(_) => {}
     }
+}
+
+// Unit tests that construct events directly use the default session. The live
+// event thread always calls `handle_event_from_socket`, retaining its stream's
+// source socket.
+#[cfg(test)]
+fn handle_event(d: &Arc<Daemon>, ev: HerdrEvent) {
+    let source_socket = d.default_herdr_socket();
+    handle_event_from_socket(d, &source_socket, ev);
 }
 
 #[cfg(test)]
@@ -571,6 +606,236 @@ mod tests {
             status,
             agent: Some("pi".into()),
         }
+    }
+
+    /// Build two active herdr runs sharing a pane id but living on separate
+    /// session sockets. The current pane-only matcher is deliberately used to
+    /// choose which run is *not* socket A, making these tests deterministic
+    /// despite HashMap iteration order.
+    fn two_socket_daemon() -> (Arc<Daemon>, i64, i64, i64, i64, PathBuf) {
+        let config = Config {
+            idle_grace_seconds: 5,
+            ..Default::default()
+        };
+        let db = Db::open_in_memory().unwrap();
+        let card_a = db
+            .create_card(&CardCreateParams {
+                title: "socket A".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let card_b = db
+            .create_card(&CardCreateParams {
+                title: "socket B".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let run_a = db
+            .create_run(
+                card_a.id,
+                card_a.column_id,
+                "pi",
+                "[\"pi\"]",
+                "prompt A",
+                Some("session-a"),
+                None,
+            )
+            .unwrap();
+        let run_b = db
+            .create_run(
+                card_b.id,
+                card_b.column_id,
+                "pi",
+                "[\"pi\"]",
+                "prompt B",
+                Some("session-b"),
+                None,
+            )
+            .unwrap();
+        for (run, card, workspace) in [
+            (&run_a, &card_a, "workspace-a"),
+            (&run_b, &card_b, "workspace-b"),
+        ] {
+            db.start_run(run.id, Some(workspace), Some("shared-pane"))
+                .unwrap();
+            db.set_card_status(card.id, CardStatus::Running).unwrap();
+        }
+
+        let (events_tx, _events_rx) = broadcast::channel(16);
+        let (dispatch_tx, _dispatch_rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let d = Arc::new(Daemon::new(
+            Store::new(db),
+            config,
+            DaemonSettings::default(),
+            PathBuf::from("/tmp/board-watch-two-sockets.db"),
+            PathBuf::from("/tmp/board-watch-two-sockets.sock"),
+            Arc::new(LocalSpawner::new()),
+            None,
+            None,
+            events_tx,
+            dispatch_tx,
+            shutdown_tx,
+        ));
+        for (run, card, workspace, socket) in [
+            (
+                &run_a,
+                &card_a,
+                "workspace-a",
+                PathBuf::from("/tmp/herdr-a.sock"),
+            ),
+            (
+                &run_b,
+                &card_b,
+                "workspace-b",
+                PathBuf::from("/tmp/herdr-b.sock"),
+            ),
+        ] {
+            d.sched.lock().unwrap().active.insert(
+                run.id,
+                ActiveRun {
+                    card_id: card.id,
+                    handle: SpawnHandle {
+                        pane_id: Some("shared-pane".into()),
+                        workspace_id: Some(workspace.into()),
+                        herdr_socket: Some(socket),
+                        ..Default::default()
+                    },
+                    started: Instant::now(),
+                    timeout_deadline: None,
+                    idle_since: None,
+                    awaiting_since: None,
+                    is_local: false,
+                    pane_id: Some("shared-pane".into()),
+                },
+            );
+        }
+
+        // Current code cannot use this source socket and would select this
+        // run. Designate the other run as socket A so the expected target is
+        // guaranteed to differ from that incorrect pane-only selection.
+        let pane_only_match = {
+            let sched = d.sched.lock().unwrap();
+            sched
+                .active
+                .iter()
+                .find(|(_, active)| active.pane_id.as_deref() == Some("shared-pane"))
+                .map(|(run_id, _)| *run_id)
+                .unwrap()
+        };
+        let source_run = if pane_only_match == run_a.id {
+            run_b.id
+        } else {
+            run_a.id
+        };
+        let other_run = if source_run == run_a.id {
+            run_b.id
+        } else {
+            run_a.id
+        };
+        let socket_a = PathBuf::from("/tmp/herdr-a.sock");
+        let socket_b = PathBuf::from("/tmp/herdr-b.sock");
+        {
+            let mut sched = d.sched.lock().unwrap();
+            sched
+                .active
+                .get_mut(&source_run)
+                .unwrap()
+                .handle
+                .herdr_socket = Some(socket_a.clone());
+            sched
+                .active
+                .get_mut(&other_run)
+                .unwrap()
+                .handle
+                .herdr_socket = Some(socket_b);
+        }
+        d.refresh_watch();
+        let source_card = if source_run == run_a.id {
+            card_a.id
+        } else {
+            card_b.id
+        };
+        let other_card = if other_run == run_a.id {
+            card_a.id
+        } else {
+            card_b.id
+        };
+        (d, source_run, source_card, other_run, other_card, socket_a)
+    }
+
+    /// A test-only stand-in for one iteration of the event thread's
+    /// `socket -> stream` loop. The source socket is passed through to the
+    /// handler so duplicate pane ids remain session-scoped.
+    fn event_polled_from_socket(d: &Arc<Daemon>, source_socket: &PathBuf, event: HerdrEvent) {
+        assert!(d
+            .watch
+            .lock()
+            .unwrap()
+            .panes_by_socket
+            .contains_key(source_socket));
+        super::handle_event_from_socket(d, source_socket, event);
+    }
+
+    fn shared_status(status: AgentStatus) -> HerdrEvent {
+        HerdrEvent::AgentStatusChanged {
+            pane_id: "shared-pane".into(),
+            workspace_id: None,
+            status,
+            agent: Some("pi".into()),
+        }
+    }
+
+    #[test]
+    fn socket_a_status_event_does_not_update_socket_b_duplicate_pane() {
+        let (d, source_run, source_card, other_run, other_card, socket_a) = two_socket_daemon();
+
+        event_polled_from_socket(&d, &socket_a, shared_status(AgentStatus::Blocked));
+
+        let db = d.store.lock();
+        assert_eq!(db.get_run(source_run).unwrap().ended_at, None);
+        assert_eq!(db.get_run(other_run).unwrap().ended_at, None);
+        assert_eq!(
+            db.get_card(source_card).unwrap().unwrap().status,
+            CardStatus::Blocked,
+            "socket A's event must update socket A's card",
+        );
+        assert_eq!(
+            db.get_card(other_card).unwrap().unwrap().status,
+            CardStatus::Running,
+            "socket A's event must not update socket B's card",
+        );
+    }
+
+    #[test]
+    fn socket_a_pane_exit_does_not_finalize_socket_b_duplicate_pane() {
+        let (d, source_run, source_card, other_run, other_card, socket_a) = two_socket_daemon();
+
+        event_polled_from_socket(
+            &d,
+            &socket_a,
+            HerdrEvent::PaneExited {
+                pane_id: "shared-pane".into(),
+                workspace_id: None,
+            },
+        );
+
+        let db = d.store.lock();
+        assert_eq!(
+            db.get_run(source_run).unwrap().outcome,
+            Some(RunOutcome::Fail)
+        );
+        assert!(db.get_run(other_run).unwrap().ended_at.is_none());
+        assert_eq!(
+            db.get_card(source_card).unwrap().unwrap().status,
+            CardStatus::Failed,
+            "socket A's pane exit must finalize socket A's run",
+        );
+        assert_eq!(
+            db.get_card(other_card).unwrap().unwrap().status,
+            CardStatus::Running,
+            "socket A's pane exit must not finalize socket B's run",
+        );
     }
 
     #[test]
@@ -909,5 +1174,34 @@ mod tests {
         let card = db.get_card(card_id).unwrap().unwrap();
         assert_eq!(card.status, CardStatus::Failed);
         assert_eq!(card.column_id, original_column);
+    }
+
+    #[test]
+    fn protocol17_idle_after_done_does_not_rearm_an_awaiting_run() {
+        let (d, run_id, card_id, _events) = active_daemon();
+
+        // Protocol 17 may emit the terminal turn's `done` followed by `idle`.
+        // Done is authoritative for board review; the trailing idle must not
+        // arm a second grace period while this same run remains awaiting.
+        handle_event(&d, status(AgentStatus::Done));
+        handle_event(&d, status(AgentStatus::Idle));
+
+        let db = d.store.lock();
+        let card = db.get_card(card_id).unwrap().unwrap();
+        assert_eq!(card.status, CardStatus::Awaiting);
+        assert_eq!(card.awaiting_reason, Some(AwaitingReason::AgentDone));
+        assert!(db.get_run(run_id).unwrap().ended_at.is_none());
+        drop(db);
+        assert!(
+            d.sched
+                .lock()
+                .unwrap()
+                .active
+                .get(&run_id)
+                .unwrap()
+                .idle_since
+                .is_none(),
+            "a trailing protocol-17 idle event must not rearm idle expiry while awaiting",
+        );
     }
 }

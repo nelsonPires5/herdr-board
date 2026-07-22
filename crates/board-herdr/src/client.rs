@@ -17,9 +17,9 @@ use serde_json::{json, Value};
 use crate::envelope::{Request, Response};
 use crate::error::{HerdrError, Result};
 use crate::types::{
-    AgentStarted, Layout, NotificationShown, NotificationSound, PaneInfo, PaneReadResult, Pong,
-    ReadSource, SessionSnapshot, SplitDirection, TabCreated, TabInfo, WorkspaceCreated,
-    WorkspaceInfo, WorktreeCreated, WorktreeRemoved,
+    AgentInfo, AgentStarted, AgentStatus, Layout, NotificationShown, NotificationSound, PaneInfo,
+    PaneReadResult, Pong, ReadSource, SessionSnapshot, SplitDirection, TabCreated, TabInfo,
+    WorkspaceCreated, WorkspaceInfo, WorktreeCreated, WorktreeRemoved,
 };
 
 /// Default socket path: `$HERDR_SOCKET_PATH` (herdr's canonical variable,
@@ -66,23 +66,66 @@ pub struct TabCreateParams {
     pub focus: bool,
 }
 
-/// Params for `agent.start`. Harness/model/effort/permission all go in `argv`
-/// (herdr has no first-class flags for them).
+/// Protocol-17 params for `agent.start`. Placement, cwd, and environment are
+/// established on the target pane before starting the managed agent.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct AgentStartParams {
     pub name: String,
-    pub argv: Vec<String>,
+    pub kind: String,
+    pub pane_id: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
+    pub timeout_ms: Option<u64>,
+}
+
+/// Optional wait behavior for `agent.prompt`.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AgentPromptWaitOptions {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub until: Vec<AgentStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+}
+
+/// Params for `agent.prompt`.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AgentPromptParams {
+    pub target: String,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wait: Option<AgentPromptWaitOptions>,
+}
+
+/// Params for `agent.wait`.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AgentWaitParams {
+    pub target: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub until: Vec<AgentStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+}
+
+/// Params for protocol-17 `pane.split`.
+#[derive(Debug, Clone, Serialize)]
+pub struct PaneSplitParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
+    pub target_pane_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tab_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub split: Option<SplitDirection>,
+    pub cwd: Option<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+    pub direction: SplitDirection,
     pub focus: bool,
+}
+
+/// Params for `pane.rename`.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PaneRenameParams {
+    pub pane_id: String,
+    pub label: String,
 }
 
 /// Params for `worktree.create`.
@@ -204,6 +247,23 @@ impl HerdrClient {
         self.call_into("ping", json!({}))
     }
 
+    /// Require the exact Herdr release and socket protocol supported by this
+    /// client. The explicit protocol argument keeps callers' expected contract
+    /// visible at the gate.
+    pub fn require_protocol(&mut self, expected: u32) -> Result<Pong> {
+        let pong = self.ping()?;
+        if pong.version != "0.7.5" || pong.protocol != expected || expected != 17 {
+            return Err(HerdrError::Protocol {
+                code: "incompatible_protocol".to_string(),
+                message: format!(
+                    "Herdr 0.7.5 with protocol 17 is required (found Herdr {} with protocol {})",
+                    pong.version, pong.protocol
+                ),
+            });
+        }
+        Ok(pong)
+    }
+
     /// True if a `ping` currently succeeds. The daemon uses this to set its
     /// `herdr_connected` flag.
     pub fn is_live(&mut self) -> bool {
@@ -242,6 +302,18 @@ impl HerdrClient {
         self.call_into("agent.start", serde_json::to_value(p)?)
     }
 
+    pub fn agent_get(&mut self, target: &str) -> Result<AgentInfo> {
+        self.call_field("agent.get", json!({ "target": target }), "agent")
+    }
+
+    pub fn agent_prompt(&mut self, p: &AgentPromptParams) -> Result<AgentInfo> {
+        self.call_field("agent.prompt", serde_json::to_value(p)?, "agent")
+    }
+
+    pub fn agent_wait(&mut self, p: &AgentWaitParams) -> Result<AgentInfo> {
+        self.call_field("agent.wait", serde_json::to_value(p)?, "agent")
+    }
+
     // -- pane ----------------------------------------------------------------
 
     pub fn pane_list(&mut self, workspace_id: Option<&str>) -> Result<Vec<PaneInfo>> {
@@ -250,6 +322,10 @@ impl HerdrClient {
             None => json!({}),
         };
         self.call_field("pane.list", params, "panes")
+    }
+
+    pub fn pane_split(&mut self, p: &PaneSplitParams) -> Result<PaneInfo> {
+        self.call_field("pane.split", serde_json::to_value(p)?, "pane")
     }
 
     pub fn pane_read(
@@ -290,6 +366,11 @@ impl HerdrClient {
     /// Focus a pane; returns the pane's updated [`PaneInfo`].
     pub fn pane_focus(&mut self, pane_id: &str) -> Result<PaneInfo> {
         self.call_field("pane.focus", json!({ "pane_id": pane_id }), "pane")
+    }
+
+    /// Rename a pane; returns the pane's updated [`PaneInfo`].
+    pub fn pane_rename(&mut self, p: &PaneRenameParams) -> Result<PaneInfo> {
+        self.call_field("pane.rename", serde_json::to_value(p)?, "pane")
     }
 
     /// Fetch the pane [`Layout`] for the tab containing `pane_id` (`None` = the

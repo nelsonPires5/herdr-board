@@ -110,6 +110,75 @@ impl TestDaemon {
 
 impl Drop for TestDaemon {
     fn drop(&mut self) {
+        let mut cancelled_open_work = false;
+
+        if let Ok(mut client) = UnixClient::connect(&self.socket) {
+            // Cancel every kind of open card. A cancellation wakes dispatch, so
+            // rescan briefly to catch work that was queued at the same time.
+            let cancel_deadline = Instant::now() + Duration::from_millis(350);
+            loop {
+                let mut active_cards = Vec::new();
+                if let Ok(boards) = client.board_list() {
+                    for board in boards.boards {
+                        if let Ok(snapshot) = client.board_get_by_id(board.id) {
+                            active_cards.extend(
+                                snapshot
+                                    .cards
+                                    .into_iter()
+                                    .filter(|card| {
+                                        matches!(
+                                            card.status,
+                                            CardStatus::Queued
+                                                | CardStatus::Running
+                                                | CardStatus::Blocked
+                                                | CardStatus::Awaiting
+                                        )
+                                    })
+                                    .map(|card| card.id),
+                            );
+                        }
+                    }
+                }
+                active_cards.sort_unstable();
+                active_cards.dedup();
+
+                if active_cards.is_empty() {
+                    break;
+                }
+                for card_id in active_cards {
+                    if client.run_cancel(card_id).is_ok() {
+                        cancelled_open_work = true;
+                    }
+                }
+                if Instant::now() >= cancel_deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+
+        if cancelled_open_work {
+            // Keep the original listener alive while already-forked `board
+            // comment`/`done` CLIs finish. Otherwise they auto-start a
+            // replacement daemon when the socket disappears.
+            std::thread::sleep(Duration::from_millis(750));
+        }
+
+        if let Ok(mut client) = UnixClient::connect(&self.socket) {
+            let _ = client.daemon_stop();
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                Ok(None) | Err(_) => break,
+            }
+        }
+
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -233,9 +302,11 @@ fn process_exit_without_done() {
     let mut c = td.client();
     let todo = todo_id(&mut c);
     let review = c.column_create(&col("review-h", Trigger::Manual)).unwrap();
+    let back = c.column_create(&col("back", Trigger::Manual)).unwrap();
     let work = c
         .column_create(&ColumnCreateParams {
             on_success_column_id: Some(review.id),
+            on_fail_column_id: Some(back.id),
             ..col("work", Trigger::Auto)
         })
         .unwrap();

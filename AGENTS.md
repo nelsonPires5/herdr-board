@@ -27,11 +27,21 @@ cargo fmt --all --check                      # formatted
 ```
 
 - `#[ignore]`'d tests hit a live herdr (run only when `HERDR_SOCK`/`HERDR_SOCKET_PATH` exists).
-- End-to-end: `e2e/run-all.sh` (compat: `scripts/e2e.sh`) drives a REAL herdr with a scenario
-  suite. It boots its own **ephemeral** herdr session (`hb-e2e-<pid>`) per run and never touches your
-  real sessions; each scenario uses an isolated temp DB + socket, creates **disposable** workspaces,
-  prefixes every herdr mutation `HERDR MUTATION:`, and tears everything down on exit (`--keep` leaves
-  sessions/workspaces for review). See [`docs/testing.md`](docs/testing.md) for the layers and how to add one.
+- End-to-end: `e2e/run-all.sh` (compat: `scripts/e2e.sh`) drives a REAL Herdr with a scenario
+  suite, but checked-in fake Pi/Claude executables keep the standard suite provider-free and
+  zero-cost. It boots its own collision-resistant **ephemeral** Herdr session
+(`hb-e2e-<pid>-<random>-<random>`) per run and never touches
+  your real sessions; each scenario uses an isolated temp DB + socket, creates **disposable**
+  workspaces, prefixes every Herdr mutation `HERDR MUTATION:`, and tears everything down on exit
+  (`--keep` leaves sessions/workspaces for review). The forced-build standard suite passes 01–17
+  provider-free under a mode-0700 root with controlled HOME/ZDOT/rc/PATH, never sourcing user rc;
+  Herdr is resolved absolutely before PATH narrowing. Session mutation, board-daemon signals, workspace close, and session stop/delete are authorized
+  only by a captured Linux `/proc` identity token (start time, executable, complete argv, expected
+  session/name), never PID liveness alone; this applies to the primary and secondary sessions,
+  run-all, standalone, and future real-Claude smoke paths. The real-Claude smoke independently
+  captures/verifies the daemon identity. Cleanup is limited to the owning session root, and cleanup
+  failures propagate so a passing scenario cannot hide failed cleanup. See [`docs/testing.md`](docs/testing.md)
+  for the layers and how to add one.
 
 ## Testing policy (pragmatic)
 
@@ -45,7 +55,8 @@ Full layering, harness details, and how to add tests live in [`docs/testing.md`]
 - **Trivial changes are exempt** — docs, comments, typos, pure renames need no new test.
 - **Green before handoff.** The gates above **and** `e2e/run-all.sh` must pass (all scenarios
   PASS — the suite boots its own ephemeral session(s), so 03-sessions no longer skips) before
-  handing a change off.
+  handing a change off. The configured runner's residual orphan-script limitation remains
+  documented; it is not silently treated as a cleanup guarantee.
 
 ## Conventions
 
@@ -69,18 +80,22 @@ Full layering, harness details, and how to add tests live in [`docs/testing.md`]
 sources are the installed binary itself — `herdr api schema --json` (methods/types/events +
 protocol number), `herdr <cmd> --help`, `herdr api snapshot`. Never assume a herdr command,
 flag, or JSON shape from memory, and pin the argv you verified in a test comment. Repo herdr
-facts are pinned to **herdr 0.7.4 / protocol 16**; on a newer herdr, re-verify against
-`api schema` **before** patching code. **See [`docs/herdr.md`](docs/herdr.md).**
+facts are pinned to exactly **Herdr 0.7.5 / protocol 17**. herdr-board intentionally rejects every
+other Herdr version and protocol; re-verify against `api schema` before changing that gate or any
+wire behavior. **See [`docs/herdr.md`](docs/herdr.md).**
 
 - **Never run destructive herdr commands against a user's workspaces/sessions.** Mutations only
   against disposable workspaces you created (see `e2e/`). Read-only probes otherwise.
 - **Agent names are exclusive** while a pane is open. Names are `card-<id>-<column-slug>`; on an
   `agent_name_taken` collision the daemon retries with the `-r<run>` fallback.
-- **Panes don't inherit the workspace's env/cwd.** `agent.start` needs cwd + env passed explicitly;
-  workspace cwd is read from the workspace's pane snapshot.
+- **Panes don't inherit the workspace's env/cwd.** Protocol-17 launch is pane-first:
+  `tab.create`/`pane.split` establishes cwd + env, then `agent.start` targets that pane with
+  `{name, kind, pane_id, args}`. Workspace cwd is read from the workspace's pane snapshot.
 - **Tab labels are not unique** in herdr — resolve the `kanban` tab by find-or-create on id, not label.
-- **herdr events are a raw-socket stream** (`events.subscribe`, persistent connection); the CLI only
-  has a blocking one-shot `events.wait`. Event fields: `pane_agent_status_changed` carries
-  `{pane, workspace, agent, status}`; `idle ≠ finished` (done needs the explicit `board done` channel).
+- **Herdr events are a raw-socket stream** (`events.subscribe`, persistent connection); the CLI only
+  has a blocking one-shot `events.wait`. Protocol-17 `pane_agent_status_changed` carries pane,
+  workspace, agent, and status fields; `idle ≠ finished`, and a trailing `idle` may follow `done`
+  (completion still needs the explicit `board done` channel). Watcher identity is `(session socket,
+  pane id)`, not pane id alone.
 - **AF_UNIX paths cap at 108 chars.** Test DBs/sockets must live under a short `/tmp` dir
   (`tempfile::tempdir()`), not a deep nested path, or `connect` fails with a cryptic error.

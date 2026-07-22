@@ -23,6 +23,8 @@ use uuid::Uuid;
 use crate::state::{ActiveRun, Daemon, MAX_AUTO_HOPS};
 use crate::store::space_key_str;
 
+const HERDR_PROTOCOL: u32 = 17;
+
 fn map_harness_err(e: HarnessError) -> Error {
     match e {
         HarnessError::UnknownHarness(h) => Error::BadRequest(format!("unknown harness: {h}")),
@@ -59,33 +61,62 @@ fn enqueue_run_inner(
     is_retry: bool,
     mode: EnqueueMode,
 ) -> Result<Run> {
-    let (card, column, comments, session_used) = {
-        let db = d.store.lock();
-        let card = db
-            .get_card(card_id)?
-            .ok_or_else(|| Error::NotFound(format!("card {card_id}")))?;
-        let column = db
-            .get_column(column_id)?
-            .ok_or_else(|| Error::NotFound(format!("column {column_id}")))?;
-        let comments = db.list_comments(card_id)?;
-        // Resume/fork only sessions PROVEN to exist on the harness side —
-        // claude exits with "no conversation found" otherwise. A spawned pane
-        // is not proof (claude may crash before creating the session); an
-        // `agent:<run_id>` comment is: it can only be posted from inside a
-        // live run (the skill mandates comment-before-done).
-        let session_used = match &card.session_id {
-            Some(sid) => db.list_runs(card_id)?.iter().any(|r| {
-                r.started_at.is_some()
-                    && r.session_id.as_deref() == Some(sid)
-                    && comments
-                        .iter()
-                        .any(|c| c.author == format!("agent:{}", r.id))
-            }),
-            None => false,
-        };
-        (card, column, comments, session_used)
-    };
+    // The scheduler claim and every enqueue input share one critical section.
+    // In particular, do not prepare an invocation from a card snapshot before
+    // this lock: a concurrent edit could otherwise update `card.session` (or
+    // its settings/prompt) before this run persists the stale value.
+    let sched = d.sched.lock().unwrap();
+    let db = d.store.lock();
+    let card = db
+        .get_card(card_id)?
+        .ok_or_else(|| Error::NotFound(format!("card {card_id}")))?;
+    if card.archived_at.is_some() {
+        return Err(Error::InvalidState(
+            "archived card must be restored before starting a run".into(),
+        ));
+    }
+    match (mode, sched.finalizing_cards.get(&card_id)) {
+        (EnqueueMode::Public, None) => {}
+        (EnqueueMode::Finalization(run_id), Some(owner)) if run_id == *owner => {}
+        (EnqueueMode::Public, Some(_)) => {
+            return Err(Error::InvalidState(
+                "card finalization is in progress; retry after it completes".into(),
+            ));
+        }
+        (EnqueueMode::Finalization(_), _) => {
+            return Err(Error::InvalidState(
+                "internal enqueue lost its card finalization claim".into(),
+            ));
+        }
+    }
+    if db.open_run_for_card(card_id)?.is_some() {
+        return Err(Error::InvalidState(
+            "card has an open run; complete or cancel it before starting another".into(),
+        ));
+    }
+    if card.column_id != column_id {
+        return Err(Error::InvalidState(
+            "card moved to another column while its run was being prepared".into(),
+        ));
+    }
 
+    let column = db
+        .get_column(column_id)?
+        .ok_or_else(|| Error::NotFound(format!("column {column_id}")))?;
+    let comments = db.list_comments(card_id)?;
+    // Resume/fork only sessions PROVEN to exist on the harness side — claude
+    // exits with "no conversation found" otherwise. A spawned pane is not
+    // proof; an `agent:<run_id>` comment can only be posted from a live run.
+    let session_used = match &card.session_id {
+        Some(sid) => db.list_runs(card_id)?.iter().any(|r| {
+            r.started_at.is_some()
+                && r.session_id.as_deref() == Some(sid)
+                && comments
+                    .iter()
+                    .any(|comment| comment.author == format!("agent:{}", r.id))
+        }),
+        None => false,
+    };
     let settings = effective_settings(&card, &column)?;
     let prompt = assemble_prompt(&card.description, &comments);
     let existing_session = card.session_id.as_deref().filter(|_| session_used);
@@ -114,55 +145,25 @@ fn enqueue_run_inner(
             SessionPlan::Resume(id) | SessionPlan::Fork(id) => Some(id.clone()),
         });
     let argv_json = serde_json::to_string(&invocation.argv)?;
+    // Persist one authoritative, trailer-inclusive value for every new run.
+    // Managed adapters already resolved this channel; configured harnesses use
+    // the same protocol composition they historically received through env.
+    let system_prompt_snapshot = invocation.system_prompt.clone().unwrap_or_else(|| {
+        board_core::harness::protocol_system_prompt(settings.system_prompt.as_deref())
+    });
 
-    // Invocation preparation above deliberately runs without either lock.
-    // Revalidate under scheduler -> store and keep both through the writes:
-    // this is the authoritative open-run and finalization guard.
-    let sched = d.sched.lock().unwrap();
-    let db = d.store.lock();
-    let current_card = db
-        .get_card(card_id)?
-        .ok_or_else(|| Error::NotFound(format!("card {card_id}")))?;
-    if current_card.archived_at.is_some() {
-        return Err(Error::InvalidState(
-            "archived card must be restored before starting a run".into(),
-        ));
-    }
-    match (mode, sched.finalizing_cards.get(&card_id)) {
-        (EnqueueMode::Public, None) => {}
-        (EnqueueMode::Finalization(run_id), Some(owner)) if run_id == *owner => {}
-        (EnqueueMode::Public, Some(_)) => {
-            return Err(Error::InvalidState(
-                "card finalization is in progress; retry after it completes".into(),
-            ));
-        }
-        (EnqueueMode::Finalization(_), _) => {
-            return Err(Error::InvalidState(
-                "internal enqueue lost its card finalization claim".into(),
-            ));
-        }
-    }
-    if db.open_run_for_card(card_id)?.is_some() {
-        return Err(Error::InvalidState(
-            "card has an open run; complete or cancel it before starting another".into(),
-        ));
-    }
-    if current_card.column_id != column_id {
-        return Err(Error::InvalidState(
-            "card moved to another column while its run was being prepared".into(),
-        ));
-    }
     if let Some(session_id) = &session_for_run {
-        if current_card.session_id.as_deref() != Some(session_id) {
+        if card.session_id.as_deref() != Some(session_id) {
             db.set_card_session(card_id, session_id)?;
         }
     }
-    let run = db.create_run(
+    let run = db.create_run_with_prompt_snapshots(
         card_id,
         column_id,
         &settings.harness,
         &argv_json,
         &prompt,
+        Some(&system_prompt_snapshot),
         session_for_run.as_deref(),
         card.session.as_deref(),
     )?;
@@ -231,18 +232,45 @@ async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result<bool> {
             .ok_or_else(|| Error::NotFound(format!("column {}", run.column_id)))?
     };
 
-    // Reconstruct the harness env (BOARD_PROMPT/BOARD_SYSTEM_PROMPT for custom
-    // harnesses) plus the daemon-injected BOARD_* vars.
-    let mut env = harness_prompt_env(
-        &run.harness,
-        &run.prompt_snapshot,
-        column.system_prompt.as_deref(),
-    );
+    // A non-NULL snapshot is explicit protocol-17 launch metadata. Legacy v6
+    // built-ins remain unmanaged so their persisted all-in-one argv executes
+    // unchanged, without duplicate prompt delivery.
+    let builtin = is_builtin_harness(&run.harness);
+    let managed = builtin && run.system_prompt_snapshot.is_some();
+    let agent_kind = managed.then(|| run.harness.clone());
+    let initial_prompt = managed.then(|| run.prompt_snapshot.clone());
+    let system_prompt = if managed {
+        run.system_prompt_snapshot.clone()
+    } else {
+        None
+    };
+    let mut env = if builtin {
+        Vec::new()
+    } else if let Some(snapshot) = &run.system_prompt_snapshot {
+        // New configured runs use the exact enqueue-time value. In particular,
+        // do not append the protocol trailer a second time here.
+        vec![
+            ("BOARD_PROMPT".to_string(), run.prompt_snapshot.clone()),
+            ("BOARD_SYSTEM_PROMPT".to_string(), snapshot.clone()),
+        ]
+    } else {
+        // Pre-v7 configured rows never persisted this channel; retain their
+        // historical spawn-time current-column fallback.
+        harness_prompt_env(
+            &run.harness,
+            &run.prompt_snapshot,
+            column.system_prompt.as_deref(),
+        )
+    };
     env.push(("BOARD_CARD_ID".into(), card.id.to_string()));
     env.push(("BOARD_RUN_ID".into(), run.id.to_string()));
     env.push((
         "BOARD_SOCKET".into(),
         d.socket_path.to_string_lossy().into_owned(),
+    ));
+    env.push((
+        "BOARD_BIN".into(),
+        std::env::current_exe()?.to_string_lossy().into_owned(),
     ));
 
     let argv: Vec<String> = serde_json::from_str(&run.argv_json)?;
@@ -252,6 +280,9 @@ async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result<bool> {
         // panes stay open, visible, by design), so on collision the spawner
         // retries once with the run-scoped `name_fallback`.
         name: run_pane_name(card.id, &column.name),
+        agent_kind,
+        initial_prompt,
+        system_prompt,
         name_fallback: Some(run_pane_name_unique(card.id, &column.name, run.id)),
         // Both space kinds land in a `kanban` tab (find-or-create + grid layout).
         tab_label: Some("kanban".to_string()),
@@ -293,23 +324,22 @@ async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result<bool> {
         let kind = card.space_kind;
         let space_ref = card.space_ref.clone();
         let space_cwd = card.space_cwd.clone();
-        let resolved =
-            tokio::task::spawn_blocking(move || -> anyhow::Result<(String, Option<String>)> {
-                let mut client = HerdrClient::connect(&socket)
-                    .map_err(|e| anyhow::anyhow!("herdr unavailable: {e}"))?;
-                resolve_space(
-                    &mut client,
-                    kind,
-                    space_ref.as_deref(),
-                    space_cwd.as_deref(),
-                )
-            })
-            .await
-            .map_err(|e| Error::BadRequest(format!("workspace resolve join: {e}")))?;
+        let resolved = tokio::task::spawn_blocking(move || -> anyhow::Result<(String, String)> {
+            let mut client = HerdrClient::connect(&socket)
+                .map_err(|e| anyhow::anyhow!("herdr unavailable: {e}"))?;
+            resolve_space(
+                &mut client,
+                kind,
+                space_ref.as_deref(),
+                space_cwd.as_deref(),
+            )
+        })
+        .await
+        .map_err(|e| Error::BadRequest(format!("workspace resolve join: {e}")))?;
         match resolved {
             Ok((id, cwd)) => {
                 req.workspace_ref = Some(id);
-                req.cwd = cwd.map(PathBuf::from);
+                req.cwd = Some(PathBuf::from(cwd));
             }
             Err(e) => {
                 fail_queued_run(d, run, card, &format!("{e:#}"))?;
@@ -420,8 +450,9 @@ fn register_spawned_run(
 }
 
 /// Prompt env is only for config-defined harness templates. Built-ins carry
-/// their prompt/system instructions in argv and must not receive reconstruction.
-/// The board-protocol trailer is unconditional: every custom-harness run gets
+/// their prompt/system instructions in explicit managed launch fields and must
+/// not receive reconstruction. The board-protocol trailer is unconditional:
+/// every custom-harness run gets
 /// BOARD_SYSTEM_PROMPT even when the column sets no system prompt.
 fn harness_prompt_env(
     harness: &str,
@@ -772,20 +803,29 @@ fn apply_transition(
 /// - [`SpaceKind::Workspace`]: `space_ref` is an existing workspace id or a
 ///   case-insensitive label; cwd comes from the workspace's pane snapshot.
 /// - [`SpaceKind::NewWorkspace`]: reuse an open workspace whose label matches
-///   `space_ref`, else `workspace.create {label, cwd}`; cwd is `space_cwd`.
+///   `space_ref`, else `workspace.create {label, cwd}`; in either case cwd is
+///   verified from the resulting workspace's live pane snapshot.
 fn resolve_space(
     client: &mut HerdrClient,
     kind: SpaceKind,
     space_ref: Option<&str>,
     space_cwd: Option<&str>,
-) -> anyhow::Result<(String, Option<String>)> {
+) -> anyhow::Result<(String, String)> {
+    // Dispatch performs workspace discovery before handing off to the spawner,
+    // so the selected socket must be gated here as well as in HerdrSpawner.
+    client.require_protocol(HERDR_PROTOCOL).map_err(|error| {
+        let message = error.to_string();
+        anyhow::Error::new(error).context(format!(
+            "checking Herdr protocol before workspace resolution: {message}"
+        ))
+    })?;
     let workspaces = client.workspace_list()?;
     match kind {
         SpaceKind::Workspace => {
             let ws_ref =
                 space_ref.ok_or_else(|| anyhow::anyhow!("workspace space requires a space_ref"))?;
             let id = resolve_workspace_ref(&workspaces, ws_ref).map_err(|m| anyhow::anyhow!(m))?;
-            let cwd = workspace_cwd(client, &id);
+            let cwd = workspace_cwd(client, &id)?;
             Ok((id, cwd))
         }
         SpaceKind::NewWorkspace => {
@@ -796,10 +836,12 @@ fn resolve_space(
                 .filter(|s| !s.trim().is_empty())
                 .ok_or_else(|| anyhow::anyhow!("new_workspace space requires space_cwd"))?;
             match find_workspace_by_label(&workspaces, label) {
-                // Reuse: prefer the workspace's live cwd, fall back to the card's.
+                // A reused workspace must use a cwd from one of its live
+                // panes. Protocol 17 does not inherit workspace cwd, so the
+                // card's original create cwd is not a safe fallback here.
                 Some(id) => {
-                    let live = workspace_cwd(client, &id);
-                    Ok((id, live.or_else(|| Some(cwd.to_string()))))
+                    let live = workspace_cwd(client, &id)?;
+                    Ok((id, live))
                 }
                 None => {
                     let created = client.workspace_create(&WorkspaceCreateParams {
@@ -808,21 +850,39 @@ fn resolve_space(
                         focus: false,
                         ..Default::default()
                     })?;
-                    Ok((created.workspace_id().to_string(), Some(cwd.to_string())))
+                    let id = created.workspace_id().to_string();
+                    let live = workspace_cwd(client, &id)?;
+                    Ok((id, live))
                 }
             }
         }
     }
 }
 
-/// Look up a workspace's cwd via its first pane in the session snapshot.
-fn workspace_cwd(client: &mut HerdrClient, workspace_id: &str) -> Option<String> {
-    client.session_snapshot().ok().and_then(|s| {
-        s.panes
-            .iter()
-            .find(|p| p.workspace_id == workspace_id)
-            .and_then(|p| p.cwd.clone())
-    })
+/// Look up a workspace's cwd via one of its live panes in the session snapshot.
+///
+/// Protocol 17 placement is pane-first and never inherits a workspace cwd, so
+/// failure to read this value must stop dispatch rather than launch from an
+/// implicit daemon/Herdr fallback directory.
+fn workspace_cwd(client: &mut HerdrClient, workspace_id: &str) -> anyhow::Result<String> {
+    let snapshot = client.session_snapshot().map_err(|error| {
+        // `anyhow::Error`'s Display shows only the outermost context. Include
+        // the rendered cause in that context so a dispatch failure tells the
+        // operator both which cwd lookup failed and why the snapshot failed,
+        // while retaining the original error chain for callers using `{:#}`.
+        let cause = format!("{error:#}");
+        anyhow::Error::new(error).context(format!(
+            "session snapshot unavailable while reading cwd for workspace '{workspace_id}': {cause}"
+        ))
+    })?;
+    snapshot
+        .panes
+        .iter()
+        .find(|pane| pane.workspace_id == workspace_id)
+        .and_then(|pane| pane.cwd.as_deref())
+        .filter(|cwd| !cwd.trim().is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("workspace '{workspace_id}' has no live pane cwd"))
 }
 
 /// Resolve a `workspace` space_ref (id, else case-insensitive label) to a
@@ -862,26 +922,31 @@ fn find_workspace_by_label(workspaces: &[WorkspaceInfo], label: &str) -> Option<
 
 #[cfg(test)]
 mod tests {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
     use std::time::Instant;
 
     use super::{
         dispatch_pass, enqueue_run, finalize_run, find_workspace_by_label, harness_prompt_env,
-        register_spawned_run, resolve_workspace_ref,
+        register_spawned_run, resolve_space, resolve_workspace_ref,
     };
     use crate::settings::DaemonSettings;
     use crate::state::Daemon;
     use crate::store::Store;
     use board_core::config::Config;
     use board_core::db::Db;
+    use board_core::prompt::{assemble_prompt, effective_settings};
     use board_core::protocol::{
-        AwaitingReason, BoardChangedReason, CardCreateParams, CardStatus, ColumnCreateParams,
-        ColumnUpdateParams, Effort, Event, RunOutcome, Trigger,
+        AwaitingReason, BoardChangedReason, CardCreateParams, CardStatus, CardUpdateParams,
+        ColumnCreateParams, ColumnUpdateParams, Effort, Event, RunOutcome, SpaceKind, Trigger,
     };
     use board_core::spawn::{SpawnHandle, SpawnReq, Spawner};
-    use board_herdr::{AgentStatus, WorkspaceInfo};
+    use board_herdr::{AgentStatus, HerdrClient, WorkspaceInfo};
+    use serde_json::Value;
     use tokio::sync::{broadcast, mpsc, watch};
 
     struct MissingPiSpawner;
@@ -904,6 +969,29 @@ mod tests {
     #[derive(Default)]
     struct RecordingSpawner {
         kills: AtomicUsize,
+    }
+
+    #[derive(Default)]
+    struct CapturingSpawner {
+        requests: std::sync::Mutex<Vec<SpawnReq>>,
+    }
+
+    impl Spawner for CapturingSpawner {
+        fn spawn(&self, req: &SpawnReq) -> anyhow::Result<SpawnHandle> {
+            self.requests.lock().unwrap().push(req.clone());
+            Ok(SpawnHandle {
+                pid: Some(4242),
+                ..Default::default()
+            })
+        }
+
+        fn kill(&self, _h: &SpawnHandle) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn is_alive(&self, _h: &SpawnHandle) -> anyhow::Result<bool> {
+            Ok(false)
+        }
     }
 
     impl Spawner for RecordingSpawner {
@@ -960,6 +1048,130 @@ mod tests {
             active_tab_id: String::new(),
             agent_status: AgentStatus::Unknown,
         }
+    }
+
+    /// Serve exactly the three calls made by `resolve_space`: protocol gate,
+    /// workspace discovery, and the live pane snapshot. Keeping the fixture
+    /// single-purpose makes cwd failure tests deterministic and independent of
+    /// a real Herdr process.
+    fn workspace_resolution_server(snapshot: Option<Value>) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("workspace-resolution.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        thread::spawn(move || {
+            for incoming in listener.incoming().take(3) {
+                let Ok(stream) = incoming else { break };
+                let mut writer = stream.try_clone().unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    continue;
+                }
+                let request: Value = serde_json::from_str(line.trim()).unwrap();
+                let response = match request["method"].as_str().unwrap() {
+                    "ping" => serde_json::json!({
+                        "id": request["id"],
+                        "result": {
+                            "type": "pong", "version": "0.7.5", "protocol": 17,
+                            "capabilities": {}
+                        }
+                    }),
+                    "workspace.list" => serde_json::json!({
+                        "id": request["id"],
+                        "result": {"workspaces": [{
+                            "workspace_id": "w1", "label": "Feature", "number": 1,
+                            "focused": false, "active_tab_id": "", "agent_status": "idle"
+                        }]}
+                    }),
+                    "session.snapshot" => match &snapshot {
+                        Some(snapshot) => serde_json::json!({
+                            "id": request["id"],
+                            "result": {"snapshot": snapshot}
+                        }),
+                        None => serde_json::json!({
+                            "id": request["id"],
+                            "error": {
+                                "code": "snapshot_failed",
+                                "message": "session snapshot unavailable"
+                            }
+                        }),
+                    },
+                    method => panic!("unexpected workspace resolution method: {method}"),
+                };
+                writeln!(writer, "{response}").unwrap();
+                writer.flush().unwrap();
+            }
+        });
+        (dir, socket)
+    }
+
+    /// Serve the four calls made while creating a missing `new_workspace`:
+    /// protocol gate, workspace discovery, create, and live pane snapshot.
+    fn new_workspace_resolution_server(snapshot: Option<Value>) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("new-workspace-resolution.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        thread::spawn(move || {
+            for incoming in listener.incoming().take(4) {
+                let Ok(stream) = incoming else { break };
+                let mut writer = stream.try_clone().unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    continue;
+                }
+                let request: Value = serde_json::from_str(line.trim()).unwrap();
+                let response = match request["method"].as_str().unwrap() {
+                    "ping" => serde_json::json!({
+                        "id": request["id"],
+                        "result": {
+                            "type": "pong", "version": "0.7.5", "protocol": 17,
+                            "capabilities": {}
+                        }
+                    }),
+                    "workspace.list" => serde_json::json!({
+                        "id": request["id"], "result": {"workspaces": []}
+                    }),
+                    "workspace.create" => serde_json::json!({
+                        "id": request["id"],
+                        "result": {
+                            "type": "workspace_created",
+                            "workspace": {
+                                "workspace_id": "created-ws", "label": "Created", "number": 1,
+                                "focused": false, "active_tab_id": "created-ws:t1",
+                                "agent_status": "unknown"
+                            },
+                            "tab": {
+                                "tab_id": "created-ws:t1", "workspace_id": "created-ws",
+                                "label": "tab", "focused": false, "number": 1,
+                                "pane_count": 1, "agent_status": "unknown"
+                            },
+                            "root_pane": {
+                                "pane_id": "created-ws:p1", "terminal_id": "term-1",
+                                "workspace_id": "created-ws", "tab_id": "created-ws:t1",
+                                "focused": true, "revision": 0, "agent_status": "unknown"
+                            }
+                        }
+                    }),
+                    "session.snapshot" => match &snapshot {
+                        Some(snapshot) => serde_json::json!({
+                            "id": request["id"], "result": {"snapshot": snapshot}
+                        }),
+                        None => serde_json::json!({
+                            "id": request["id"],
+                            "error": {
+                                "code": "snapshot_failed",
+                                "message": "created workspace snapshot unavailable"
+                            }
+                        }),
+                    },
+                    method => panic!("unexpected new-workspace resolution method: {method}"),
+                };
+                writeln!(writer, "{response}").unwrap();
+                writer.flush().unwrap();
+            }
+        });
+        (dir, socket)
     }
 
     #[test]
@@ -1358,6 +1570,230 @@ mod tests {
         );
     }
 
+    #[derive(Debug, PartialEq, Eq)]
+    struct EnqueueSnapshotSpec {
+        harness: String,
+        model: Option<String>,
+        effort: Option<Effort>,
+        permission_mode: Option<String>,
+        system_prompt: Option<String>,
+        fresh_session: bool,
+        prompt: String,
+        session: Option<String>,
+    }
+
+    // Test-only seam for the authoritative-lock contract: production enqueue
+    // must call the pure snapshot builders again from the locked state rather
+    // than persist the values prepared before the lock.
+    fn authoritative_enqueue_snapshot(
+        card: &board_core::model::Card,
+        column: &board_core::model::Column,
+        comments: &[board_core::model::Comment],
+    ) -> EnqueueSnapshotSpec {
+        let settings = effective_settings(card, column).unwrap();
+        EnqueueSnapshotSpec {
+            harness: settings.harness,
+            model: settings.model,
+            effort: settings.effort,
+            permission_mode: settings.permission_mode,
+            system_prompt: settings.system_prompt,
+            fresh_session: settings.fresh_session,
+            prompt: assemble_prompt(&card.description, comments),
+            session: card.session.clone(),
+        }
+    }
+
+    #[test]
+    fn enqueue_snapshot_spec_rebuilds_after_authoritative_card_changes() {
+        let d = test_daemon(Arc::new(MissingPiSpawner));
+        let (card_id, column_id) = {
+            let db = d.store.lock();
+            let column = db
+                .create_column(&ColumnCreateParams {
+                    name: "authoritative old".into(),
+                    system_prompt: Some("old settings".into()),
+                    model_override: Some("old-model".into()),
+                    ..Default::default()
+                })
+                .unwrap();
+            let card = db
+                .create_card(&CardCreateParams {
+                    title: "authoritative snapshot".into(),
+                    column_id: Some(column.id),
+                    harness: Some("pi".into()),
+                    description: Some("old prompt".into()),
+                    session: Some("old-herdr-session".into()),
+                    ..Default::default()
+                })
+                .unwrap();
+            db.add_comment(card.id, "user", "old comment").unwrap();
+            (card.id, column.id)
+        };
+
+        let prepared = {
+            let db = d.store.lock();
+            authoritative_enqueue_snapshot(
+                &db.get_card(card_id).unwrap().unwrap(),
+                &db.get_column(column_id).unwrap().unwrap(),
+                &db.list_comments(card_id).unwrap(),
+            )
+        };
+
+        {
+            let db = d.store.lock();
+            db.update_card(&CardUpdateParams {
+                id: card_id,
+                description: Some("new prompt".into()),
+                model: Some("new-model".into()),
+                session: Some("new-herdr-session".into()),
+                ..Default::default()
+            })
+            .unwrap();
+            db.update_column(&ColumnUpdateParams {
+                id: column_id,
+                system_prompt: Some("new settings".into()),
+                model_override: Some("new-column-model".into()),
+                ..Default::default()
+            })
+            .unwrap();
+            db.add_comment(card_id, "user", "new comment").unwrap();
+        }
+
+        let rebuilt = {
+            let db = d.store.lock();
+            authoritative_enqueue_snapshot(
+                &db.get_card(card_id).unwrap().unwrap(),
+                &db.get_column(column_id).unwrap().unwrap(),
+                &db.list_comments(card_id).unwrap(),
+            )
+        };
+        assert_ne!(prepared, rebuilt);
+        assert_eq!(rebuilt.harness, "pi");
+        assert_eq!(rebuilt.model.as_deref(), Some("new-column-model"));
+        assert_eq!(rebuilt.system_prompt.as_deref(), Some("new settings"));
+        assert_eq!(rebuilt.session.as_deref(), Some("new-herdr-session"));
+        assert!(rebuilt.prompt.contains("new prompt"));
+        assert!(rebuilt.prompt.contains("new comment"));
+        assert!(!rebuilt.prompt.contains("old prompt"));
+        // Existing comments remain part of the authoritative current list;
+        // the new comment must not be dropped while rebuilding.
+        assert!(rebuilt.prompt.contains("old comment"));
+    }
+
+    #[tokio::test]
+    async fn queued_managed_pi_uses_enqueue_time_system_snapshot() {
+        let spawner = Arc::new(CapturingSpawner::default());
+        let d = test_daemon(spawner.clone());
+        let (card_id, column_id) = {
+            let db = d.store.lock();
+            let column = db
+                .create_column(&ColumnCreateParams {
+                    name: "Execute".into(),
+                    trigger: Some(Trigger::Auto),
+                    system_prompt: Some("old column instructions".into()),
+                    ..Default::default()
+                })
+                .unwrap();
+            let card = db
+                .create_card(&CardCreateParams {
+                    title: "snapshot dispatch".into(),
+                    column_id: Some(column.id),
+                    harness: Some("pi".into()),
+                    description: Some("task body".into()),
+                    ..Default::default()
+                })
+                .unwrap();
+            (card.id, column.id)
+        };
+        let run = enqueue_run(&d, card_id, column_id, false).unwrap();
+        let old = board_core::harness::protocol_system_prompt(Some("old column instructions"));
+        d.store
+            .lock()
+            .update_column(&ColumnUpdateParams {
+                id: column_id,
+                system_prompt: Some("new column instructions".into()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        dispatch_pass(&d).await;
+
+        let requests = spawner.requests.lock().unwrap();
+        let req = &requests[0];
+        assert_eq!(req.agent_kind.as_deref(), Some("pi"));
+        assert_eq!(
+            req.initial_prompt.as_deref(),
+            Some(run.prompt_snapshot.as_str())
+        );
+        assert_eq!(req.system_prompt.as_deref(), Some(old.as_str()));
+        assert!(req
+            .argv
+            .iter()
+            .all(|arg| !arg.contains("old column instructions")));
+        assert!(req.argv.iter().all(|arg| !arg.contains("task body")));
+    }
+
+    #[tokio::test]
+    async fn queued_configured_harness_uses_enqueue_time_system_snapshot() {
+        let spawner = Arc::new(CapturingSpawner::default());
+        let mut d = test_daemon(spawner.clone());
+        Arc::get_mut(&mut d).unwrap().config.harness.insert(
+            "custom".into(),
+            board_core::config::HarnessDef {
+                argv: vec!["custom-agent".into()],
+                ..Default::default()
+            },
+        );
+        let (card_id, column_id) = {
+            let db = d.store.lock();
+            let column = db
+                .create_column(&ColumnCreateParams {
+                    name: "Configured".into(),
+                    system_prompt: Some("configured old".into()),
+                    ..Default::default()
+                })
+                .unwrap();
+            let card = db
+                .create_card(&CardCreateParams {
+                    title: "configured snapshot".into(),
+                    column_id: Some(column.id),
+                    harness: Some("custom".into()),
+                    description: Some("configured task".into()),
+                    ..Default::default()
+                })
+                .unwrap();
+            (card.id, column.id)
+        };
+        enqueue_run(&d, card_id, column_id, false).unwrap();
+        d.store
+            .lock()
+            .update_column(&ColumnUpdateParams {
+                id: column_id,
+                system_prompt: Some("configured new".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        dispatch_pass(&d).await;
+        let requests = spawner.requests.lock().unwrap();
+        let env = &requests[0].env;
+        assert_eq!(
+            env.iter()
+                .find(|(k, _)| k == "BOARD_SYSTEM_PROMPT")
+                .unwrap()
+                .1,
+            board_core::harness::protocol_system_prompt(Some("configured old"))
+        );
+        assert_eq!(
+            env.iter().find(|(k, _)| k == "BOARD_BIN").map(|(_, v)| v),
+            Some(
+                &std::env::current_exe()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            )
+        );
+    }
+
     #[tokio::test]
     async fn spawn_failure_for_missing_pi_marks_run_failed_with_system_comment() {
         let d = test_daemon(Arc::new(MissingPiSpawner));
@@ -1469,5 +1905,128 @@ mod tests {
         let all = [ws("w1", "Alpha")];
         // Absent → None → dispatch will call workspace.create.
         assert!(find_workspace_by_label(&all, "brand-new").is_none());
+    }
+
+    #[test]
+    fn existing_workspace_resolution_fails_when_snapshot_fails() {
+        let (_dir, socket) = workspace_resolution_server(None);
+        let mut client = HerdrClient::connect(&socket).unwrap();
+        let err = resolve_space(&mut client, SpaceKind::Workspace, Some("w1"), None)
+            .expect_err("a snapshot failure must prevent launch without a cwd");
+        assert!(err.to_string().contains("session snapshot unavailable"));
+    }
+
+    #[test]
+    fn workspace_resolution_fails_without_live_cwd_for_existing_and_reused_spaces() {
+        let missing_cwd_snapshot = serde_json::json!({
+            "panes": [{
+                "pane_id": "w1:p1",
+                "workspace_id": "w1",
+                "focused": false,
+                "revision": 1
+            }]
+        });
+
+        for (kind, space_ref, space_cwd) in [
+            (SpaceKind::Workspace, "w1", None),
+            (SpaceKind::NewWorkspace, "Feature", Some("/fallback")),
+        ] {
+            let (_dir, socket) = workspace_resolution_server(Some(missing_cwd_snapshot.clone()));
+            let mut client = HerdrClient::connect(&socket).unwrap();
+            let err = resolve_space(&mut client, kind, Some(space_ref), space_cwd)
+                .expect_err("a missing live pane cwd must not fall back or be omitted");
+            assert!(err.to_string().contains("cwd"), "{err}");
+        }
+    }
+
+    #[test]
+    fn newly_created_workspace_requires_live_snapshot_cwd() {
+        for snapshot in [
+            None,
+            Some(serde_json::json!({
+                "panes": [{
+                    "pane_id": "created-ws:p1",
+                    "workspace_id": "created-ws",
+                    "focused": false,
+                    "revision": 1
+                }]
+            })),
+        ] {
+            let (_dir, socket) = new_workspace_resolution_server(snapshot);
+            let mut client = HerdrClient::connect(&socket).unwrap();
+            let err = resolve_space(
+                &mut client,
+                SpaceKind::NewWorkspace,
+                Some("Created"),
+                Some("/requested-but-unverified"),
+            )
+            .expect_err("a created workspace must prove its cwd from a live pane snapshot");
+            assert!(err.to_string().contains("cwd") || err.to_string().contains("snapshot"));
+        }
+    }
+
+    #[test]
+    fn new_workspace_selected_socket_preflights_protocol_before_resolution() {
+        // RED: dispatch must gate the selected socket before resolve_space. A
+        // mismatched socket must receive exactly ping; workspace.list/create,
+        // session.snapshot, and spawner placement must not be reached.
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("selected-herdr.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let methods = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen = Arc::clone(&methods);
+        thread::spawn(move || {
+            for stream in listener.incoming().take(3) {
+                let Ok(stream) = stream else { break };
+                let mut writer = stream.try_clone().unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    continue;
+                }
+                let request: Value = serde_json::from_str(line.trim()).unwrap();
+                seen.lock()
+                    .unwrap()
+                    .push(request["method"].as_str().unwrap().into());
+                let result = match request["method"].as_str().unwrap() {
+                    "ping" => serde_json::json!({
+                        "type": "pong", "version": "0.7.4", "protocol": 17,
+                        "capabilities": {}
+                    }),
+                    "workspace.list" => serde_json::json!({
+                        "workspaces": [{
+                            "workspace_id": "w1", "label": "feature", "number": 1,
+                            "focused": false, "active_tab_id": "", "agent_status": "idle"
+                        }]
+                    }),
+                    "session.snapshot" => serde_json::json!({}),
+                    other => panic!("unexpected mutating/placement method: {other}"),
+                };
+                writeln!(
+                    writer,
+                    "{}",
+                    serde_json::json!({
+                        "id": request["id"], "result": result
+                    })
+                )
+                .unwrap();
+                writer.flush().unwrap();
+            }
+        });
+
+        let mut client = HerdrClient::connect(&socket).unwrap();
+        let result = resolve_space(
+            &mut client,
+            SpaceKind::NewWorkspace,
+            Some("feature"),
+            Some("/tmp/feature"),
+        );
+
+        let actual_methods = methods.lock().unwrap().clone();
+        assert_eq!(actual_methods, vec!["ping"]);
+        let err = result.expect_err("protocol mismatch must stop workspace resolution");
+        assert!(err
+            .to_string()
+            .contains("Herdr 0.7.5 with protocol 17 is required"));
     }
 }

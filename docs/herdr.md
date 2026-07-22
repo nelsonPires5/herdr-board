@@ -34,9 +34,11 @@ live agent status (idle / working / blocked / done) back to herdr. Manage them w
 - `herdr integration install <name>` / `herdr integration uninstall <name>`
 - `herdr integration status [--outdated-only]`
 
-As of herdr 0.7.4 the installable integrations are: **pi, omp, claude, codex,
+As of herdr 0.7.5 the installable integrations are: **pi, omp, claude, codex,
 copilot, devin, droid, kimi, opencode, kilo, hermes, qodercli, cursor,
-mastracode** (get the current list from `herdr integration --help`).
+mastracode** (get the current list from `herdr integration install --help`). On the
+2026-07-22 verification host, `herdr integration status` reported Pi **v6** and
+Claude **v7** as current.
 
 Installing one **writes into that harness's own config** (`pi` installs
 `~/.pi/agent/extensions/herdr-agent-state.ts`; `claude` installs a hook under
@@ -63,14 +65,35 @@ To verify what a running herdr actually reports, inspect the live state:
 Pi users who need precise live working/blocked/done status and session references must run
 `herdr integration install pi`; the matching integration is a prerequisite for whichever harness
 is being dispatched. Without it, the board continues in the degraded mode described above. The
-standard E2E uses a fake Pi and tests watcher status mapping deterministically rather than changing
-integrations.
+standard E2E uses checked-in fake Pi and Claude executables and tests watcher status mapping
+deterministically rather than changing integrations or calling a provider.
+
+## Protocol 17 launch contract
+
+Herdr 0.7.5 uses pane-first managed-agent launch. First create or split an
+existing pane with the required cwd and environment; then call `agent.start`
+with `{name, kind, pane_id, args, timeout_ms}`. `kind` selects Herdr's canonical
+agent executable and `args` contains only that executable's arguments. The old
+workspace/tab/split/env placement fields are not part of `agent.start`.
+
+After start, `agent.get <target>` exposes `interactive_ready` and
+`launch_pending`. herdr-board waits for `interactive_ready=true` and
+`launch_pending=false`, then submits the exact card task with `agent.prompt`
+instead of startup argv or synthetic keystrokes. `agent.read` remains a terminal
+screen/scrollback read, not a semantic result channel.
+
+Configured harnesses are intentionally unmanaged. Protocol 17 has a
+`herdr pane run <PANE_ID> <COMMAND>...` CLI command but no `pane.run` socket
+method, so the daemon invokes that CLI against the selected session socket via
+a temporary runner script. Agents must still use `board comment` and `board
+done`; the configured runner reports a silent child exit back to boardd as a
+failed run with no automatic column transition.
 
 ## Version drift
 
 This repo's herdr facts — [`docs/research.md`](research.md), [`docs/design.md`](design.md),
 and the wire shapes hard-coded in `board-herdr` — were **verified against
-herdr 0.7.4 / protocol 16 on 2026-07-17**.
+Herdr 0.7.5 / protocol 17 on 2026-07-22**.
 
 herdr updates independently of this repo (`herdr update`, stable/preview channels).
 When something that used to work misbehaves on a newer herdr — an unknown method, a

@@ -1,6 +1,6 @@
 //! Typed views over herdr result payloads.
 //!
-//! Field names verified against `herdr api schema --json` (protocol 16,
+//! Field names verified against `herdr api schema --json` (protocol 17,
 //! captured in `tests/fixtures/schema.json`). All structs use
 //! `#[serde(default)]` on optional fields and ignore unknown fields so the
 //! client keeps working across minor herdr additions.
@@ -101,6 +101,8 @@ pub struct PaneInfo {
     pub title: Option<String>,
     #[serde(default)]
     pub cwd: Option<String>,
+    pub focused: bool,
+    pub revision: u64,
 }
 
 /// An agent-bearing pane, as listed in `session.snapshot.agents`.
@@ -119,6 +121,12 @@ pub struct AgentInfo {
     pub agent_status: AgentStatus,
     #[serde(default)]
     pub custom_status: Option<String>,
+    pub focused: bool,
+    pub revision: u64,
+    #[serde(default)]
+    pub launch_pending: bool,
+    #[serde(default)]
+    pub interactive_ready: bool,
 }
 
 /// A git worktree entry.
@@ -198,7 +206,7 @@ pub struct TabCreated {
     pub root_pane: PaneInfo,
 }
 
-/// Result of `agent.start`. `argv` echoes the launched command line.
+/// Result of protocol-17 `agent.start`. `argv` echoes the launched command line.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AgentStarted {
     pub agent: AgentInfo,

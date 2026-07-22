@@ -13,7 +13,7 @@
 //!   [`HerdrEvent`]s via `events.subscribe`.
 //!
 //! Method and field names are verified against `herdr api schema --json`
-//! (protocol 16), captured in `tests/fixtures/schema.json`.
+//! (protocol 17), captured in `tests/fixtures/schema.json`.
 
 mod client;
 mod envelope;
@@ -22,8 +22,9 @@ mod events;
 mod types;
 
 pub use client::{
-    default_socket_path, AgentStartParams, HerdrClient, TabCreateParams, WorkspaceCreateParams,
-    WorktreeCreateParams,
+    default_socket_path, AgentPromptParams, AgentPromptWaitOptions, AgentStartParams,
+    AgentWaitParams, HerdrClient, PaneRenameParams, PaneSplitParams, TabCreateParams,
+    WorkspaceCreateParams, WorktreeCreateParams,
 };
 pub use envelope::{ErrorBody, Request, Response};
 pub use error::{HerdrError, Result};

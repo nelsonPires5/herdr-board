@@ -8,7 +8,7 @@
 | **Column** | A stage, entirely user-defined: create/rename/reorder/delete from the TUI (keyboard or mouse). Config: `system_prompt`, `trigger` (`auto` = entering the column starts a run; `manual` = waits for human), `on_success` / `on_fail` (move card to column X, or stay), optional overrides (model/effort/harness) applied to every card passing through. Nothing about column names or count is hardcoded. |
 | **Card** | A unit of work. Title, **description = the base prompt**, harness, model, effort, permission mode, a **herdr session** (`session`, null = daemon default) AND a **space** within it (`workspace` = an already-open workspace id; `new_workspace` = a label + cwd the daemon opens on first dispatch), position, live status (`idle · queued · running · blocked · awaiting · done · failed`), the harness `session_id` for resume, and an optional `archived_at` timestamp. Archiving is reversible and preserves comments/run history. `awaiting` (agent finished/went idle without `board done`, run still open, pending human review) records an `awaiting_reason` (`agent_done` / `idle_expired`); `done` is confirmed completion with no target column. |
 | **Comment** | Timestamped note on a card. Author = `user`, `agent` (from a run), or `system` (daemon transitions). Comments are both the audit log **and** context for the next run. |
-| **Run** | One agent execution of a card in a column: argv, herdr pane/workspace ids, session id, started/ended, exit status, result summary. Cards keep full run history (retries = new runs). |
+| **Run** | One agent execution of a card in a column: startup argv, enqueue-time task/system-prompt snapshots, herdr pane/workspace ids, session id, started/ended, exit status, result summary. Cards keep full run history (retries = new runs). |
 
 Separation card ↔ run is deliberate (vibe-kanban converged on task/attempt/execution after painful migrations): a card can be re-run, moved back, or forked without losing history.
 
@@ -28,7 +28,8 @@ Separation card ↔ run is deliberate (vibe-kanban converged on task/attempt/exe
              └───────┬──────────────────────────────────────┘
                      │ herdr socket API (~/.config/herdr/herdr.sock)
                      ▼
-   workspace.create · agent.start · agent.send
+   ping · workspace.create · tab.create / pane.split
+   agent.start · agent.get · agent.prompt · pane.rename / pane.close
    events.subscribe(pane_agent_status_changed, pane_exited) · pane.read
    notification.show
 ```
@@ -37,6 +38,20 @@ Separation card ↔ run is deliberate (vibe-kanban converged on task/attempt/exe
 - **TUI** is packaged as a herdr plugin: `herdr-plugin.toml` declares a `[[panes]]` entry (herdr spawns the TUI binary in a split/tab) and `[[actions]]` (e.g. "add focused pane's repo as a card") bindable via `[[keys.command]]`. Plugin processes receive `HERDR_BIN_PATH`, `HERDR_PLUGIN_CONFIG_DIR`, `HERDR_PLUGIN_CONTEXT_JSON`.
 - **`board` CLI** subcommands hit the boardd socket — never SQLite directly (single-writer rule).
 - boardd holds a persistent connection to herdr's socket for `events.subscribe`; fallback is polling `herdr api snapshot`.
+
+### Herdr compatibility and launch boundary
+
+The public boardd socket protocol remains **v1**. That is independent of the upstream Herdr socket
+contract: this version supports **exactly Herdr 0.7.5 / protocol 17** and has no protocol-16 launch
+path. On the card's selected session socket, dispatch first calls `ping` and requires both exact
+values. This happens before workspace discovery or `workspace.create`; the spawner repeats the gate
+as its first call before `tab.create`, `pane.split`, `agent.start`, or the configured-harness runner.
+A mismatch fails the queued run without mutating the workspace.
+
+Protocol 17 is pane-first. boardd creates the `kanban` tab with `cwd` and `env`, using its root pane,
+or splits a selected pane in an existing tab with the same `cwd` and `env`. Only then does it start
+a managed agent in that exact pane or run a configured harness there. Placement, cwd, and env are
+never passed to `agent.start`.
 
 ## 3. Data model
 
@@ -55,17 +70,25 @@ cards(id, board_id, column_id, position, title, description,
       session_id, created_at, updated_at, archived_at)
 comments(id, card_id, author, body, created_at)
 runs(id, card_id, column_id, harness, argv_json, prompt_snapshot,
+     system_prompt_snapshot,                    -- nullable; enqueue-time, trailer-inclusive
      herdr_workspace_id, herdr_pane_id, session_id,
      session,                                    -- herdr session the run spawned into
      started_at, ended_at, outcome ('ok'|'fail'|'cancelled'|'lost'),  -- 'lost' is legacy, no longer produced
      result_summary, log_path)
 ```
 
-Schema is versioned via `PRAGMA user_version` (current = **v6**). A fresh DB is built straight from
-`schema.sql` and stamped v6. Existing v1→v4 migrations retain their space/session, archive, and Pi
+Schema is versioned via `PRAGMA user_version` (current = **v7**). A fresh DB is built straight from
+`schema.sql` and stamped v7. Existing v1→v4 migrations retain their space/session, archive, and Pi
 effort behavior. v5 adds unique non-null `boards.scope_path`, preserves board `id=1` plus every
 related row as `Global`, and leaves existing card harnesses unchanged. v6 rebuilds `cards` to admit
-the `awaiting`/`done` statuses and adds `cards.awaiting_reason` (NULL outside `awaiting`).
+the `awaiting`/`done` statuses and adds `cards.awaiting_reason` (NULL outside `awaiting`). v7 adds
+nullable `runs.system_prompt_snapshot` without backfilling old rows. New runs atomically preserve the
+fully resolved, board-protocol-trailer-inclusive system prompt at enqueue time, so a queued run is
+not changed by later column edits. A legacy NULL remains a launch-version marker: pre-v7 built-ins
+execute their persisted all-in-one argv unchanged, while pre-v7 configured rows retain their
+historical spawn-time current-column reconstruction. `Run` deserialization defaults an omitted field
+to NULL, but serialization always omits `system_prompt_snapshot` and its contents from boardd wire
+responses.
 
 ### Session model
 
@@ -74,11 +97,14 @@ Cards target a **herdr session** plus a space in it. Because two sessions can ea
 - **Registry**: session enumeration is not in the herdr socket API (a session only knows itself), so the daemon shells out to `herdr session list --json` (binary via `$HERDR_BIN_PATH`, else `herdr`), caching ~3s. It maps `name/default/running/socket_path`.
 - **Default**: a card with `session = null` uses the daemon's own bound herdr socket; its display name is the registry entry whose `socket_path` matches (else the synthetic `"default"`).
 - **Per-session client**: spawn / kill / liveness / workspace resolve-or-create all build a `HerdrClient` on the resolved session socket (carried on `SpawnReq`/`SpawnHandle` as `herdr_socket`, and persisted as `runs.session` so kill/liveness work after a daemon restart).
-- **Per-session watchers**: a single watcher thread multiplexes one `HerdrEvents` stream **per session socket** that has active panes (agent-status subscriptions are validated per socket). It holds a `socket → stream` map, rebuilds all streams on a watch-set generation change, and (re)connects any watched socket missing a live stream — simpler than per-session thread lifecycles while fitting the existing loop.
+- **Per-session watchers**: a single watcher thread multiplexes one `HerdrEvents` stream **per session socket** that has active panes (agent-status subscriptions are validated per socket). It holds a `socket → stream` map, rebuilds all streams on a watch-set generation change, and (re)connects any watched socket missing a live stream — simpler than per-session thread lifecycles while fitting the existing loop. Event identity is the tuple `(session socket, pane id)`, not pane id alone.
 
 ### new_workspace flow
 
-On first dispatch of a `new_workspace` card: list the session's workspaces; if one's label matches `space_ref` (case-insensitive) reuse it, else `workspace.create {label:space_ref, cwd:space_cwd}`. Then proceed identically to a `workspace` card (cwd snapshot, kanban tab, grid layout).
+On first dispatch of a `new_workspace` card: preflight the selected socket for exact Herdr
+0.7.5/protocol 17, then list the session's workspaces; if one's label matches `space_ref`
+(case-insensitive) reuse it, else `workspace.create {label:space_ref, cwd:space_cwd, focus:false}`.
+Then proceed identically to a `workspace` card (cwd snapshot, pane-first kanban-tab placement). If the reused or existing workspace snapshot fails, or contains no live cwd, dispatch fails; it never falls back to process cwd or a stale snapshot.
 
 ### Worktree removal
 
@@ -140,7 +166,7 @@ trigger = "manual"
 ```
 
 Notes:
-- Column `system_prompt` is delivered via `--append-system-prompt` (never `--system-prompt`) so harness defaults and context files stay intact. It can invoke skills (`/quick-planner`, `/code-review`) — that's how "column triggers a skill" works, no special mechanism needed.
+- Column `system_prompt` is combined with the mandatory board-protocol trailer and snapshotted at enqueue. For managed Pi it is delivered through a temporary file passed to `--append-system-prompt`; for managed Claude the file flag is `--append-system-prompt-file`. Neither replaces harness defaults/context files, and neither puts the system text directly in startup argv. It can invoke skills (`/quick-planner`, `/code-review`) — that's how "column triggers a skill" works, no special mechanism needed.
 - `on_fail = "Execute"` from Review + comments-as-context gives the fix loop for free: the re-entered Execute run sees the reviewer's findings in its prompt.
 
 ### Scope selection
@@ -186,20 +212,68 @@ toast.
 
 ## 5. Prompt assembly
 
-For each run, boardd builds:
+At enqueue, boardd resolves and persists two independent channels:
 
 ```
-argv  = pi [--model <card|column override>] [--thinking <effort>]
-           --append-system-prompt <column.system_prompt + board protocol trailer>
-           [--session-id <exact-id> | --fork <old-id> --session-id <new-id>]
-        # explicit --harness claude retains Claude's model/effort/permission argv
-prompt = <card.description>
-         + "\n\n## Card comments so far\n" + last N comments (author, ts, body)
-env    = BOARD_CARD_ID=<id>, BOARD_RUN_ID=<id>, BOARD_SOCKET=<path>
+task_prompt   = <card.description>
+                + "\n\n## Card comments\n" + last 20 comments (author, ts, body)
+system_prompt = <column.system_prompt, if any>
+                + "\n\n" + <mandatory board protocol trailer>
+
+env = BOARD_CARD_ID=<id>, BOARD_RUN_ID=<id>, BOARD_SOCKET=<path>, BOARD_BIN=<exact board executable>
 ```
+
+`runs.prompt_snapshot` stores `task_prompt`; v7 `runs.system_prompt_snapshot` stores the exact
+trailer-inclusive `system_prompt`. Both are enqueue-time values. For managed built-ins, persisted
+startup argv is deliberately prompt-free:
+
+```
+Pi:     pi [--model M] [--thinking E]
+            (--session-id ID | --fork OLD --session-id NEW)
+Claude: claude [--model M] [--effort E] [--permission-mode P]
+               --allowedTools "Bash(board:*)"
+               (--session-id ID | --resume ID [--fork-session])
+```
+
+After pane-first placement, boardd writes `system_prompt` to a temporary mode-`0600` file and calls
+Herdr protocol 17 as follows:
+
+```
+agent.start {
+  name, kind:"pi"|"claude", pane_id,
+  args:<startup argv without executable> +
+       ["--append-system-prompt", FILE]          # Pi
+       ["--append-system-prompt-file", FILE],    # Claude
+  timeout_ms:30000
+}
+agent.get {target:pane_id}       # bounded polling until interactive_ready && !launch_pending
+agent.prompt {target:pane_id, text:task_prompt}
+```
+
+The temporary file is removed before spawn returns, on success or failure. The card prompt is never
+part of `agent.start`; it is submitted only after readiness. An `agent_name_taken` response retries
+once on the same owned pane with `card-<id>-<column-slug>-r<run>`.
+
+Configured harnesses use the same pane-first cwd/env placement, then `pane.rename`. Because direct
+`herdr pane run` does not preserve complex argv boundaries, boardd writes one mode-`0700`,
+self-removing script with every configured argv element POSIX-quoted and invokes exactly
+`herdr pane run <pane_id> <script_path>` with `HERDR_SOCKET_PATH` set to the selected session socket.
+The script runs the exact child argv and preserves its exit status. When the child returns it invokes
+the hidden `board __pane-exited --run-id "$BOARD_RUN_ID"` guard. That guard sends internal
+`run.pane_exited {card_id,run_id}`; only the exact matching open queued or started configured run is failed, with no `on_fail`
+transition. A callback before registration is accepted. The same narrow race rule applies to an
+immediate configured-harness `board done`: the CLI forwards `BOARD_RUN_ID`, and only that exact
+queued run may finalize before runner registration; a queued built-in Pi/Claude completion is
+rejected because no managed pane exists yet. For an already-started run, `run_id` remains optional
+so manual/TUI callers remain compatible, but a supplied mismatched id is rejected. Stale,
+replaced, completed, and built-in callbacks are rejected, so a stale child cannot complete a
+replacement. An already-completed or replaced run is rejected and the wrapper ignores that expected
+error. The script deletes itself when it starts; if the pane runner fails synchronously, boardd
+removes it and closes only the pane boardd allocated. If scheduling succeeds but the pane never
+opens the script, the residual configured-script orphan is an accepted asynchronous limitation.
 
 - **Session strategy**: Pi's first auto column mints an exact `--session-id`; later stages reuse it; retry uses `--fork <old> --session-id <new>` and persists the new target. Claude keeps exact mint, `--resume`, and `--fork-session`. Column config can force `fresh_session = true`.
-- `prompt_snapshot` is stored on the run — reproducibility and debugging.
+- **Configured harnesses** remain unmanaged. Their exact configured argv is not inferred to be Pi or Claude; prompt channels arrive as `BOARD_PROMPT` / `BOARD_SYSTEM_PROMPT`. The configured runner resolves a nonempty `HERDR_BIN_PATH`, otherwise `herdr`.
 
 ## 6. Data flow — the canonical walkthrough
 
@@ -207,12 +281,12 @@ env    = BOARD_CARD_ID=<id>, BOARD_RUN_ID=<id>, BOARD_SOCKET=<path>
 2. **User drags card → Plan** (TUI → boardd `card.move`).
 3. Column engine: *Plan* is `trigger=auto` → **enqueue run** on the card's space queue.
 4. Dispatcher (respecting per-space serial queue + global cap):
-   a. Resolve space: reuse workspace `w4`, or create/reuse the card's labeled `new_workspace`; repository worktree isolation remains an agent prompt responsibility.
-   b. Place the pane in the workspace's **`kanban` tab** (find-or-create it; a fresh tab is filled unsplit then its leftover shell pane is closed, an existing tab splits its largest pane — `Right` when that pane is ≥ 2× as wide as tall in cells, else `Down`, so N panes tile ≈ square). `herdr agent start card-42-plan --workspace w4 --tab <kanban> [--split right|down] --env BOARD_CARD_ID=42 … -- pi --thinking low --session-id <uuid> --append-system-prompt "<Plan prompt + protocol>" "Card task:\n<description + comments>"`.
-   c. Card status → `running`; run row created with pane id. The pane is **visible** — you can watch or type into it anytime.
+   a. Resolve the card's session socket and `ping` it. Anything except exact Herdr 0.7.5/protocol 17 fails before workspace discovery/creation. Then reuse workspace `w4`, or create/reuse the card's labeled `new_workspace`; repository worktree isolation remains an agent prompt responsibility.
+   b. Preflight the selected socket again at the spawner boundary. In the workspace's **`kanban` tab**, `tab.create {workspace_id,cwd,env,…}` supplies a new root pane, or an existing tab's largest pane is selected and `pane.split {target_pane_id,cwd,env,…}` creates the owned pane (`Right` when the target is ≥ 2× as wide as tall in cells, else `Down`). There is no protocol-16 placement inside `agent.start` and no leftover root shell to close.
+   c. For Pi/Claude, write the snapshotted system prompt to a mode-`0600` temporary file; issue `agent.start {name,kind,pane_id,args}` with prompt-free startup args; poll `agent.get` for readiness; then send only the task snapshot through `agent.prompt`. Remove the file. Card status → `running`; record the exact pane/workspace ids. The pane is **visible** — you can watch or type into it anytime.
 
-   **Pane naming**: the herdr agent name is `card-<id>-<column-slug>` (e.g. `card-42-plan`, `card-42-execute`) — stable and readable per column. herdr agent names are exclusive while a pane is open, so on an `agent_name_taken` collision the daemon retries once with the run-scoped fallback `card-<id>-<column-slug>-r<run>`.
-5. Agent plans, writes `docs/plans/meli-retry.md`, then calls `board comment 42 "Plan ready at docs/plans/meli-retry.md …"` and `board done 42 --outcome ok`.
+   **Pane naming and ownership**: the managed agent name is `card-<id>-<column-slug>` (e.g. `card-42-plan`, `card-42-execute`). Herdr names are exclusive while a pane is open, so `agent_name_taken` retries once on the same pane with `card-<id>-<column-slug>-r<run>`. If a placement target disappears, boardd closes only the pane it created (a missing pane is already clean), restarts discovery from `tab.list`, and retries the complete placement once. A terminal launch error also closes only that board-owned pane; pre-existing user panes are never cleanup targets.
+5. Agent plans, writes `docs/plans/meli-retry.md`, then calls `board comment 42 "Plan ready at docs/plans/meli-retry.md …"` and `board done 42 --outcome ok`. From a run, the CLI forwards `BOARD_RUN_ID`; manual/TUI completion omits it and remains compatible.
 6. boardd receives `done` → closes the run (`outcome=ok`), posts a `system` comment ("Plan finished in 4m12s, $0.38"), applies `on_success` → **card auto-moves to Execute** → step 3 repeats with the Execute column prompt, `--resume <session>`.
 7. Execute finishes → comment → auto-move to *Review* → Review run (fresh session, model override) → verdict comment.
    - `--outcome ok` → card lands in **Human Review**: `trigger=manual`, boardd fires `herdr notification show "Card #42 ready for human review" --sound request`.
@@ -227,11 +301,14 @@ env    = BOARD_CARD_ID=<id>, BOARD_RUN_ID=<id>, BOARD_SOCKET=<path>
 | `pane_agent_status_changed` → `done` | herdr events (requires `herdr integration install pi`; Claude has its equivalent) | agent finished but forgot `board done` → card `awaiting` (`agent_done`), run stays open, notify human |
 | `pane_agent_status_changed` → `idle` sustained past grace | herdr events | agent idle without `board done` → card `awaiting` (`idle_expired`), run stays open, notify human |
 | `pane_agent_status_changed` → `blocked` | herdr events | agent/integration reports blocked (provider retry exhaustion or input need) → card `blocked`, board change + notification |
-| `pane_exited` | herdr events | crash / closed pane → run `fail` |
+| `pane_exited` | herdr events | managed pane crash / close → run `fail`, no transition; events match `(session socket, pane id)` |
+| configured runner exit guard | board-owned wrapper after its exact child argv returns | exact open (`queued` or `started`) configured run → `fail`, no transition; callback-before-registration is accepted, stale/completed and built-in runs are rejected |
 
-**Golden rule:** herdr status is a HINT; `board done` is the only terminal success truth. Pane-idle
-scraping alone is the documented weak point of every tmux-style orchestrator (claude-squad); the
-explicit `board done` channel is what makes auto-transition trustworthy, and silent finishes park
+**Golden rule:** herdr status is a HINT; `board done` is the only terminal success truth. For a
+configured harness, that completion may arrive in the narrow queued-before-registration window;
+queued built-in Pi/Claude runs are deliberately not eligible. Pane-idle scraping alone is the
+documented weak point of every tmux-style orchestrator (claude-squad); the explicit `board done`
+channel is what makes auto-transition trustworthy, and silent finishes park
 the card in `awaiting` for review instead of guessing an outcome. Without the optional Pi
 integration, spawn, explicit completion, timeout, and pane exit remain deterministic, while
 working/blocked/done signals and the idle→`awaiting` watchdog are unavailable (degraded mode).
@@ -259,6 +336,9 @@ keep their existing `finalize_run` paths.
 
 ## 7. Queueing & concurrency
 
+- **Atomic enqueue snapshot**: scheduler→store locking builds the card/column/comments/settings/task,
+  system, and session snapshot together; the queued run is never assembled from stale reads and
+  `run.session` matches the launch target.
 - **Atomic card finalization**: the scheduler claims a card while closing/removing its old run and
   keeps that claim through comments, transition/status writes, and any internal auto-target
   enqueue. Public enqueue/retry and conflicting card/column mutations reject the claimed card;
@@ -273,7 +353,7 @@ keep their existing `finalize_run` paths.
 - `--max-budget-usd` per run (Claude supports it in print mode; interactive panes rely on timeout + human visibility).
 - Pi has no board tool-permission mode; no permission/approval flag is added and explicit Pi permission is rejected. Claude `bypassPermissions` requires explicit per-card opt-in, never a column default.
 - Cards never auto-move into *Done*; last auto hop is always a human-gated column.
-- Retry = new run (`--fork-session`); history preserved.
+- Retry = a new run; Pi uses `--fork <old> --session-id <new>`, Claude uses `--resume <old> --fork-session`; history is preserved.
 
 ## 9. Decisions (user-confirmed 2026-07-14)
 
@@ -310,6 +390,6 @@ herdr panes are fully drivable from the CLI (`pane send-keys` with named keys, `
 | 1. Unit | column engine, prompt assembly, queue, transitions | plain Rust tests, in-memory SQLite; no herdr |
 | 2. TUI snapshot | every view/modal/keybind incl. `?` help | ratatui `TestBackend` + fed `KeyEvent`s + `insta` snapshots; no herdr, no terminal |
 | 3. Daemon integration | dispatch → run → done → auto-move, without tokens | config fake harness plus built-in Pi adapter tests; real boardd paths, no provider call |
-| 4. Full E2E | real Herdr wiring | disposable named session/workspace; standard suite shadows only `pi` with a checked-in fake and asserts mint/fork argv with zero provider cost. A separate opt-in real-Pi smoke is never in `run-all.sh`. |
+| 4. Full E2E | real Herdr wiring | disposable named session/workspace; the standard suite uses checked-in fake Pi/Claude/configured harnesses and asserts protocol-17 placement/prompt/argv contracts with zero provider cost. A separate opt-in real-Claude Haiku/low smoke is never in `run-all.sh`; its intended contract is one authorized attempt with no retry or fallback. |
 
 Isolation rules for level 3–4: `BOARD_DB=/tmp/…` + dedicated daemon socket per test run so tests never touch the real board; prefer a separate `herdr --session board-test` (or headless `herdr server`) in CI so the user's session is untouched; inside an interactive dev loop, a throwaway workspace in the live session is fine.

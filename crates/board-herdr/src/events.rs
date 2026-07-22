@@ -4,7 +4,7 @@
 //! request/response connection). This module opens that socket, subscribes,
 //! and exposes a blocking [`Iterator`] of [`HerdrEvent`].
 //!
-//! ## Subscription quirk (verified live, protocol 16)
+//! ## Subscription quirk (verified live, protocol 17)
 //! A `pane.agent_status_changed` subscription **requires a concrete `pane_id`**
 //! — herdr validates the pane exists and rejects a wildcard/missing id with
 //! `internal_error`. So the daemon must build one subscription per pane it
@@ -128,8 +128,8 @@ pub fn parse_event_line(line: &str) -> Option<HerdrEvent> {
     };
     // The kind lives in `data.type` (underscore names) on some herdr builds and
     // in the top-level `event` key (dotted names) on others (verified live on
-    // 0.7.3: {"event":"pane.agent_status_changed","data":{...}} with no
-    // data.type). Accept both, normalized to underscores.
+    // protocol 17: {"event":"pane.agent_status_changed","data":{...}} with
+    // no data.type). Accept both, normalized to underscores.
     let kind = data
         .get("type")
         .and_then(Value::as_str)

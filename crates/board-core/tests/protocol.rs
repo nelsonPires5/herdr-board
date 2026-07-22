@@ -1,10 +1,12 @@
 //! Serde round-trips for representative protocol messages.
 
+use board_core::model::Run;
 use board_core::protocol::{
     AwaitingReason, BoardChangedReason, BoardGetParams, BoardListResult, BoardOpenParams,
     CardArchiveParams, CardCreateParams, CardListParams, CardStatus, ColumnCreateParams, Effort,
-    Event, HarnessCapabilitiesParams, Request, Response, RpcError, RunFocusParams, RunFocusResult,
-    RunOutcome, SpaceInfo, SpaceKind, SpaceListResult, TemplateApplyParams, Trigger,
+    Event, HarnessCapabilitiesParams, Request, Response, RpcError, RunDoneParams, RunFocusParams,
+    RunFocusResult, RunOutcome, RunPaneExitedParams, SpaceInfo, SpaceKind, SpaceListResult,
+    TemplateApplyParams, Trigger,
 };
 use serde_json::json;
 
@@ -15,6 +17,38 @@ where
     let s = serde_json::to_string(value).unwrap();
     let back: T = serde_json::from_str(&s).unwrap();
     assert_eq!(&back, value);
+}
+
+#[test]
+fn run_system_prompt_snapshot_serde_compatibility_and_privacy() {
+    let legacy: Run = serde_json::from_value(json!({
+        "id": 1,
+        "card_id": 2,
+        "column_id": 3,
+        "harness": "pi",
+        "argv_json": "[]",
+        "prompt_snapshot": "task",
+        "herdr_workspace_id": null,
+        "herdr_pane_id": null,
+        "session_id": null,
+        "session": null,
+        "started_at": null,
+        "ended_at": null,
+        "outcome": null,
+        "result_summary": null,
+        "log_path": null
+    }))
+    .unwrap();
+    assert_eq!(legacy.system_prompt_snapshot, None);
+
+    let secret = "system instructions\nprivate line";
+    let run = Run {
+        system_prompt_snapshot: Some(secret.into()),
+        ..legacy
+    };
+    let serialized = serde_json::to_string(&run).unwrap();
+    assert!(!serialized.contains("system_prompt_snapshot"));
+    assert!(!serialized.contains(secret));
 }
 
 #[test]
@@ -29,6 +63,45 @@ fn request_with_and_without_params() {
     // Omitted params default to Null.
     let r: Request = serde_json::from_str(r#"{"id":"2","method":"board.get"}"#).unwrap();
     assert_eq!(r.params, serde_json::Value::Null);
+}
+
+#[test]
+fn run_pane_exited_params_serialize_exact_internal_wire_shape() {
+    let params = RunPaneExitedParams {
+        card_id: 42,
+        run_id: 7,
+    };
+    assert_eq!(
+        serde_json::to_string(&params).unwrap(),
+        r#"{"card_id":42,"run_id":7}"#
+    );
+    roundtrip(&params);
+}
+
+#[test]
+fn run_done_params_run_id_is_optional_and_serializes_when_present() {
+    let missing: RunDoneParams = serde_json::from_value(json!({
+        "card_id": 42,
+        "outcome": "ok"
+    }))
+    .unwrap();
+    assert_eq!(missing.run_id, None);
+    assert_eq!(
+        serde_json::to_value(&missing).unwrap(),
+        json!({"card_id": 42, "outcome": "ok"})
+    );
+
+    let provided = RunDoneParams {
+        card_id: 42,
+        outcome: RunOutcome::Ok,
+        summary: None,
+        run_id: Some(7),
+    };
+    assert_eq!(
+        serde_json::to_value(&provided).unwrap(),
+        json!({"card_id": 42, "outcome": "ok", "run_id": 7})
+    );
+    roundtrip(&provided);
 }
 
 #[test]

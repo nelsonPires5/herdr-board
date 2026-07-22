@@ -81,6 +81,10 @@ pub struct Run {
     pub harness: String,
     pub argv_json: String,
     pub prompt_snapshot: String,
+    /// Enqueue-time, protocol-trailer-inclusive system instructions. `None`
+    /// identifies a legacy pre-v7 launch whose persisted argv is authoritative.
+    #[serde(default, skip_serializing)]
+    pub system_prompt_snapshot: Option<String>,
     pub herdr_workspace_id: Option<String>,
     pub herdr_pane_id: Option<String>,
     /// harness conversation id (`--resume`); distinct from the herdr `session`.

@@ -1,7 +1,7 @@
 # herdr-board
 
 ![Rust](https://img.shields.io/badge/rust-edition%202021-orange.svg)
-![herdr 0.7+](https://img.shields.io/badge/herdr-0.7%2B-8a2be2)
+![herdr 0.7.5](https://img.shields.io/badge/herdr-0.7.5-8a2be2)
 ![platforms: linux, macOS](https://img.shields.io/badge/platforms-linux%2C%20macOS-informational)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 
@@ -39,8 +39,11 @@ only `Todo`.
 
 ## Install
 
-Requires **Herdr 0.7+**, Git, and a Rust toolchain with `cargo`. Linux and macOS are supported.
-Ensure `~/.local/bin` is on your `PATH`.
+Requires exactly **Herdr 0.7.5 (protocol 17)**, Git, and a Rust toolchain with `cargo`. Linux
+and macOS are supported. Ensure `~/.local/bin` is on your `PATH`.
+
+The daemon checks the selected Herdr socket before workspace discovery and pane launch. It rejects
+any Herdr version other than 0.7.5 and any protocol other than 17; protocol 16 is not supported.
 
 ```bash
 herdr plugin install nelsonPires5/herdr-board
@@ -56,7 +59,7 @@ Open the board:
 herdr plugin action invoke open-board --plugin herdr-board
 ```
 
-If your Herdr version does not support overlay placement, open it as a tab:
+To open the board as a tab instead of an overlay:
 
 ```bash
 herdr plugin pane open --plugin herdr-board --entrypoint board --placement tab --focus

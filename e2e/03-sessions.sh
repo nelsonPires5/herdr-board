@@ -3,7 +3,8 @@
 #
 # One boardd drives every herdr session. The primary ephemeral session (the one
 # e2e_init binds the daemon to = its "default") is session A; this scenario BOOTS
-# its OWN second ephemeral session B (`hb-e2e-b-<pid>`) and exercises the
+# its OWN collision-resistant second ephemeral session B
+# (`hb-e2e-b-<pid>-<random>-<random>`) and exercises the
 # session/space-scoped paths against it:
 #   - space list scoped per session (A/default vs B differ),
 #   - a `workspace` card dispatched into B (pane lands in B's kanban tab),
@@ -26,10 +27,10 @@ e2e_isolate
 e2e_daemon_start
 
 # --- boot a SECOND ephemeral session B --------------------------------------
-SESS="hb-e2e-b-$$"
+SESS="$(e2e_session_name 'hb-e2e-b-')"
 step "Booting a second ephemeral herdr session '$SESS' (~2s)"
-e2e_session_boot "$SESS" SESS_SOCK SESS_B_PID
-e2e_defer "e2e_session_teardown '$SESS' '${SESS_B_PID:-}'"
+e2e_session_boot "$SESS" SESS_SOCK SESS_B_PID SESS_B_IDENTITY
+e2e_defer_session_teardown "$SESS" "$SESS_B_PID" "$SESS_B_IDENTITY"
 [ -n "$SESS_SOCK" ] || fail "could not resolve socket path for session '$SESS'"
 echo "  session B: $SESS"
 echo "  session B socket: $SESS_SOCK (server pid ${SESS_B_PID:-?})"
@@ -64,7 +65,7 @@ PY
 
 # --- space list scoped per session ------------------------------------------
 step "HERDR MUTATION: create a disposable workspace in session '$SESS'"
-e2e_ws_create bsess-ws "$SESS_SOCK"; WS_SESS="$E2E_WS"
+e2e_ws_create bsess-ws "$SESS_SOCK" "$SESS_B_PID" "$SESS_B_IDENTITY"; WS_SESS="$E2E_WS"
 echo "  workspace in $SESS: $WS_SESS"
 
 step "space list scoped per session (default vs $SESS)"
@@ -109,7 +110,7 @@ ws = json.load(sys.stdin).get("workspaces", [])
 print(next((w["workspace_id"] for w in ws if w.get("label") == "bsess-new"), ""))
 ')"
 [ -n "$NEW_WS" ] || fail "daemon did not create the bsess-new workspace in session '$SESS'"
-e2e_ws_defer_close "$NEW_WS" "$SESS_SOCK"
+e2e_ws_defer_close "$NEW_WS" "$SESS_SOCK" "$SESS_B_PID" "$SESS_B_IDENTITY"
 echo "  daemon-created workspace: $NEW_WS"
 assert_kanban_pane "$NEW_WS" "$CARD_NEW"
 ok "new-workspace card created a workspace in '$SESS' with a kanban pane"

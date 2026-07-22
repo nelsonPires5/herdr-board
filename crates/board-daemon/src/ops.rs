@@ -11,7 +11,7 @@ use board_core::engine::{
     decide_entry, validate_card_archive, validate_card_edit, validate_card_space,
     validate_column_delete, validate_column_permission_override,
 };
-use board_core::harness::DEFAULT_HARNESS;
+use board_core::harness::{is_builtin_harness, DEFAULT_HARNESS};
 use board_core::pi_catalog;
 use board_core::protocol::*;
 use board_core::{Error, Result};
@@ -54,6 +54,7 @@ pub fn handle_request(d: &Arc<Daemon>, method: &str, params: Value) -> Result<Va
         "card.list" => card_list(d, from(params)?),
         "comment.add" => comment_add(d, from(params)?),
         "run.done" => run_done(d, from(params)?),
+        "run.pane_exited" => run_pane_exited(d, from(params)?),
         "run.cancel" => run_cancel(d, from(params)?),
         "run.retry" => run_retry(d, from(params)?),
         "run.focus" => run_focus(d, from(params)?),
@@ -360,13 +361,79 @@ fn comment_add(d: &Arc<Daemon>, p: CommentAddParams) -> Result<Value> {
 
 fn run_done(d: &Arc<Daemon>, p: RunDoneParams) -> Result<Value> {
     let run = {
+        // Keep the scheduler -> store lock order and finalization guard used
+        // by the normal active-run path. A configured runner can call board
+        // done before pane registration, while its run is still queued; only
+        // that exact, sole queued run is eligible for this narrow exception.
         let sched = d.sched.lock().unwrap();
         let db = d.store.lock();
         sched.ensure_card_not_finalizing(p.card_id)?;
-        db.active_run_for_card(p.card_id)?
-            .ok_or_else(|| Error::NotFound(format!("no active run for card {}", p.card_id)))?
+        if let Some(run) = db.active_run_for_card(p.card_id)? {
+            if let Some(run_id) = p.run_id {
+                if run.id != run_id {
+                    return Err(Error::InvalidState(format!(
+                        "run {run_id} does not match active run {} for card {}",
+                        run.id, p.card_id
+                    )));
+                }
+            }
+            run
+        } else {
+            let card = db
+                .get_card(p.card_id)?
+                .ok_or_else(|| Error::NotFound(format!("no active run for card {}", p.card_id)))?;
+            match db.open_run_for_card(p.card_id)? {
+                Some(run)
+                    if card.status == CardStatus::Queued
+                        && run.started_at.is_none()
+                        && !is_builtin_harness(&run.harness)
+                        && p.run_id == Some(run.id) =>
+                {
+                    run
+                }
+                _ => {
+                    return Err(Error::NotFound(format!(
+                        "no active run for card {}",
+                        p.card_id
+                    )))
+                }
+            }
+        }
     };
     let (run, card) = finalize_run(d, run.id, p.outcome, p.summary, None, false, true)?;
+    Ok(json!(RunActionResult { run, card }))
+}
+
+fn run_pane_exited(d: &Arc<Daemon>, p: RunPaneExitedParams) -> Result<Value> {
+    {
+        let sched = d.sched.lock().unwrap();
+        let db = d.store.lock();
+        sched.ensure_card_not_finalizing(p.card_id)?;
+        let open = db
+            .open_run_for_card(p.card_id)?
+            .ok_or_else(|| Error::NotFound(format!("no open run for card {}", p.card_id)))?;
+        if open.id != p.run_id {
+            return Err(Error::InvalidState(format!(
+                "open run {} for card {} does not match pane-exited run {}",
+                open.id, p.card_id, p.run_id
+            )));
+        }
+        if is_builtin_harness(&open.harness) {
+            return Err(Error::InvalidState(
+                "pane-exited callback is only valid for configured harnesses".into(),
+            ));
+        }
+    }
+
+    let (run, card) = finalize_run(
+        d,
+        p.run_id,
+        RunOutcome::Fail,
+        Some("configured harness exited without calling board done".into()),
+        Some("pane exited without board done".into()),
+        false,
+        false,
+    )?;
     Ok(json!(RunActionResult { run, card }))
 }
 
@@ -735,6 +802,393 @@ mod tests {
     }
 
     #[test]
+    fn run_done_accepts_matching_queued_configured_run_before_pane_registration() {
+        let mut config = Config::default();
+        config.harness.insert(
+            "custom".into(),
+            HarnessDef {
+                argv: vec!["custom-agent".into()],
+                ..Default::default()
+            },
+        );
+        let d = test_daemon(config);
+        let (card_id, run_id, target_id) = {
+            let db = d.store.lock();
+            let target = db
+                .create_column(&ColumnCreateParams {
+                    name: "pre-registration target".into(),
+                    ..Default::default()
+                })
+                .unwrap();
+            let source = db
+                .create_column(&ColumnCreateParams {
+                    name: "pre-registration source".into(),
+                    trigger: Some(Trigger::Auto),
+                    on_success_column_id: Some(target.id),
+                    ..Default::default()
+                })
+                .unwrap();
+            let card = db
+                .create_card(&CardCreateParams {
+                    title: "done before pane registration".into(),
+                    column_id: Some(source.id),
+                    harness: Some("custom".into()),
+                    ..Default::default()
+                })
+                .unwrap();
+            let run = db
+                .create_run(card.id, source.id, "custom", "[]", "p", None, None)
+                .unwrap();
+            // The configured runner can report board done before the daemon
+            // registers the spawned pane, so this is an open queued run.
+            db.set_card_status(card.id, CardStatus::Queued).unwrap();
+            (card.id, run.id, target.id)
+        };
+
+        let result = handle_request(
+            &d,
+            "run.done",
+            json!({
+                "card_id": card_id,
+                "run_id": run_id,
+                "outcome": "ok",
+                "summary": "completed before pane registration"
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(result["run"]["id"], run_id);
+        assert_eq!(result["run"]["outcome"], "ok");
+        assert_eq!(
+            result["run"]["result_summary"],
+            "completed before pane registration"
+        );
+        assert_eq!(result["card"]["column_id"], target_id);
+        assert_eq!(result["card"]["status"], "idle");
+
+        // A late pane-exit callback must not turn the already-successful run
+        // into a configured-harness failure.
+        let pane_exit = handle_request(
+            &d,
+            "run.pane_exited",
+            json!({"card_id": card_id, "run_id": run_id}),
+        )
+        .unwrap_err();
+        assert!(pane_exit.to_string().contains("no open run"), "{pane_exit}");
+        let db = d.store.lock();
+        let run = db.get_run(run_id).unwrap();
+        assert_eq!(run.outcome, Some(RunOutcome::Ok));
+        assert!(run.ended_at.is_some());
+        let card = db.get_card(card_id).unwrap().unwrap();
+        assert_eq!(card.column_id, target_id);
+        assert_eq!(card.status, CardStatus::Idle);
+    }
+
+    #[test]
+    fn run_done_rejects_queued_configured_runs_without_or_with_stale_run_id() {
+        for stale in [false, true] {
+            let mut config = Config::default();
+            config.harness.insert(
+                "custom".into(),
+                HarnessDef {
+                    argv: vec!["custom-agent".into()],
+                    ..Default::default()
+                },
+            );
+            let d = test_daemon(config);
+            let (card_id, run_id) = {
+                let db = d.store.lock();
+                let card = db
+                    .create_card(&CardCreateParams {
+                        title: "queued callback identity".into(),
+                        harness: Some("custom".into()),
+                        ..Default::default()
+                    })
+                    .unwrap();
+                let run = db
+                    .create_run(card.id, card.column_id, "custom", "[]", "p", None, None)
+                    .unwrap();
+                db.set_card_status(card.id, CardStatus::Queued).unwrap();
+                (card.id, run.id)
+            };
+
+            let params = if stale {
+                json!({"card_id": card_id, "run_id": run_id + 1, "outcome": "ok"})
+            } else {
+                json!({"card_id": card_id, "outcome": "ok"})
+            };
+            let err = handle_request(&d, "run.done", params).unwrap_err();
+            assert!(err.to_string().contains("no active run"), "{err}");
+
+            let db = d.store.lock();
+            let run = db.get_run(run_id).unwrap();
+            assert!(run.ended_at.is_none());
+            assert!(run.outcome.is_none());
+            assert_eq!(
+                db.get_card(card_id).unwrap().unwrap().status,
+                CardStatus::Queued
+            );
+        }
+    }
+
+    #[test]
+    fn run_done_rejects_mismatching_run_id_for_a_different_active_replacement() {
+        let mut config = Config::default();
+        config.harness.insert(
+            "custom".into(),
+            HarnessDef {
+                argv: vec!["custom-agent".into()],
+                ..Default::default()
+            },
+        );
+        let d = test_daemon(config);
+        let (card_id, stale_run_id, active_run_id) = {
+            let db = d.store.lock();
+            let card = db
+                .create_card(&CardCreateParams {
+                    title: "replacement callback identity".into(),
+                    harness: Some("custom".into()),
+                    ..Default::default()
+                })
+                .unwrap();
+            let stale = db
+                .create_run(card.id, card.column_id, "custom", "[]", "old", None, None)
+                .unwrap();
+            db.start_run(stale.id, Some("w1"), Some("old-pane"))
+                .unwrap();
+            db.finish_run(stale.id, RunOutcome::Fail, Some("replaced"))
+                .unwrap();
+
+            let active = db
+                .create_run(card.id, card.column_id, "custom", "[]", "new", None, None)
+                .unwrap();
+            db.start_run(active.id, Some("w1"), Some("new-pane"))
+                .unwrap();
+            db.set_card_status(card.id, CardStatus::Running).unwrap();
+            (card.id, stale.id, active.id)
+        };
+
+        let err = handle_request(
+            &d,
+            "run.done",
+            json!({
+                "card_id": card_id,
+                "run_id": stale_run_id,
+                "outcome": "ok"
+            }),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("run"), "{err}");
+
+        let db = d.store.lock();
+        assert_eq!(
+            db.get_run(stale_run_id).unwrap().outcome,
+            Some(RunOutcome::Fail)
+        );
+        assert!(db.get_run(active_run_id).unwrap().ended_at.is_none());
+        assert_eq!(
+            db.get_card(card_id).unwrap().unwrap().status,
+            CardStatus::Running
+        );
+    }
+
+    #[test]
+    fn run_done_rejects_queued_builtin_runs_before_pane_registration() {
+        for harness in ["pi", "claude"] {
+            let d = test_daemon(Config::default());
+            let (card_id, run_id) = {
+                let db = d.store.lock();
+                let card = db
+                    .create_card(&CardCreateParams {
+                        title: format!("queued builtin {harness}"),
+                        harness: Some(harness.into()),
+                        ..Default::default()
+                    })
+                    .unwrap();
+                let run = db
+                    .create_run(card.id, card.column_id, harness, "[]", "p", None, None)
+                    .unwrap();
+                db.set_card_status(card.id, CardStatus::Queued).unwrap();
+                (card.id, run.id)
+            };
+
+            let err = handle_request(
+                &d,
+                "run.done",
+                json!({"card_id": card_id, "run_id": run_id, "outcome": "ok"}),
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("no active run"), "{err}");
+
+            let db = d.store.lock();
+            let run = db.get_run(run_id).unwrap();
+            assert!(run.ended_at.is_none());
+            assert!(run.outcome.is_none());
+            assert_eq!(
+                db.get_card(card_id).unwrap().unwrap().status,
+                CardStatus::Queued
+            );
+        }
+    }
+
+    #[test]
+    fn pane_exited_finalizes_matching_run_without_on_fail_transition() {
+        let d = test_daemon(Config::default());
+        let (card_id, run_id, source_id) = {
+            let db = d.store.lock();
+            let target = db
+                .create_column(&ColumnCreateParams {
+                    name: "pane-exit target".into(),
+                    ..Default::default()
+                })
+                .unwrap();
+            let source = db
+                .create_column(&ColumnCreateParams {
+                    name: "pane-exit source".into(),
+                    trigger: Some(Trigger::Auto),
+                    on_fail_column_id: Some(target.id),
+                    ..Default::default()
+                })
+                .unwrap();
+            let card = db
+                .create_card(&CardCreateParams {
+                    title: "silent configured harness".into(),
+                    column_id: Some(source.id),
+                    ..Default::default()
+                })
+                .unwrap();
+            let run = db
+                .create_run(card.id, source.id, "fake", "[]", "silent", None, None)
+                .unwrap();
+            db.start_run(run.id, Some("w1"), Some("p1")).unwrap();
+            db.set_card_status(card.id, CardStatus::Running).unwrap();
+            (card.id, run.id, source.id)
+        };
+
+        let stale = handle_request(
+            &d,
+            "run.pane_exited",
+            json!({"card_id": card_id, "run_id": run_id + 1}),
+        )
+        .unwrap_err();
+        assert!(stale.to_string().contains("run"));
+        {
+            let db = d.store.lock();
+            assert!(db.get_run(run_id).unwrap().ended_at.is_none());
+            let card = db.get_card(card_id).unwrap().unwrap();
+            assert_eq!(card.status, CardStatus::Running);
+            assert_eq!(card.column_id, source_id);
+        }
+
+        let res = handle_request(
+            &d,
+            "run.pane_exited",
+            json!({"card_id": card_id, "run_id": run_id}),
+        )
+        .unwrap();
+        assert_eq!(res["run"]["outcome"], "fail");
+        assert_eq!(
+            res["run"]["result_summary"],
+            "configured harness exited without calling board done"
+        );
+        assert_eq!(res["card"]["status"], "failed");
+        assert_eq!(res["card"]["column_id"], source_id);
+        let detail = handle_request(&d, "card.get", json!({"id": card_id})).unwrap();
+        assert!(detail["comments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|comment| comment["body"] == "pane exited without board done"));
+    }
+
+    #[test]
+    fn pane_exited_accepts_matching_queued_configured_run() {
+        let d = test_daemon(Config::default());
+        let (card_id, run_id, column_id) = {
+            let db = d.store.lock();
+            let column = db
+                .create_column(&ColumnCreateParams {
+                    name: "queued configured".into(),
+                    on_fail_column_id: Some(db.default_column_id(BOARD_ID).unwrap()),
+                    ..Default::default()
+                })
+                .unwrap();
+            let card = db
+                .create_card(&CardCreateParams {
+                    title: "callback before registration".into(),
+                    column_id: Some(column.id),
+                    harness: Some("custom".into()),
+                    ..Default::default()
+                })
+                .unwrap();
+            let run = db
+                .create_run(card.id, column.id, "custom", "[]", "p", None, None)
+                .unwrap();
+            db.set_card_status(card.id, CardStatus::Queued).unwrap();
+            (card.id, run.id, column.id)
+        };
+
+        let result = handle_request(
+            &d,
+            "run.pane_exited",
+            json!({"card_id": card_id, "run_id": run_id}),
+        )
+        .unwrap();
+
+        assert_eq!(result["run"]["id"], run_id);
+        assert_eq!(result["run"]["outcome"], "fail");
+        assert_eq!(result["card"]["status"], "failed");
+        assert_eq!(result["card"]["column_id"], column_id);
+        let detail = handle_request(&d, "card.get", json!({"id": card_id})).unwrap();
+        assert!(detail["comments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|comment| { comment["body"] == "pane exited without board done" }));
+    }
+
+    #[test]
+    fn pane_exited_rejects_builtin_runs_without_mutating_them() {
+        for harness in ["pi", "claude"] {
+            let d = test_daemon(Config::default());
+            let (card_id, run_id) = {
+                let db = d.store.lock();
+                let card = db
+                    .create_card(&CardCreateParams {
+                        title: format!("builtin {harness}"),
+                        harness: Some(harness.into()),
+                        ..Default::default()
+                    })
+                    .unwrap();
+                let run = db
+                    .create_run(card.id, card.column_id, harness, "[]", "p", None, None)
+                    .unwrap();
+                db.start_run(run.id, Some("w1"), Some("p1")).unwrap();
+                db.set_card_status(card.id, CardStatus::Running).unwrap();
+                (card.id, run.id)
+            };
+
+            let err = handle_request(
+                &d,
+                "run.pane_exited",
+                json!({"card_id": card_id, "run_id": run_id}),
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("configured harness"), "{err}");
+
+            let db = d.store.lock();
+            let run = db.get_run(run_id).unwrap();
+            assert!(run.ended_at.is_none());
+            assert!(run.outcome.is_none());
+            assert_eq!(
+                db.get_card(card_id).unwrap().unwrap().status,
+                CardStatus::Running
+            );
+            assert!(db.list_comments(card_id).unwrap().is_empty());
+        }
+    }
+
+    #[test]
     fn run_retry_rejects_every_kind_of_open_run_from_db_truth() {
         for (status, started) in [
             (CardStatus::Queued, false),
@@ -1100,7 +1554,7 @@ mod tests {
         assert!(err.to_string().contains("gone"));
 
         let (_dir, socket) = fake_herdr(
-            "\"result\":{\"type\":\"pane_info\",\"pane\":{\"pane_id\":\"w1:p9\",\"terminal_id\":\"term\",\"workspace_id\":\"w1\",\"tab_id\":\"w1:t1\",\"agent_status\":\"idle\"}}",
+            "\"result\":{\"type\":\"pane_info\",\"pane\":{\"pane_id\":\"w1:p9\",\"terminal_id\":\"term\",\"workspace_id\":\"w1\",\"tab_id\":\"w1:t1\",\"focused\":true,\"revision\":0,\"agent_status\":\"idle\"}}",
         );
         let d = test_daemon_with_registry(
             Config::default(),
