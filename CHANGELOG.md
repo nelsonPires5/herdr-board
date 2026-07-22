@@ -7,6 +7,9 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Changed
+- Herdr socket requests and subscription acknowledgements now have bounded deadlines, match exact
+  response IDs, preserve events interleaved before acknowledgements, and restore blocking stream
+  reads after bounded polling/handshakes.
 - `board daemon --stop` now stops safely: it reports success only after the listener disappears,
   preserves the socket on RPC errors/timeouts, and removes stale sockets only after identity checks.
 - The opt-in real-Claude Haiku smoke now stages only completed onboarding/theme, exact workspace

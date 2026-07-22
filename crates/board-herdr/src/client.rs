@@ -7,8 +7,11 @@
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
+use std::os::fd::FromRawFd;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -148,6 +151,128 @@ pub struct WorktreeCreateParams {
 
 // -- client ------------------------------------------------------------------
 
+/// Bounds for blocking socket operations. Long-running Herdr methods extend
+/// `request` by their wire `timeout_ms` plus `method_grace`.
+#[derive(Debug, Clone, Copy)]
+pub struct SocketDeadlines {
+    pub connect: Duration,
+    pub read: Duration,
+    pub write: Duration,
+    pub handshake: Duration,
+    pub request: Duration,
+    pub method_grace: Duration,
+}
+
+impl Default for SocketDeadlines {
+    fn default() -> Self {
+        Self {
+            connect: Duration::from_secs(2),
+            read: Duration::from_secs(30),
+            write: Duration::from_secs(5),
+            handshake: Duration::from_secs(5),
+            request: Duration::from_secs(30),
+            method_grace: Duration::from_secs(5),
+        }
+    }
+}
+
+pub(crate) fn connect_with_deadline(path: &Path, timeout: Duration) -> Result<UnixStream> {
+    let path_bytes = path.as_os_str().as_bytes();
+    let max_path = std::mem::size_of::<libc::sockaddr_un>()
+        - std::mem::offset_of!(libc::sockaddr_un, sun_path);
+    if path_bytes.len() >= max_path {
+        return Err(HerdrError::Io(std::io::Error::from_raw_os_error(
+            libc::ENAMETOOLONG,
+        )));
+    }
+
+    // SAFETY: all libc pointers below refer to initialized local storage for
+    // the duration of each call. `fd` has one owner and is closed on every
+    // error path or transferred exactly once to `UnixStream`.
+    unsafe {
+        let fd = libc::socket(
+            libc::AF_UNIX,
+            libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+            0,
+        );
+        if fd < 0 {
+            return Err(HerdrError::Io(std::io::Error::last_os_error()));
+        }
+        let close_error = |error| {
+            libc::close(fd);
+            error
+        };
+        let mut address: libc::sockaddr_un = std::mem::zeroed();
+        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        std::ptr::copy_nonoverlapping(
+            path_bytes.as_ptr().cast(),
+            address.sun_path.as_mut_ptr(),
+            path_bytes.len(),
+        );
+        let address_len = (std::mem::offset_of!(libc::sockaddr_un, sun_path) + path_bytes.len() + 1)
+            as libc::socklen_t;
+        if libc::connect(
+            fd,
+            (&raw const address).cast::<libc::sockaddr>(),
+            address_len,
+        ) < 0
+        {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EINPROGRESS) {
+                return Err(close_error(HerdrError::Io(error)));
+            }
+            let millis = timeout.as_millis().min(i32::MAX as u128).max(1) as i32;
+            let mut poll_fd = libc::pollfd {
+                fd,
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            let ready = libc::poll(&raw mut poll_fd, 1, millis);
+            if ready == 0 {
+                return Err(close_error(HerdrError::Deadline {
+                    operation: "connect",
+                }));
+            }
+            if ready < 0 {
+                return Err(close_error(HerdrError::Io(std::io::Error::last_os_error())));
+            }
+            let mut socket_error = 0;
+            let mut error_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+            if libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_ERROR,
+                (&raw mut socket_error).cast(),
+                &raw mut error_len,
+            ) < 0
+            {
+                return Err(close_error(HerdrError::Io(std::io::Error::last_os_error())));
+            }
+            if socket_error != 0 {
+                return Err(close_error(HerdrError::Io(
+                    std::io::Error::from_raw_os_error(socket_error),
+                )));
+            }
+        }
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) < 0 {
+            return Err(close_error(HerdrError::Io(std::io::Error::last_os_error())));
+        }
+        Ok(UnixStream::from_raw_fd(fd))
+    }
+}
+
+fn deadline_io(error: std::io::Error, operation: &'static str) -> HerdrError {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+    ) {
+        HerdrError::Deadline { operation }
+    } else {
+        HerdrError::Io(error)
+    }
+}
+
 /// A blocking client for the herdr socket.
 ///
 /// herdr serves **one request per connection** — it closes the socket after
@@ -158,6 +283,7 @@ pub struct WorktreeCreateParams {
 pub struct HerdrClient {
     path: PathBuf,
     next_id: u64,
+    deadlines: SocketDeadlines,
 }
 
 impl HerdrClient {
@@ -165,10 +291,22 @@ impl HerdrClient {
     pub fn connect(path: &Path) -> Result<HerdrClient> {
         // Fail fast if the socket is missing/unreachable; the probe connection
         // is dropped immediately (herdr tolerates a no-request connection).
-        let _probe = UnixStream::connect(path)?;
+        let deadlines = SocketDeadlines::default();
+        let _probe = connect_with_deadline(path, deadlines.connect)?;
         Ok(HerdrClient {
             path: path.to_path_buf(),
             next_id: 0,
+            deadlines,
+        })
+    }
+
+    /// Bind a client with injectable socket deadlines.
+    pub fn connect_with_deadlines(path: &Path, deadlines: SocketDeadlines) -> Result<HerdrClient> {
+        let _probe = connect_with_deadline(path, deadlines.connect)?;
+        Ok(HerdrClient {
+            path: path.to_path_buf(),
+            next_id: 0,
+            deadlines,
         })
     }
 
@@ -194,15 +332,29 @@ impl HerdrClient {
             params,
         };
 
-        let stream = UnixStream::connect(&self.path)?;
+        let stream = connect_with_deadline(&self.path, self.deadlines.connect)?;
+        let timeout_ms = req
+            .params
+            .get("timeout_ms")
+            .and_then(Value::as_u64)
+            .or_else(|| req.params.get("wait")?.get("timeout_ms")?.as_u64());
+        let read_timeout = timeout_ms
+            .map(|ms| Duration::from_millis(ms).saturating_add(self.deadlines.method_grace))
+            .unwrap_or(self.deadlines.request.min(self.deadlines.read));
+        stream.set_read_timeout(Some(read_timeout))?;
+        stream.set_write_timeout(Some(self.deadlines.write))?;
         let mut writer = stream.try_clone()?;
         let mut reader = BufReader::new(stream);
-        writer.write_all(req.to_line()?.as_bytes())?;
-        writer.flush()?;
+        writer
+            .write_all(req.to_line()?.as_bytes())
+            .map_err(|e| deadline_io(e, "write"))?;
+        writer.flush().map_err(|e| deadline_io(e, "write"))?;
 
         loop {
             let mut buf = String::new();
-            let n = reader.read_line(&mut buf)?;
+            let n = reader
+                .read_line(&mut buf)
+                .map_err(|e| deadline_io(e, "response"))?;
             if n == 0 {
                 return Err(HerdrError::Disconnected);
             }
@@ -211,7 +363,7 @@ impl HerdrClient {
             }
             let resp = Response::from_line(&buf)?;
             // Ignore anything that is not this request's reply.
-            if !resp.id.is_empty() && resp.id != id {
+            if resp.id != id {
                 continue;
             }
             if let Some(err) = resp.error {

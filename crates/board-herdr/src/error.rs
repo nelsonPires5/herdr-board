@@ -19,6 +19,10 @@ pub enum HerdrError {
     #[error("herdr decode error: {0}")]
     Decode(#[from] serde_json::Error),
 
+    /// A bounded socket operation did not complete in time.
+    #[error("herdr {operation} deadline exceeded")]
+    Deadline { operation: &'static str },
+
     /// The connection was closed by the peer, or EOF was hit mid-call.
     #[error("herdr connection closed")]
     Disconnected,

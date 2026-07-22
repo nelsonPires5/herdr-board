@@ -23,8 +23,8 @@ mod types;
 
 pub use client::{
     default_socket_path, AgentPromptParams, AgentPromptWaitOptions, AgentStartParams,
-    AgentWaitParams, HerdrClient, PaneRenameParams, PaneSplitParams, TabCreateParams,
-    WorkspaceCreateParams, WorktreeCreateParams,
+    AgentWaitParams, HerdrClient, PaneRenameParams, PaneSplitParams, SocketDeadlines,
+    TabCreateParams, WorkspaceCreateParams, WorktreeCreateParams,
 };
 pub use envelope::{ErrorBody, Request, Response};
 pub use error::{HerdrError, Result};

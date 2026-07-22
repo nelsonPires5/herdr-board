@@ -89,6 +89,19 @@ a temporary runner script. Agents must still use `board comment` and `board
 done`; the configured runner reports a silent child exit back to boardd as a
 failed run with no automatic column transition.
 
+## Socket request and subscription bounds
+
+`board-herdr` opens a fresh bounded connection for each request. Writes and responses have local
+socket deadlines; methods with a wire `timeout_ms` allow that timeout plus a small transport grace.
+Only the response whose ID exactly matches the request can complete it; unrelated responses are
+ignored, and protocol errors are surfaced only for the matching ID.
+
+Event subscriptions use a persistent connection, but each subscribe/add acknowledgement is
+bounded and must carry that subscribe request's exact ID. Events arriving before the matching
+acknowledgement are buffered in order rather than lost. After an acknowledgement or bounded
+`poll_event`, the temporary read timeout is removed so ordinary event iteration remains blocking.
+These transport failures do not log request or response payloads.
+
 ## Version drift
 
 This repo's herdr facts — [`docs/research.md`](research.md), [`docs/design.md`](design.md),
