@@ -62,10 +62,10 @@ CARD_ID="$(printf '%s' "$card_json" | jget id)" || fail "could not parse card id
 echo "  card: $CARD_ID"
 
 mut "board move $CARD_ID 'Override Execute' -> herdr agent.start (harness fake-ov)"
-"$BOARD_BIN" move "$CARD_ID" "Override Execute" --json >/dev/null
+e2e_board_herdr_mutate -- move "$CARD_ID" "Override Execute" --json >/dev/null
 outcome="$(wait_ok "$CARD_ID" 80)" || {
-  tail -60 "$E2E_TMP/daemon.log" || true
-  "$BOARD_BIN" card show "$CARD_ID" --json || true
+
+  e2e_card_failure_diag "$CARD_ID"
   fail "override-column run outcome '$outcome', expected ok"
 }
 [ "$outcome" = "ok" ] || fail "override-column run outcome '$outcome', expected ok"
@@ -76,17 +76,17 @@ python3 - "$show" <<'PY'
 import json, sys
 x = json.load(open(sys.argv[1], encoding="utf-8"))
 card, runs = x["card"], x["runs"]
-assert len(runs) == 1, runs
+assert len(runs) == 1
 run = runs[0]
 # The column harness_override drove the run; the card's own harness (pi) was
 # overridden by the column setting.
-assert run["harness"] == "fake-ov", run
+assert run["harness"] == "fake-ov"
 argv = json.loads(run["argv_json"])
-assert argv[0] == "env", argv
+assert argv[0] == "env"
 # {model} was unset -> its element dropped; {effort}/{permission_mode} resolved.
-assert "low" in argv, argv
-assert "auto" in argv, argv
-assert not any(a in ("{model}", "{effort}", "{permission_mode}") for a in argv), argv
+assert "low" in argv
+assert "auto" in argv
+assert not any(a in ("{model}", "{effort}", "{permission_mode}") for a in argv)
 print("  run harness:", run["harness"], "| argv:", argv)
 PY
 ok "column harness_override=fake-ov drove the run; effort=low, permission=auto resolved in argv"

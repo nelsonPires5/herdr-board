@@ -210,21 +210,21 @@ import json, pathlib, re, sys
 card_path, model, poem_path = sys.argv[1:]
 x = json.load(open(card_path, encoding="utf-8"))
 card, run, comments = x["card"], x["runs"][-1], x["comments"]
-assert card["harness"] == "pi", card
-assert card["model"] == model, card
-assert card["effort"] == "low", card
-assert run["harness"] == "pi", run
-assert run["outcome"] == "ok", run
+assert card["harness"] == "pi"
+assert card["model"] == model
+assert card["effort"] == "low"
+assert run["harness"] == "pi"
+assert run["outcome"] == "ok"
 argv = json.loads(run["argv_json"])
-assert argv[argv.index("--model") + 1] == model, argv
-assert argv[argv.index("--thinking") + 1] == "low", argv
-assert any(c["author"] == f"agent:{run['id']}" and poem_path in c["body"] for c in comments), comments
+assert argv[argv.index("--model") + 1] == model
+assert argv[argv.index("--thinking") + 1] == "low"
+assert any(c["author"] == f"agent:{run['id']}" and poem_path in c["body"] for c in comments)
 poem = pathlib.Path(poem_path)
-assert poem.is_file(), poem
+assert poem.is_file()
 lines = poem.read_text(encoding="utf-8").splitlines()
-assert len(lines) == 4, lines
-assert all(line.strip() for line in lines), lines
-assert re.search(r"lua", "\n".join(lines), re.I), lines
+assert len(lines) == 4
+assert all(line.strip() for line in lines)
+assert re.search(r"lua", "\n".join(lines), re.I)
 PY
 
 FINAL_STATUS="$(git -C "$ROOT" status --short)"

@@ -41,6 +41,42 @@ use crate::app::{
 use crate::editor::{EditorLauncher, RealEditor};
 use crate::view::{board_picker_label, pane_title, view};
 
+/// Explicit context supplied by the composition root to the TUI.
+///
+/// Test and embedded drivers use [`Default::default`] so ambient Herdr/plugin
+/// variables cannot affect their state. Only [`Driver::new`] and
+/// [`run_with_board`] construct this from the process environment.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OriginContext {
+    pub origin_socket: Option<String>,
+    pub session: Option<String>,
+    pub plugin_id: Option<String>,
+    pub pane_id: Option<String>,
+    pub herdr_bin_path: Option<String>,
+}
+
+impl OriginContext {
+    /// Read the invoking Herdr/plugin context at the production boundary.
+    pub fn from_environment() -> OriginContext {
+        let origin_socket = std::env::var("HERDR_SOCKET_PATH")
+            .ok()
+            .filter(|socket| !socket.is_empty());
+        OriginContext {
+            session: crate::forms::session_name_from_socket(origin_socket.as_deref()),
+            origin_socket,
+            plugin_id: std::env::var("HERDR_PLUGIN_ID")
+                .ok()
+                .filter(|value| !value.is_empty()),
+            pane_id: std::env::var("HERDR_PANE_ID")
+                .ok()
+                .filter(|value| !value.is_empty()),
+            herdr_bin_path: std::env::var("HERDR_BIN_PATH")
+                .ok()
+                .filter(|value| !value.is_empty()),
+        }
+    }
+}
+
 /// Owns the client + editor and applies [`Effect`]s produced by `update`.
 ///
 /// Kept separate from [`run`] (the terminal loop) so tests can drive it against
@@ -49,21 +85,33 @@ pub struct Driver {
     pub app: App,
     client: Box<dyn BoardClient>,
     editor: Box<dyn EditorLauncher>,
-    origin_socket: Option<String>,
+    origin: OriginContext,
 }
 
 impl Driver {
     /// Build a driver, fetching the initial board.
     pub fn new(client: Box<dyn BoardClient>) -> Result<Driver> {
-        Driver::with_editor(client, Box::new(RealEditor))
+        Driver::with_editor_and_origin(
+            client,
+            Box::new(RealEditor),
+            OriginContext::from_environment(),
+        )
     }
 
     pub fn with_editor(
-        mut client: Box<dyn BoardClient>,
+        client: Box<dyn BoardClient>,
         editor: Box<dyn EditorLauncher>,
     ) -> Result<Driver> {
+        Driver::with_editor_and_origin(client, editor, OriginContext::default())
+    }
+
+    pub fn with_editor_and_origin(
+        mut client: Box<dyn BoardClient>,
+        editor: Box<dyn EditorLauncher>,
+        origin: OriginContext,
+    ) -> Result<Driver> {
         let board = client.board_get()?;
-        Driver::with_editor_and_board(client, editor, board)
+        Driver::with_editor_and_board_and_origin(client, editor, board, origin)
     }
 
     pub fn with_editor_and_board(
@@ -71,13 +119,20 @@ impl Driver {
         editor: Box<dyn EditorLauncher>,
         board: BoardSnapshot,
     ) -> Result<Driver> {
+        Driver::with_editor_and_board_and_origin(client, editor, board, OriginContext::default())
+    }
+
+    pub fn with_editor_and_board_and_origin(
+        client: Box<dyn BoardClient>,
+        editor: Box<dyn EditorLauncher>,
+        board: BoardSnapshot,
+        origin: OriginContext,
+    ) -> Result<Driver> {
         let mut driver = Driver {
-            app: App::new(board),
+            app: App::with_origin_context(board, origin.clone()),
             client,
             editor,
-            origin_socket: std::env::var("HERDR_SOCKET_PATH")
-                .ok()
-                .filter(|socket| !socket.is_empty()),
+            origin,
         };
         driver.set_pane_title(CardFilter::Active);
         Ok(driver)
@@ -85,7 +140,9 @@ impl Driver {
 
     /// Override the invoking Herdr socket (deterministic tests/embedders).
     pub fn set_origin_socket(&mut self, socket: Option<String>) {
-        self.origin_socket = socket;
+        self.origin.origin_socket = socket.clone();
+        self.origin.session = crate::forms::session_name_from_socket(socket.as_deref());
+        self.app.origin_context = self.origin.clone();
     }
 
     /// Feed one synthetic message: run the reducer, then apply its effects.
@@ -274,7 +331,7 @@ impl Driver {
                 }
             }
             Effect::FocusRun(id) => {
-                let Some(origin_socket) = self.origin_socket.clone() else {
+                let Some(origin_socket) = self.origin.origin_socket.clone() else {
                     self.app.set_toast(
                         "jump to pane requires Herdr (HERDR_SOCKET_PATH is unset)",
                         true,
@@ -296,16 +353,16 @@ impl Driver {
     /// Update the label rendered by Herdr in the pane border. Outside a Herdr
     /// plugin pane (tests, examples, standalone TUI) this is deliberately a no-op.
     fn set_pane_title(&mut self, filter: CardFilter) {
-        if std::env::var("HERDR_PLUGIN_ID").as_deref() != Ok("herdr-board") {
+        if self.origin.plugin_id.as_deref() != Some("herdr-board") {
             return;
         }
-        let Ok(pane_id) = std::env::var("HERDR_PANE_ID") else {
+        let Some(pane_id) = self.origin.pane_id.as_deref() else {
             return;
         };
-        let bin = std::env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_string());
+        let bin = self.origin.herdr_bin_path.as_deref().unwrap_or("herdr");
         let title = pane_title(&self.app.board.board, filter);
         let _ = Command::new(bin)
-            .args(["pane", "rename", &pane_id, &title])
+            .args(["pane", "rename", pane_id, &title])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -427,7 +484,12 @@ pub fn run(client: Box<dyn BoardClient>) -> Result<()> {
 }
 
 pub fn run_with_board(client: Box<dyn BoardClient>, board: BoardSnapshot) -> Result<()> {
-    let mut driver = Driver::with_editor_and_board(client, Box::new(RealEditor), board)?;
+    let mut driver = Driver::with_editor_and_board_and_origin(
+        client,
+        Box::new(RealEditor),
+        board,
+        OriginContext::from_environment(),
+    )?;
     run_driver(&mut driver)
 }
 

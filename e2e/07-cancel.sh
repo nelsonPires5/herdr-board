@@ -36,7 +36,7 @@ card_json="$("$BOARD_BIN" card new --title "Cancel Card" -d "cancel me" \
 CARD_ID="$(printf '%s' "$card_json" | jget id)" || fail "could not parse card id"
 echo "  card: $CARD_ID"
 mut "board move $CARD_ID Execute -> agent.start in $WS_ID"
-"$BOARD_BIN" move "$CARD_ID" Execute --json >/dev/null
+e2e_board_herdr_mutate -- move "$CARD_ID" Execute --json >/dev/null
 
 # pane_present <card_id> — echo the matching agent pane label (card-<id>-execute[-r<n>])
 # in WS_ID, or empty. Uses the raw herdr socket (labels live on panes, not the CLI).
@@ -64,13 +64,13 @@ for _ in $(seq 1 60); do
   fi
   sleep 0.5
 done
-[ -n "$STARTED" ] || { tail -40 "$E2E_TMP/daemon.log"; fail "run for card $CARD_ID never started (started_at unset)"; }
+[ -n "$STARTED" ] || { fail "run for card $CARD_ID never started (started_at unset)"; }
 PANE_LABEL="$(pane_present "$CARD_ID")"
 ok "run started (started_at=$STARTED); live agent pane present: $PANE_LABEL"
 
 step "HERDR MUTATION: board cancel $CARD_ID -> kill the pane, fail the run"
 mut "board cancel $CARD_ID"
-"$BOARD_BIN" cancel "$CARD_ID" >/dev/null || fail "board cancel failed"
+e2e_board_herdr_mutate -- cancel "$CARD_ID" >/dev/null || fail "board cancel failed"
 
 step "Assert the agent pane is gone (killed) from the workspace"
 GONE=0
@@ -82,8 +82,8 @@ done
 ok "agent pane killed on cancel"
 
 step "Assert run outcome=cancelled and card status=failed (no transition)"
-oc="$(wait_runs "$CARD_ID" 1)" || { tail -40 "$E2E_TMP/daemon.log"; fail "run never finalized"; }
-[ "$oc" = "cancelled" ] || { "$BOARD_BIN" card show "$CARD_ID" --json; fail "run outcome '$oc', expected 'cancelled'"; }
+oc="$(wait_runs "$CARD_ID" 1)" || { fail "run never finalized"; }
+[ "$oc" = "cancelled" ] || { e2e_card_failure_diag "$CARD_ID"; fail "run outcome '$oc', expected 'cancelled'"; }
 st="$(card_field "$CARD_ID" card.status || true)"
 col="$(card_field "$CARD_ID" card.column_id || true)"
 [ "$st" = "failed" ] || fail "card status '$st', expected 'failed'"

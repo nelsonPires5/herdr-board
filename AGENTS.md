@@ -29,18 +29,21 @@ cargo fmt --all --check                      # formatted
 - `#[ignore]`'d tests hit a live herdr (run only when `HERDR_SOCK`/`HERDR_SOCKET_PATH` exists).
 - End-to-end: `e2e/run-all.sh` (compat: `scripts/e2e.sh`) drives a REAL Herdr with a scenario
   suite, but checked-in fake Pi/Claude executables keep the standard suite provider-free and
-  zero-cost. It boots its own collision-resistant **ephemeral** Herdr session
-(`hb-e2e-<pid>-<random>-<random>`) per run and never touches
-  your real sessions; each scenario uses an isolated temp DB + socket, creates **disposable**
-  workspaces, prefixes every Herdr mutation `HERDR MUTATION:`, and tears everything down on exit
+  zero-cost. Every scenario boots its own collision-resistant **ephemeral** Herdr session
+  (`hb-e2e-<scenario>-<pid>-<random64>`, bounded slug) and never touches or adopts
+  your real sessions; each uses a marker-gated mode-0700 short HOME with explicit AF_UNIX margin,
+  an isolated temp DB + socket, and **disposable**
+  marked workspaces, prefixes every Herdr mutation `HERDR MUTATION:`, and tears everything down on exit
   (`--keep` leaves sessions/workspaces for review). The forced-build standard suite passes 01–17
   provider-free under a mode-0700 root with controlled HOME/ZDOT/rc/PATH, never sourcing user rc;
   Herdr is resolved absolutely before PATH narrowing. Session mutation, board-daemon signals, workspace close, and session stop/delete are authorized
-  only by a captured Linux `/proc` identity token (start time, executable, complete argv, expected
-  session/name), never PID liveness alone; this applies to the primary and secondary sessions,
-  run-all, standalone, and future real-Claude smoke paths. The real-Claude smoke independently
-  captures/verifies the daemon identity. Cleanup is limited to the owning session root, and cleanup
-  failures propagate so a passing scenario cannot hide failed cleanup. See [`docs/testing.md`](docs/testing.md)
+  only by a captured Linux `/proc` identity token (start time, executable, complete exact
+  `--session <name> server` argv), never PID liveness alone; scenario mutation wrappers freshly verify
+  boardd and each primary/secondary target. Stop and post-stop delete have separate fail-closed
+  authorization, with delete requiring the exact private ownership marker. The real-Claude smoke independently
+  captures/verifies the daemon identity. Cleanup is limited to invocation-emitted exact names/roots/PIDs; marker and script-content digests are reverified immediately before destructive cleanup, and inherited roots always fail closed (reuse is process-local with exact path/mode/header/token/owner validation). A post-spawn server is provisionally ledgered by PID/start/exe/argv/owner token before full capture and is signalled only after a fresh match,
+  and failures propagate so a passing scenario cannot hide failed cleanup. Standard children use an
+  environment allowlist that excludes inherited provider configuration. See [`docs/testing.md`](docs/testing.md)
   for the layers and how to add one.
 
 ## Testing policy (pragmatic)

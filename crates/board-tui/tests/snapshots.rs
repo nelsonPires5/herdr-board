@@ -9,7 +9,7 @@ use board_tui::editor::FakeEditor;
 use board_tui::forms::{FieldId, FieldKind};
 use board_tui::testkit::demo_client;
 use board_tui::view::{parse_epoch, view};
-use board_tui::Driver;
+use board_tui::{Driver, OriginContext};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
@@ -63,6 +63,44 @@ fn render(d: &mut Driver, w: u16, h: u16) -> String {
 fn empty_board() {
     let mut d = driver(FakeBoardClient::new().unwrap());
     insta::assert_snapshot!("empty_board", render(&mut d, 80, 24));
+}
+
+#[test]
+fn set_origin_socket_updates_context_used_by_later_new_card_form() {
+    let mut d = driver(FakeBoardClient::new().unwrap());
+    d.set_origin_socket(Some("/tmp/herdr/sessions/feature/herdr.sock".to_string()));
+    key(&mut d, KeyCode::Char('n'));
+    let form = d.app.form.as_ref().expect("new-card form");
+    assert_eq!(form.current_session().as_deref(), Some("feature"));
+}
+
+#[test]
+fn default_context_ignores_ambient_herdr_session() {
+    let mut d = driver(FakeBoardClient::new().unwrap());
+    key(&mut d, KeyCode::Char('n'));
+    let form = d.app.form.as_ref().expect("new-card form");
+    assert_eq!(form.current_session(), None);
+}
+
+#[test]
+fn explicit_hostile_origin_context_keeps_default_rendering_byte_identical() {
+    let mut default = driver(FakeBoardClient::new().unwrap());
+    let mut hostile = Driver::with_editor_and_origin(
+        Box::new(FakeBoardClient::new().unwrap()),
+        Box::new(FakeEditor::new("edited via $EDITOR")),
+        OriginContext {
+            origin_socket: Some("/hostile/socket".into()),
+            session: Some("hostile-session".into()),
+            plugin_id: Some("hostile-plugin-sentinel".into()),
+            pane_id: Some("hostile-pane-sentinel".into()),
+            herdr_bin_path: Some("/hostile/herdr-sentinel".into()),
+        },
+    )
+    .unwrap();
+
+    let default_output = render(&mut default, 80, 24);
+    let hostile_output = render(&mut hostile, 80, 24);
+    assert_eq!(hostile_output, default_output);
 }
 
 #[test]

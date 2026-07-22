@@ -62,35 +62,56 @@ require the sample because a fast provider response can finish between polls.
 - `cargo` on `PATH` — `run-all.sh` builds the release `board` binary once
   (`scripts/build.sh`); scenarios reuse it.
 - **No second session needed.** `03-sessions.sh` boots its own second ephemeral
-  collision-resistant session (`hb-e2e-b-<pid>-<random>-<random>`) and tears it down;
+  collision-resistant session (`hb-e2e-<scenario-b>-<pid>-<random64>`) and tears it down;
   it no longer discovers or skips.
 
 ## Ephemeral session model
 
-Each run generates a collision-resistant `hb-e2e-<pid>-<random>-<random>` name and
-preflights that exact name in the session registry before launching `herdr --session
-<name> server`. A live Herdr socket with the exact name is a collision; registry
+Each scenario generates a bounded collision-resistant
+`hb-e2e-<slug>-<pid>-<random64>` name (slug ≤8 characters; 64-bit cryptographic suffix) and
+preflights that exact name in its marker-gated `/tmp/h<random32>` HOME before launching the
+verified `herdr --session <name> server` argv. A live Herdr socket with the exact name is a collision; registry
 enumeration/parse failures fail closed, while stale or non-Herdr sockets are reported as stale.
 The isolated boardd binds to the newly started session
 (`HERDR_SOCKET_PATH`), so that session is the daemon's "default", and every herdr CLI
 call + `hrpc` assert targets it. Boot/readiness, mutation, board-daemon signals, workspace close, and session stop/delete use one
 captured Linux `/proc` identity token containing start time, executable, complete argv,
-and expected session/name argv identity; PID liveness alone never authorizes an operation.
-The same fail-closed gate applies to the primary and secondary sessions, run-all, standalone
-scenarios, and future real-Claude smoke paths. `run-all.sh` boots ONE session for the whole run
-and exports `E2E_SESSION`/`E2E_SESSION_SOCKET` to each scenario; a scenario run **standalone**
-boots (and tears down) its own. Teardown stops+deletes only while that owner identity remains
-valid, then verifies no `hb-e2e-*` sessions remain; it never cleans a coincident replacement.
-Cleanup failures propagate, so a successful scenario cannot hide failed cleanup.
+and exact `--session <name> server` full argv identity; PID liveness alone never authorizes an operation.
+Immediately after spawn, before full server capture can settle, cleanup is armed and deferred from a
+stable direct-child PID/start/parent/owner-token capability before the race-prone provisional ledger check.
+Its fresh verifier accepts only the captured launcher identity or that same child/owner's exact expected
+Herdr executable and `--session <name> server` argv after exec, so every registration/transition failure
+terminates and reaps only the spawned child.
+Scenario Herdr CLI/RPC mutations use identity-gated wrappers; board commands that can trigger Herdr
+verify boardd and the exact target session immediately before the request. Primary and secondary
+sessions have independent roots, PIDs, sockets, and tokens. `run-all.sh`
+never boots or exports a shared session: it scrubs inherited session/plugin/provider variables and
+each child follows exactly the same boot and teardown path as a **standalone** scenario. Teardown stops+deletes only while that owner identity remains
+valid. Stop requires a fresh full token; delete is separately authorized only after the captured
+process is gone and the exact private registry name/ownership marker matches. It never scans a prefix
+or cleans a coincident replacement. Cleanup failures propagate, so a successful scenario cannot hide
+failed cleanup. The append-only resource ledger records full identity tokens for session servers,
+boardd, and any helper/proxy; marker hashes for scenario/managed roots and workspace ownership;
+and bounded configured-runner/temp-script paths plus non-sensitive content digests. Marker/script digests are rechecked by audit and immediately
+before destructive cleanup. Scenario and managed paths require bounded mode-0700 roots with strict
+header/current-token/owner markers and process-local reuse. `run-all.sh` refuses `E2E_ARTIFACT_ROOT`
+and always creates a fresh private exact artifact root, so it never writes to or changes a pre-existing path.
+Both early roots are ledgered and deferred before any fake-managed pre-init failure. Replacement generations and releases are validated,
+and both standalone cleanup and `run-all.sh` run the same kind-specific audit. Audits use only exact
+ledger entries—never a prefix scan, process-name search, or user inventory—and malformed ledgers
+fail closed. Prompt/system-prompt files and content are intentionally never individually recorded.
+Standard children start from an environment allowlist with a fixed system-tool `PATH`, comprehensively
+scrubbing inherited provider credentials, endpoints, opt-ins, and shell functions after resolving Herdr absolutely.
 
 The provider-free harness uses a mode-`0700` `/tmp/hb-e2e-managed.XXXXXX` root with a marker,
 controlled `HOME`, `ZDOTDIR`, rc files, `PATH`, and fake-provider functions; it never sources user
 rc files. Herdr is resolved to an absolute path before the managed pane `PATH` is narrowed.
-Cleanup removes the marked root only for its exact primary-session owner and refuses malformed,
-unmarked, or out-of-root paths. The board DB/socket/config and scope remain under the separate
-short `/tmp/hb-e2e.XXXXXX` isolated root. The generated configured runner self-removes when it
-starts; if asynchronous `pane run` scheduling succeeds but the pane never opens it, the residual
-configured-script orphan is a documented limitation. The forced-build standard suite passes
+Cleanup removes the marked roots only for their exact primary-session owner and refuses malformed,
+unmarked, or out-of-root paths. Named-session sockets must be at most 92 bytes, leaving at least
+15 bytes below Linux's 108-byte AF_UNIX limit. The board DB/socket/config and scope remain under the separate
+short `/tmp/hb-e2e.XXXXXX` isolated root. `TMPDIR` is pinned to that exact marker-owned root, so
+generated configured-harness scripts remain contained even if asynchronous `pane run` never opens
+their normal self-removing script. The forced-build standard suite passes
 scenarios 01–17 without provider calls.
 
 ## Running
@@ -108,12 +129,12 @@ E2E_REAL_CLAUDE_HAIKU=1 e2e/real-claude-haiku-smoke.sh  # one authorized REAL Ha
 **Keep mode** (`--keep`, or `E2E_KEEP=1`): skips session stop/delete **and** workspace close,
 so each scenario's disposable workspace stays inside its kept session for inspection.
 Scenario-level daemons/temp dirs are still cleaned up; cleanup failures still propagate
-(only the explicitly kept Herdr session/workspace artifacts are exempt). At the end
-`run-all.sh` prints a review block per kept session — the `herdr session attach <name>` line
-and the `herdr session stop <n> && herdr session delete <n>` cleanup one-liner.
+(only the explicitly kept Herdr session/workspace artifacts are exempt). The exact kept session name remains in each scenario artifact directory for review and explicit cleanup.
 
 Exit codes: scenario `0` = PASS, `3` = SKIP (missing precondition), anything else =
-FAIL. `run-all.sh` exits non-zero if any scenario FAILED. The suite is **not** part
+FAIL. `run-all.sh` captures the scenario side of its logging pipeline via `PIPESTATUS[0]` and exits
+non-zero if any scenario failed; `--require-all` also converts SKIP to failure. Per-scenario logs,
+status, exact owned session name, and sanitized manifest events are written below the run artifact root. The suite is **not** part
 of CI (it needs Herdr 0.7.5 to boot a real ephemeral protocol-17 server) — it is
 run by a human/orchestrator. The real-Claude smoke stages only completed onboarding/theme,
 exact workspace trust, the installed Herdr hook, credentials, and approved
@@ -125,6 +146,7 @@ personal Claude state. Its intended contract is one authorized attempt with no r
 | File | Role |
 |---|---|
 | `lib.sh` | Shared harness sourced by every scenario: logging, isolated stack, cleanup registry, daemon + workspace helpers, pollers (`wait_ok`/`wait_runs`), JSON/`hrpc`/`brpc`/`col_create` helpers. |
+| `test-harness.sh` | Deterministic shell safety checks for ownership tokens and every exact-resource ledger kind, replacement, malformed record, and standalone parity; starts no Herdr resources. |
 | `fake-agent.sh` | Config-defined fake harness used by scenarios 01–10 and 13–15. |
 | `fake-bin/pi` / `fake-bin/claude` | Executables exposed only inside disposable standard-E2E Herdr servers/workspaces. They emulate interactive readiness/session reports, require the exact `agent.prompt` bytes before completion, record evidence under isolated temp, and never modify installed tools or call a provider. |
 | `16-managed-p17.sh` | Managed pane-first Pi/Claude protocol-17 launch and no-provider boundary. |
@@ -135,7 +157,7 @@ personal Claude state. Its intended contract is one authorized attempt with no r
 | `12-cwd-boards.sh` | Scoped board identity/isolation plus real TUI title/picker. |
 | `13-jump-to-pane.sh` | Same-session pane focus through a real plugin overlay. |
 | `NN-*.sh` | The scenarios above. |
-| `run-all.sh` | Builds once, runs every scenario in order, prints the summary. |
+| `run-all.sh` | Builds once, runs every scenario as an environment-scrubbed child with its own session, captures artifacts, and prints the summary (`--require-all` forbids skips). |
 
 Columns have no `board` CLI verb, so scenarios configure them over the boardd
 socket via `scripts/board-rpc.py` (wrapped by `lib.sh`'s `col_create` / `brpc`).

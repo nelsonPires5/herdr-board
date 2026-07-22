@@ -93,11 +93,12 @@ case ↔ scenario ↔ status catalog):
 | File | Role |
 |---|---|
 | `lib.sh` | Shared harness sourced by every scenario: logging, isolated stack, cleanup registry, daemon + workspace helpers, pollers, JSON/`hrpc` helpers. |
+| `test-harness.sh` | Deterministic shell checks for ownership tokens and every exact-resource kind, replacement, malformed ledger, and standalone parity; starts no live Herdr resources. |
 | `fake-agent.sh` | The fake harness dispatched instead of a real agent. Mirrors the crate fixture and adds `FAKE_AGENT_HOLD` (keep the pane alive after the run). |
 | `hrpc.py` | One-shot raw herdr socket RPC (honours `HERDR_SOCKET_PATH`) for structural assertions (`tab.list`/`pane.list`/`pane.layout`). |
 | `01-core.sh` | CLI path (dispatch → run → outcome/comment) + TUI path (drive the new-card form via send-keys). |
 | `02-kanban-grid.sh` | Several cards → one auto column → asserts the mesh grid (one `kanban` tab, one pane per card, tiled rects). |
-| `03-sessions.sh` | Multi-session behaviour against a **second collision-resistant ephemeral session it boots itself** (`hb-e2e-b-<pid>-<random>-<random>`). |
+| `03-sessions.sh` | Multi-session behaviour against a **second collision-resistant ephemeral session it boots itself** (`hb-e2e-<scenario-b>-<pid>-<random64>`). |
 | `04-fail-on-fail.sh` | `board done --outcome fail` → card follows the column's `on_fail_column_id`. |
 | `05-retry.sh` | `board retry` spawns a NEW run row for a finished card (run count grows). |
 | `06-silent-exit.sh` | A configured harness exits without `board done`; its generated runner calls the private pane-exit fallback → run failed, **no** auto-transition. |
@@ -141,26 +142,42 @@ Its intended contract is one authorized Haiku/low attempt with no retry or fallb
 ### How it stays isolated and safe
 
 - **Ephemeral herdr session.** The suite **never** touches your real sessions.
-  Each run generates a collision-resistant `hb-e2e-<pid>-<random>-<random>` name, checks the
-  exact name in the session registry before launching the server, and refuses to launch when a
+  Each scenario generates a bounded `hb-e2e-<slug>-<pid>-<random64>` name (slug ≤8), checks the
+  exact name in its marker-gated `/tmp/h<random32>` HOME before launching the server, and refuses to launch when a
   live Herdr socket already owns that exact name. Registry enumeration/parse failures fail closed;
   a stale or non-Herdr socket is reported as stale rather than treated as a collision. The boot,
   readiness, mutation, board-daemon signal, workspace-close, and session stop/delete paths capture
   and verify one Linux `/proc` identity token containing PID, start time, executable, complete argv,
-  and expected session/name argv identity; PID liveness alone never authorizes an operation. This
-  token gate is used by run-all, standalone scenarios, the primary and secondary sessions, and
-  future real-Claude smoke paths. Each run binds the isolated boardd to it (`HERDR_SOCKET_PATH`),
-  so it is the daemon's "default" and every herdr CLI + `hrpc` call targets it.
-  `run-all.sh` boots ONE session for the whole run (exports `E2E_SESSION`/`E2E_SESSION_SOCKET`
-  to scenarios) and tears it down after, verifying no `hb-e2e-*` session lingers; a scenario run
-  **standalone** boots and tears down its own via `e2e_session_ensure` (called by `e2e_init`).
+  and exact `--session <name> server` full argv identity; PID liveness alone never authorizes an operation. All scenario Herdr mutations use identity-gated CLI/RPC wrappers, and board commands that can trigger Herdr verify both boardd and the exact target session immediately before the request. This token gate is independent for primary and secondary sessions. Each scenario binds its isolated
+  boardd to its own socket (`HERDR_SOCKET_PATH`). `run-all.sh` never boots or exports a shared
+  session: it scrubs inherited session/plugin/provider variables and each child uses the same
+  `e2e_init` ownership path as a **standalone** invocation.
   `03-sessions.sh` additionally boots a *second* ephemeral session to exercise the cross-session
   paths. Teardown stops/deletes only while that exact owner identity remains valid; it never
   pattern-kills or adopts/deletes a coincident replacement. **Keep mode** (`--keep` / `E2E_KEEP=1`)
   skips session stop/delete and workspace close so a run can be inspected; daemon/temp cleanup
-  still runs, and cleanup failures propagate so a successful scenario cannot hide failed cleanup.
-  `run-all.sh` then prints an attach + cleanup one-liner per kept session.
-- **Isolated stack and root.** `e2e_isolate` makes a short `/tmp/hb-e2e.XXXXXX` root and
+  still runs, and cleanup failures propagate so a successful scenario cannot hide failed cleanup. Strict
+  bounded mode-0700 root/artifact markers bind the current invocation token and owner; fake-managed roots
+  are ledgered before any pre-init failure. Immediately after server spawn, an exact-child
+  PID/start/parent/owner-token cleanup capability is armed and deferred before the provisional ledger
+  validation. Its fresh verifier permits only the captured launcher or that same child's exact expected
+  Herdr executable/argv after exec, so registration/transition failures terminate and reap the owner child.
+  `run-all.sh` captures each child's pipeline status with `PIPESTATUS[0]`, stores per-scenario
+  artifacts, and supports `--require-all` to treat any SKIP as failure. Stop requires a fresh full
+  process token; delete is separately authorized only after that process is gone and the exact private
+  registry name/ownership marker matches. An append-only ledger records full process identity tokens,
+  exact sessions, marker-hashed scenario/managed roots and workspace evidence, and bounded configured/temp
+  script paths with non-sensitive content digests; replacements and releases are validated. Marker and
+  script digests are checked by the audit and
+  immediately before destructive cleanup. Scenario/managed root reuse is process-local; suite artifact
+  roots are stricter: `run-all.sh` refuses inherited `E2E_ARTIFACT_ROOT` and always creates a fresh private
+  exact root without touching a pre-existing path. Standalone and suite cleanup run the same kind-specific audit. It checks only exact emitted entries—never a prefix/process-name scan or user
+  inventory—and malformed ledgers fail closed. Sensitive prompt payload paths/content are not recorded.
+  Standard children start from an environment allowlist with a fixed system-tool `PATH`, scrubbing
+  inherited provider keys, endpoints, opt-ins, and shell functions; Herdr is resolved absolutely first.
+- **Isolated stack and root.** The Herdr registry uses a marker-gated `/tmp/h<random32>` HOME;
+  session socket paths are rejected above 92 bytes, preserving at least 15 bytes of AF_UNIX margin.
+  `e2e_isolate` separately makes a short `/tmp/hb-e2e.XXXXXX` root and
   points `BOARD_DB`/`BOARD_SOCKET`/`HERDR_BOARD_CONFIG` there, sets a canonical disposable
   `BOARD_SCOPE_PATH`, and uses `BOARD_SPAWNER=herdr`. The daemon it starts is entirely separate
   from your real board — it never reads your board db or socket. (`/tmp`, not `$TMPDIR`: AF_UNIX
@@ -182,7 +199,8 @@ Its intended contract is one authorized Haiku/low attempt with no retry or fallb
   server token), then the temp dir is removed. Cleanup failures propagate to the scenario result;
   cleanup is fail-closed: it removes only resources
   registered by the owning session and the marker-checked managed root owned by the exact session;
-  it does not sweep shared/user paths or clean up a name after its owner dies. Mutations only ever
+  generated configured-harness temp scripts are contained by setting `TMPDIR` to the exact isolated
+  scenario root. It does not sweep shared/user paths or clean up a name after its owner dies. Mutations only ever
   hit workspaces the suite created; user workspaces/tabs are never touched. A configured runner
   script self-removes when it starts, but an asynchronously scheduled script whose pane never
   opens it can remain as the documented residual configured-script orphan.
@@ -206,7 +224,7 @@ set -euo pipefail
 
 # export E2E_FAKE_ENV="FAKE_AGENT_HOLD=300"   # only if you inspect live panes
 
-e2e_init          # preconditions + cleanup trap + ephemeral session  (FIRST)
+e2e_init          # cleanup trap + private root/session + preconditions (FIRST)
 e2e_build         # idempotent release build
 e2e_isolate       # temp db/socket/config with the fake harness
 e2e_daemon_start  # isolated boardd, stopped on cleanup
@@ -234,7 +252,8 @@ Checklist:
 
 - [ ] `set -euo pipefail`; source `lib.sh`.
 - [ ] `e2e_init` **before** creating anything (it installs the cleanup trap and
-      boots/adopts the ephemeral session, so partial runs still tear down).
+      boots the invocation-owned ephemeral session, so partial runs still tear down).
+- [ ] `e2e_init` boots a new invocation-owned session; it never adopts inherited session state.
 - [ ] Use `e2e_isolate` — never the real board db/socket; keep all scenario state under its
       isolated `/tmp/hb-e2e.XXXXXX` root.
 - [ ] Own every workspace you touch. Create with `e2e_ws_create` (auto-registers
@@ -269,7 +288,8 @@ Checklist:
 
 ```bash
 e2e/run-all.sh                  # build once, run all scenarios, print a summary
-e2e/run-all.sh --keep           # keep sessions + workspaces for review
+e2e/run-all.sh --keep           # keep each scenario's owned session/workspaces
+e2e/run-all.sh --require-all    # fail if any selected scenario skips
 e2e/run-all.sh 04 07            # only scenarios matching a filename filter
 scripts/e2e.sh                  # compat wrapper -> run-all.sh
 bash e2e/01-core.sh             # a single scenario (boots its own ephemeral session)
@@ -278,8 +298,8 @@ E2E_REAL_CLAUDE_HAIKU=1 e2e/real-claude-haiku-smoke.sh  # one authorized Haiku/l
 ```
 
 - Standard suite requires **exactly Herdr 0.7.5 / socket protocol 17**, `python3`, and `cargo`. Every scenario preflights both `herdr --version` and a socket `ping`; protocol 16 and unknown/future protocols fail before dispatch. The forced-build standard suite scenarios 01–17 pass with no provider calls. The real-Pi smoke additionally verifies Pi's runtime default model, current Herdr integration, and WezTerm. The real-Claude smoke is an intended-contract validation only: it requires a logged-in real Claude CLI plus current Herdr Claude integration v7, stages minimal completed onboarding/theme, exact workspace trust, the installed Herdr hook, credentials, and approved `remote-settings.json` under `/tmp` so startup dialogs cannot consume `agent.prompt`; no broad personal Claude state is copied, and it has no retry or fallback. Both opt-ins compare user/repository state and clean exact resources. `run-all.sh` builds
-  the release binary once; scenarios reuse it. **No second session** is needed —
-  the suite boots its own ephemeral session(s) and cleans them up.
+  the release binary once; scenarios reuse it. Every scenario boots and cleans its own ephemeral
+  session; scenario 03 additionally owns an independently tokened secondary session.
 - Exit codes: scenario `0` = PASS, `3` = SKIP, other = FAIL; `run-all.sh` exits
   non-zero if any scenario FAILED.
 - **Not in CI.** CI runs `cargo fmt`/`clippy`/`test` (layers 1–3); the live e2e
@@ -289,7 +309,7 @@ E2E_REAL_CLAUDE_HAIKU=1 e2e/real-claude-haiku-smoke.sh  # one authorized Haiku/l
 ### Multi-session (`03-sessions.sh`)
 
 `03-sessions.sh` no longer needs a pre-existing second session. It boots its own
-second ephemeral session `hb-e2e-b-<pid>-<random>-<random>`
+second ephemeral session `hb-e2e-<scenario-b>-<pid>-<random64>`
 (`herdr --session <name> server &`), runs
 the cross-session assertions against it, and stops+deletes it on cleanup (kept for
 review under `--keep`/`E2E_KEEP=1`). The daemon reaches that session by name — session

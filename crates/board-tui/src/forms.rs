@@ -268,7 +268,11 @@ impl Form {
     // -- construction --------------------------------------------------------
 
     pub fn card_create(column_id: i64) -> Form {
-        let values = CardValues::from_card(None);
+        Self::card_create_with_session(column_id, None)
+    }
+
+    pub fn card_create_with_session(column_id: i64, session: Option<&str>) -> Form {
+        let values = CardValues::from_card(None, session);
         Form {
             kind: FormKind::CardCreate { column_id },
             fields: build_card_fields(&values, None, &default_harnesses(), &[], &[]),
@@ -282,7 +286,7 @@ impl Form {
     }
 
     pub fn card_edit(card: &Card) -> Form {
-        let values = CardValues::from_card(Some(card));
+        let values = CardValues::from_card(Some(card), None);
         Form {
             kind: FormKind::CardEdit { card_id: card.id },
             fields: build_card_fields(&values, None, &default_harnesses(), &[], &[]),
@@ -789,24 +793,18 @@ impl Form {
     }
 }
 
-/// Parse the current herdr session name from a `HERDR_SOCKET_PATH` value.
+/// Parse a herdr session name from a `HERDR_SOCKET_PATH` value.
 ///
 /// A named session's socket lives at `…/sessions/<name>/herdr.sock`; anything
 /// else (unset, or the plain default `…/herdr.sock`) means the daemon's default
-/// session, represented as `None`. Pure so it can be unit-tested; the env read
-/// lives in [`detect_current_session`].
+/// session, represented as `None`. This function is pure so production
+/// composition can inject its result without test-time environment reads.
 pub fn session_name_from_socket(path: Option<&str>) -> Option<String> {
     // Expect the tail `sessions/<name>/herdr.sock`.
     let rest = path?.strip_suffix("/herdr.sock")?;
     let (parent, name) = rest.rsplit_once('/')?;
     let last_seg = parent.rsplit('/').next().unwrap_or(parent);
     (last_seg == "sessions" && !name.is_empty()).then(|| name.to_string())
-}
-
-/// Read `HERDR_SOCKET_PATH` and resolve it to the current session name
-/// (`None` = the daemon's default session).
-fn detect_current_session() -> Option<String> {
-    session_name_from_socket(std::env::var("HERDR_SOCKET_PATH").ok().as_deref())
 }
 
 // -- field templates ---------------------------------------------------------
@@ -904,7 +902,7 @@ struct CardValues {
 }
 
 impl CardValues {
-    fn from_card(card: Option<&Card>) -> CardValues {
+    fn from_card(card: Option<&Card>, default_session: Option<&str>) -> CardValues {
         match card {
             Some(c) => CardValues {
                 title: c.title.clone(),
@@ -921,8 +919,7 @@ impl CardValues {
             },
             None => CardValues {
                 harness: DEFAULT_HARNESS.to_string(),
-                // A new card defaults to the session the TUI itself runs in.
-                session: detect_current_session(),
+                session: default_session.map(str::to_string),
                 space_kind: "workspace".to_string(),
                 ..CardValues::default()
             },

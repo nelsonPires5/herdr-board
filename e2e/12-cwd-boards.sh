@@ -57,18 +57,15 @@ global="$(brpc board.get '{}')"
   || fail "legacy Global board unavailable"
 
 step "HERDR MUTATION: open scoped TUI from explicit plugin context"
-mut "workspace create --cwd $SUB --label cwd-boards --no-focus"
-ws_json="$("$HERDR_BIN" workspace create --cwd "$SUB" --label cwd-boards --no-focus \
+ws_json="$(e2e_herdr_mutate -- workspace create --cwd "$SUB" --label cwd-boards --no-focus \
   --env "BOARD_BIN=$BOARD_BIN" --env "BOARD_SOCKET=$BOARD_SOCKET")"
 WS_ID="$(printf '%s' "$ws_json" | jget workspace_id)"
 e2e_ws_defer_close "$WS_ID"
-mut "tab create --workspace $WS_ID --label cwd-boards --no-focus"
-tab_json="$("$HERDR_BIN" tab create --workspace "$WS_ID" --label cwd-boards --no-focus)"
+tab_json="$(e2e_herdr_mutate -- tab create --workspace "$WS_ID" --label cwd-boards --no-focus)"
 PANE_ID="$(printf '%s' "$tab_json" | jget pane_id)"
 CONTEXT="$(python3 -c 'import json,sys; print(json.dumps({"focused_pane_cwd":sys.argv[1],"workspace_cwd":sys.argv[2]}))' "$SUB" "$PLAIN")"
 CONTEXT_Q="$(printf '%q' "$CONTEXT")"
-mut "pane run $PANE_ID '<board> tui' with explicit HERDR_PLUGIN_CONTEXT_JSON"
-"$HERDR_BIN" pane run "$PANE_ID" \
+e2e_herdr_mutate -- pane run "$PANE_ID" \
   "env -u BOARD_SCOPE_PATH HERDR_PLUGIN_CONTEXT_JSON=$CONTEXT_Q HERDR_PLUGIN_ID=herdr-board HERDR_PANE_ID=$PANE_ID HERDR_BIN_PATH=$HERDR_BIN HERDR_SOCKET_PATH=$HERDR_SOCKET_PATH BOARD_SOCKET=$BOARD_SOCKET BOARD_DB=$BOARD_DB HERDR_BOARD_CONFIG=$HERDR_BOARD_CONFIG $BOARD_BIN tui"
 
 expected="Board [$(basename "$REPO") · ACTIVE]"
@@ -85,8 +82,7 @@ for pane in json.load(sys.stdin).get("panes",[]):
   sleep .1
 done
 [ "$label" = "$expected" ] || fail "scoped TUI label '$label' (expected '$expected')"
-mut "pane send-keys $PANE_ID b"
-"$HERDR_BIN" pane send-keys "$PANE_ID" b
+e2e_herdr_mutate -- pane send-keys "$PANE_ID" b
 sleep 0.5
 screen="$("$HERDR_BIN" pane read "$PANE_ID" --source recent-unwrapped --lines 200 || true)"
 grep -Fq 'Switch board' <<<"$screen" || fail "board picker did not open"

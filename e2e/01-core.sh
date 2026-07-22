@@ -38,14 +38,12 @@ CARD_ID="$(printf '%s' "$card_json" | jget id)" || fail "could not parse card id
 echo "  card: $CARD_ID"
 
 step "Move card into 'Execute' (auto) — this dispatches a real herdr agent pane"
-mut "board move $CARD_ID Execute -> daemon calls herdr agent.start in $WS_ID"
-"$BOARD_BIN" move "$CARD_ID" Execute --json
+e2e_board_herdr_mutate -- move "$CARD_ID" Execute --json
 echo "  moved; polling for the run to finish (fake harness sleeps then reports)..."
 
 outcome="$(wait_ok "$CARD_ID")" || {
   echo "  run outcome: $outcome"
-  echo "--- card state:"; "$BOARD_BIN" card show "$CARD_ID" --json || true
-  echo "--- daemon log:"; tail -30 "$E2E_TMP/daemon.log" || true
+  echo "--- card state:"; e2e_card_failure_diag "$CARD_ID"
   fail "expected run outcome 'ok', got '$outcome'"
 }
 echo "  run outcome: $outcome"
@@ -59,8 +57,7 @@ ok "card $CARD_ID ran the fake harness (outcome ok, 'fake:' comment present)"
 step "TUI PATH"
 # ----------------------------------------------------------------------------
 step "HERDR MUTATION: open a tab in the workspace and launch 'board tui' in it"
-mut "tab create --workspace $WS_ID --label board-tui --no-focus"
-tab_json="$("$HERDR_BIN" tab create --workspace "$WS_ID" --label board-tui --no-focus)"
+tab_json="$(e2e_herdr_mutate -- tab create --workspace "$WS_ID" --label board-tui --no-focus)"
 echo "  -> $tab_json"
 TAB_ID="$(printf '%s' "$tab_json" | jget tab_id)" || fail "could not parse tab_id"
 PANE_ID="$(printf '%s' "$tab_json" | jget pane_id)"
@@ -69,21 +66,17 @@ echo "  tui pane: $PANE_ID"
 
 # Pane shells do NOT inherit workspace --env; pass the isolated env inline so the
 # TUI talks to THIS test's daemon, not the default socket.
-mut "pane run $PANE_ID '<board> tui' (isolated BOARD_SOCKET/BOARD_DB)"
-"$HERDR_BIN" pane run "$PANE_ID" \
+e2e_herdr_mutate -- pane run "$PANE_ID" \
   "BOARD_SOCKET=$BOARD_SOCKET BOARD_DB=$BOARD_DB HERDR_BOARD_CONFIG=$HERDR_BOARD_CONFIG BOARD_SCOPE_PATH=$BOARD_SCOPE_PATH $BOARD_BIN tui"
 echo "  waiting for the TUI to come up..."
 sleep 3
 
 step "Drive the new-card form via send-keys (n, type title, Enter)"
-mut "pane send-keys $PANE_ID n"
-"$HERDR_BIN" pane send-keys "$PANE_ID" n
+e2e_herdr_mutate -- pane send-keys "$PANE_ID" n
 sleep 0.5
-mut "pane send-text $PANE_ID 'E2E TUI Card'"
-"$HERDR_BIN" pane send-text "$PANE_ID" "E2E TUI Card"
+e2e_herdr_mutate -- pane send-text "$PANE_ID" "E2E TUI Card"
 sleep 0.5
-mut "pane send-keys $PANE_ID Enter (submit)"
-"$HERDR_BIN" pane send-keys "$PANE_ID" enter
+e2e_herdr_mutate -- pane send-keys "$PANE_ID" enter
 sleep 2
 
 step "Read the TUI pane and assert the new card appears"

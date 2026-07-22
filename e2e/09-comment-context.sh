@@ -41,10 +41,10 @@ card_json="$("$BOARD_BIN" card new --title "Ctx Card" -d "context flow" \
 CARD_ID="$(printf '%s' "$card_json" | jget id)" || fail "could not parse card id"
 echo "  card: $CARD_ID"
 mut "board move $CARD_ID Stage1 -> agent.start; on ok auto-advances to Stage2"
-"$BOARD_BIN" move "$CARD_ID" Stage1 --json >/dev/null
+e2e_board_herdr_mutate -- move "$CARD_ID" Stage1 --json >/dev/null
 
 step "Wait for BOTH stage runs to finish (chained auto advance)"
-oc="$(wait_runs "$CARD_ID" 2)" || { tail -50 "$E2E_TMP/daemon.log"; "$BOARD_BIN" card show "$CARD_ID" --json; fail "second (Stage2) run never finished"; }
+oc="$(wait_runs "$CARD_ID" 2)" || { e2e_card_failure_diag "$CARD_ID"; fail "second (Stage2) run never finished"; }
 echo "  last (Stage2) run outcome: $oc"
 [ "$oc" = "ok" ] || fail "Stage2 run outcome '$oc', expected ok"
 
@@ -59,11 +59,11 @@ if len(runs) < 2:
 last = runs[-1]
 snap = last.get("prompt_snapshot") or ""
 if "## Card comments" not in snap:
-    sys.exit("Stage2 prompt_snapshot has no \"## Card comments\" section:\n" + snap)
+    sys.exit(f"Stage2 prompt_snapshot missing comments section (length={len(snap)})")
 if marker not in snap:
-    sys.exit(f"Stage2 prompt_snapshot missing the Stage1 marker {marker!r}:\n" + snap)
+    sys.exit(f"Stage2 prompt_snapshot missing fixed marker (length={len(snap)})")
 print(f"  [ok] Stage2 prompt_snapshot contains \"## Card comments\" and the marker {marker}", file=sys.stderr)
-' "$MARKER" || { "$BOARD_BIN" card show "$CARD_ID" --json; fail "comment context did not flow into Stage2 prompt"; }
+' "$MARKER" || { e2e_card_failure_diag "$CARD_ID"; fail "comment context did not flow into Stage2 prompt"; }
 ok "Stage1 comment flowed into Stage2's prompt via the '## Card comments' section"
 
 step "09-comment-context: ALL CHECKS PASSED"

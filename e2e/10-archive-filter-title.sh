@@ -14,16 +14,14 @@ e2e_ws_create archive-filter; WS_ID="$E2E_WS"
 echo "  workspace: $WS_ID"
 
 step "HERDR MUTATION: create a tab and launch the real TUI with plugin pane context"
-mut "tab create --workspace $WS_ID --label archive-filter --no-focus"
-tab_json="$("$HERDR_BIN" tab create --workspace "$WS_ID" --label archive-filter --no-focus)"
+tab_json="$(e2e_herdr_mutate -- tab create --workspace "$WS_ID" --label archive-filter --no-focus)"
 PANE_ID="$(printf '%s' "$tab_json" | jget pane_id)"
 [ -n "$PANE_ID" ] || fail "could not find pane for archive-filter tab"
 
 # Verified against Herdr 0.7.5 / protocol 17: `pane rename <pane_id> <label>`.
 # The plugin variables reproduce the real pane context without linking a plugin
 # into anything except this disposable session/workspace.
-mut "pane run $PANE_ID '<board> tui' with isolated plugin context"
-"$HERDR_BIN" pane run "$PANE_ID" \
+e2e_herdr_mutate -- pane run "$PANE_ID" \
   "HERDR_PLUGIN_ID=herdr-board HERDR_PANE_ID=$PANE_ID HERDR_BIN_PATH=$HERDR_BIN HERDR_SOCKET_PATH=$HERDR_SOCKET_PATH BOARD_SOCKET=$BOARD_SOCKET BOARD_DB=$BOARD_DB HERDR_BOARD_CONFIG=$HERDR_BOARD_CONFIG BOARD_SCOPE_PATH=$BOARD_SCOPE_PATH $BOARD_BIN tui"
 
 pane_label() {
@@ -54,11 +52,9 @@ wait_label "Board [$SCOPE_LABEL · ACTIVE]"
 ok "startup pane title is Board [$SCOPE_LABEL · ACTIVE]"
 
 step "Cycle ACTIVE -> ALL -> ARCHIVED and assert each scoped title"
-mut "pane send-keys $PANE_ID v (ACTIVE -> ALL)"
-"$HERDR_BIN" pane send-keys "$PANE_ID" v
+e2e_herdr_mutate -- pane send-keys "$PANE_ID" v
 wait_label "Board [$SCOPE_LABEL · ALL]"
-mut "pane send-keys $PANE_ID v (ALL -> ARCHIVED)"
-"$HERDR_BIN" pane send-keys "$PANE_ID" v
+e2e_herdr_mutate -- pane send-keys "$PANE_ID" v
 wait_label "Board [$SCOPE_LABEL · ARCHIVED]"
 ok "archive filter stays synchronized with the Herdr pane title"
 

@@ -37,14 +37,13 @@ for i in $(seq 1 "$NCARDS"); do
   cid="$(printf '%s' "$card_json" | jget id)" || fail "could not parse card id ($i)"
   CARD_IDS+=("$cid")
   mut "board move $cid Execute -> agent.start in $WS_ID"
-  "$BOARD_BIN" move "$cid" Execute --json >/dev/null
+  e2e_board_herdr_mutate -- move "$cid" Execute --json >/dev/null
   echo "  card $i -> $cid dispatched"
 done
 
 step "Wait for every run to report outcome ok"
 for cid in "${CARD_IDS[@]}"; do
   oc="$(wait_ok "$cid")" || {
-    echo "--- daemon log:"; tail -40 "$E2E_TMP/daemon.log" || true
     fail "card $cid outcome '$oc' (expected ok)"
   }
   echo "  card $cid: $oc"

@@ -39,26 +39,27 @@ card_json="$("$BOARD_BIN" card new --title "Fail Card" -d "fails on purpose" \
 CARD_ID="$(printf '%s' "$card_json" | jget id)" || fail "could not parse card id"
 echo "  card: $CARD_ID"
 mut "board move $CARD_ID Execute -> agent.start in $WS_ID"
-"$BOARD_BIN" move "$CARD_ID" Execute --json >/dev/null
+e2e_board_herdr_mutate -- move "$CARD_ID" Execute --json >/dev/null
 
 step "Wait for the run to finish and assert outcome=fail"
-oc="$(wait_runs "$CARD_ID" 1)" || { tail -40 "$E2E_TMP/daemon.log"; fail "run never finished (last outcome '$oc')"; }
-[ "$oc" = "fail" ] || { "$BOARD_BIN" card show "$CARD_ID" --json; fail "expected run outcome 'fail', got '$oc'"; }
+oc="$(wait_runs "$CARD_ID" 1)" || { fail "run never finished (last outcome '$oc')"; }
+[ "$oc" = "fail" ] || { e2e_card_failure_diag "$CARD_ID"; fail "expected run outcome 'fail', got '$oc'"; }
 ok "run outcome recorded as fail"
 
 step "Assert the card moved into the on_fail column (Backlog) and parked idle"
 col_now="$(card_field "$CARD_ID" card.column_id || true)"
 status_now="$(card_field "$CARD_ID" card.status || true)"
 echo "  card column_id=$col_now status=$status_now (want column=$BACKLOG_ID status=idle)"
-[ "$col_now" = "$BACKLOG_ID" ] || { "$BOARD_BIN" card show "$CARD_ID" --json; fail "card in column $col_now, expected on_fail column $BACKLOG_ID"; }
+[ "$col_now" = "$BACKLOG_ID" ] || { e2e_card_failure_diag "$CARD_ID"; fail "card in column $col_now, expected on_fail column $BACKLOG_ID"; }
 [ "$status_now" = "idle" ] || fail "card status '$status_now', expected 'idle' (manual on_fail parks the card)"
 ok "card landed in the on_fail column, status idle"
 
 step "Assert a system transition comment records the fail -> Backlog move"
 show="$("$BOARD_BIN" card show "$CARD_ID" --json)"
-printf '%s' "$show" | grep -q "Execute failed in" \
-  || { printf '%s\n' "$show"; fail "no 'Execute failed in ... -> Backlog' system comment"; }
-printf '%s' "$show" | grep -q "Backlog" || fail "transition comment does not name the Backlog target"
+grep -q "Execute failed in" <<<"$show" \
+  || { e2e_card_failure_diag "$CARD_ID"; fail "no 'Execute failed in ... -> Backlog' system comment"; }
+grep -q "Backlog" <<<"$show" \
+  || { e2e_card_failure_diag "$CARD_ID"; fail "transition comment does not name the Backlog target"; }
 ok "system transition comment present"
 
 step "04-fail-on-fail: ALL CHECKS PASSED"
