@@ -40,6 +40,20 @@ runner action. A mismatch fails the run before workspace mutation.
 then retry with backoff for ~3s. Daemon takes an exclusive flock on `<db>.lock` — a second
 daemon on the same DB must exit 0 silently (lost the race = someone else serves).
 
+## Client boundary
+
+`board-core::client::BoardClient` is the shared typed client boundary used by the CLI and TUI.
+Its wrappers encode the v1 method parameters and decode result DTOs; the CLI and TUI do not build
+method strings or inspect raw result values for these operations. `UnixClient` keeps the blocking
+NDJSON `call(method, params)` primitive internally for transport implementations and compatibility
+with lightweight recording/fake clients. Production clients perform no SQLite I/O; only boardd owns
+and mutates the database.
+
+The typed catalog/action surface includes `harness.capabilities`, `harness.list`,
+`space.list`, `session.list`, `run.cancel`, and `run.retry`, in addition to the existing board,
+column, card, comment, and run wrappers. `space.list(None)` deliberately serializes as `{}` while
+a named session serializes as `{ "session": "..." }`, preserving the v1 wire contract.
+
 ## Methods
 
 ### daemon

@@ -23,10 +23,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use board_core::capability::HarnessCapabilities;
 use board_core::client::BoardClient;
-use board_core::protocol::{
-    BoardSnapshot, Event, HarnessListResult, SessionInfo, SessionListResult, SpaceInfo,
-    SpaceListResult,
-};
+use board_core::protocol::{BoardSnapshot, Event, SessionInfo, SpaceInfo};
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event as CtEvent, KeyEventKind};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -428,38 +425,27 @@ impl Driver {
     }
 }
 
-/// Fetch `harness.capabilities` for `harness` via the client's generic `call`
-/// (works over the real socket; the fake testkit client stubs it).
+/// Fetch `harness.capabilities` for `harness` through the typed client API.
 fn fetch_capabilities(client: &mut dyn BoardClient, harness: &str) -> Result<HarnessCapabilities> {
-    let v = client.call(
-        "harness.capabilities",
-        serde_json::json!({ "harness": harness }),
-    )?;
-    Ok(serde_json::from_value(v)?)
+    client.harness_capabilities(harness)
 }
 
-/// Fetch `harness.list` (built-ins + config-defined) via the client's generic
-/// `call`. Drives the harness/harness-override selects so config-defined
+/// Fetch `harness.list` (built-ins + config-defined) through the typed client
+/// API. Drives the harness/harness-override selects so config-defined
 /// harnesses appear without a client-side config read.
 fn fetch_harness_list(client: &mut dyn BoardClient) -> Result<Vec<String>> {
-    let v = client.call("harness.list", serde_json::json!({}))?;
-    let r: HarnessListResult = serde_json::from_value(v)?;
-    Ok(r.harnesses)
+    Ok(client.harness_list()?.harnesses)
 }
 
-/// Fetch `space.list` (scoped to `session`, `None` = default) via the client's
-/// generic `call`.
+/// Fetch `space.list` (scoped to `session`, `None` = default) through the typed
+/// client API.
 fn fetch_spaces(client: &mut dyn BoardClient, session: Option<&str>) -> Result<Vec<SpaceInfo>> {
-    let v = client.call("space.list", serde_json::json!({ "session": session }))?;
-    let r: SpaceListResult = serde_json::from_value(v)?;
-    Ok(r.spaces)
+    Ok(client.space_list(session)?.spaces)
 }
 
-/// Fetch `session.list` via the client's generic `call`.
+/// Fetch `session.list` through the typed client API.
 fn fetch_sessions(client: &mut dyn BoardClient) -> Result<Vec<SessionInfo>> {
-    let v = client.call("session.list", serde_json::json!({}))?;
-    let r: SessionListResult = serde_json::from_value(v)?;
-    Ok(r.sessions)
+    Ok(client.session_list()?.sessions)
 }
 
 fn epoch_secs() -> i64 {

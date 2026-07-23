@@ -421,6 +421,10 @@ Workspace crates:
 - `board-tui`: Ratatui application;
 - `board-cli`: the `board` binary.
 
+The CLI and TUI share `board_core::client::BoardClient`: typed wrappers own method names,
+wire parameters, and response decoding for board, harness, space, session, and run actions.
+The Unix-socket transport retains only the raw request primitive; production clients do not access SQLite.
+
 ### Documentation
 
 - [`docs/README.md`](docs/README.md) — documentation index;

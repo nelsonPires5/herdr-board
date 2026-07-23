@@ -31,9 +31,16 @@ directories (paths), tracing + tracing-subscriber (daemon logs), libc (daemonize
 
 ```rust
 // board-core::client — blocking NDJSON client over UnixStream (TUI + CLI use it).
-pub trait BoardClient { fn call(&mut self, method: &str, params: serde_json::Value) -> Result<serde_json::Value>; }
-// + typed convenience wrappers mirroring docs/protocol.md, and subscribe() -> impl Iterator<Item=Event>.
+pub trait BoardClient {
+    // The only raw transport primitive; typed wrappers are default methods.
+    fn call(&mut self, method: &str, params: serde_json::Value)
+        -> anyhow::Result<serde_json::Value>;
+    fn subscribe(&mut self)
+        -> anyhow::Result<Box<dyn Iterator<Item = Event> + Send>>;
+    // Typed wrappers mirror docs/protocol.md and decode every result DTO.
+}
 // Provide `FakeBoardClient` (in-memory board state) behind #[cfg(feature="fake-client")] for TUI tests.
+// CLI/TUI clients use these wrappers and never perform DB I/O.
 
 // board-core::spawn — how the daemon launches agent processes.
 pub struct SpawnReq { pub name: String, pub cwd: Option<PathBuf>, pub workspace_ref: Option<String>,

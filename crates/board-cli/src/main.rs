@@ -17,8 +17,7 @@ use board_core::client::{BoardClient, UnixClient};
 use board_core::harness::DEFAULT_HARNESS;
 use board_core::paths;
 use board_core::protocol::{
-    BoardSnapshot, CardCreateParams, CardMoveParams, Effort, RunOutcome, SessionListResult,
-    SpaceKind, SpaceListResult,
+    BoardSnapshot, CardCreateParams, CardMoveParams, Effort, RunOutcome, SpaceKind,
 };
 use board_core::scope::{resolve_scope_path, select_scope_candidate};
 use clap::{Parser, Subcommand};
@@ -291,8 +290,8 @@ fn real_main() -> Result<()> {
             column,
             json,
         } => cmd_move(card_id, column, json),
-        Cmd::Cancel { card_id, json } => cmd_run_action("run.cancel", card_id, json),
-        Cmd::Retry { card_id, json } => cmd_run_action("run.retry", card_id, json),
+        Cmd::Cancel { card_id, json } => cmd_run_action(card_id, json, false),
+        Cmd::Retry { card_id, json } => cmd_run_action(card_id, json, true),
         Cmd::Column { sub } => cmd_column(sub),
         Cmd::Harness { sub } => cmd_harness(sub),
         Cmd::Space { sub } => cmd_space(sub),
@@ -707,17 +706,17 @@ fn cmd_move(card_id: i64, column: String, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_run_action(method: &str, card_id: i64, json: bool) -> Result<()> {
+fn cmd_run_action(card_id: i64, json: bool, retry: bool) -> Result<()> {
     let mut c = connect_or_start()?;
-    let v = c.call(method, json!({ "card_id": card_id }))?;
-    if json {
-        println!("{}", serde_json::to_string_pretty(&v)?);
+    let result = if retry {
+        c.run_retry(card_id)?
     } else {
-        let action = if method == "run.cancel" {
-            "Cancelled"
-        } else {
-            "Retried"
-        };
+        c.run_cancel(card_id)?
+    };
+    if json {
+        print_json(&result)?;
+    } else {
+        let action = if retry { "Retried" } else { "Cancelled" };
         println!("{action} card #{card_id}");
     }
     Ok(())
@@ -747,8 +746,7 @@ fn cmd_harness(sub: HarnessCmd) -> Result<()> {
     let mut c = connect_or_start()?;
     match sub {
         HarnessCmd::List { json } => {
-            let v = c.call("harness.list", json!({}))?;
-            let names: Vec<String> = serde_json::from_value(v["harnesses"].clone())?;
+            let names = c.harness_list()?.harnesses;
             if json {
                 print_json(&names)?;
             } else {
@@ -816,8 +814,7 @@ fn cmd_space(sub: SpaceCmd) -> Result<()> {
     let mut c = connect_or_start()?;
     match sub {
         SpaceCmd::List { session, json } => {
-            let v = c.call("space.list", json!({ "session": session }))?;
-            let res: SpaceListResult = serde_json::from_value(v)?;
+            let res = c.space_list(session.as_deref())?;
             if json {
                 print_json(&res)?;
             } else {
@@ -835,8 +832,7 @@ fn cmd_session(sub: SessionCmd) -> Result<()> {
     let mut c = connect_or_start()?;
     match sub {
         SessionCmd::List { json } => {
-            let v = c.call("session.list", json!({}))?;
-            let res: SessionListResult = serde_json::from_value(v)?;
+            let res = c.session_list()?;
             if json {
                 print_json(&res)?;
             } else {
@@ -866,8 +862,7 @@ fn parse_space_kind(s: &str) -> Result<SpaceKind> {
 
 /// Fetch a harness's capability catalog (`harness.capabilities`).
 fn harness_capabilities(c: &mut UnixClient, harness: &str) -> Result<HarnessCapabilities> {
-    let v = c.call("harness.capabilities", json!({ "harness": harness }))?;
-    Ok(serde_json::from_value(v)?)
+    c.harness_capabilities(harness)
 }
 
 /// Render an effort list space-separated (e.g. `low medium high xhigh max`).

@@ -9,6 +9,9 @@ All notable changes to this project are documented here. The format is based on
 - Schema v8 enforces one open run per card and makes enqueue, promotion, and finalization durable atomic DB units of work. Daemon board-done, cancel, timeout, and pane-exit paths now execute final comments, card transitions, and auto-hop enqueue in that single finalization transaction; failures leave the exact prior durable state, duplicate or stale losers are idempotent, and post-commit effects run in deterministic order.
 
 ### Changed
+- CLI and TUI board operations now share typed `BoardClient` wrappers for harness, space, session,
+  and run actions; raw method/result handling remains confined to the transport primitive, with no
+  production client-side SQLite I/O.
 - Card and column settings now use shared merged capability validation before persistence or
   change events; effective card/column settings are revalidated at enqueue time, including legacy
   rows. Invalid model/effort/permission combinations are rejected atomically, Pi permission modes
