@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+- Board snapshots now carry an additive v1 `active_runs` summary (`card_id`, `started_at`) scoped to the requested board. The TUI uses the open run start for timers, so comments and other card updates do not reset elapsed time; live scenario 21 verifies the real event-refresh path without a provider.
 - Schema v10 uses partial queued/active indexes and direct scheduler queries, avoiding full run-history scans. Independent spaces can begin launch concurrently while typed per-space FIFO, a serialized dispatch-claim pass, and the global cap prevent duplicate or oversubscribed launches.
 - Daemon restart recovery now performs conservative Herdr reconciliation independent of initial connection success. An always-on per-socket supervisor connects when Herdr appears, isolates subscription changes and reconnect backoff to the affected socket, subscribes before snapshot reconciliation, and periodically repairs missed-event gaps. Only confirmed missing panes fail; unresolved sessions and probe failures remain open.
 - Schema v9 preserves timeout deadlines and awaiting pauses across daemon restarts; pause/resume is atomic and restart never resets a run's budget.

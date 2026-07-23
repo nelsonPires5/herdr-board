@@ -755,6 +755,54 @@ fn direct_scheduler_queries_are_global_fifo_and_exclude_started_and_ended_rows()
 }
 
 #[test]
+fn active_run_summaries_are_started_open_and_board_scoped() {
+    let db = mem();
+    let other = db.open_board("/tmp/other-board").unwrap();
+    let make = |board_id: i64, title: &str| {
+        db.create_card(&CardCreateParams {
+            board_id: Some(board_id),
+            title: title.into(),
+            ..Default::default()
+        })
+        .unwrap()
+    };
+    let active = make(BOARD_ID, "active");
+    let queued = make(BOARD_ID, "queued");
+    let ended = make(BOARD_ID, "ended");
+    let other_active = make(other.id, "other active");
+
+    let open = |card: &board_core::model::Card| {
+        let run = db
+            .create_run(card.id, card.column_id, "pi", "[]", "prompt", None, None)
+            .unwrap();
+        db.start_run(run.id, Some("workspace"), Some("pane"))
+            .unwrap();
+        run
+    };
+    let _active_run = open(&active);
+    let _queued_run = db
+        .create_run(
+            queued.id,
+            queued.column_id,
+            "pi",
+            "[]",
+            "prompt",
+            None,
+            None,
+        )
+        .unwrap();
+    let ended_run = open(&ended);
+    db.finish_run(ended_run.id, RunOutcome::Ok, None).unwrap();
+    let _other_run = open(&other_active);
+
+    let summaries = db.active_run_summaries(BOARD_ID).unwrap();
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0].card_id, active.id);
+    assert!(!summaries[0].started_at.is_empty());
+    assert_eq!(db.active_run_summaries(other.id).unwrap().len(), 1);
+}
+
+#[test]
 fn delete_column_moves_cards() {
     let db = mem();
     let todo = db.default_column_id(BOARD_ID).unwrap();

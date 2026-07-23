@@ -396,6 +396,7 @@ mod fake {
                         board: db.get_board(board_id)?,
                         columns: db.list_columns(board_id)?,
                         cards: db.list_cards(board_id)?,
+                        active_runs: db.active_run_summaries(board_id)?,
                     };
                     serde_json::to_value(snap)?
                 }
@@ -405,6 +406,7 @@ mod fake {
                     serde_json::to_value(BoardSnapshot {
                         columns: db.list_columns(board.id)?,
                         cards: db.list_cards(board.id)?,
+                        active_runs: db.active_run_summaries(board.id)?,
                         board,
                     })?
                 }

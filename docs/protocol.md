@@ -68,8 +68,11 @@ Boards are independent pipelines keyed by canonical path. `Global` is board `id=
 - `board.open {scope_path}` → `BoardSnapshot`; idempotently gets/creates the path board, seeding a
   new board with exactly one manual `Todo` column.
 - `board.list {}` → `{boards:[Board…]}`; `Global` first, then scoped boards ordered by full path.
-- `board.get {board_id?}` → `{board:{id,name,scope_path}, columns:[Column…ordered], cards:[Card…]}`.
+- `board.get {board_id?}` → `{board:{id,name,scope_path}, columns:[Column…ordered], cards:[Card…], active_runs:[{card_id,started_at}…]}`.
   Omitted `board_id` means `Global`. Cards include active and archived rows for local filtering.
+  `active_runs` is additive in protocol v1 and contains only started, open runs whose cards belong
+  to the requested board; queued, ended, and other-board runs are omitted. Older clients may omit
+  the field when decoding a snapshot, which is treated as an empty list.
 - `column.create {name, board_id?, position?, system_prompt?, trigger?, on_success_column_id?, on_fail_column_id?, fresh_session?, harness_override?, model_override?, effort_override?, permission_override?, timeout_minutes?}` → `Column`; omitted `board_id` means `Global`.
 - `column.update {id, …any subset of the above}` → `Column` (name/trigger/etc.; nullable update fields use the tri-state encoding below)
 - `column.reorder {id, position}` → `[Column…]`

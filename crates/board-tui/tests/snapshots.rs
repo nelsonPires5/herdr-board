@@ -1,6 +1,7 @@
 //! ratatui `TestBackend` + `insta` snapshots driven through the real `Driver`
 //! and `FakeBoardClient`. Everything is deterministic: a fixed `now`, fixed
-//! terminal sizes, and running-card timers pinned by rewriting `updated_at`.
+//! terminal sizes, and running-card timers pinned by rewriting the active-run
+//! summary start time.
 
 use board_core::client::{BoardClient, FakeBoardClient};
 use board_core::protocol::{AwaitingReason, CardCreateParams, CardStatus, RunOutcome};
@@ -22,13 +23,18 @@ fn now() -> i64 {
     parse_epoch(NOW_STR).unwrap()
 }
 
-/// Pin `now` and rewrite every running card's `updated_at` so timers are stable
-/// (a board fetch resets them, so callers re-run this right before rendering).
+/// Pin `now` and rewrite active-run starts so timers are stable (a board fetch
+/// resets them, so callers re-run this right before rendering).
 fn pin(app: &mut App) {
     app.now = now();
+    for run in &mut app.board.active_runs {
+        run.started_at = RUN_START.to_string();
+    }
     for c in &mut app.board.cards {
         if c.status == CardStatus::Running {
-            c.updated_at = RUN_START.to_string();
+            // Deliberately disagree with the summary: ordinary card activity
+            // must not reset the run timer.
+            c.updated_at = NOW_STR.to_string();
         }
     }
     if let Some(detail) = &mut app.detail {
@@ -57,6 +63,13 @@ fn render(d: &mut Driver, w: u16, h: u16) -> String {
     let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
     term.draw(|f| view(&d.app, f)).unwrap();
     term.backend().to_string()
+}
+
+#[test]
+fn active_run_summary_wins_over_card_updated_at_for_timer() {
+    let mut d = driver(demo_client().unwrap());
+    let output = render(&mut d, 120, 35);
+    assert!(output.contains("running · 2m"), "{output}");
 }
 
 #[test]

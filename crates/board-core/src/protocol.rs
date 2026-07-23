@@ -323,12 +323,26 @@ pub struct BoardListResult {
     pub boards: Vec<Board>,
 }
 
+/// A compact view of a run that is currently started and open on a board.
+///
+/// This is intentionally separate from [`Run`]: board snapshots only need the
+/// card identity and start point required by clients to render live-run state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveRunSummary {
+    pub card_id: i64,
+    pub started_at: String,
+}
+
 /// `board.get` / `board.open` result.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BoardSnapshot {
     pub board: Board,
     pub columns: Vec<Column>,
     pub cards: Vec<Card>,
+    /// Started, open runs for cards belonging to this board. The default keeps
+    /// older v1 clients/snapshots readable when this additive field is absent.
+    #[serde(default)]
+    pub active_runs: Vec<ActiveRunSummary>,
 }
 
 /// `column.create` params.

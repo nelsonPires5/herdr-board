@@ -315,9 +315,15 @@ fn draw_card(app: &App, f: &mut Frame, card: &Card, r: Rect, selected: bool) {
         ]
     };
     if !archived && card.status == CardStatus::Running {
-        let elapsed = parse_epoch(&card.updated_at)
-            .map(|s| (app.now - s).max(0))
-            .unwrap_or(0);
+        // Card updates (comments, moves, etc.) change `updated_at` while a run
+        // remains open. Prefer the board-scoped active-run summary so the
+        // timer measures execution time rather than unrelated card activity;
+        // the card timestamp is a compatibility fallback for old snapshots.
+        let start = app
+            .active_run_for_card(card.id)
+            .and_then(|run| parse_epoch(&run.started_at))
+            .or_else(|| parse_epoch(&card.updated_at));
+        let elapsed = start.map(|s| (app.now - s).max(0)).unwrap_or(0);
         status_spans.push(Span::raw(format!(" · {}", format_duration(Some(elapsed)))));
     }
     status_spans.push(Span::styled(

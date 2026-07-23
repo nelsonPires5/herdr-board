@@ -2,11 +2,12 @@
 
 use board_core::model::Run;
 use board_core::protocol::{
-    AwaitingReason, BoardChangedReason, BoardGetParams, BoardListResult, BoardOpenParams,
-    CardArchiveParams, CardCreateParams, CardListParams, CardStatus, CardUpdateParams,
-    ColumnCreateParams, ColumnUpdateParams, Effort, Event, HarnessCapabilitiesParams, Patch,
-    Request, Response, RpcError, RunDoneParams, RunFocusParams, RunFocusResult, RunOutcome,
-    RunPaneExitedParams, SpaceInfo, SpaceKind, SpaceListResult, TemplateApplyParams, Trigger,
+    ActiveRunSummary, AwaitingReason, BoardChangedReason, BoardGetParams, BoardListResult,
+    BoardOpenParams, BoardSnapshot, CardArchiveParams, CardCreateParams, CardListParams,
+    CardStatus, CardUpdateParams, ColumnCreateParams, ColumnUpdateParams, Effort, Event,
+    HarnessCapabilitiesParams, Patch, Request, Response, RpcError, RunDoneParams, RunFocusParams,
+    RunFocusResult, RunOutcome, RunPaneExitedParams, SpaceInfo, SpaceKind, SpaceListResult,
+    TemplateApplyParams, Trigger,
 };
 use serde_json::json;
 
@@ -17,6 +18,32 @@ where
     let s = serde_json::to_string(value).unwrap();
     let back: T = serde_json::from_str(&s).unwrap();
     assert_eq!(&back, value);
+}
+
+#[test]
+fn active_run_summary_and_snapshot_compatibility_roundtrip() {
+    let summary = ActiveRunSummary {
+        card_id: 4,
+        started_at: "2026-07-14 11:58:00".into(),
+    };
+    roundtrip(&summary);
+
+    let snapshot = BoardSnapshot {
+        board: serde_json::from_value(json!({
+            "id": 1, "name": "Global", "scope_path": null
+        }))
+        .unwrap(),
+        columns: vec![],
+        cards: vec![],
+        active_runs: vec![summary],
+    };
+    roundtrip(&snapshot);
+
+    // A v1 client may still send a snapshot without the additive field.
+    let mut legacy = serde_json::to_value(snapshot).unwrap();
+    legacy.as_object_mut().unwrap().remove("active_runs");
+    let decoded: BoardSnapshot = serde_json::from_value(legacy).unwrap();
+    assert!(decoded.active_runs.is_empty());
 }
 
 #[test]

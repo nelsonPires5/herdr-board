@@ -34,6 +34,7 @@ isolation/safety design, and the **how-to-write-a-scenario** guide, see
 | Nullable omitted/null/value semantics, merged capability validation, atomic rejection, and provider-free dispatch after clears | `18-nullable-clear.sh` | live, zero provider cost |
 | Daemon starts before Herdr; late supervisor connection observes one exact pane exit | `19-daemon-before-herdr.sh` | live, zero provider cost |
 | Proxy outage/restart preserves `Unknown` and timeout budget; reconnect snapshot repairs an event gap once | `20-herdr-recovery.sh` | live, zero provider cost |
+| Active-run summary survives a card timestamp update and drives the timer in the real TUI | `21-active-run-timer.sh` | live, zero provider cost |
 
 ### How the live scenario produces Herdr `done`
 
@@ -115,7 +116,7 @@ unmarked, or out-of-root paths. Named-session sockets must be at most 92 bytes, 
 short `/tmp/hb-e2e.XXXXXX` isolated root. `TMPDIR` is pinned to that exact marker-owned root, so
 generated configured-harness scripts remain contained even if asynchronous `pane run` never opens
 their normal self-removing script. The forced-build standard suite passes
-scenarios 01–20 without provider calls. Scenarios 18–20 use only the configured fake harness and
+scenarios 01–21 without provider calls. Scenarios 18–21 use only the configured fake harness and
 never records prompt or system-prompt bodies.
 
 ## Running
@@ -158,6 +159,7 @@ personal Claude state. Its intended contract is one authorized attempt with no r
 | `18-nullable-clear.sh` | Nullable clearing, merged validation, atomic rejection, and post-clear configured dispatch; no prompt-body logging. |
 | `19-daemon-before-herdr.sh` | Late Herdr availability and exact pane-exit observation. |
 | `20-herdr-recovery.sh` / `herdr-proxy.py` | Controllable owned proxy for conservative outage/restart and dropped-stream recovery. |
+| `21-active-run-timer.sh` | Real-TUI active-run timer and event-refresh check; provider-free. |
 | `real-pi-smoke.sh` | Fail-closed real-provider poem smoke. Detects Pi's runtime default model, passes low thinking, isolates board/Pi session output under `/tmp`, verifies integration/WezTerm, poem/comments/argv/git/settings, and supports keep mode for visual audit. Not in `run-all.sh`. |
 | `real-claude-haiku-smoke.sh` | Fail-closed intended-contract smoke. Requires exact opt-in, authorizes one Claude Haiku/low attempt with no retry/fallback, stages only completed onboarding/theme, exact workspace trust, the installed Herdr hook, credentials, and approved remote-settings bytes under `/tmp` so startup dialogs cannot consume `agent.prompt`; no broad personal Claude state is copied. Independently identity-gates the daemon and Herdr server and cleans exact resources. Not in `run-all.sh`. |
 | `hrpc.py` | One-shot raw **herdr** socket RPC (honours `HERDR_SOCKET_PATH`) for structural asserts (`tab.list`/`pane.list`/`pane.layout`). |

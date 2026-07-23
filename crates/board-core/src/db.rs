@@ -8,8 +8,8 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use crate::model::{Board, Card, Column, Comment, Run};
 use crate::protocol::{
-    AwaitingReason, CardCreateParams, CardStatus, CardUpdateParams, ColumnCreateParams,
-    ColumnUpdateParams, Effort, Patch, RunOutcome, SpaceKind, Trigger,
+    ActiveRunSummary, AwaitingReason, CardCreateParams, CardStatus, CardUpdateParams,
+    ColumnCreateParams, ColumnUpdateParams, Effort, Patch, RunOutcome, SpaceKind, Trigger,
 };
 use crate::{Error, Result};
 
@@ -1484,6 +1484,33 @@ impl Db {
             "SELECT id, card_id FROM runs INDEXED BY idx_runs_active_open
              WHERE started_at IS NOT NULL AND ended_at IS NULL ORDER BY id",
         )
+    }
+
+    /// Started and open runs for cards on one board, reduced to the fields
+    /// needed by board snapshot consumers. This query is board-scoped at the
+    /// SQL boundary; it never exposes queued, ended, or other-board runs.
+    pub fn active_run_summaries(&self, board_id: i64) -> Result<Vec<ActiveRunSummary>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT r.card_id, r.started_at
+             FROM runs r
+             JOIN cards c ON c.id=r.card_id
+             WHERE c.board_id=?1
+               AND r.started_at IS NOT NULL
+               AND r.ended_at IS NULL
+             ORDER BY r.id",
+        )?;
+        let rows = stmt.query_map(params![board_id], |row| {
+            Ok(ActiveRunSummary {
+                card_id: row.get("card_id")?,
+                started_at: row.get("started_at")?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Alias using the list-oriented naming used by board snapshot callers.
+    pub fn list_active_run_summaries(&self, board_id: i64) -> Result<Vec<ActiveRunSummary>> {
+        self.active_run_summaries(board_id)
     }
 
     /// Never-started open runs paired with cards in global FIFO order.

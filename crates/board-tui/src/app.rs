@@ -244,6 +244,17 @@ impl App {
         self.board.columns.get(idx).map(|c| c.id)
     }
 
+    /// Find the live-run summary for a card in the current board snapshot.
+    pub fn active_run_for_card(
+        &self,
+        card_id: i64,
+    ) -> Option<&board_core::protocol::ActiveRunSummary> {
+        self.board
+            .active_runs
+            .iter()
+            .find(|run| run.card_id == card_id)
+    }
+
     /// Cards of a column, in board order.
     pub fn cards_of(&self, col_id: i64) -> Vec<&board_core::model::Card> {
         self.board

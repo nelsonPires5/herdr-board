@@ -161,6 +161,7 @@ fn board_snapshot(d: &Arc<Daemon>, board_id: i64) -> Result<Value> {
         board: db.get_board(board_id)?,
         columns: db.list_columns(board_id)?,
         cards: db.list_cards(board_id)?,
+        active_runs: db.active_run_summaries(board_id)?,
     }))
 }
 
@@ -895,6 +896,62 @@ mod tests {
         assert_eq!(omitted["board"]["name"], "Global");
         let list = handle_request(&d, "board.list", json!({})).unwrap();
         assert_eq!(list["boards"][0]["name"], "Global");
+    }
+
+    #[test]
+    fn board_snapshot_active_runs_are_started_open_and_board_scoped() {
+        let d = test_daemon(Config::default());
+        let alpha = handle_request(&d, "board.open", json!({"scope_path":"/alpha"})).unwrap();
+        let beta = handle_request(&d, "board.open", json!({"scope_path":"/beta"})).unwrap();
+        let alpha_id = alpha["board"]["id"].as_i64().unwrap();
+        let beta_id = beta["board"]["id"].as_i64().unwrap();
+        let create = |board_id: i64, title: &str| {
+            handle_request(
+                &d,
+                "card.create",
+                json!({"board_id": board_id, "title": title}),
+            )
+            .unwrap()
+        };
+        let alpha_active = create(alpha_id, "active");
+        let alpha_queued = create(alpha_id, "queued");
+        let alpha_ended = create(alpha_id, "ended");
+        let beta_active = create(beta_id, "other board");
+        let db = d.store.lock();
+        let open = |value: &Value| {
+            let card_id = value["id"].as_i64().unwrap();
+            let card = db.get_card(card_id).unwrap().unwrap();
+            let run = db
+                .create_run(card.id, card.column_id, "fake", "[]", "prompt", None, None)
+                .unwrap();
+            db.start_run(run.id, Some("workspace"), Some("pane"))
+                .unwrap();
+            run
+        };
+        let _active_run = open(&alpha_active);
+        let queued_card = db
+            .get_card(alpha_queued["id"].as_i64().unwrap())
+            .unwrap()
+            .unwrap();
+        db.create_run(
+            queued_card.id,
+            queued_card.column_id,
+            "fake",
+            "[]",
+            "prompt",
+            None,
+            None,
+        )
+        .unwrap();
+        let ended_run = open(&alpha_ended);
+        db.finish_run(ended_run.id, RunOutcome::Ok, None).unwrap();
+        let _other_run = open(&beta_active);
+        drop(db);
+
+        let snapshot = handle_request(&d, "board.get", json!({"board_id": alpha_id})).unwrap();
+        assert_eq!(snapshot["active_runs"].as_array().unwrap().len(), 1);
+        assert_eq!(snapshot["active_runs"][0]["card_id"], alpha_active["id"]);
+        assert!(snapshot["active_runs"][0]["started_at"].is_string());
     }
 
     #[test]
