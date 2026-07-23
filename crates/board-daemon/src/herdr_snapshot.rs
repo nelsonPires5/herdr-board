@@ -11,7 +11,7 @@ use board_herdr::{AgentStatus, SessionSnapshot};
 /// takes precedence; otherwise the pane's own `agent_status` is the fallback.
 /// Duplicate pane ids are impossible (the snapshot is authoritative), so the
 /// last-write-wins semantics of the collecting iterator is benign.
-pub fn snapshot_pane_statuses(snapshot: SessionSnapshot) -> HashMap<String, AgentStatus> {
+pub(crate) fn snapshot_pane_statuses(snapshot: SessionSnapshot) -> HashMap<String, AgentStatus> {
     snapshot
         .panes
         .into_iter()
