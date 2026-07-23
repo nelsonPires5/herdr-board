@@ -197,8 +197,7 @@ fn column_create(d: &Arc<Daemon>, p: ColumnCreateParams) -> Result<Value> {
 
 fn column_update(d: &Arc<Daemon>, p: ColumnUpdateParams) -> Result<Value> {
     let col = {
-        let sched = d.sched.lock().unwrap();
-        sched.ensure_no_finalizing_cards("update a column")?;
+        let _sched = d.sched.lock().unwrap();
         let db = d.store.lock();
         let current = db
             .get_column(p.id)?
@@ -219,10 +218,9 @@ fn column_reorder(d: &Arc<Daemon>, p: ColumnReorderParams) -> Result<Value> {
 
 fn column_delete(d: &Arc<Daemon>, p: ColumnDeleteParams) -> Result<Value> {
     {
-        // A pending transition may still read its source or move into its
-        // target, so column deletion pauses briefly for any finalizing card.
-        let sched = d.sched.lock().unwrap();
-        sched.ensure_no_finalizing_cards("delete a column")?;
+        // Match finalization's scheduler→store order so the delete and its
+        // open-run check cannot interleave with the final transaction.
+        let _sched = d.sched.lock().unwrap();
         let db = d.store.lock();
         let cards = db.list_cards_in_column(p.id)?;
         let has_open_run = db.column_has_open_run(p.id)?;
@@ -276,17 +274,13 @@ fn card_update(d: &Arc<Daemon>, p: CardUpdateParams) -> Result<Value> {
         || !p.space_ref.is_unchanged()
         || !p.space_cwd.is_unchanged();
     let card = {
-        let sched = d.sched.lock().unwrap();
+        let _sched = d.sched.lock().unwrap();
         let db = d.store.lock();
         let card = db
             .get_card(p.id)?
             .ok_or_else(|| Error::NotFound(format!("card {}", p.id)))?;
-        // Status validation remains a defense against inconsistent card state;
-        // the open-run/finalization checks are authoritative and serialized
-        // with locked-field updates.
-        if edits_locked {
-            sched.ensure_card_not_finalizing(p.id)?;
-        }
+        // The scheduler→store critical section serializes this validation and
+        // update with an entire finalization transaction.
         validate_card_edit(card.status, edits_locked)?;
         if edits_locked && db.open_run_for_card(p.id)?.is_some() {
             return Err(Error::InvalidState(
@@ -303,11 +297,10 @@ fn card_update(d: &Arc<Daemon>, p: CardUpdateParams) -> Result<Value> {
 
 fn card_delete(d: &Arc<Daemon>, p: CardIdParams) -> Result<Value> {
     {
-        let sched = d.sched.lock().unwrap();
+        let _sched = d.sched.lock().unwrap();
         let db = d.store.lock();
         db.get_card(p.id)?
             .ok_or_else(|| Error::NotFound(format!("card {}", p.id)))?;
-        sched.ensure_card_not_finalizing(p.id)?;
         if db.open_run_for_card(p.id)?.is_some() {
             return Err(Error::InvalidState(
                 "card has an open run; cancel it first".into(),
@@ -321,12 +314,11 @@ fn card_delete(d: &Arc<Daemon>, p: CardIdParams) -> Result<Value> {
 
 fn card_archive(d: &Arc<Daemon>, p: CardArchiveParams) -> Result<Value> {
     let card = {
-        let sched = d.sched.lock().unwrap();
+        let _sched = d.sched.lock().unwrap();
         let db = d.store.lock();
         let card = db
             .get_card(p.id)?
             .ok_or_else(|| Error::NotFound(format!("card {}", p.id)))?;
-        sched.ensure_card_not_finalizing(p.id)?;
         if p.archived {
             validate_card_archive(card.status)?;
             if db.open_run_for_card(p.id)?.is_some() {
@@ -343,12 +335,11 @@ fn card_archive(d: &Arc<Daemon>, p: CardArchiveParams) -> Result<Value> {
 
 fn card_move(d: &Arc<Daemon>, p: CardMoveParams) -> Result<Value> {
     let (card, target) = {
-        let sched = d.sched.lock().unwrap();
+        let _sched = d.sched.lock().unwrap();
         let db = d.store.lock();
         let current = db
             .get_card(p.id)?
             .ok_or_else(|| Error::NotFound(format!("card {}", p.id)))?;
-        sched.ensure_card_not_finalizing(p.id)?;
         if current.archived_at.is_some() {
             return Err(Error::InvalidState(
                 "archived card must be restored before moving".into(),
@@ -420,12 +411,11 @@ fn comment_add(d: &Arc<Daemon>, p: CommentAddParams) -> Result<Value> {
 
 fn run_done(d: &Arc<Daemon>, p: RunDoneParams) -> Result<Value> {
     let (run, plan) = {
-        // Keep the scheduler -> store lock order and finalization guard used
-        // by the normal active-run path. The pure engine owns callback
+        // Keep the scheduler -> store lock order used by the normal active-run
+        // path so eligibility and finalization serialize. The pure engine owns callback
         // eligibility, including the narrow queued configured-run exception.
-        let sched = d.sched.lock().unwrap();
+        let _sched = d.sched.lock().unwrap();
         let db = d.store.lock();
-        sched.ensure_card_not_finalizing(p.card_id)?;
         let run = db
             .open_run_for_card(p.card_id)?
             .ok_or_else(|| Error::NotFound(format!("no active run for card {}", p.card_id)))?;
@@ -456,9 +446,8 @@ fn run_done(d: &Arc<Daemon>, p: RunDoneParams) -> Result<Value> {
 
 fn run_pane_exited(d: &Arc<Daemon>, p: RunPaneExitedParams) -> Result<Value> {
     let (run, plan) = {
-        let sched = d.sched.lock().unwrap();
+        let _sched = d.sched.lock().unwrap();
         let db = d.store.lock();
-        sched.ensure_card_not_finalizing(p.card_id)?;
         let open = db
             .open_run_for_card(p.card_id)?
             .ok_or_else(|| Error::NotFound(format!("no open run for card {}", p.card_id)))?;
@@ -491,9 +480,8 @@ fn run_pane_exited(d: &Arc<Daemon>, p: RunPaneExitedParams) -> Result<Value> {
 fn run_cancel(d: &Arc<Daemon>, p: RunCardParams) -> Result<Value> {
     // Prefer the active run; else cancel the latest queued run for the card.
     let active = {
-        let sched = d.sched.lock().unwrap();
+        let _sched = d.sched.lock().unwrap();
         let db = d.store.lock();
-        sched.ensure_card_not_finalizing(p.card_id)?;
         db.active_run_for_card(p.card_id)?
     };
     if let Some(run) = active {
@@ -511,9 +499,8 @@ fn run_cancel(d: &Arc<Daemon>, p: RunCardParams) -> Result<Value> {
 
     // Queued (never started) run.
     let (run, card) = {
-        let sched = d.sched.lock().unwrap();
+        let _sched = d.sched.lock().unwrap();
         let db = d.store.lock();
-        sched.ensure_card_not_finalizing(p.card_id)?;
         let queued = db
             .open_run_for_card(p.card_id)?
             .filter(|run| run.started_at.is_none())
@@ -595,7 +582,6 @@ fn run_retry(d: &Arc<Daemon>, p: RunCardParams) -> Result<Value> {
         let card = db
             .get_card(p.card_id)?
             .ok_or_else(|| Error::NotFound(format!("card {}", p.card_id)))?;
-        sched.ensure_card_not_finalizing(p.card_id)?;
         if card.archived_at.is_some() {
             return Err(Error::InvalidState(
                 "archived card must be restored before retrying".into(),
@@ -1400,71 +1386,6 @@ mod tests {
             assert_eq!(err.code(), 3);
             assert!(err.to_string().contains("open run"));
         }
-    }
-
-    #[test]
-    fn finalizing_card_rejects_retry_and_conflicting_mutations() {
-        let d = test_daemon(Config::default());
-        let (card_id, source_id, target_id) = {
-            let db = d.store.lock();
-            let target_id = db.default_column_id(BOARD_ID).unwrap();
-            let source = db
-                .create_column(&ColumnCreateParams {
-                    name: "Finalizing source".into(),
-                    ..Default::default()
-                })
-                .unwrap();
-            let card = db
-                .create_card(&CardCreateParams {
-                    title: "finalizing".into(),
-                    column_id: Some(source.id),
-                    ..Default::default()
-                })
-                .unwrap();
-            (card.id, source.id, target_id)
-        };
-        d.sched.lock().unwrap().finalizing_cards.insert(card_id, 77);
-
-        for (method, params) in [
-            ("run.done", json!({"card_id": card_id, "outcome": "ok"})),
-            ("run.retry", json!({"card_id": card_id})),
-            ("run.cancel", json!({"card_id": card_id})),
-            ("card.delete", json!({"id": card_id})),
-            ("card.archive", json!({"id": card_id, "archived": true})),
-            (
-                "card.update",
-                json!({"id": card_id, "model": "locked-model"}),
-            ),
-            ("card.move", json!({"id": card_id, "column_id": target_id})),
-            ("column.update", json!({"id": source_id, "trigger": "auto"})),
-            (
-                "column.delete",
-                json!({"id": source_id, "move_cards_to": target_id}),
-            ),
-        ] {
-            let err = handle_request(&d, method, params).unwrap_err();
-            assert_eq!(err.code(), 3, "{method}: {err}");
-            assert!(err.to_string().contains("finalization"), "{method}: {err}");
-        }
-
-        let card = d.store.lock().get_card(card_id).unwrap().unwrap();
-        assert_eq!(card.column_id, source_id);
-        assert!(card.archived_at.is_none());
-        assert_eq!(card.model, None);
-        assert_eq!(
-            d.store
-                .lock()
-                .get_column(source_id)
-                .unwrap()
-                .unwrap()
-                .trigger,
-            Trigger::Manual
-        );
-        assert!(d.store.lock().list_runs(card_id).unwrap().is_empty());
-        assert_eq!(
-            d.sched.lock().unwrap().finalizing_cards.get(&card_id),
-            Some(&77)
-        );
     }
 
     #[test]

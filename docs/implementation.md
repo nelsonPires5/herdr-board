@@ -68,7 +68,12 @@ a queued built-in Pi/Claude run is rejected until its managed pane is registered
 mismatched id is rejected, preventing stale children from completing replacement runs. The
 Herdr-neutral eligibility and finalizer policy is centralized in
 `board_core::engine::{LifecycleDecision, FinalizePlan}`; boardd remains responsible for gathering
-facts and applying DB/process/events effects.
+facts and applying one `finalize_run_uow`. It prepares transition and auto-hop inputs before that
+transaction; committed DTOs are the only source for post-commit bookkeeping and effects. The fixed
+post-commit order is scheduler bookkeeping, watch refresh, kill, notification scheduling, terminal
+events, then dispatch wake. The scheduler→store critical section provides transient mutual exclusion;
+there is no durable or in-memory `finalizing_cards` source of truth. No socket, process, notification,
+or other external I/O occurs inside the SQLite transaction.
 
 ## Conventions
 

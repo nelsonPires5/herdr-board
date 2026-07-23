@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
-- Schema v8 enforces one open run per card and makes enqueue, promotion, and finalization durable atomic DB units of work.
+- Schema v8 enforces one open run per card and makes enqueue, promotion, and finalization durable atomic DB units of work. Daemon board-done, cancel, timeout, and pane-exit paths now execute final comments, card transitions, and auto-hop enqueue in that single finalization transaction; failures leave the exact prior durable state, duplicate or stale losers are idempotent, and post-commit effects run in deterministic order.
 
 ### Changed
 - Card and column settings now use shared merged capability validation before persistence or

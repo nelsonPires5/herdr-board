@@ -221,7 +221,7 @@ pub struct FinalizeRun<'a> {
     pub run_id: i64,
     pub outcome: RunOutcome,
     pub summary: Option<&'a str>,
-    pub comment: Option<(&'a str, &'a str)>,
+    pub comments: &'a [(&'a str, &'a str)],
     pub target_column_id: Option<i64>,
     pub final_status: CardStatus,
     pub final_awaiting_reason: Option<AwaitingReason>,
@@ -1200,7 +1200,7 @@ impl Db {
             params![p.outcome.as_str(), p.summary, p.run_id],
         )?;
         self.lifecycle_fault(LifecycleFaultPoint::FinalizeAfterRunUpdate)?;
-        if let Some((author, body)) = p.comment {
+        for (author, body) in p.comments {
             tx.execute(
                 "INSERT INTO comments(card_id,author,body) VALUES(?1,?2,?3)",
                 params![card_id, author, body],

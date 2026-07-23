@@ -38,34 +38,8 @@ pub struct ActiveRun {
 pub struct Sched {
     /// Started runs by run id.
     pub active: HashMap<i64, ActiveRun>,
-    /// Cards whose ended run is still applying its transition. The value is the
-    /// owning run id, so a duplicate finalizer cannot clear another claim.
-    pub finalizing_cards: HashMap<i64, i64>,
     /// Consecutive auto-hops per card (reset on human action / chain end).
     pub chain_hops: HashMap<i64, u32>,
-}
-
-impl Sched {
-    /// Reject a public mutation that could conflict with a pending transition.
-    pub fn ensure_card_not_finalizing(&self, card_id: i64) -> board_core::Result<()> {
-        if self.finalizing_cards.contains_key(&card_id) {
-            return Err(board_core::Error::InvalidState(
-                "card finalization is in progress; retry after it completes".into(),
-            ));
-        }
-        Ok(())
-    }
-
-    /// Reject a column mutation that could invalidate a finalizer's transition
-    /// snapshot, regardless of which card's source or target it touches.
-    pub fn ensure_no_finalizing_cards(&self, action: &str) -> board_core::Result<()> {
-        if !self.finalizing_cards.is_empty() {
-            return Err(board_core::Error::InvalidState(format!(
-                "card finalization is in progress; cannot {action}"
-            )));
-        }
-        Ok(())
-    }
 }
 
 /// The panes the herdr event watcher should subscribe to, grouped by the herdr
@@ -102,6 +76,8 @@ pub struct Daemon {
     pub watch: Mutex<WatchState>,
     shutdown_tx: watch::Sender<bool>,
     stopping: AtomicBool,
+    #[cfg(test)]
+    pub effect_log: Mutex<Option<Arc<Mutex<Vec<&'static str>>>>>,
 }
 
 impl Daemon {
@@ -134,11 +110,18 @@ impl Daemon {
             watch: Mutex::new(WatchState::default()),
             shutdown_tx,
             stopping: AtomicBool::new(false),
+            #[cfg(test)]
+            effect_log: Mutex::new(None),
         }
     }
 
     /// Broadcast an event to all subscribers (no-op if none).
     pub fn emit(&self, ev: Event) {
+        #[cfg(test)]
+        self.record_effect(match &ev {
+            Event::RunEnded { .. } => "run_ended",
+            Event::BoardChanged { .. } => "board_changed",
+        });
         let _ = self.events_tx.send(ev);
     }
 
@@ -168,11 +151,15 @@ impl Daemon {
 
     /// Wake the dispatcher to (re)evaluate the queue.
     pub fn wake_dispatch(&self) {
+        #[cfg(test)]
+        self.record_effect("dispatch_wake");
         let _ = self.dispatch_tx.send(());
     }
 
     /// Fire a herdr notification (best effort, detached; no-op without herdr).
     pub fn notify(&self, title: String, body: Option<String>, sound: NotificationSound) {
+        #[cfg(test)]
+        self.record_effect("notification");
         if let Some(h) = &self.herdr {
             let mut c = h.clone();
             std::thread::spawn(move || {
@@ -193,6 +180,8 @@ impl Daemon {
     /// Recompute the herdr watch pane-set (grouped by session socket) from
     /// active runs; bump generation on change so the watcher rebuilds.
     pub fn refresh_watch(&self) {
+        #[cfg(test)]
+        self.record_effect("watch");
         let default_sock = self.default_herdr_socket();
         let grouped: HashMap<PathBuf, Vec<String>> = {
             let s = self.sched.lock().unwrap();
@@ -217,6 +206,13 @@ impl Daemon {
         if w.panes_by_socket != grouped {
             w.panes_by_socket = grouped;
             w.generation += 1;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_effect(&self, effect: &'static str) {
+        if let Some(log) = self.effect_log.lock().unwrap().as_ref() {
+            log.lock().unwrap().push(effect);
         }
     }
 
