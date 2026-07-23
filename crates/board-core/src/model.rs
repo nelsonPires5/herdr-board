@@ -31,6 +31,26 @@ pub struct Column {
     pub timeout_minutes: Option<i64>,
 }
 
+/// Typed identity of a serialized execution space. The session is part of the
+/// identity; `None` is the daemon's default session and remains distinct from
+/// every explicitly named session. Null refs are preserved rather than encoded.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SpaceKey {
+    pub session: Option<String>,
+    pub kind: SpaceKind,
+    pub reference: Option<String>,
+}
+
+impl SpaceKey {
+    pub fn from_card(card: &Card) -> Self {
+        Self {
+            session: card.session.clone(),
+            kind: card.space_kind,
+            reference: card.space_ref.clone(),
+        }
+    }
+}
+
 /// A unit of work.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Card {

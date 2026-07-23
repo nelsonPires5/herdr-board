@@ -91,7 +91,7 @@ pub enum Trigger {
 /// - [`SpaceKind::NewWorkspace`] — the daemon creates a workspace on first
 ///   dispatch (label = `space_ref`, cwd = `space_cwd`), reusing an existing
 ///   workspace with that label if one is already open.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SpaceKind {
     Workspace,

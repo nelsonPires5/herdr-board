@@ -18,7 +18,7 @@ use crate::{Error, Result};
 const SCHEMA_SQL: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../schema.sql"));
 
 /// The latest schema version embedded in [`SCHEMA_SQL`].
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 
 /// v1 → v2 migration. SQLite cannot alter a CHECK constraint or drop a column
 /// in place, so `cards` is rebuilt. Legacy `space_kind` values `cwd`/`worktree`
@@ -207,6 +207,12 @@ SET timeout_paused_at_ms = (SELECT CAST(unixepoch(cards.updated_at) * 1000 AS IN
 WHERE ended_at IS NULL AND EXISTS
   (SELECT 1 FROM cards WHERE cards.id=runs.card_id AND cards.status='awaiting');
 ";
+
+/// v9 → v10: cover the two scheduler queue scans without indexing history.
+const V10_QUEUED_INDEX_SQL: &str =
+    "CREATE INDEX idx_runs_queued_fifo ON runs(id) WHERE started_at IS NULL AND ended_at IS NULL";
+const V10_ACTIVE_INDEX_SQL: &str =
+    "CREATE INDEX idx_runs_active_open ON runs(id) WHERE started_at IS NOT NULL AND ended_at IS NULL";
 
 /// Deterministic statement boundaries used by crash-atomicity tests. Hooks are
 /// opt-in per [`Db`] instance and receive no row or effect DTO.
@@ -445,6 +451,29 @@ impl Db {
                     tx.execute_batch("ALTER TABLE runs ADD COLUMN timeout_paused_at_ms INTEGER")?;
                 }
                 tx.execute_batch(V9_MIGRATION_SQL)?;
+            }
+            if version < 10 {
+                for (name, expected) in [
+                    ("idx_runs_queued_fifo", V10_QUEUED_INDEX_SQL),
+                    ("idx_runs_active_open", V10_ACTIVE_INDEX_SQL),
+                ] {
+                    let existing: Option<String> = tx
+                        .query_row(
+                            "SELECT sql FROM sqlite_master WHERE type='index' AND name=?1",
+                            params![name],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    match existing {
+                        None => tx.execute_batch(expected)?,
+                        Some(sql) if sql == expected => {}
+                        Some(sql) => {
+                            return Err(Error::InvalidState(format!(
+                                "schema v10 migration blocked: {name} has unexpected SQL: {sql}"
+                            )));
+                        }
+                    }
+                }
             }
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             tx.commit()?;
@@ -1448,31 +1477,39 @@ impl Db {
         ))
     }
 
-    /// Queued runs for a space key `(space_kind, space_ref)`, FIFO by run id.
-    pub fn queued_runs_by_space(
-        &self,
-        space_kind: SpaceKind,
-        space_ref: Option<&str>,
-    ) -> Result<Vec<Run>> {
-        let base = "SELECT r.* FROM runs r JOIN cards c ON c.id=r.card_id
-                    WHERE r.started_at IS NULL AND r.ended_at IS NULL AND c.space_kind=?1";
-        let rows = match space_ref {
-            Some(sr) => {
-                let sql = format!("{base} AND c.space_ref=?2 ORDER BY r.id");
-                self.conn
-                    .prepare(&sql)?
-                    .query_map(params![space_kind.as_str(), sr], row_to_run)?
-                    .collect::<rusqlite::Result<Vec<_>>>()?
-            }
-            None => {
-                let sql = format!("{base} AND c.space_ref IS NULL ORDER BY r.id");
-                self.conn
-                    .prepare(&sql)?
-                    .query_map(params![space_kind.as_str()], row_to_run)?
-                    .collect::<rusqlite::Result<Vec<_>>>()?
-            }
+    /// Started and open runs paired with their cards, using only the partial
+    /// active index rather than scanning card run histories.
+    pub fn active_runs_with_cards(&self) -> Result<Vec<(Run, Card)>> {
+        self.open_runs_with_cards(
+            "SELECT id, card_id FROM runs INDEXED BY idx_runs_active_open
+             WHERE started_at IS NOT NULL AND ended_at IS NULL ORDER BY id",
+        )
+    }
+
+    /// Never-started open runs paired with cards in global FIFO order.
+    pub fn queued_runs_with_cards(&self) -> Result<Vec<(Run, Card)>> {
+        self.open_runs_with_cards(
+            "SELECT id, card_id FROM runs INDEXED BY idx_runs_queued_fifo
+             WHERE started_at IS NULL AND ended_at IS NULL ORDER BY id",
+        )
+    }
+
+    fn open_runs_with_cards(&self, sql: &str) -> Result<Vec<(Run, Card)>> {
+        let ids = {
+            let mut stmt = self.conn.prepare(sql)?;
+            let rows =
+                stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
-        Ok(rows)
+        ids.into_iter()
+            .map(|(run_id, card_id)| {
+                let run = self.get_run(run_id)?;
+                let card = self
+                    .get_card(card_id)?
+                    .ok_or_else(|| Error::NotFound(format!("card {card_id}")))?;
+                Ok((run, card))
+            })
+            .collect()
     }
 
     pub fn count_active_runs(&self) -> Result<i64> {

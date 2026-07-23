@@ -51,7 +51,7 @@ use board_herdr::{HerdrClient, NotificationSound, WorkspaceCreateParams, Workspa
 use uuid::Uuid;
 
 use crate::state::{ActiveRun, Daemon};
-use crate::store::space_key_str;
+use board_core::model::SpaceKey;
 
 const HERDR_PROTOCOL: u32 = 17;
 
@@ -227,6 +227,10 @@ fn prepare_enqueue_values(
 /// Evaluate the queue and promote as many queued runs as the per-space FIFO and
 /// the global concurrency cap allow.
 pub async fn dispatch_pass(d: &Arc<Daemon>) {
+    // A claim lives in this pass until spawn registration/failure is durable.
+    // Serializing passes prevents another caller from observing those claimed
+    // rows as queued and independently claiming the same capacity or space.
+    let _pass = d.dispatch_pass.lock().await;
     let active = match d.store.active_runs() {
         Ok(v) => v,
         Err(e) => {
@@ -234,7 +238,10 @@ pub async fn dispatch_pass(d: &Arc<Daemon>) {
             return;
         }
     };
-    let mut busy: HashSet<String> = active.iter().map(|(_, c)| space_key_str(c)).collect();
+    let mut busy: HashSet<SpaceKey> = active
+        .iter()
+        .map(|(_, card)| SpaceKey::from_card(card))
+        .collect();
     let mut active_count = active.len();
     let max = d.config.max_concurrent.max(1);
 
@@ -246,21 +253,36 @@ pub async fn dispatch_pass(d: &Arc<Daemon>) {
         }
     };
 
+    // Claim capacity and one FIFO head per space before any launch starts.
+    // Independent spaces then launch concurrently; a second run for a claimed
+    // space cannot slip in while its first launch is in flight.
+    let mut claimed = Vec::new();
     for (run, card) in queued {
         if active_count >= max {
             break;
         }
-        let key = space_key_str(&card);
-        if busy.contains(&key) {
-            continue;
+        let key = SpaceKey::from_card(&card);
+        if busy.insert(key) {
+            active_count += 1;
+            claimed.push((run, card));
         }
-        match spawn_one(d, &run, &card).await {
-            Ok(true) => {
-                busy.insert(key);
-                active_count += 1;
+    }
+
+    let mut launches = tokio::task::JoinSet::new();
+    for (run, card) in claimed {
+        let daemon = Arc::clone(d);
+        launches.spawn(async move {
+            let run_id = run.id;
+            (run_id, spawn_one(&daemon, &run, &card).await)
+        });
+    }
+    while let Some(result) = launches.join_next().await {
+        match result {
+            Ok((_, Ok(true) | Ok(false))) => {}
+            Ok((run_id, Err(error))) => {
+                tracing::error!("dispatch: spawn_one run {run_id} failed: {error}");
             }
-            Ok(false) => {} // spawn failed; run finished, slot not taken
-            Err(e) => tracing::error!("dispatch: spawn_one run {} failed: {e}", run.id),
+            Err(error) => tracing::error!("dispatch: launch task failed: {error}"),
         }
     }
 }
@@ -855,7 +877,7 @@ mod tests {
     use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Condvar, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -911,6 +933,55 @@ mod tests {
     #[derive(Default)]
     struct FaultPromotionSpawner {
         kills: AtomicUsize,
+    }
+
+    #[derive(Default)]
+    struct PausedSpawner {
+        state: Mutex<PausedSpawnerState>,
+        changed: Condvar,
+        started_notify: tokio::sync::Notify,
+    }
+
+    #[derive(Default)]
+    struct PausedSpawnerState {
+        started: Vec<String>,
+        released: bool,
+    }
+
+    impl PausedSpawner {
+        fn started(&self) -> Vec<String> {
+            self.state.lock().unwrap().started.clone()
+        }
+
+        fn release(&self) {
+            let mut state = self.state.lock().unwrap();
+            state.released = true;
+            self.changed.notify_all();
+        }
+    }
+
+    impl Spawner for PausedSpawner {
+        fn spawn(&self, req: &SpawnReq) -> anyhow::Result<SpawnHandle> {
+            let mut state = self.state.lock().unwrap();
+            state.started.push(req.name.clone());
+            self.started_notify.notify_one();
+            self.changed.notify_all();
+            while !state.released {
+                state = self.changed.wait(state).unwrap();
+            }
+            Ok(SpawnHandle {
+                pid: Some(4242),
+                ..Default::default()
+            })
+        }
+
+        fn kill(&self, _h: &SpawnHandle) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn is_alive(&self, _h: &SpawnHandle) -> anyhow::Result<bool> {
+            Ok(true)
+        }
     }
 
     impl Spawner for FaultPromotionSpawner {
@@ -976,12 +1047,23 @@ mod tests {
         broadcast::Receiver<Event>,
         mpsc::UnboundedReceiver<()>,
     ) {
+        test_daemon_with_config(spawner, Config::default())
+    }
+
+    fn test_daemon_with_config(
+        spawner: Arc<dyn Spawner>,
+        config: Config,
+    ) -> (
+        Arc<Daemon>,
+        broadcast::Receiver<Event>,
+        mpsc::UnboundedReceiver<()>,
+    ) {
         let (events_tx, events_rx) = broadcast::channel(16);
         let (dispatch_tx, dispatch_rx) = mpsc::unbounded_channel();
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
         let daemon = Arc::new(Daemon::new(
             Store::new(Db::open_in_memory().unwrap()),
-            Config::default(),
+            config,
             DaemonSettings::default(),
             PathBuf::from("/tmp/board-test.db"),
             PathBuf::from("/tmp/board-test.sock"),
@@ -1236,6 +1318,91 @@ mod tests {
             .collect();
         assert_eq!(open_runs.len(), 1);
         assert_eq!(open_runs[0].id, first.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dispatch_claims_a1_and_b1_before_launch_and_serializes_competing_passes() {
+        let spawner = Arc::new(PausedSpawner::default());
+        let config = Config {
+            max_concurrent: 2,
+            ..Default::default()
+        };
+        let (d, _, _) = test_daemon_with_config(spawner.clone(), config);
+        let (a1, a2, b1) = {
+            let db = d.store.lock();
+            let make = |title: &str, space_ref: &str| {
+                db.create_card(&CardCreateParams {
+                    title: title.into(),
+                    space_kind: Some(SpaceKind::Workspace),
+                    space_ref: Some(space_ref.into()),
+                    ..Default::default()
+                })
+                .unwrap()
+            };
+            let a1 = make("A1", "space-a");
+            let a2 = make("A2", "space-a");
+            let b1 = make("B1", "space-b");
+            for card in [&a1, &a2, &b1] {
+                db.create_run(
+                    card.id,
+                    card.column_id,
+                    "pi",
+                    "[]",
+                    card.title.as_str(),
+                    None,
+                    None,
+                )
+                .unwrap();
+            }
+            (a1, a2, b1)
+        };
+
+        // Deliberately race two callers. The per-daemon pass lock must keep the
+        // second caller behind the first pass's pre-launch claims.
+        let first = tokio::spawn({
+            let d = d.clone();
+            async move { dispatch_pass(&d).await }
+        });
+        let second = tokio::spawn({
+            let d = d.clone();
+            async move { dispatch_pass(&d).await }
+        });
+
+        while spawner.started().len() < 2 {
+            spawner.started_notify.notified().await;
+        }
+        let started = spawner.started();
+        assert_eq!(started.len(), 2, "global cap was exceeded: {started:?}");
+        assert!(started
+            .iter()
+            .any(|name| name.starts_with(&format!("card-{}-", a1.id))));
+        assert!(started
+            .iter()
+            .any(|name| name.starts_with(&format!("card-{}-", b1.id))));
+        assert!(!started
+            .iter()
+            .any(|name| name.starts_with(&format!("card-{}-", a2.id))));
+
+        spawner.release();
+        first.await.unwrap();
+        second.await.unwrap();
+
+        let db = d.store.lock();
+        let active_ids: Vec<_> = db
+            .active_runs_with_cards()
+            .unwrap()
+            .into_iter()
+            .map(|(_, card)| card.id)
+            .collect();
+        let queued_ids: Vec<_> = db
+            .queued_runs_with_cards()
+            .unwrap()
+            .into_iter()
+            .map(|(_, card)| card.id)
+            .collect();
+        assert_eq!(active_ids, vec![a1.id, b1.id]);
+        assert_eq!(queued_ids, vec![a2.id]);
+        assert_eq!(spawner.started().len(), 2);
     }
 
     #[tokio::test]

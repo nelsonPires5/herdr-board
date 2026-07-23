@@ -12,7 +12,7 @@ use board_core::protocol::{BoardChangedReason, Event, RunOutcome};
 use board_core::spawn::{SpawnHandle, Spawner};
 use board_herdr::{HerdrClient, NotificationSound};
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{broadcast, mpsc, watch, Mutex as AsyncMutex};
 
 use crate::session::SessionRegistry;
 use crate::settings::DaemonSettings;
@@ -82,6 +82,9 @@ pub struct Daemon {
     pub session_registry: Option<SessionRegistry>,
     pub events_tx: broadcast::Sender<Event>,
     pub dispatch_tx: mpsc::UnboundedSender<()>,
+    /// Serializes complete dispatch passes so capacity/space claims remain
+    /// authoritative until their launches have either registered or failed.
+    pub dispatch_pass: AsyncMutex<()>,
     pub sched: Mutex<Sched>,
     pub watch: Mutex<WatchState>,
     shutdown_tx: watch::Sender<bool>,
@@ -117,6 +120,7 @@ impl Daemon {
             session_registry,
             events_tx,
             dispatch_tx,
+            dispatch_pass: AsyncMutex::new(()),
             sched: Mutex::new(Sched::default()),
             watch: Mutex::new(WatchState::default()),
             shutdown_tx,

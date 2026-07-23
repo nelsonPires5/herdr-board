@@ -76,8 +76,12 @@ using saturating shifts. Upgrade derives legacy open-run values once from `runs.
 column timeout, and (for awaiting) `cards.updated_at`; restart consumes the persisted budget. Upgrade retains a single open run unchanged and rejects ambiguous duplicates with every card
 and run ID; no duplicate is normalized or selected as a winner. It retains v5's preserved board id=1
 as `Global` (`scope_path=NULL`) and scoped-board rows, v6's `awaiting`/`done` status invariants, and
-v7's nullable `runs.system_prompt_snapshot`. New v7 queued runs store the exact
-resolved, trailer-inclusive system prompt; pre-v7 rows remain `NULL` with no backfill. That legacy
+v7's nullable `runs.system_prompt_snapshot`. New v7 queued runs store the exact resolved,
+trailer-inclusive system prompt; pre-v7 rows remain `NULL` with no backfill. v10 adds partial
+FIFO-queued and active-open run indexes; daemon queue reads use direct SQL pairs instead of scanning
+every card's run history. The typed `SpaceKey` preserves session/kind/ref null identity. A
+per-daemon async pass lock prevents competing passes from duplicating claims; each pass claims
+per-space/global slots before concurrently launching independent spaces. That legacy
 `NULL` is intentional: built-ins keep their persisted all-in-one argv, while configured rows keep
 their historical spawn-time reconstruction. The internal snapshot is omitted from boardd wire
 responses. Every canonical-path board independently seeds one manual `Todo` column.

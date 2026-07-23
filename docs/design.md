@@ -406,8 +406,13 @@ executes the returned plan; it performs no Herdr or SQLite I/O in the pure decis
   scheduler bookkeeping, refresh watches, kill a pane, schedule notification, emit terminal events,
   and wake dispatch, in that order. The shared scheduler→store lock order supplies only transient
   mutual exclusion; no separate finalizing-card state participates in durable decisions.
-- **Per-space FIFO**: two agents mutating one working tree collide; cards sharing a `(session, space_kind, space_ref)` key run serially.
-- **Global semaphore** (default 3) caps concurrent runs across spaces (cost + machine load).
+- **Per-space FIFO**: two agents mutating one working tree collide; cards sharing the typed
+  `SpaceKey(session, space_kind, space_ref)` run serially. Null/default values remain typed and are
+  never separator-encoded.
+- **Global concurrency cap** (default 3) limits active runs across spaces. A per-daemon async mutex
+  serializes complete dispatch passes through launch registration/failure. Inside that lock, a pass
+  claims capacity and each space's FIFO head before any launch starts; claimed independent spaces
+  launch concurrently, while a second run for either space remains queued.
 - A `new_workspace` card that opens a distinct workspace per label gets its own queue key, so distinct labels run in parallel (up to the global cap). Agent-driven worktree isolation (see §3) is what escapes a per-repo bottleneck now.
 
 ## 8. Failure & safety rails

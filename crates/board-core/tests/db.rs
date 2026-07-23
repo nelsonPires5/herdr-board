@@ -14,7 +14,7 @@ fn mem() -> Db {
 #[test]
 fn migration_seeds_board_and_todo_column() {
     let db = mem();
-    assert_eq!(db.user_version().unwrap(), 9);
+    assert_eq!(db.user_version().unwrap(), 10);
     let board = db.get_board(BOARD_ID).unwrap();
     assert_eq!(board.name, "Global");
     assert_eq!(board.scope_path, None);
@@ -36,7 +36,7 @@ fn migration_idempotent_on_reopen() {
     // Reopen: must not re-seed (still exactly one board, one column).
     {
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.user_version().unwrap(), 9);
+        assert_eq!(db.user_version().unwrap(), 10);
         assert_eq!(db.list_columns(BOARD_ID).unwrap().len(), 1);
         assert_eq!(db.get_board(BOARD_ID).unwrap().name, "Global");
     }
@@ -126,7 +126,7 @@ fn migration_v2_upgrades_v1_database() {
     }
     // Open via Db → runs the v2 through v7 migrations.
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 9);
+    assert_eq!(db.user_version().unwrap(), 10);
     let cards = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(cards.len(), 2);
     for c in &cards {
@@ -492,7 +492,7 @@ fn migration_v4_preserves_claude_cards_and_accepts_pi_efforts() {
     }
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 9);
+    assert_eq!(db.user_version().unwrap(), 10);
     let existing = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(existing[0].harness, "claude");
     assert_eq!(db.list_comments(existing[0].id).unwrap().len(), 1);
@@ -514,14 +514,14 @@ fn migration_does_not_downgrade_future_schema_version() {
     let path = tmp.path().to_path_buf();
     {
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.user_version().unwrap(), 9);
+        assert_eq!(db.user_version().unwrap(), 10);
     }
     {
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch("PRAGMA user_version = 8;").unwrap();
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 9);
+    assert_eq!(db.user_version().unwrap(), 10);
 }
 
 #[test]
@@ -546,7 +546,7 @@ fn migration_v3_adds_archived_at_to_v2_database() {
         .unwrap();
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 9);
+    assert_eq!(db.user_version().unwrap(), 10);
     let cards = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(cards.len(), 1);
     assert!(cards[0].archived_at.is_none());
@@ -612,7 +612,7 @@ fn v6_to_v7_migration_preserves_legacy_queued_run_byte_for_byte() {
         .unwrap();
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 9);
+    assert_eq!(db.user_version().unwrap(), 10);
     let run = &db.list_runs(1).unwrap()[0];
     assert_eq!(run.argv_json, argv);
     assert_eq!(run.prompt_snapshot, prompt);
@@ -645,62 +645,113 @@ fn comments_and_runs_roundtrip() {
         .unwrap();
     assert!(run.started_at.is_none());
     assert_eq!(db.count_queued_runs().unwrap(), 1);
+    let queued = db.queued_runs_with_cards().unwrap();
+    assert_eq!((queued[0].0.id, queued[0].1.id), (run.id, card.id));
+    assert!(db.active_runs_with_cards().unwrap().is_empty());
 
     db.start_run(run.id, Some("w4"), Some("p9")).unwrap();
     assert_eq!(db.count_active_runs().unwrap(), 1);
+    assert!(db.queued_runs_with_cards().unwrap().is_empty());
+    assert_eq!(db.active_runs_with_cards().unwrap()[0].0.id, run.id);
     let active = db.active_run_for_card(card.id).unwrap().unwrap();
     assert_eq!(active.herdr_pane_id.as_deref(), Some("p9"));
 
     db.finish_run(run.id, RunOutcome::Ok, Some("done")).unwrap();
     assert_eq!(db.count_active_runs().unwrap(), 0);
+    assert!(db.queued_runs_with_cards().unwrap().is_empty());
+    assert!(db.active_runs_with_cards().unwrap().is_empty());
     let done = db.get_run(run.id).unwrap();
     assert_eq!(done.outcome, Some(RunOutcome::Ok));
     assert!(done.ended_at.is_some());
 }
 
 #[test]
-fn queued_runs_by_space_key_fifo() {
+fn direct_scheduler_queries_are_global_fifo_and_exclude_started_and_ended_rows() {
     let db = mem();
-    let c1 = db
-        .create_card(&CardCreateParams {
-            title: "1".into(),
-            space_kind: Some(SpaceKind::Workspace),
-            space_ref: Some("w4".into()),
+    let make = |title: &str| {
+        db.create_card(&CardCreateParams {
+            title: title.into(),
             ..Default::default()
         })
+        .unwrap()
+    };
+    let queued_one_card = make("queued one");
+    let ended_card = make("ended");
+    let queued_two_card = make("queued two");
+    let active_card = make("active");
+
+    let queued_one = db
+        .create_run(
+            queued_one_card.id,
+            queued_one_card.column_id,
+            "pi",
+            "[]",
+            "q1",
+            None,
+            None,
+        )
         .unwrap();
-    let c2 = db
-        .create_card(&CardCreateParams {
-            title: "2".into(),
-            space_kind: Some(SpaceKind::Workspace),
-            space_ref: Some("w4".into()),
-            ..Default::default()
-        })
+    let ended = db
+        .create_run(
+            ended_card.id,
+            ended_card.column_id,
+            "pi",
+            "[]",
+            "ended",
+            None,
+            None,
+        )
         .unwrap();
-    let other = db
-        .create_card(&CardCreateParams {
-            title: "3".into(),
-            space_kind: Some(SpaceKind::Workspace),
-            space_ref: Some("w9".into()),
-            ..Default::default()
-        })
+    db.finish_run(ended.id, RunOutcome::Ok, None).unwrap();
+    let queued_two = db
+        .create_run(
+            queued_two_card.id,
+            queued_two_card.column_id,
+            "pi",
+            "[]",
+            "q2",
+            None,
+            None,
+        )
         .unwrap();
-    db.create_run(c1.id, c1.column_id, "claude", "[]", "p", None, None)
+    let active = db
+        .create_run(
+            active_card.id,
+            active_card.column_id,
+            "pi",
+            "[]",
+            "active",
+            None,
+            None,
+        )
         .unwrap();
-    db.create_run(c2.id, c2.column_id, "claude", "[]", "p", None, None)
-        .unwrap();
-    db.create_run(other.id, other.column_id, "claude", "[]", "p", None, None)
+    db.start_run(active.id, Some("workspace"), Some("pane"))
         .unwrap();
 
-    let w4 = db
-        .queued_runs_by_space(SpaceKind::Workspace, Some("w4"))
-        .unwrap();
-    assert_eq!(w4.len(), 2);
-    assert!(w4[0].id < w4[1].id); // FIFO by run id
-    let w9 = db
-        .queued_runs_by_space(SpaceKind::Workspace, Some("w9"))
-        .unwrap();
-    assert_eq!(w9.len(), 1);
+    let queued: Vec<_> = db
+        .queued_runs_with_cards()
+        .unwrap()
+        .into_iter()
+        .map(|(run, card)| (run.id, card.id))
+        .collect();
+    assert_eq!(
+        queued,
+        vec![
+            (queued_one.id, queued_one_card.id),
+            (queued_two.id, queued_two_card.id),
+        ]
+    );
+    let active_rows: Vec<_> = db
+        .active_runs_with_cards()
+        .unwrap()
+        .into_iter()
+        .map(|(run, card)| (run.id, card.id))
+        .collect();
+    assert_eq!(active_rows, vec![(active.id, active_card.id)]);
+    assert!(!queued
+        .iter()
+        .any(|(id, _)| *id == active.id || *id == ended.id));
+    assert!(!active_rows.iter().any(|(id, _)| *id == ended.id));
 }
 
 #[test]
@@ -899,7 +950,7 @@ fn migration_v5_preserves_global_data_and_renames_it() {
 
     let db = Db::open(&path).unwrap();
     let global = db.get_board(BOARD_ID).unwrap();
-    assert_eq!(db.user_version().unwrap(), 9);
+    assert_eq!(db.user_version().unwrap(), 10);
     assert_eq!(global.name, "Global");
     assert!(global.scope_path.is_none());
     let cards = db.list_cards(BOARD_ID).unwrap();
@@ -1041,7 +1092,7 @@ fn migration_v6_rebuilds_cards_check_and_preserves_data() {
     }
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 9);
+    assert_eq!(db.user_version().unwrap(), 10);
     let cards = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(cards.len(), 2);
     let kept = &cards[0];

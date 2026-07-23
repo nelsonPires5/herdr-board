@@ -4,11 +4,177 @@ use std::process::Command;
 use board_core::db::{Db, EnqueueRun, FinalizeRun, LifecycleFaultPoint};
 use board_core::model::{Card, Comment, Run};
 use board_core::protocol::{AwaitingReason, CardCreateParams, CardStatus, RunOutcome};
-use rusqlite::Connection;
+use rusqlite::{types::Value, Connection};
 
 const INDEX_SQL: &str =
     "CREATE UNIQUE INDEX idx_runs_one_open_per_card ON runs(card_id) WHERE ended_at IS NULL";
+const QUEUED_INDEX_SQL: &str =
+    "CREATE INDEX idx_runs_queued_fifo ON runs(id) WHERE started_at IS NULL AND ended_at IS NULL";
+const ACTIVE_INDEX_SQL: &str =
+    "CREATE INDEX idx_runs_active_open ON runs(id) WHERE started_at IS NOT NULL AND ended_at IS NULL";
 const CRASH_CHILD_ENV: &str = "HERDR_BOARD_DB_ATOMIC_CRASH_CHILD";
+
+fn raw_rows(conn: &Connection, table: &str) -> Vec<Vec<Value>> {
+    let mut statement = conn
+        .prepare(&format!("SELECT * FROM {table} ORDER BY id"))
+        .unwrap();
+    let columns = statement.column_count();
+    statement
+        .query_map([], |row| {
+            (0..columns)
+                .map(|column| row.get(column))
+                .collect::<rusqlite::Result<Vec<Value>>>()
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+}
+
+fn scheduler_index_sql(conn: &Connection, name: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND name=?1",
+        [name],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
+#[test]
+fn fresh_v10_has_exact_partial_scheduler_indexes_and_query_plans() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("board.db");
+    let db = Db::open(&path).unwrap();
+    assert_eq!(db.user_version().unwrap(), 10);
+    drop(db);
+    let conn = Connection::open(path).unwrap();
+    for (name, expected) in [
+        ("idx_runs_queued_fifo", QUEUED_INDEX_SQL),
+        ("idx_runs_active_open", ACTIVE_INDEX_SQL),
+    ] {
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND name=?1",
+                [name],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(sql, expected);
+    }
+    for (sql, index) in [
+        (
+            "EXPLAIN QUERY PLAN SELECT id, card_id FROM runs WHERE started_at IS NULL AND ended_at IS NULL ORDER BY id",
+            "idx_runs_queued_fifo",
+        ),
+        (
+            "EXPLAIN QUERY PLAN SELECT id, card_id FROM runs WHERE started_at IS NOT NULL AND ended_at IS NULL ORDER BY id",
+            "idx_runs_active_open",
+        ),
+    ] {
+        let detail: String = conn.query_row(sql, [], |row| row.get(3)).unwrap();
+        assert!(detail.contains(index), "unexpected plan: {detail}");
+    }
+}
+
+#[test]
+fn v9_file_fixture_upgrades_to_v10_without_changing_card_or_run_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v9.db");
+    let (card_id, run_id) = {
+        let db = Db::open(&path).unwrap();
+        let card = db
+            .create_card(&CardCreateParams {
+                title: "v9 exact \0 title  ".into(),
+                description: Some("line one\nline two  ".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let run = db
+            .create_run_with_prompt_snapshots(
+                card.id,
+                card.column_id,
+                "pi",
+                r#"["pi","exact\\nargv"]"#,
+                "prompt\nbytes\0  ",
+                Some("system\nbytes  "),
+                Some("session-id"),
+                Some("session-name"),
+            )
+            .unwrap();
+        (card.id, run.id)
+    };
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "DROP INDEX idx_runs_queued_fifo;
+         DROP INDEX idx_runs_active_open;
+         PRAGMA user_version=9;",
+    )
+    .unwrap();
+    let before_cards = raw_rows(&conn, "cards");
+    let before_runs = raw_rows(&conn, "runs");
+    drop(conn);
+
+    let db = Db::open(&path).unwrap();
+    assert_eq!(db.user_version().unwrap(), 10);
+    assert_eq!(db.get_card(card_id).unwrap().unwrap().id, card_id);
+    assert_eq!(db.get_run(run_id).unwrap().id, run_id);
+    drop(db);
+
+    for reopen in 0..2 {
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(raw_rows(&conn, "cards"), before_cards, "reopen {reopen}");
+        assert_eq!(raw_rows(&conn, "runs"), before_runs, "reopen {reopen}");
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            10
+        );
+        assert_eq!(
+            scheduler_index_sql(&conn, "idx_runs_queued_fifo").as_deref(),
+            Some(QUEUED_INDEX_SQL)
+        );
+        assert_eq!(
+            scheduler_index_sql(&conn, "idx_runs_active_open").as_deref(),
+            Some(ACTIVE_INDEX_SQL)
+        );
+        drop(conn);
+        drop(Db::open(&path).unwrap());
+    }
+}
+
+#[test]
+fn v10_conflicting_index_failure_is_atomic_and_stable_on_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("conflict.db");
+    drop(Db::open(&path).unwrap());
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "DROP INDEX idx_runs_queued_fifo;
+         DROP INDEX idx_runs_active_open;
+         CREATE INDEX idx_runs_active_open ON runs(card_id);
+         PRAGMA user_version=9;",
+    )
+    .unwrap();
+    drop(conn);
+
+    for attempt in 0..2 {
+        let error = match Db::open(&path) {
+            Ok(_) => panic!("attempt {attempt}: conflicting migration unexpectedly succeeded"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("idx_runs_active_open"), "{error}");
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            9
+        );
+        assert_eq!(scheduler_index_sql(&conn, "idx_runs_queued_fifo"), None);
+        assert_eq!(
+            scheduler_index_sql(&conn, "idx_runs_active_open").as_deref(),
+            Some("CREATE INDEX idx_runs_active_open ON runs(card_id)")
+        );
+    }
+}
 
 fn enqueue<'a>(card_id: i64, column_id: i64) -> EnqueueRun<'a> {
     EnqueueRun {
@@ -342,7 +508,7 @@ fn v8_upgrade_retains_a_single_open_run_byte_for_byte() {
         .unwrap();
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 9);
+    assert_eq!(db.user_version().unwrap(), 10);
     assert_eq!(db.get_run(before.id).unwrap(), before);
 }
 
@@ -360,7 +526,7 @@ fn fresh_and_v7_upgrade_install_exact_partial_unique_index_sql() {
                 .unwrap();
         }
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.user_version().unwrap(), 9);
+        assert_eq!(db.user_version().unwrap(), 10);
         drop(db);
         let sql: String = Connection::open(&path)
             .unwrap()
