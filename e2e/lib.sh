@@ -26,6 +26,24 @@
 # "HERDR MUTATION:". Mutations only ever hit disposable workspaces this suite
 # created inside the ephemeral session; never a workspace/session you care about.
 
+# run-all passes this once at shell bootstrap. Scrub it before this sourced file
+# executes any subprocess so Herdr/board/helper children never inherit the key.
+E2E_LOCAL_IDENTITY_KEY="${E2E_IDENTITY_KEY_BOOTSTRAP:-}"
+# Assignment preserves an inherited variable's export attribute in Bash. Strip
+# it explicitly so even a hostile standalone environment cannot export the key
+# generated below to Herdr/board/helper children.
+export -n E2E_LOCAL_IDENTITY_KEY
+unset E2E_IDENTITY_KEY_BOOTSTRAP
+# These guards prove same-shell creation/reuse. Values arriving through the
+# environment are attacker-controlled, even when their marker bytes match.
+for _e2e_local_guard in E2E_LOCAL_SCENARIO_ROOT E2E_LOCAL_INVOCATION_TOKEN \
+  E2E_LOCAL_MANAGED_ROOT E2E_LOCAL_RESOURCE_MANIFEST; do
+  if [[ "$(declare -p "$_e2e_local_guard" 2>/dev/null || true)" == "declare -x "* ]]; then
+    unset "$_e2e_local_guard"
+  fi
+done
+unset _e2e_local_guard
+
 # --- logging ----------------------------------------------------------------
 step() { printf '\n=== %s\n' "$*"; }
 mut()  { printf 'HERDR MUTATION: %s\n' "$*"; }
@@ -43,7 +61,37 @@ BOARD_BIN="${BOARD_BIN:-$REPO_ROOT/target/release/board}"
 E2E_FAKE_AGENT="${E2E_FAKE_AGENT:-$E2E_LIB_DIR/fake-agent.sh}"
 HRPC="$E2E_LIB_DIR/hrpc.py"
 E2E_FAKE_PI_BIN_DIR="$E2E_LIB_DIR/fake-bin"
+E2E_PROCESS_IDENTITY="$E2E_LIB_DIR/process_identity.py"
 export BOARD_BIN
+
+e2e_identity_key_ensure() {
+  if [ -z "$E2E_LOCAL_IDENTITY_KEY" ]; then
+    E2E_LOCAL_IDENTITY_KEY="$(python3 -c 'import secrets; print(secrets.token_hex(32))')" \
+      || fail "cannot generate process-identity signing key"
+  fi
+  [ "${#E2E_LOCAL_IDENTITY_KEY}" -ge 32 ] || fail "process-identity signing key is too short"
+}
+
+e2e_identity_python() {
+  [ -n "$E2E_LOCAL_IDENTITY_KEY" ] || return 1
+  python3 "$E2E_PROCESS_IDENTITY" "$@" 3<<<"$E2E_LOCAL_IDENTITY_KEY"
+}
+
+e2e_stat_mode() { python3 "$E2E_PROCESS_IDENTITY" mode "$1"; }
+e2e_realpath() { python3 "$E2E_PROCESS_IDENTITY" realpath "$1"; }
+e2e_process_exists() { python3 "$E2E_PROCESS_IDENTITY" exists "$1"; }
+e2e_process_state() { python3 "$E2E_PROCESS_IDENTITY" state "$1"; }
+e2e_identity_sign_json() { e2e_identity_python sign "$1"; }
+e2e_identity_token_validate() { e2e_identity_python validate "$1"; }
+
+e2e_path_is_canonical() {
+  python3 - "$1" <<'PY'
+import os,sys
+path=os.path.abspath(sys.argv[1])
+expected=("/private"+path) if sys.platform == "darwin" and path.startswith("/tmp/") else path
+raise SystemExit(0 if os.path.realpath(path) == expected else 1)
+PY
+}
 
 # Scope the checked-in executables named exactly `pi` and `claude` to disposable
 # e2e Herdr servers. The candidate board binary is also on PATH so the fakes can
@@ -53,7 +101,7 @@ export BOARD_BIN
 # below HOME, so even a bounded session name needs this margin under sun_path.
 e2e_marker_shape_verify() {
   local marker="$1" header="$2" owner="$3" token="$4"
-  [ -f "$marker" ] && [ ! -L "$marker" ] && [ "$(stat -c %a "$marker")" = 600 ] || return 1
+  [ -f "$marker" ] && [ ! -L "$marker" ] && [ "$(e2e_stat_mode "$marker")" = 600 ] || return 1
   python3 - "$marker" "$header" "$owner" "$token" <<'PY'
 import pathlib,sys
 path,header,owner,token=sys.argv[1:]
@@ -65,7 +113,7 @@ PY
 e2e_private_dir_verify() {
   local path="$1" pattern="$2"
   [[ "$path" == $pattern ]] && [ -d "$path" ] && [ ! -L "$path" ] \
-    && [ "$(stat -c %a "$path")" = 700 ] && [ "$(readlink -f "$path")" = "$path" ]
+    && [ "$(e2e_stat_mode "$path")" = 700 ] && e2e_path_is_canonical "$path"
 }
 
 e2e_artifact_invocation_validate() {
@@ -84,6 +132,7 @@ e2e_artifact_invocation_validate() {
 }
 
 e2e_scenario_root_ensure() {
+  e2e_identity_key_ensure
   local owner="${E2E_OWNER_ID:-standalone-$$}"
   # Reuse is process-local only. An environment can never nominate a root,
   # even with a self-authored matching token/marker.
@@ -481,11 +530,21 @@ e2e_suite_verdict() {
 e2e_audit_owned_manifest() {
   local manifest="$1" keep="${2:-0}"
   [ -f "$manifest" ] || { printf 'E2E FAIL: owned-resource manifest missing: %s\n' "$manifest" >&2; return 1; }
-  python3 - "$manifest" "$keep" <<'PY'
-import hashlib, json, os, sys
+  e2e_identity_key_ensure
+  # Darwin may lazily recreate $HOME/Library when Python starts. The scenario
+  # root is deliberately removed before this final audit, so never let the
+  # audit process recreate that just-released root.
+  HOME=/var/empty CFFIXED_USER_HOME=/var/empty python3 - "$manifest" "$keep" "$E2E_PROCESS_IDENTITY" \
+    3<<<"$E2E_LOCAL_IDENTITY_KEY" <<'PY'
+import hashlib, importlib.util, json, os, sys
 
-IDENTITY_KEYS = {"pid","start_time","exe","session","name",
-                 "expected_command","owner_token","cmdline"}
+spec=importlib.util.spec_from_file_location("e2e_process_identity", sys.argv[3])
+identity=importlib.util.module_from_spec(spec); sys.modules[spec.name]=identity
+spec.loader.exec_module(identity)
+with os.fdopen(3, "rb", closefd=True) as key_file:
+    identity_key=key_file.read().rstrip(b"\n")
+IDENTITY_KEYS = {"version","platform","proof","parent_pid","pid","start_time","exe",
+                 "session","name","expected_command","owner_token","cmdline","signature"}
 BASE_KEYS = {"version","op","resource_id","logical_id","generation","kind","role"}
 ROLE_BY_KIND = {
     "process": {"board-daemon","helper","proxy"},
@@ -507,26 +566,11 @@ def exact_identity_present(pid, token):
         raise ValueError("invalid process identity")
     if set(token) != IDENTITY_KEYS or token.get("pid") != pid:
         raise ValueError("invalid process identity fields")
-    if not all(isinstance(token[k], str) for k in IDENTITY_KEYS - {"cmdline"}):
-        raise ValueError("invalid process identity scalars")
-    if not isinstance(token["cmdline"], list) or not all(isinstance(v, str) for v in token["cmdline"]):
-        raise ValueError("invalid process argv")
     try:
-        stat = open(f"/proc/{pid}/stat", encoding="utf-8").read()
-        start = stat[stat.rfind(")") + 2:].split()[19]
-        exe = os.readlink(f"/proc/{pid}/exe")
-        argv = [v.decode("utf-8", "surrogateescape") for v in
-                open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0") if v]
-        environ = open(f"/proc/{pid}/environ", "rb").read().split(b"\0")
-    except (IndexError, OSError, UnicodeError):
-        return False
-    owner = token["owner_token"]
-    owner_env = ("E2E_BOARD_DAEMON_OWNER_TOKEN=" if
-                 token.get("session") == "daemon" and token.get("name") == "--foreground"
-                 else "E2E_HERDR_OWNER_TOKEN=")
-    return (start == token["start_time"] and exe == token["exe"]
-            and argv == token["cmdline"]
-            and (not owner or (owner_env + owner).encode() in environ))
+        identity.validate_token(token, identity_key)
+    except identity.IdentityError as exc:
+        raise ValueError("invalid signed process identity") from exc
+    return identity.verify_identity(int(pid), token, identity_key, audit=True)
 
 def marker_digest(path):
     with open(path, "rb") as f:
@@ -615,7 +659,7 @@ for r in registrations:
         failed = True
     if r["kind"] in ("process", "session"):
         try:
-            if exact_identity_present(r["pid"], r["identity"]): leaked.append(f"process /proc/{r['pid']}")
+            if exact_identity_present(r["pid"], r["identity"]): leaked.append(f"process pid={r['pid']}")
         except ValueError as e:
             print(f"E2E FAIL: malformed identity for {r['logical_id']}: {e}", file=sys.stderr)
             failed = True
@@ -710,116 +754,26 @@ e2e_init_late_session() {
 }
 
 # --- ephemeral herdr session ------------------------------------------------
-# A PID alone is not process ownership: it can be reused. Keep a JSON token
-# bound to Linux /proc's start time, executable, expected argv identity, and
-# complete argv. JSON also keeps the token safe to quote through deferred cleanup.
+# A PID alone is not process ownership. Tokens bind the exact process instance,
+# executable and complete argv to a private per-invocation HMAC. Linux also
+# re-verifies the owner token in /proc/environ; Darwin establishes ownership
+# through the signed exact direct-child capability.
 e2e_process_identity_capture() {
   local pid="$1" session="$2" name="$3" expected_command="${4:-}" owner_token="${5:-}" \
-    owner_env="${6:-E2E_HERDR_OWNER_TOKEN}"
-  [ -r "/proc/$pid/stat" ] && [ -r "/proc/$pid/cmdline" ] && [ -L "/proc/$pid/exe" ] || return 1
-  python3 - "$pid" "$session" "$name" "$expected_command" "$owner_token" "$owner_env" <<'PY'
-import json, os, sys
-pid, session, name, expected_command, owner_token, owner_env = sys.argv[1:]
-try:
-    stat = open(f"/proc/{pid}/stat", encoding="utf-8").read()
-    # comm can contain spaces/parentheses; after its final ')' index 19 is field 22.
-    start_time = stat[stat.rfind(")") + 2:].split()[19]
-    exe = os.readlink(f"/proc/{pid}/exe")
-    argv = [part.decode("utf-8", "surrogateescape")
-            for part in open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0") if part]
-    environ = open(f"/proc/{pid}/environ", "rb").read().split(b"\0")
-except (IndexError, OSError, UnicodeError):
-    raise SystemExit(1)
-# Herdr server ownership requires the complete verified infrastructure argv,
-# not merely the presence of a random session string. Other process tokens
-# (boardd/helpers) retain their own exact full argv in the token.
-is_server = bool(expected_command and session == name and owner_token)
-is_daemon = bool(expected_command and session == "daemon" and name == "--foreground" and owner_token)
-if is_server:
-    expected_argv = [expected_command, "--session", session, "server"]
-    argv_ok = argv == expected_argv
-elif is_daemon:
-    argv_ok = argv == [expected_command, "daemon", "--foreground"]
-else:
-    argv_ok = (session in argv and name in argv
-               and (not expected_command or expected_command in argv[:2]))
-if (not argv_ok or owner_env not in ("E2E_HERDR_OWNER_TOKEN", "E2E_BOARD_DAEMON_OWNER_TOKEN")
-        or (owner_token and (owner_env + "=" + owner_token).encode() not in environ)):
-    raise SystemExit(1)
-print(json.dumps({"pid": pid, "start_time": start_time, "exe": exe,
-                  "session": session, "name": name, "expected_command": expected_command,
-                  "owner_token": owner_token, "cmdline": argv},
-                 sort_keys=True, ensure_ascii=True, separators=(",", ":")))
-PY
+    owner_env="${6:-E2E_HERDR_OWNER_TOKEN}" provisional="${7:-}"
+  [ -n "$provisional" ] || return 1
+  e2e_identity_python stable-capture "$pid" "$session" "$name" "$expected_command" \
+    "$owner_token" "$owner_env" "$provisional"
 }
 
 e2e_process_identity_verify() {
   local pid="$1" token="$2"
-  [ -n "$token" ] && [ -r "/proc/$pid/stat" ] && [ -r "/proc/$pid/cmdline" ] && [ -L "/proc/$pid/exe" ] || return 1
-  python3 - "$pid" "$token" <<'PY'
-import json, os, sys
-pid, token = sys.argv[1:]
-try:
-    recorded = json.loads(token)
-    required = {"pid", "start_time", "exe", "session", "name",
-                "expected_command", "owner_token", "cmdline"}
-    if set(recorded) != required or recorded["pid"] != pid:
-        raise ValueError("invalid identity token")
-    if not all(isinstance(recorded[key], str) for key in required - {"cmdline"}):
-        raise ValueError("invalid identity fields")
-    if not isinstance(recorded["cmdline"], list) or not all(isinstance(v, str) for v in recorded["cmdline"]):
-        raise ValueError("invalid argv")
-    stat = open(f"/proc/{pid}/stat", encoding="utf-8").read()
-    start_time = stat[stat.rfind(")") + 2:].split()[19]
-    exe = os.readlink(f"/proc/{pid}/exe")
-    argv = [part.decode("utf-8", "surrogateescape")
-            for part in open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0") if part]
-    environ = open(f"/proc/{pid}/environ", "rb").read().split(b"\0")
-    owner = recorded["owner_token"]
-    is_server = bool(recorded["expected_command"]
-                     and recorded["session"] == recorded["name"] and owner)
-    is_daemon = bool(recorded["expected_command"] and recorded["session"] == "daemon"
-                     and recorded["name"] == "--foreground" and owner)
-    if is_server:
-        semantic_argv = [recorded["expected_command"], "--session",
-                         recorded["session"], "server"]
-        argv_ok = argv == semantic_argv
-    elif is_daemon:
-        argv_ok = argv == [recorded["expected_command"], "daemon", "--foreground"]
-    else:
-        argv_ok = ((not recorded["session"] and not recorded["name"])
-                   or (recorded["session"] in argv and recorded["name"] in argv
-                       and (not recorded["expected_command"]
-                            or recorded["expected_command"] in argv[:2])))
-    owner_env = "E2E_BOARD_DAEMON_OWNER_TOKEN=" if is_daemon else "E2E_HERDR_OWNER_TOKEN="
-    if (start_time != recorded["start_time"] or exe != recorded["exe"]
-            or argv != recorded["cmdline"] or not argv_ok
-            or (owner and (owner_env + owner).encode() not in environ)):
-        raise ValueError("identity changed")
-except (IndexError, OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
-    raise SystemExit(1)
-PY
+  [ -n "$token" ] && e2e_identity_python verify "$pid" "$token"
 }
 
 e2e_provisional_child_capture() {
   local pid="$1" owner_token="$2" owner_env="${3:-E2E_HERDR_OWNER_TOKEN}"
-  python3 - "$pid" "$owner_token" "$$" "$owner_env" <<'PY'
-import json,os,sys
-pid,owner,parent,owner_env=sys.argv[1:]
-try:
-    stat=open(f"/proc/{pid}/stat",encoding="utf-8").read()
-    fields=stat[stat.rfind(")")+2:].split()
-    if fields[1] != parent: raise ValueError("not exact child")
-    start=fields[19]
-    exe=os.readlink(f"/proc/{pid}/exe")
-    argv=[v.decode("utf-8","surrogateescape") for v in open(f"/proc/{pid}/cmdline","rb").read().split(b"\0") if v]
-    env=open(f"/proc/{pid}/environ","rb").read().split(b"\0")
-    if (owner_env not in ("E2E_HERDR_OWNER_TOKEN", "E2E_BOARD_DAEMON_OWNER_TOKEN")
-        or not argv or (owner_env+"="+owner).encode() not in env): raise ValueError("owner mismatch")
-except (IndexError,OSError,UnicodeError,ValueError): raise SystemExit(1)
-print(json.dumps({"pid":pid,"start_time":start,"exe":exe,"session":"","name":"",
- "expected_command":"","owner_token":owner,"cmdline":argv},sort_keys=True,separators=(",",":")))
-PY
+  e2e_identity_python provisional-capture "$pid" "$owner_token" "$$" "$owner_env"
 }
 
 # Verify the stable spawn capability across the one permitted identity change:
@@ -828,35 +782,8 @@ PY
 e2e_provisional_child_transition_verify() {
   local pid="$1" token="$2" expected_command="${3:-}" name="${4:-}" \
     transition="${5:-session}" owner_env="${6:-E2E_HERDR_OWNER_TOKEN}"
-  python3 - "$pid" "$token" "$$" "$expected_command" "$name" "$transition" "$owner_env" <<'PY'
-import json,os,sys
-pid,raw,parent,expected,name,transition,owner_env=sys.argv[1:]
-try:
-    token=json.loads(raw)
-    required={"pid","start_time","exe","session","name","expected_command","owner_token","cmdline"}
-    if set(token) != required or token["pid"] != pid or not token["owner_token"]:
-        raise ValueError("invalid capability")
-    stat=open(f"/proc/{pid}/stat",encoding="utf-8").read()
-    fields=stat[stat.rfind(")")+2:].split()
-    start,ppid=fields[19],fields[1]
-    exe=os.readlink(f"/proc/{pid}/exe")
-    argv=[v.decode("utf-8","surrogateescape") for v in open(f"/proc/{pid}/cmdline","rb").read().split(b"\0") if v]
-    env=open(f"/proc/{pid}/environ","rb").read().split(b"\0")
-    if owner_env not in ("E2E_HERDR_OWNER_TOKEN", "E2E_BOARD_DAEMON_OWNER_TOKEN"):
-        raise ValueError("invalid owner environment")
-    owner=(owner_env+"="+token["owner_token"]).encode()
-    original=(exe == token["exe"] and argv == token["cmdline"])
-    if transition == "daemon":
-        transitioned=bool(expected and exe == os.path.realpath(expected)
-                          and argv == [expected,"daemon","--foreground"])
-    else:
-        transitioned=bool(expected and name and exe == os.path.realpath(expected)
-                          and argv == [expected,"--session",name,"server"])
-    if start != token["start_time"] or ppid != parent or owner not in env or not (original or transitioned):
-        raise ValueError("spawn capability changed")
-except (IndexError,OSError,UnicodeError,ValueError,TypeError,json.JSONDecodeError):
-    raise SystemExit(1)
-PY
+  e2e_identity_python transition-verify "$pid" "$token" "$$" "$expected_command" \
+    "$name" "$transition" "$owner_env"
 }
 
 declare -Ag E2E_PROVISIONAL_CHILD_ARMED=()
@@ -867,7 +794,7 @@ e2e_provisional_child_abort() {
   # boot remain usable by focused deterministic tests.
   if [ "${E2E_PROVISIONAL_CHILD_ARMED[$logical]+set}" = set ] \
      && [ "${E2E_PROVISIONAL_CHILD_ARMED[$logical]}" != 1 ]; then return 0; fi
-  if [ ! -e "/proc/$pid" ]; then
+  if ! e2e_process_exists "$pid"; then
     wait "$pid" 2>/dev/null || true
     e2e_process_resource_release "$logical"
     E2E_PROVISIONAL_CHILD_ARMED["$logical"]=0
@@ -951,8 +878,10 @@ e2e_scenario_root_remove_owned() {
       [ -d "$root" ] && e2e_marker_resource_verify root scenario-root "$root/.disposable" || {
         printf 'E2E FAIL: refusing changed/unowned scenario-root cleanup: %s\n' "$root" >&2; return 1;
       }
-      rm -rf -- "$root"
-      e2e_root_resource_release scenario-root ;;
+      # Release serialization starts Python, which may lazily create macOS
+      # $HOME/Library caches. Ledger first, then make removal the final action.
+      e2e_root_resource_release scenario-root || return 1
+      rm -rf -- "$root" ;;
     *) printf 'E2E FAIL: refusing scenario-root cleanup outside /tmp: %s\n' "$root" >&2; return 1 ;;
   esac
 }
@@ -1078,7 +1007,7 @@ e2e_owned_process_start() {
   provisional=""
   for (( i=0; i<20; i++ )); do
     provisional="$(e2e_provisional_child_capture "$pid" "$owner_token")" && break
-    [ -e "/proc/$pid" ] || break
+    e2e_process_exists "$pid" || break
     sleep 0.005
   done
   [ -n "$provisional" ] || fail "cannot capture provisional exact-child for $logical"
@@ -1091,7 +1020,7 @@ e2e_owned_process_start() {
   identity=""
   for (( i=0; i<30; i++ )); do
     identity="$(e2e_process_identity_capture "$pid" "$identity_session" "$identity_name" \
-      "$command" "$owner_token")" && break
+      "$command" "$owner_token" E2E_HERDR_OWNER_TOKEN "$provisional")" && break
     sleep 0.01
   done
   if [ -z "$identity" ]; then
@@ -1156,10 +1085,11 @@ PY
 
 e2e_session_resource_register() {
   local name="$1" identity="$2" registry="$3" owner_marker="$4" pid digest payload
+  e2e_identity_token_validate "$identity" || return 1
   pid="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["pid"])' "$identity")" || return 1
   # Live production callers must prove the complete exact Herdr server token.
   # Deterministic dead-PID tests still pass the same semantic token shape.
-  if [ -e "/proc/$pid" ]; then e2e_session_identity_verify "$pid" "$identity" "$name" || return 1; fi
+  if e2e_process_exists "$pid"; then e2e_session_identity_verify "$pid" "$identity" "$name" || return 1; fi
   [ -f "$owner_marker" ] || return 1
   digest="$(e2e_marker_sha256 "$owner_marker")" || return 1
   payload="$(python3 - "$name" "$pid" "$identity" "$registry" "$owner_marker" "$digest" <<'PY'
@@ -1203,7 +1133,7 @@ e2e_workspace_resource_release() { e2e_resource_release workspace "$1"; }
 e2e_exact_child_path() {
   local path="$1" root="$2"
   [ -n "$root" ] && [[ "$path" == "$root"/* ]] && [ "$(dirname "$path")" = "$root" ] \
-    && [ "$(readlink -m "$path")" = "$path" ]
+    && e2e_path_is_canonical "$path"
 }
 
 e2e_script_resource_register() {
@@ -1305,7 +1235,8 @@ e2e_session_delete_authorized() {
   local name="$1" pid="$2" identity="$3" marker registry
   marker="$E2E_SCENARIO_ROOT/sessions/$name.owner"
   registry="$HOME/.config/herdr/sessions/$name"
-  [ ! -e "/proc/$pid" ] || { printf 'E2E FAIL: session process still exists: %s\n' "$name" >&2; return 1; }
+  ! e2e_process_exists "$pid" || { printf 'E2E FAIL: session process still exists: %s\n' "$name" >&2; return 1; }
+  e2e_identity_token_validate "$identity" || { printf 'E2E FAIL: unsigned/changed identity for post-stop delete: %s\n' "$name" >&2; return 1; }
   python3 - "$identity" "$name" "$pid" <<'PY' || {
 import json,sys
 try: t=json.loads(sys.argv[1])
@@ -1339,7 +1270,7 @@ e2e_session_abort_owned() {
   }
   mut "session stop '$name'"
   if ! "$HERDR_BIN" session stop "$name" >/dev/null 2>&1; then
-    if [ -e "/proc/$pid" ]; then
+    if e2e_process_exists "$pid"; then
       e2e_session_identity_verify "$pid" "$identity" "$name" || \
         printf 'E2E FAIL: owner changed after failed stop: %s\n' "$name" >&2
     fi
@@ -1347,22 +1278,17 @@ e2e_session_abort_owned() {
     return 1
   fi
   for (( i=0; i<30; i++ )); do
-    [ -e "/proc/$pid" ] || break
+    e2e_process_exists "$pid" || break
     # Bash may retain an exited direct child as a zombie until wait(2). Reap
     # only after its exact token still matches; disappearance is then proven.
     if e2e_session_identity_verify "$pid" "$identity" "$name" \
-      && [ "$(python3 - "$pid" <<'PY' 2>/dev/null || true
-import sys
-s=open(f"/proc/{sys.argv[1]}/stat", encoding="utf-8").read()
-print(s[s.rfind(")")+2:].split()[0])
-PY
-)" = Z ]; then
+      && [ "$(e2e_process_state "$pid" 2>/dev/null || true)" = Z ]; then
       wait "$pid" 2>/dev/null || true
       break
     fi
     sleep 0.1
   done
-  if [ -e "/proc/$pid" ]; then
+  if e2e_process_exists "$pid"; then
     e2e_session_identity_verify "$pid" "$identity" "$name" || \
       printf 'E2E FAIL: owner changed while waiting for stop: %s\n' "$name" >&2
     printf 'E2E FAIL: exact session process remains after stop: %s\n' "$name" >&2
@@ -1376,7 +1302,7 @@ PY
   # registry directory and captured process instead; never inspect a prefix or
   # the caller's registry.
   for (( i=0; i<30; i++ )); do
-    if [ ! -e "$registry_dir" ] && [ ! -e "/proc/$pid" ]; then
+    if [ ! -e "$registry_dir" ] && ! e2e_process_exists "$pid"; then
       registry_clean=1
       break
     fi
@@ -1422,11 +1348,11 @@ e2e_session_boot() {
   provisional=""
   for (( i=0; i<20; i++ )); do
     provisional="$(e2e_provisional_child_capture "$_pid" "$owner_token")" && break
-    [ -e "/proc/$_pid" ] || break
+    e2e_process_exists "$_pid" || break
     sleep 0.005
   done
   if [ -z "$provisional" ]; then
-    [ ! -e "/proc/$_pid" ] && wait "$_pid" 2>/dev/null || true
+    ! e2e_process_exists "$_pid" && wait "$_pid" 2>/dev/null || true
     fail "refusing ephemeral session '$name': could not capture provisional exact-child evidence"
   fi
   # Arm and defer the stable spawn capability before fresh ledger validation:
@@ -1443,7 +1369,8 @@ e2e_session_boot() {
   # changes /proc identity; no unrelated process can be published by PID/name.
   identity=""
   for (( i=0; i<50; i++ )); do
-    identity="$(e2e_process_identity_capture "$_pid" "$name" "$name" "$HERDR_BIN" "$owner_token")" && break
+    identity="$(e2e_process_identity_capture "$_pid" "$name" "$name" "$HERDR_BIN" "$owner_token" \
+      E2E_HERDR_OWNER_TOKEN "$provisional")" && break
     sleep 0.02
   done
   if [ -z "$identity" ]; then
@@ -1462,7 +1389,8 @@ e2e_session_boot() {
   stable=""
   for (( i=0; i<30; i++ )); do
     sleep 0.1
-    stable="$(e2e_process_identity_capture "$_pid" "$name" "$name" "$HERDR_BIN" "$owner_token")" || continue
+    stable="$(e2e_process_identity_capture "$_pid" "$name" "$name" "$HERDR_BIN" "$owner_token" \
+      E2E_HERDR_OWNER_TOKEN "$provisional")" || continue
     if [ "$stable" = "$identity" ]; then break; fi
     identity="$stable"
     e2e_defer_session_teardown "$name" "$_pid" "$identity"
@@ -1625,13 +1553,13 @@ e2e_daemon_start() {
   provisional=""
   for (( i=0; i<20; i++ )); do
     provisional="$(e2e_provisional_child_capture "$E2E_DAEMON_PID" "$owner_token" E2E_BOARD_DAEMON_OWNER_TOKEN)" && break
-    [ -e "/proc/$E2E_DAEMON_PID" ] || break
+    e2e_process_exists "$E2E_DAEMON_PID" || break
     sleep 0.005
   done
   if [ -z "$provisional" ]; then
     # No signal is authorized without stable PID/start/parent/exe/argv and owner
     # evidence. Reap only an already-gone child; a live mismatch fails closed.
-    [ ! -e "/proc/$E2E_DAEMON_PID" ] && wait "$E2E_DAEMON_PID" 2>/dev/null || true
+    ! e2e_process_exists "$E2E_DAEMON_PID" && wait "$E2E_DAEMON_PID" 2>/dev/null || true
     e2e_manifest_event daemon_boot board-daemon "refused provisional-capture"
     fail "refusing isolated daemon: could not capture provisional exact-child evidence"
   fi
@@ -1645,7 +1573,7 @@ e2e_daemon_start() {
   # Only the same PID/start/parent/owner may transition to this exact daemon argv.
   for (( i=0; i<25; i++ )); do
     E2E_DAEMON_IDENTITY="$(e2e_process_identity_capture "$E2E_DAEMON_PID" daemon --foreground \
-      "$BOARD_BIN" "$owner_token" E2E_BOARD_DAEMON_OWNER_TOKEN)" && break
+      "$BOARD_BIN" "$owner_token" E2E_BOARD_DAEMON_OWNER_TOKEN "$provisional")" && break
     sleep 0.02
   done
   if [ -z "$E2E_DAEMON_IDENTITY" ]; then

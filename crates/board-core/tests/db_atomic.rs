@@ -88,17 +88,21 @@ fn v9_file_fixture_upgrades_through_v11_without_changing_existing_bytes() {
                 ..Default::default()
             })
             .unwrap();
+        // Historical v9→v11 migration fixture: enqueue_run_uow writes a v11
+        // row; after manual downgrade to user_version=9 the migration path
+        // still re-adds indexes and must preserve every byte.
         let run = db
-            .create_run_with_prompt_snapshots(
-                card.id,
-                card.column_id,
-                "pi",
-                r#"["pi","exact\\nargv"]"#,
-                "prompt\nbytes\0  ",
-                Some("system\nbytes  "),
-                Some("session-id"),
-                Some("session-name"),
-            )
+            .enqueue_run_uow(&EnqueueRun {
+                card_id: card.id,
+                column_id: card.column_id,
+                harness: "pi",
+                argv_json: r#"["pi","exact\\nargv"]"#,
+                prompt_snapshot: "prompt\nbytes\0  ",
+                system_prompt_snapshot: Some("system\nbytes  "),
+                launch_spec_json: None,
+                session_id: Some("session-id"),
+                session: Some("session-name"),
+            })
             .unwrap();
         (card.id, run.id)
     };
@@ -580,7 +584,17 @@ fn unique_open_run_index_rejects_second_open_run_and_allows_history() {
     assert!(db
         .enqueue_run_uow(&enqueue(card.id, card.column_id))
         .is_err());
-    db.finish_run(first.id, RunOutcome::Ok, None).unwrap();
+    db.finalize_run_uow(&FinalizeRun {
+        run_id: first.id,
+        outcome: RunOutcome::Ok,
+        summary: None,
+        comments: &[],
+        target_column_id: None,
+        final_status: CardStatus::Done,
+        final_awaiting_reason: None,
+        next: None,
+    })
+    .unwrap();
     db.enqueue_run_uow(&enqueue(card.id, card.column_id))
         .unwrap();
     drop(db);
@@ -592,7 +606,7 @@ fn timeout_pause_rolls_back_card_when_run_write_fails() {
     let (_dir, path, card) = create_file_db("pause rollback");
     let db = Db::open(&path).unwrap();
     let run = db
-        .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
+        .enqueue_run_uow(&enqueue(card.id, card.column_id))
         .unwrap();
     db.promote_run_uow(run.id, None, None, Some(1_000)).unwrap();
     drop(db);
@@ -619,7 +633,7 @@ fn timeout_resume_rolls_back_run_when_card_write_fails() {
     let (_dir, path, card) = create_file_db("resume rollback");
     let db = Db::open(&path).unwrap();
     let run = db
-        .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
+        .enqueue_run_uow(&enqueue(card.id, card.column_id))
         .unwrap();
     db.promote_run_uow(run.id, None, None, Some(1_000)).unwrap();
     db.pause_run_timeout_uow(card.id, AwaitingReason::AgentDone, 100)

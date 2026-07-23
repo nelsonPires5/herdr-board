@@ -387,7 +387,9 @@ int main(void) {
             f"""
             set -u
             source {shlex.quote(str(E2E_LIB))}
-            python3 -c 'import time; time.sleep(30)' \\
+            e2e_identity_key_ensure
+            owner_token=identity-fixture-owner-token
+            env E2E_HERDR_OWNER_TOKEN="$owner_token" python3 -c 'import time; time.sleep(30)' \\
                 --session {shlex.quote(session)} --name {shlex.quote(name)} \\
                 --identity-context {shlex.quote(context)} &
             pid=$!
@@ -398,7 +400,9 @@ int main(void) {
             start=$(awk '{{print $22}}' "/proc/$pid/stat")
             exe=$(readlink "/proc/$pid/exe")
             cmdline=$(tr '\\0' ' ' < "/proc/$pid/cmdline")
-            token=$(e2e_process_identity_capture "$pid" {shlex.quote(session)} {shlex.quote(name)})
+            provisional=$(e2e_provisional_child_capture "$pid" "$owner_token")
+            token=$(e2e_process_identity_capture "$pid" {shlex.quote(session)} {shlex.quote(name)} "" \
+                "$owner_token" E2E_HERDR_OWNER_TOKEN "$provisional")
             [ -n "$token" ]
             case "$token" in *"$start"*) ;; *) exit 21 ;; esac
             case "$token" in *"$exe"*) ;; *) exit 22 ;; esac
@@ -451,6 +455,7 @@ int main(void) {
                         f"""
                         set -u
                         source {shlex.quote(str(E2E_LIB))}
+                        e2e_identity_key_ensure
                         server={shlex.quote(str(server))}
                         owner_token=live-session-fixture-token
                         env E2E_HERDR_OWNER_TOKEN="$owner_token" "$server" \\
@@ -460,7 +465,9 @@ int main(void) {
                         trap cleanup EXIT
                         for _ in 1 2 3 4 5; do kill -0 "$pid" 2>/dev/null && break; sleep 0.02; done
                         kill -0 "$pid" 2>/dev/null
-                        token=$(e2e_process_identity_capture "$pid" {shlex.quote(session)} {shlex.quote(session)} "$server" "$owner_token")
+                        provisional=$(e2e_provisional_child_capture "$pid" "$owner_token")
+                        token=$(e2e_process_identity_capture "$pid" {shlex.quote(session)} {shlex.quote(session)} \
+                            "$server" "$owner_token" E2E_HERDR_OWNER_TOKEN "$provisional")
                         bad_token=${{token/{session}/reused-session}}
                         [ "$bad_token" != "$token" ]
                         if {operation} {shlex.quote(session)} "$pid" "$bad_token"; then exit 41; fi
@@ -536,7 +543,9 @@ int main(void) {
                             trap cleanup EXIT
                             for _ in 1 2 3 4 5; do kill -0 "$pid" 2>/dev/null && break; sleep 0.02; done
                             kill -0 "$pid" 2>/dev/null
-                            identity=$(e2e_process_identity_capture "$pid" {shlex.quote(session)} {shlex.quote(session)} "$server" "$owner_token")
+                            provisional=$(e2e_provisional_child_capture "$pid" "$owner_token")
+                            identity=$(e2e_process_identity_capture "$pid" {shlex.quote(session)} {shlex.quote(session)} \
+                                "$server" "$owner_token" E2E_HERDR_OWNER_TOKEN "$provisional")
                             bad_token=${{identity/{session}/reused-workspace-server}}
                             {textwrap.dedent(register)}
                             E2E_KEEP=0
@@ -557,6 +566,7 @@ int main(void) {
             f"""
             set -u
             source {shlex.quote(str(E2E_LIB))}
+            e2e_identity_key_ensure
             pid=""
             cleanup() {{
                 if [ -n "${{pid:-}}" ]; then
@@ -566,12 +576,15 @@ int main(void) {
             }}
             trap cleanup EXIT
             for mode in mismatch exact; do
-                python3 -c 'import time; time.sleep(30)' \\
+                owner_token=daemon-fixture-owner-token
+                env E2E_HERDR_OWNER_TOKEN="$owner_token" python3 -c 'import time; time.sleep(30)' \\
                     --session hb-test-daemon-session --name daemon-owner &
                 pid=$!
                 for _ in 1 2 3 4 5; do kill -0 "$pid" 2>/dev/null && break; sleep 0.02; done
                 kill -0 "$pid" 2>/dev/null
-                identity=$(e2e_process_identity_capture "$pid" hb-test-daemon-session daemon-owner)
+                provisional=$(e2e_provisional_child_capture "$pid" "$owner_token")
+                identity=$(e2e_process_identity_capture "$pid" hb-test-daemon-session daemon-owner "" \
+                    "$owner_token" E2E_HERDR_OWNER_TOKEN "$provisional")
                 bad_token=${{identity/daemon-owner/reused-daemon-owner}}
                 E2E_DAEMON_PID="$pid"
                 if [ "$mode" = mismatch ]; then
@@ -657,7 +670,9 @@ int main(void) {
                 fallback() {{ kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; }}
                 trap fallback EXIT
                 for _ in 1 2 3 4 5; do kill -0 "$pid" 2>/dev/null && break; sleep 0.02; done
-                identity=$(e2e_process_identity_capture "$pid" hb-test-cleanup hb-test-cleanup "$server" "$owner_token")
+                provisional=$(e2e_provisional_child_capture "$pid" "$owner_token")
+                identity=$(e2e_process_identity_capture "$pid" hb-test-cleanup hb-test-cleanup \
+                    "$server" "$owner_token" E2E_HERDR_OWNER_TOKEN "$provisional")
                 e2e_defer_session_teardown hb-test-cleanup "$pid" "$identity"
                 e2e_cleanup
                 status=$?

@@ -5,6 +5,7 @@
 //! spawner) to launch agents.
 
 mod dispatch;
+mod herdr_snapshot;
 mod ops;
 mod server;
 mod session;
@@ -31,8 +32,11 @@ use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::settings::{DaemonSettings, ProcessEnv, SpawnerKind};
 use crate::spawner::{HerdrSpawner, LocalSpawner};
-use crate::state::Daemon;
+use crate::state::{ActiveRun, Daemon};
 use crate::store::Store;
+
+/// The herdr protocol version the daemon requires.
+pub(crate) const HERDR_PROTOCOL: u32 = 17;
 
 /// Run the daemon. `foreground` mirrors logs to stderr and is used by
 /// `board daemon --foreground`. Returns `Ok(())` immediately if another daemon
@@ -298,27 +302,25 @@ async fn adopt_runs(d: &Arc<Daemon>) {
             let adopted_at = std::time::Instant::now();
             let wall_now_ms = d.wall_now_ms();
             // v9 deadlines are authoritative: restart never grants a fresh budget.
-            let deadline = run.timeout_deadline_at_ms.and_then(|ms| {
-                adopted_at.checked_add(std::time::Duration::from_millis(
-                    ms.saturating_sub(wall_now_ms).max(0) as u64,
-                ))
-            });
+            let deadline = ActiveRun::reconstruct_deadline(
+                adopted_at,
+                wall_now_ms,
+                run.timeout_deadline_at_ms,
+            );
             let mut sched = d.sched.lock().unwrap();
             sched.active.insert(
                 run.id,
-                crate::state::ActiveRun {
+                ActiveRun {
                     card_id: card.id,
                     handle,
                     started: adopted_at,
                     timeout_deadline: deadline,
                     idle_since: None,
-                    awaiting_since: run.timeout_paused_at_ms.map(|paused| {
-                        adopted_at
-                            .checked_sub(std::time::Duration::from_millis(
-                                wall_now_ms.saturating_sub(paused).max(0) as u64,
-                            ))
-                            .unwrap_or(adopted_at)
-                    }),
+                    awaiting_since: ActiveRun::reconstruct_awaiting_since(
+                        adopted_at,
+                        wall_now_ms,
+                        run.timeout_paused_at_ms,
+                    ),
                     is_local: false,
                     pane_id: run.herdr_pane_id.clone(),
                 },
@@ -367,97 +369,4 @@ fn spawn_signal_handler(d: Arc<Daemon>) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::Duration;
-
-    use crate::spawner::{HerdrLaunchPlan, Spawner};
-    use board_core::engine::AgentSignal;
-    use board_core::protocol::{
-        AwaitingReason, CardCreateParams, CardStatus, ColumnUpdateParams, Patch,
-    };
-
-    struct AliveSpawner;
-
-    impl Spawner for AliveSpawner {
-        fn spawn(&self, _req: &HerdrLaunchPlan) -> anyhow::Result<RuntimeHandle> {
-            unreachable!("adoption test does not spawn")
-        }
-
-        fn kill(&self, _handle: &RuntimeHandle) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        fn is_alive(&self, _handle: &RuntimeHandle) -> anyhow::Result<bool> {
-            Ok(true)
-        }
-    }
-
-    #[tokio::test]
-    async fn adopted_awaiting_run_keeps_timeout_paused_until_work_resumes() {
-        let db = Db::open_in_memory().unwrap();
-        let card = db
-            .create_card(&CardCreateParams {
-                title: "review across restart".into(),
-                ..Default::default()
-            })
-            .unwrap();
-        db.update_column(&ColumnUpdateParams {
-            id: card.column_id,
-            timeout_minutes: Patch::Set(1),
-            ..Default::default()
-        })
-        .unwrap();
-        let run = db
-            .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
-            .unwrap();
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
-        db.promote_run_uow(run.id, Some("w1"), Some("p1"), Some(now_ms + 60_000))
-            .unwrap();
-        db.pause_run_timeout_uow(card.id, AwaitingReason::AgentDone, now_ms)
-            .unwrap();
-
-        let (events_tx, _events_rx) = broadcast::channel(16);
-        let (dispatch_tx, _dispatch_rx) = mpsc::unbounded_channel();
-        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
-        let d = Arc::new(Daemon::new(
-            Store::new(db),
-            Config::default(),
-            DaemonSettings::default(),
-            PathBuf::from("/tmp/board-adopt.db"),
-            PathBuf::from("/tmp/board-adopt.sock"),
-            Arc::new(AliveSpawner),
-            None,
-            None,
-            events_tx,
-            dispatch_tx,
-            shutdown_tx,
-        ));
-
-        adopt_runs(&d).await;
-        let original_deadline = {
-            let mut sched = d.sched.lock().unwrap();
-            let active = sched.active.get_mut(&run.id).unwrap();
-            assert!(active.awaiting_since.is_some());
-            let deadline = active.timeout_deadline.unwrap();
-            active.awaiting_since =
-                Some(active.awaiting_since.unwrap() - Duration::from_secs(3600));
-            deadline
-        };
-
-        watchers::apply_signal(&d, run.id, card.id, AgentSignal::Working);
-
-        let resumed = d.store.lock().get_card(card.id).unwrap().unwrap();
-        assert_eq!(resumed.status, CardStatus::Running);
-        let sched = d.sched.lock().unwrap();
-        let active = sched.active.get(&run.id).unwrap();
-        assert!(active.awaiting_since.is_none());
-        assert!(
-            active.timeout_deadline.unwrap() >= original_deadline + Duration::from_secs(3599),
-            "long post-restart review must be excluded from elapsed timeout"
-        );
-    }
-}
+mod tests;

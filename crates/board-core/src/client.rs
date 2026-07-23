@@ -362,7 +362,7 @@ impl Iterator for EventStream {
 #[cfg(feature = "fake-client")]
 mod fake {
     use super::*;
-    use crate::db::{Db, BOARD_ID};
+    use crate::db::{Db, FinalizeEffects, FinalizeRun, BOARD_ID};
     use crate::engine;
 
     /// In-memory board state machine for TUI tests. Backed by an in-memory
@@ -511,12 +511,20 @@ mod fake {
                     let columns = db.list_columns(card.board_id)?;
                     let decision = engine::decide_transition(&column, &columns, p.outcome, None);
 
-                    let run = db.finish_run(run.id, p.outcome, p.summary.as_deref())?;
-                    db.add_comment(p.card_id, "system", &decision.system_comment)?;
-                    if let Some(target) = decision.target_column_id {
-                        db.set_card_column(p.card_id, target)?;
-                    }
-                    let card = db.set_card_status(p.card_id, decision.new_status)?;
+                    let FinalizeEffects {
+                        card,
+                        finished_run: run,
+                        next_run: _,
+                    } = db.finalize_run_uow(&FinalizeRun {
+                        run_id: run.id,
+                        outcome: p.outcome,
+                        summary: p.summary.as_deref(),
+                        comments: &[("system", &decision.system_comment)],
+                        target_column_id: decision.target_column_id,
+                        final_status: decision.new_status,
+                        final_awaiting_reason: None,
+                        next: None,
+                    })?;
                     serde_json::to_value(RunActionResult { run, card })?
                 }
                 "run.focus" => {

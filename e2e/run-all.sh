@@ -1,5 +1,20 @@
 #!/usr/bin/env bash
 # run-all.sh — build once and run each live scenario in its own owned Herdr session.
+# macOS ships Bash 3.2. Re-exec before parsing/sourcing any code that needs the
+# associative arrays used by lib.sh; fixed absolute candidates remain available
+# even when the caller intentionally supplies a system-only PATH.
+if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then
+  for _bash_candidate in "${BASH:-}" "$(command -v bash 2>/dev/null || true)" \
+    /opt/homebrew/bin/bash /usr/local/bin/bash; do
+    [ "${_bash_candidate#/}" != "$_bash_candidate" ] && [ -x "$_bash_candidate" ] || continue
+    "$_bash_candidate" -c '(( BASH_VERSINFO[0] >= 4 ))' 2>/dev/null || continue
+    exec "$_bash_candidate" "$0" "$@"
+  done
+  echo 'run-all.sh: an absolute Bash >= 4 is required' >&2
+  exit 2
+fi
+unset _bash_candidate
+
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 REPO_ROOT="$(cd "$DIR/.." && pwd)"
@@ -35,9 +50,22 @@ HERDR_BIN_PATH="${HERDR_BIN_PATH:-$(type -P herdr 2>/dev/null || true)}"
 [[ "$HERDR_BIN_PATH" == /* ]] && [ -x "$HERDR_BIN_PATH" ] \
   || { echo 'run-all.sh: herdr must resolve to an absolute executable' >&2; exit 2; }
 E2E_STANDARD_PATH=/usr/local/bin:/usr/bin:/bin
-export E2E_STANDARD_PATH
+resolve_bash4() {
+  local candidate
+  for candidate in "${BASH:-}" "$(type -P bash 2>/dev/null || true)" \
+    /opt/homebrew/bin/bash /usr/local/bin/bash; do
+    [[ "$candidate" == /* ]] && [ -x "$candidate" ] || continue
+    "$candidate" -c '(( BASH_VERSINFO[0] >= 4 ))' 2>/dev/null || continue
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  return 1
+}
+E2E_BASH="$(resolve_bash4)" \
+  || { echo 'run-all.sh: an absolute Bash >= 4 is required' >&2; exit 2; }
+export E2E_STANDARD_PATH E2E_BASH
 if [ ! -x "$BOARD_BIN" ] || [ "${E2E_FORCE_BUILD:-0}" = 1 ]; then
-  bash "$REPO_ROOT/scripts/build.sh" || exit $?
+  "$E2E_BASH" "$REPO_ROOT/scripts/build.sh" || exit $?
 fi
 
 SCENARIOS=(
@@ -61,6 +89,7 @@ RUN_ROOT="$(mktemp -d /tmp/hb-e2e-run.XXXXXX)" \
 chmod 700 "$RUN_ROOT"
 OWNER_ID="run-$$-$(python3 -c 'import secrets; print(secrets.token_hex(8))')"
 INVOCATION_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
+IDENTITY_KEY="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
 printf 'herdr-board-e2e-artifacts\nowner=%s\ntoken=%s\n' "$OWNER_ID" "$INVOCATION_TOKEN" >"$RUN_ROOT/.owned-artifacts"
 chmod 600 "$RUN_ROOT/.owned-artifacts"
 : >"$RUN_ROOT/manifest-events.ndjson"
@@ -84,15 +113,18 @@ for s in "${SCENARIOS[@]}"; do
     E2E_KEEP="$KEEP" E2E_TEST_FILE="$s" E2E_TEST_SLUG="$slug"
     E2E_OWNER_ID="$scenario_owner" E2E_SCENARIO_ARTIFACT_DIR="$artifact"
     E2E_INVOCATION_ARTIFACT_ROOT="$RUN_ROOT" E2E_INVOCATION_TOKEN="$INVOCATION_TOKEN"
-    E2E_INVOCATION_OWNER_ID="$OWNER_ID"
-    E2E_STANDARD_PATH="$E2E_STANDARD_PATH"
+    E2E_INVOCATION_OWNER_ID="$OWNER_ID" E2E_IDENTITY_KEY_BOOTSTRAP="$IDENTITY_KEY"
+    E2E_STANDARD_PATH="$E2E_STANDARD_PATH" E2E_BASH="$E2E_BASH"
     BOARD_BIN="$BOARD_BIN" HERDR_BIN_PATH="$HERDR_BIN_PATH"
   )
   set +e
-  env -i "${child_env[@]}" bash "$DIR/$s" 2>&1 | tee "$artifact/scenario.log"
+  env -i "${child_env[@]}" "$E2E_BASH" "$DIR/$s" 2>&1 | tee "$artifact/scenario.log"
   code=${PIPESTATUS[0]}
   set -e 2>/dev/null || true
   audit_code=0
+  # Retained only in this parent shell; scenario bootstrap scrubbed its exported
+  # copy before any Herdr/board/helper process was spawned.
+  E2E_LOCAL_IDENTITY_KEY="$IDENTITY_KEY"
   e2e_audit_owned_manifest "$artifact/owned-resources.ndjson" "$KEEP" \
     >"$artifact/audit.log" 2>&1 || audit_code=$?
   printf '%s\n' "$audit_code" >"$artifact/audit.status"

@@ -84,7 +84,7 @@ SHOW="$E2E_TMP/p17-runner-show.json"
 "$BOARD_BIN" card show "$CARD_ID" --json >"$SHOW"
 [ -f "$RECORD" ] || fail "temporary runner did not execute (missing $RECORD)"
 python3 - "$RECORD" "$SHOW" "$CARD_ID" "$RUN_ID" "$BOARD_SOCKET" "$HERDR_SOCKET_PATH" "$EXPECTED_PANE_CWD" <<'PY'
-import json, sys
+import json, os, sys
 x=json.load(open(sys.argv[1])); show=json.load(open(sys.argv[2]))
 card, run, board, herdr, cwd = sys.argv[3:]
 assert x["card_id"] == int(card) and x["run_id"] == int(run)
@@ -94,8 +94,8 @@ assert x["prompt"].startswith("configured prompt with spaces\nand a newline\n\n"
 assert x["system_prompt"].startswith("## herdr-board protocol\n")
 assert "$BOARD_CARD_ID" in x["system_prompt"]
 assert x["board_socket"] == board and x["herdr_socket"] == herdr
-assert x["cwd"] == cwd
-print("  configured argv preserved; card/run, BOARD_SYSTEM_PROMPT, sockets, cwd exact")
+assert os.path.realpath(x["cwd"]) == os.path.realpath(cwd)
+print("  configured argv preserved; card/run, BOARD_SYSTEM_PROMPT, sockets, canonical cwd exact")
 PY
 
 step "Assert configured pane structure and explicit completion behavior"

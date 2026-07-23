@@ -15,6 +15,12 @@ All notable changes to this project are documented here. The format is based on
 - Schema v8 enforces one open run per card and makes enqueue, promotion, and finalization durable atomic DB units of work. Daemon board-done, cancel, timeout, and pane-exit paths now execute final comments, card transitions, and auto-hop enqueue in that single finalization transaction; failures leave the exact prior durable state, duplicate or stale losers are idempotent, and post-commit effects run in deterministic order.
 
 ### Changed
+- The standard provider-free E2E harness now runs on Linux and macOS. Portable filesystem helpers replace GNU-only `stat`/`readlink` assumptions; process identity uses Linux `/proc` or Darwin `libproc` plus `KERN_PROCARGS2`, with versioned HMAC-signed direct-child capabilities, complete argv verification, and a non-exported signing key delivered only over an inherited file descriptor. `run-all.sh` also resolves Bash ≥4 before narrowing `PATH`, and macOS canonical `/private/tmp` paths are compared without weakening bounded-root cleanup. The independent real-Claude smoke remains Linux-only.
+- Run lifecycle is consolidated into a canonical three-step core DB API: `enqueue_run_uow` →
+  optional `promote_run_uow` → `finalize_run_uow`. No legacy methods remain. Queued cancel
+  and spawn failure are themselves finalized through `finalize_run_uow` and are atomic with
+  zero external effect before commit; all process, socket, notification, and event effects
+  execute in a fixed deterministic order only after the transaction commits.
 - Runtime launch ownership now resides entirely in `board-daemon`; `board-core` retains only the
   versioned, runtime-neutral execution specification. Existing argv/environment materialization,
   placement, liveness, and cleanup behavior is unchanged.

@@ -22,26 +22,15 @@ use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::client::{connect_with_deadline, SocketDeadlines};
 use crate::envelope::{Request, Response};
 use crate::error::{HerdrError, Result};
+use crate::transport::{self, connect_with_deadline, SocketDeadlines};
 use crate::types::AgentStatus;
-
-fn map_deadline(error: std::io::Error, operation: &'static str) -> HerdrError {
-    if matches!(
-        error.kind(),
-        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-    ) {
-        HerdrError::Deadline { operation }
-    } else {
-        HerdrError::Io(error)
-    }
-}
 
 /// One subscription entry for `events.subscribe`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,8 +229,12 @@ impl HerdrEvents {
         deadlines: SocketDeadlines,
     ) -> Result<HerdrEvents> {
         let stream = connect_with_deadline(path, deadlines.connect)?;
-        stream.set_read_timeout(Some(deadlines.handshake))?;
-        stream.set_write_timeout(Some(deadlines.write))?;
+        // Put the socket in non-blocking mode so poll_event can honour
+        // deadlines without SO_RCVTIMEO (which macOS locks on first read).
+        // The Iterator impl uses poll with infinite timeout for blocking
+        // semantics.
+        transport::set_nonblocking(&stream, true)?;
+
         let reader = BufReader::new(stream.try_clone()?);
         let writer = stream;
         let mut ev = HerdrEvents {
@@ -253,9 +246,9 @@ impl HerdrEvents {
             deadlines,
             subscribe_id: 0,
         };
+
         let id = ev.send_subscribe(subscriptions)?;
         ev.read_ack(&id)?;
-        ev.reader.get_ref().set_read_timeout(None)?;
         Ok(ev)
     }
 
@@ -288,14 +281,8 @@ impl HerdrEvents {
     /// pane). Sends another `events.subscribe`; on failure the daemon should
     /// reconnect with the full set instead.
     pub fn add_subscriptions(&mut self, subscriptions: &[Subscription]) -> Result<()> {
-        self.reader
-            .get_ref()
-            .set_read_timeout(Some(self.deadlines.handshake))?;
-        let result = self
-            .send_subscribe(subscriptions)
-            .and_then(|id| self.read_ack(&id));
-        let reset = self.reader.get_ref().set_read_timeout(None);
-        result.and_then(|()| reset.map_err(HerdrError::from))
+        let id = self.send_subscribe(subscriptions)?;
+        self.read_ack(&id)
     }
 
     /// The socket path (for reconnects).
@@ -307,35 +294,33 @@ impl HerdrEvents {
     /// passed with the stream still healthy — callers use this to interleave
     /// housekeeping (shutdown checks, watch-set changes) with a blocking read.
     /// Non-event lines (acks) are skipped within the same call.
+    ///
+    /// Partial lines (no trailing newline) are kept in an internal buffer
+    /// and survive `Ok(None)` returns so a subsequent call can complete the
+    /// event once the peer writes the rest.
     pub fn poll_event(&mut self, timeout: Duration) -> Result<Option<HerdrEvent>> {
         if let Some(event) = self.pending_events.pop_front() {
             return Ok(Some(event));
         }
-        self.reader.get_ref().set_read_timeout(Some(timeout))?;
-        let result = loop {
+        let deadline = Instant::now() + timeout;
+        loop {
             match self.reader.read_line(&mut self.pending) {
-                Ok(0) => break Err(HerdrError::Disconnected),
-                Ok(_) => {
-                    if !self.pending.ends_with('\n') {
-                        // Partial line (deadline hit mid-line): keep and retry.
-                        continue;
-                    }
+                Ok(0) => return Err(HerdrError::Disconnected),
+                Ok(_) if self.pending.ends_with('\n') => {
                     let line = std::mem::take(&mut self.pending);
-                    if let Some(ev) = parse_event_line(&line) {
-                        break Ok(Some(ev));
+                    if let Some(event) = parse_event_line(&line) {
+                        return Ok(Some(event));
                     }
                 }
-                Err(e)
-                    if e.kind() == std::io::ErrorKind::WouldBlock
-                        || e.kind() == std::io::ErrorKind::TimedOut =>
-                {
-                    break Ok(None);
-                }
-                Err(e) => break Err(HerdrError::from(e)),
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => return Err(HerdrError::from(e)),
             }
-        };
-        let reset = self.reader.get_ref().set_read_timeout(None);
-        result.and_then(|event| reset.map(|()| event).map_err(HerdrError::from))
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() || !transport::poll_read_ready(&self.writer, remaining)? {
+                return Ok(None);
+            }
+        }
     }
 
     fn send_subscribe(&mut self, subscriptions: &[Subscription]) -> Result<String> {
@@ -357,42 +342,50 @@ impl HerdrEvents {
         };
         self.writer
             .write_all(req.to_line()?.as_bytes())
-            .map_err(|e| map_deadline(e, "subscribe write"))?;
+            .map_err(|e| transport::deadline_io(e, "subscribe write"))?;
         self.writer
             .flush()
-            .map_err(|e| map_deadline(e, "subscribe write"))?;
+            .map_err(|e| transport::deadline_io(e, "subscribe write"))?;
         Ok(id)
     }
 
     fn read_ack(&mut self, expected_id: &str) -> Result<()> {
+        let deadline = Instant::now() + self.deadlines.handshake;
+        let mut pending = String::new();
         loop {
-            let mut buf = String::new();
-            let n = self
-                .reader
-                .read_line(&mut buf)
-                .map_err(|e| map_deadline(e, "subscribe ack"))?;
-            if n == 0 {
-                return Err(HerdrError::Disconnected);
+            match self.reader.read_line(&mut pending) {
+                Ok(0) => return Err(HerdrError::Disconnected),
+                Ok(_) if pending.ends_with('\n') => {
+                    let line = std::mem::take(&mut pending);
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    if let Some(event) = parse_event_line(&line) {
+                        self.pending_events.push_back(event);
+                        continue;
+                    }
+                    let response = Response::from_line(&line)?;
+                    if response.id != expected_id {
+                        continue;
+                    }
+                    if let Some(error) = response.error {
+                        return Err(HerdrError::Protocol {
+                            code: error.code,
+                            message: error.message,
+                        });
+                    }
+                    return Ok(());
+                }
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => return Err(HerdrError::from(e)),
             }
-            if buf.trim().is_empty() {
-                continue;
-            }
-            if let Some(event) = parse_event_line(&buf) {
-                self.pending_events.push_back(event);
-                continue;
-            }
-            let resp = Response::from_line(&buf)?;
-            if resp.id != expected_id {
-                continue;
-            }
-            if let Some(err) = resp.error {
-                return Err(HerdrError::Protocol {
-                    code: err.code,
-                    message: err.message,
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() || !transport::poll_read_ready(&self.writer, remaining)? {
+                return Err(HerdrError::Deadline {
+                    operation: "subscribe ack",
                 });
             }
-            // subscription_started (or any result) => subscription is live.
-            return Ok(());
         }
     }
 }
@@ -405,14 +398,28 @@ impl Iterator for HerdrEvents {
             return Some(event);
         }
         loop {
-            let mut buf = String::new();
-            match self.reader.read_line(&mut buf) {
+            match self.reader.read_line(&mut self.pending) {
                 Ok(0) => return None,
                 Ok(_) => {
-                    if let Some(ev) = parse_event_line(&buf) {
+                    if !self.pending.ends_with('\n') {
+                        // Partial line — poll indefinitely for more data.
+                        if !transport::poll_read_ready_infinite(&self.writer).unwrap_or(false) {
+                            return None;
+                        }
+                        continue;
+                    }
+                    let line = std::mem::take(&mut self.pending);
+                    if let Some(ev) = parse_event_line(&line) {
                         return Some(ev);
                     }
                     // ack / blank / non-event: keep reading.
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // No data in socket or BufReader buffer.  Poll
+                    // indefinitely, then retry.
+                    if !transport::poll_read_ready_infinite(&self.writer).unwrap_or(false) {
+                        return None;
+                    }
                 }
                 Err(_) => return None,
             }
