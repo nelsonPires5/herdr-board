@@ -22,10 +22,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::spawner::{RuntimeHandle, Spawner};
 use board_core::config::{Config, RootConfig};
 use board_core::db::Db;
 use board_core::paths;
-use board_core::spawn::{SpawnHandle, Spawner};
 use board_herdr::HerdrClient;
 use tokio::sync::{broadcast, mpsc, watch};
 
@@ -275,7 +275,7 @@ async fn adopt_runs(d: &Arc<Daemon>) {
                 .filter(|r| Some(r.socket.as_path()) != Some(reg.default_socket()))
                 .map(|r| r.socket)
         });
-        let handle = SpawnHandle {
+        let handle = RuntimeHandle {
             pane_id: run.herdr_pane_id.clone(),
             workspace_id: run.herdr_workspace_id.clone(),
             pid: None,
@@ -371,24 +371,24 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    use crate::spawner::{HerdrLaunchPlan, Spawner};
     use board_core::engine::AgentSignal;
     use board_core::protocol::{
         AwaitingReason, CardCreateParams, CardStatus, ColumnUpdateParams, Patch,
     };
-    use board_core::spawn::{SpawnReq, Spawner};
 
     struct AliveSpawner;
 
     impl Spawner for AliveSpawner {
-        fn spawn(&self, _req: &SpawnReq) -> anyhow::Result<SpawnHandle> {
+        fn spawn(&self, _req: &HerdrLaunchPlan) -> anyhow::Result<RuntimeHandle> {
             unreachable!("adoption test does not spawn")
         }
 
-        fn kill(&self, _handle: &SpawnHandle) -> anyhow::Result<()> {
+        fn kill(&self, _handle: &RuntimeHandle) -> anyhow::Result<()> {
             Ok(())
         }
 
-        fn is_alive(&self, _handle: &SpawnHandle) -> anyhow::Result<bool> {
+        fn is_alive(&self, _handle: &RuntimeHandle) -> anyhow::Result<bool> {
             Ok(true)
         }
     }

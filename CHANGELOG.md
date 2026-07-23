@@ -14,6 +14,9 @@ All notable changes to this project are documented here. The format is based on
 - Schema v8 enforces one open run per card and makes enqueue, promotion, and finalization durable atomic DB units of work. Daemon board-done, cancel, timeout, and pane-exit paths now execute final comments, card transitions, and auto-hop enqueue in that single finalization transaction; failures leave the exact prior durable state, duplicate or stale losers are idempotent, and post-commit effects run in deterministic order.
 
 ### Changed
+- Runtime launch ownership now resides entirely in `board-daemon`; `board-core` retains only the
+  versioned, runtime-neutral execution specification. Existing argv/environment materialization,
+  placement, liveness, and cleanup behavior is unchanged.
 - Column create/edit forms now load harness metadata immediately when opened, without fetching
   card-only sessions or workspaces; existing field values and focus survive the refresh.
 - Daemon startup now parses a typed `RootConfig` once; malformed existing TOML or daemon values are fatal instead of silently falling back to defaults, and environment overrides are applied afterward with precedence.

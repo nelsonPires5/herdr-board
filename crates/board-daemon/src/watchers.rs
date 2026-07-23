@@ -291,7 +291,7 @@ pub async fn local_liveness_poller(d: Arc<Daemon>) {
 }
 
 async fn poll_once(d: &Arc<Daemon>) {
-    let candidates: Vec<(i64, board_core::spawn::SpawnHandle)> = {
+    let candidates: Vec<(i64, crate::spawner::RuntimeHandle)> = {
         let s = d.sched.lock().unwrap();
         s.active
             .iter()
@@ -689,6 +689,7 @@ mod tests {
     use crate::dispatch::{finalize_run, finalize_run_timeout};
     use crate::settings::DaemonSettings;
     use crate::spawner::LocalSpawner;
+    use crate::spawner::RuntimeHandle;
     use crate::state::{ActiveRun, Daemon};
     use crate::store::Store;
     use board_core::config::Config;
@@ -696,7 +697,6 @@ mod tests {
     use board_core::protocol::{
         AwaitingReason, BoardChangedReason, CardCreateParams, CardStatus, Event, RunOutcome,
     };
-    use board_core::spawn::SpawnHandle;
     use board_herdr::{AgentStatus, HerdrError, HerdrEvent};
     use tokio::sync::{broadcast, mpsc, watch};
 
@@ -746,7 +746,7 @@ mod tests {
             run.id,
             ActiveRun {
                 card_id: card.id,
-                handle: SpawnHandle::default(),
+                handle: RuntimeHandle::default(),
                 started: Instant::now(),
                 timeout_deadline: None,
                 idle_since: None,
@@ -854,7 +854,7 @@ mod tests {
                 run.id,
                 ActiveRun {
                     card_id: card.id,
-                    handle: SpawnHandle {
+                    handle: RuntimeHandle {
                         pane_id: Some("shared-pane".into()),
                         workspace_id: Some(workspace.into()),
                         herdr_socket: Some(socket),

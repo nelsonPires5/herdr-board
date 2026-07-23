@@ -155,7 +155,7 @@ Cards target a **herdr session** plus a space in it. Because two sessions can ea
 
 - **Registry**: session enumeration is not in the herdr socket API (a session only knows itself), so the daemon shells out to `herdr session list --json` (binary via `$HERDR_BIN_PATH`, else `herdr`), caching ~3s. It maps `name/default/running/socket_path`.
 - **Default**: a card with `session = null` uses the daemon's own bound herdr socket; its display name is the registry entry whose `socket_path` matches (else the synthetic `"default"`).
-- **Per-session client**: spawn / kill / liveness / workspace resolve-or-create all build a `HerdrClient` on the resolved session socket (carried on `SpawnReq`/`SpawnHandle` as `herdr_socket`, and persisted as `runs.session` so kill/liveness work after a daemon restart).
+- **Per-session client**: spawn / kill / liveness / workspace resolve-or-create all build a `HerdrClient` on the resolved session socket. Runtime placement and identity live in daemon-owned `HerdrLaunchPlan` / `RuntimeHandle`; `runs.session` remains durable so kill/liveness target the correct socket after a daemon restart.
 - **Per-session watchers**: one always-on supervisor multiplexes a `HerdrEvents` stream **per session socket** with active panes. Generation, subscription state, reconnect backoff, and periodic reconciliation deadlines are independent per socket, so one session's pane-set change or disconnect never resets another. Each generation completes subscribe acknowledgement before its snapshot and event polling. Event identity is `(session socket, pane id)`, not pane id alone.
 - **Conservative restart reconciliation**: startup resolves each durable open run to `Default`, `Resolved`, or `Unresolved`, then probes a session snapshot outside scheduler/store locks. Only a successful snapshot that omits the pane is `Gone` and applies pane-exit failure policy. Transport errors, timeouts, malformed replies, resolver failures, and worker panics are `Unknown`: this pass leaves the run open and occupying queue capacity; a later daemon restart (or T10) may retry it. A present pane is adopted, watched, and its terminal status restores `awaiting`/`blocked`; durable state is revalidated after the probe so stale observations cannot beat `board done`. An always-on supervisor keeps independent stream generation/backoff per socket, reconnects after Herdr appears or recovers, subscribes before snapshot reconciliation, and periodically repairs missed-event gaps.
 
@@ -403,10 +403,12 @@ executes the returned plan; it performs no Herdr or SQLite I/O in the pure decis
 - **Atomic enqueue snapshot**: scheduler→store locking builds the card/column/comments/settings/task,
   system, and session snapshot together; the queued run is never assembled from stale reads and
   `run.session` matches the launch target.
-- **Lifecycle policy ownership**: `board-core::engine` owns Herdr-neutral `LifecycleDecision`/
-  `FinalizePlan`, auto-hop limits, and resumability evidence (a started run plus its
-  `agent:<run_id>` comment). `board-daemon` gathers facts, performs DB/process effects, and
-  preserves the scheduler→store lock order; this slice does not change transaction execution.
+- **Lifecycle and launch ownership**: `board-core::engine` owns Herdr-neutral
+  `LifecycleDecision` / `FinalizePlan`, auto-hop limits, and resumability evidence (a started run
+  plus its `agent:<run_id>` comment). `board-core::launch` contains only the durable neutral
+  `ExecutionSpec` / `RunLaunchSpec`. `board-daemon` owns `Spawner`, `HerdrLaunchPlan`,
+  `RuntimeHandle`, placement, liveness, and process effects while preserving the scheduler→store
+  lock order; this boundary does not change transaction execution or launch bytes.
 - **Atomic card finalization**: under scheduler→store locking, one core transaction closes the run,
   writes all terminal comments, moves/statuses the card, and inserts any auto-hop run. Failed
   planning or SQL restores the exact prior durable state. Only after commit does the daemon update

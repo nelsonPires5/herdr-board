@@ -45,6 +45,7 @@ import json, sys
 p, runner, board = sys.argv[1:]
 with open(p, "a", encoding="utf-8") as f:
     f.write("\n[harness.p17-runner]\n")
+    f.write('efforts = ["low"]\n')
     f.write("argv = " + json.dumps(["env", "BOARD_BIN=" + board, runner,
         "literal argument with spaces", "line one\nline two", "{effort}"], ensure_ascii=False) + "\n")
 PY

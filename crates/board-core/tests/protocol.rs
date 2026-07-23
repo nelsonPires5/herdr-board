@@ -1,5 +1,6 @@
 //! Serde round-trips for representative protocol messages.
 
+use board_core::launch::{ExecutionSpec, RunLaunchSpec};
 use board_core::model::Run;
 use board_core::protocol::{
     ActiveRunSummary, AwaitingReason, BoardChangedReason, BoardGetParams, BoardListResult,
@@ -9,7 +10,6 @@ use board_core::protocol::{
     RunFocusResult, RunOutcome, RunPaneExitedParams, SpaceInfo, SpaceKind, SpaceListResult,
     TemplateApplyParams, Trigger,
 };
-use board_core::spawn::{ExecutionSpec, RunLaunchSpec};
 use serde_json::json;
 
 fn roundtrip<T>(value: &T)

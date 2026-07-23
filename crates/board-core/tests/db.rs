@@ -1,11 +1,11 @@
 //! Db migrations, seed, CRUD, and position management.
 
 use board_core::db::{Db, EnqueueRun, BOARD_ID};
+use board_core::launch::{ExecutionSpec, RunLaunchSpec};
 use board_core::protocol::{
     AwaitingReason, CardCreateParams, CardStatus, ColumnCreateParams, ColumnUpdateParams, Effort,
     Patch, RunOutcome, SpaceKind, Trigger,
 };
-use board_core::spawn::{ExecutionSpec, RunLaunchSpec};
 use rusqlite::{Connection, OptionalExtension};
 
 fn mem() -> Db {

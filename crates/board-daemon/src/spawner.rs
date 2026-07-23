@@ -12,11 +12,64 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context};
-use board_core::spawn::{SpawnHandle, SpawnReq, Spawner};
 use board_herdr::{
     AgentInfo, AgentPromptParams, AgentStartParams, AgentStarted, HerdrClient, HerdrError,
     LayoutPane, PaneRenameParams, PaneSplitParams, SplitDirection, TabCreateParams,
 };
+
+/// A request to launch one agent process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HerdrLaunchPlan {
+    /// herdr agent/pane label, e.g. `card-42-execute`.
+    pub name: String,
+    /// Explicit Herdr managed-agent kind (`pi` or `claude`). `None` means a
+    /// configured, unmanaged command; callers must never infer this from argv.
+    pub agent_kind: Option<String>,
+    /// Card task to submit after a managed agent becomes interactive. `None`
+    /// for configured harnesses, which receive `BOARD_PROMPT` in `env`.
+    pub initial_prompt: Option<String>,
+    /// Authoritative system instructions for a managed agent, transported
+    /// separately from startup argv. `None` for configured harnesses, which
+    /// receive `BOARD_SYSTEM_PROMPT` in `env`.
+    pub system_prompt: Option<String>,
+    /// Fallback agent name to retry with when `name` is already taken (herdr
+    /// agent names are exclusive while a pane using one is open). `None` skips
+    /// the retry.
+    pub name_fallback: Option<String>,
+    /// herdr tab label to place the agent pane in (find-or-create + grid
+    /// layout). `None` = no tab placement (cwd spaces / `LocalSpawner`, which
+    /// ignore it). Only honored when `workspace_ref` is also set.
+    pub tab_label: Option<String>,
+    /// Working directory (resolved workspace cwd, or `LocalSpawner`).
+    pub cwd: Option<PathBuf>,
+    /// herdr workspace id (for `workspace` / `new_workspace` spaces).
+    pub workspace_ref: Option<String>,
+    /// herdr socket to spawn on, resolved from the card's session. `None` =
+    /// the spawner's default socket (`LocalSpawner` ignores it).
+    pub herdr_socket: Option<PathBuf>,
+    /// Environment pairs to set on the child.
+    pub env: Vec<(String, String)>,
+    /// The command line.
+    pub argv: Vec<String>,
+}
+
+/// A handle to a launched process: herdr ids and/or a local pid.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RuntimeHandle {
+    pub pane_id: Option<String>,
+    pub workspace_id: Option<String>,
+    pub pid: Option<u32>,
+    /// herdr socket this pane lives on (its session), so kill/liveness target
+    /// the right session after a daemon restart. `None` = default socket.
+    pub herdr_socket: Option<PathBuf>,
+}
+
+/// Launch, kill, and liveness-check agent processes.
+pub trait Spawner: Send + Sync {
+    fn spawn(&self, req: &HerdrLaunchPlan) -> anyhow::Result<RuntimeHandle>;
+    fn kill(&self, h: &RuntimeHandle) -> anyhow::Result<()>;
+    fn is_alive(&self, h: &RuntimeHandle) -> anyhow::Result<bool>;
+}
 
 const HERDR_PROTOCOL: u32 = 17;
 const AGENT_START_TIMEOUT_MS: u64 = 30_000;
@@ -43,7 +96,7 @@ impl LocalSpawner {
 
 /// Reconstruct the legacy direct-process argv for an explicitly managed
 /// invocation. Configured (unmanaged) commands remain byte-for-byte unchanged.
-fn materialize_local_argv(req: &SpawnReq) -> anyhow::Result<Vec<String>> {
+fn materialize_local_argv(req: &HerdrLaunchPlan) -> anyhow::Result<Vec<String>> {
     let Some(kind) = req.agent_kind.as_deref() else {
         return Ok(req.argv.clone());
     };
@@ -95,7 +148,7 @@ fn materialize_local_argv(req: &SpawnReq) -> anyhow::Result<Vec<String>> {
 }
 
 impl Spawner for LocalSpawner {
-    fn spawn(&self, req: &SpawnReq) -> anyhow::Result<SpawnHandle> {
+    fn spawn(&self, req: &HerdrLaunchPlan) -> anyhow::Result<RuntimeHandle> {
         let argv = materialize_local_argv(req)?;
         let (prog, args) = argv.split_first().ok_or_else(|| anyhow!("empty argv"))?;
         let mut cmd = Command::new(prog);
@@ -119,13 +172,13 @@ impl Spawner for LocalSpawner {
             .lock()
             .map_err(|_| anyhow!("local spawner child registry lock poisoned"))?
             .insert(pid, child);
-        Ok(SpawnHandle {
+        Ok(RuntimeHandle {
             pid: Some(pid),
             ..Default::default()
         })
     }
 
-    fn kill(&self, h: &SpawnHandle) -> anyhow::Result<()> {
+    fn kill(&self, h: &RuntimeHandle) -> anyhow::Result<()> {
         if let Some(pid) = h.pid {
             let child = self
                 .children
@@ -140,7 +193,7 @@ impl Spawner for LocalSpawner {
         Ok(())
     }
 
-    fn is_alive(&self, h: &SpawnHandle) -> anyhow::Result<bool> {
+    fn is_alive(&self, h: &RuntimeHandle) -> anyhow::Result<bool> {
         let Some(pid) = h.pid else { return Ok(false) };
         let mut guard = self
             .children
@@ -227,13 +280,13 @@ impl HerdrSpawner {
         })
     }
 
-    fn selected_socket<'a>(&'a self, req: &'a SpawnReq) -> &'a Path {
+    fn selected_socket<'a>(&'a self, req: &'a HerdrLaunchPlan) -> &'a Path {
         req.herdr_socket.as_deref().unwrap_or(&self.socket)
     }
 }
 
 impl Spawner for HerdrSpawner {
-    fn spawn(&self, req: &SpawnReq) -> anyhow::Result<SpawnHandle> {
+    fn spawn(&self, req: &HerdrLaunchPlan) -> anyhow::Result<RuntimeHandle> {
         let selected_socket = self.selected_socket(req).to_path_buf();
         let mut client = self.client_for(Some(&selected_socket))?;
 
@@ -286,7 +339,7 @@ impl Spawner for HerdrSpawner {
 
             match launch_result {
                 Ok(()) => {
-                    return Ok(SpawnHandle {
+                    return Ok(RuntimeHandle {
                         pane_id: Some(owned.pane_id),
                         workspace_id: Some(owned.workspace_id),
                         pid: None,
@@ -312,7 +365,7 @@ impl Spawner for HerdrSpawner {
             .unwrap_or_else(|| anyhow!("pane placement retry exhausted without a terminal result")))
     }
 
-    fn kill(&self, h: &SpawnHandle) -> anyhow::Result<()> {
+    fn kill(&self, h: &RuntimeHandle) -> anyhow::Result<()> {
         if let Some(pane) = &h.pane_id {
             let mut client = self.client_for(h.herdr_socket.as_deref())?;
             client
@@ -322,7 +375,7 @@ impl Spawner for HerdrSpawner {
         Ok(())
     }
 
-    fn is_alive(&self, h: &SpawnHandle) -> anyhow::Result<bool> {
+    fn is_alive(&self, h: &RuntimeHandle) -> anyhow::Result<bool> {
         let Some(pane) = &h.pane_id else {
             return Ok(false);
         };
@@ -474,7 +527,7 @@ impl std::error::Error for RetryablePlacementRace {
 
 fn launch_managed(
     client: &mut HerdrClient,
-    req: &SpawnReq,
+    req: &HerdrLaunchPlan,
     kind: &str,
     pane_id: &str,
 ) -> anyhow::Result<()> {
@@ -620,7 +673,7 @@ fn launch_configured(
     client: &mut HerdrClient,
     runner: &dyn PaneRunner,
     socket: &Path,
-    req: &SpawnReq,
+    req: &HerdrLaunchPlan,
     pane_id: &str,
 ) -> anyhow::Result<()> {
     if req.argv.is_empty() {
@@ -813,7 +866,7 @@ mod tests {
     use std::thread;
 
     use super::{grid_slot, materialize_local_argv, HerdrCliPaneRunner, HerdrSpawner, PaneRunner};
-    use board_core::spawn::{SpawnReq, Spawner};
+    use crate::spawner::{HerdrLaunchPlan, Spawner};
     use board_herdr::{LayoutPane, Rect, SplitDirection};
     use serde_json::Value;
 
@@ -1114,8 +1167,8 @@ mod tests {
         )
     }
 
-    fn pi_req(initial_prompt: Option<&str>) -> SpawnReq {
-        SpawnReq {
+    fn pi_req(initial_prompt: Option<&str>) -> HerdrLaunchPlan {
+        HerdrLaunchPlan {
             name: "card-42-execute".into(),
             name_fallback: Some("card-42-execute-r7".into()),
             agent_kind: Some("pi".into()),
@@ -1136,8 +1189,8 @@ mod tests {
         }
     }
 
-    fn claude_req() -> SpawnReq {
-        SpawnReq {
+    fn claude_req() -> HerdrLaunchPlan {
+        HerdrLaunchPlan {
             name: "card-42-execute".into(),
             name_fallback: Some("card-42-execute-r7".into()),
             agent_kind: Some("claude".into()),
@@ -2021,8 +2074,8 @@ mod tests {
         );
     }
 
-    fn custom_req(socket: PathBuf, cwd: PathBuf, argv: Vec<String>) -> SpawnReq {
-        SpawnReq {
+    fn custom_req(socket: PathBuf, cwd: PathBuf, argv: Vec<String>) -> HerdrLaunchPlan {
+        HerdrLaunchPlan {
             name: "card-9-custom".into(),
             name_fallback: Some("card-9-custom-r1".into()),
             agent_kind: None,
@@ -2467,8 +2520,8 @@ mod tests {
         assert!(default.requests.lock().unwrap().is_empty());
     }
 
-    fn managed_req(kind: &str) -> SpawnReq {
-        SpawnReq {
+    fn managed_req(kind: &str) -> HerdrLaunchPlan {
+        HerdrLaunchPlan {
             name: "card-7-execute".into(),
             agent_kind: Some(kind.into()),
             initial_prompt: Some("exact task".into()),

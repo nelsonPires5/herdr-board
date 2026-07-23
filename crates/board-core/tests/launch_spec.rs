@@ -1,4 +1,4 @@
-use board_core::spawn::{ExecutionSpec, RunLaunchSpec};
+use board_core::launch::{ExecutionSpec, RunLaunchSpec};
 use serde_json::json;
 
 fn execution() -> ExecutionSpec {

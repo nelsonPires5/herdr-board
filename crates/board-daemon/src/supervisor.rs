@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::spawner::RuntimeHandle;
 use board_core::engine::AgentSignal;
 use board_core::model::{Card, Run};
 use board_core::protocol::RunOutcome;
-use board_core::spawn::SpawnHandle;
 use board_herdr::{AgentStatus, HerdrClient};
 
 use crate::dispatch;
@@ -256,7 +256,7 @@ fn adopt_alive(
         SessionTarget::Resolved(socket) => Some(socket),
         SessionTarget::Unresolved => return,
     };
-    let handle = SpawnHandle {
+    let handle = RuntimeHandle {
         pane_id: current_run.herdr_pane_id.clone(),
         workspace_id: current_run.herdr_workspace_id.clone(),
         pid: None,
@@ -305,10 +305,10 @@ mod tests {
     use std::collections::{HashMap, VecDeque};
     use std::sync::Mutex;
 
+    use crate::spawner::{HerdrLaunchPlan, Spawner};
     use board_core::config::Config;
     use board_core::db::Db;
     use board_core::protocol::{AwaitingReason, CardCreateParams, CardStatus};
-    use board_core::spawn::{SpawnReq, Spawner};
     use tokio::sync::{broadcast, mpsc, watch};
 
     use crate::settings::{DaemonSettings, SpawnerKind};
@@ -316,13 +316,13 @@ mod tests {
 
     struct NoSpawn;
     impl Spawner for NoSpawn {
-        fn spawn(&self, _: &SpawnReq) -> anyhow::Result<SpawnHandle> {
+        fn spawn(&self, _: &HerdrLaunchPlan) -> anyhow::Result<RuntimeHandle> {
             panic!("reconciliation test must not spawn")
         }
-        fn kill(&self, _: &SpawnHandle) -> anyhow::Result<()> {
+        fn kill(&self, _: &RuntimeHandle) -> anyhow::Result<()> {
             Ok(())
         }
-        fn is_alive(&self, _: &SpawnHandle) -> anyhow::Result<bool> {
+        fn is_alive(&self, _: &RuntimeHandle) -> anyhow::Result<bool> {
             Ok(false)
         }
     }

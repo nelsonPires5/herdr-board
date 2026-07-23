@@ -47,7 +47,8 @@ impl PreparedEnqueue {
         }
     }
 }
-use board_core::spawn::{ExecutionSpec, RunLaunchSpec, SpawnReq};
+use crate::spawner::HerdrLaunchPlan;
+use board_core::launch::{ExecutionSpec, RunLaunchSpec};
 use board_core::{Error, Result};
 use board_herdr::{HerdrClient, NotificationSound, WorkspaceCreateParams, WorkspaceInfo};
 use uuid::Uuid;
@@ -392,7 +393,7 @@ async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result<bool> {
         }
         None => (agent_kind, initial_prompt, system_prompt),
     };
-    let mut req = SpawnReq {
+    let mut req = HerdrLaunchPlan {
         // Stable, human-readable pane name `card-<id>-<column-slug>`. herdr
         // agent names are exclusive while a pane using one is open (and finished
         // panes stay open, visible, by design), so on collision the spawner
@@ -512,7 +513,7 @@ async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result<bool> {
 fn register_spawned_run(
     d: &Arc<Daemon>,
     run_id: i64,
-    handle: board_core::spawn::SpawnHandle,
+    handle: crate::spawner::RuntimeHandle,
     started: Instant,
     timeout_deadline: Option<Instant>,
     timeout_deadline_at_ms: Option<i64>,
@@ -943,6 +944,7 @@ mod tests {
         resolve_workspace_ref,
     };
     use crate::settings::DaemonSettings;
+    use crate::spawner::{HerdrLaunchPlan, RuntimeHandle, Spawner};
     use crate::state::{ActiveRun, Daemon};
     use crate::store::Store;
     use board_core::config::Config;
@@ -953,7 +955,6 @@ mod tests {
         AwaitingReason, CardCreateParams, CardStatus, CardUpdateParams, ColumnCreateParams,
         ColumnUpdateParams, Effort, Event, Patch, RunOutcome, SpaceKind, Trigger,
     };
-    use board_core::spawn::{SpawnHandle, SpawnReq, Spawner};
     use board_core::{Error, Result};
     use board_herdr::{AgentStatus, HerdrClient, WorkspaceInfo};
     use serde_json::Value;
@@ -962,16 +963,16 @@ mod tests {
     struct MissingPiSpawner;
 
     impl Spawner for MissingPiSpawner {
-        fn spawn(&self, req: &SpawnReq) -> anyhow::Result<SpawnHandle> {
+        fn spawn(&self, req: &HerdrLaunchPlan) -> anyhow::Result<RuntimeHandle> {
             assert_eq!(req.argv.first().map(String::as_str), Some("pi"));
             Err(std::io::Error::new(std::io::ErrorKind::NotFound, "pi not found").into())
         }
 
-        fn kill(&self, _h: &SpawnHandle) -> anyhow::Result<()> {
+        fn kill(&self, _h: &RuntimeHandle) -> anyhow::Result<()> {
             Ok(())
         }
 
-        fn is_alive(&self, _h: &SpawnHandle) -> anyhow::Result<bool> {
+        fn is_alive(&self, _h: &RuntimeHandle) -> anyhow::Result<bool> {
             Ok(false)
         }
     }
@@ -984,7 +985,7 @@ mod tests {
 
     #[derive(Default)]
     struct CapturingSpawner {
-        requests: std::sync::Mutex<Vec<SpawnReq>>,
+        requests: std::sync::Mutex<Vec<HerdrLaunchPlan>>,
     }
 
     #[derive(Default)]
@@ -1018,7 +1019,7 @@ mod tests {
     }
 
     impl Spawner for PausedSpawner {
-        fn spawn(&self, req: &SpawnReq) -> anyhow::Result<SpawnHandle> {
+        fn spawn(&self, req: &HerdrLaunchPlan) -> anyhow::Result<RuntimeHandle> {
             let mut state = self.state.lock().unwrap();
             state.started.push(req.name.clone());
             self.started_notify.notify_one();
@@ -1026,24 +1027,24 @@ mod tests {
             while !state.released {
                 state = self.changed.wait(state).unwrap();
             }
-            Ok(SpawnHandle {
+            Ok(RuntimeHandle {
                 pid: Some(4242),
                 ..Default::default()
             })
         }
 
-        fn kill(&self, _h: &SpawnHandle) -> anyhow::Result<()> {
+        fn kill(&self, _h: &RuntimeHandle) -> anyhow::Result<()> {
             Ok(())
         }
 
-        fn is_alive(&self, _h: &SpawnHandle) -> anyhow::Result<bool> {
+        fn is_alive(&self, _h: &RuntimeHandle) -> anyhow::Result<bool> {
             Ok(true)
         }
     }
 
     impl Spawner for FaultPromotionSpawner {
-        fn spawn(&self, _req: &SpawnReq) -> anyhow::Result<SpawnHandle> {
-            Ok(SpawnHandle {
+        fn spawn(&self, _req: &HerdrLaunchPlan) -> anyhow::Result<RuntimeHandle> {
+            Ok(RuntimeHandle {
                 pid: Some(4242),
                 workspace_id: Some("spawned-workspace".into()),
                 pane_id: Some("spawned-pane".into()),
@@ -1051,40 +1052,40 @@ mod tests {
             })
         }
 
-        fn kill(&self, _h: &SpawnHandle) -> anyhow::Result<()> {
+        fn kill(&self, _h: &RuntimeHandle) -> anyhow::Result<()> {
             self.kills.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
-        fn is_alive(&self, _h: &SpawnHandle) -> anyhow::Result<bool> {
+        fn is_alive(&self, _h: &RuntimeHandle) -> anyhow::Result<bool> {
             Ok(true)
         }
     }
 
     impl Spawner for CapturingSpawner {
-        fn spawn(&self, req: &SpawnReq) -> anyhow::Result<SpawnHandle> {
+        fn spawn(&self, req: &HerdrLaunchPlan) -> anyhow::Result<RuntimeHandle> {
             self.requests.lock().unwrap().push(req.clone());
-            Ok(SpawnHandle {
+            Ok(RuntimeHandle {
                 pid: Some(4242),
                 ..Default::default()
             })
         }
 
-        fn kill(&self, _h: &SpawnHandle) -> anyhow::Result<()> {
+        fn kill(&self, _h: &RuntimeHandle) -> anyhow::Result<()> {
             Ok(())
         }
 
-        fn is_alive(&self, _h: &SpawnHandle) -> anyhow::Result<bool> {
+        fn is_alive(&self, _h: &RuntimeHandle) -> anyhow::Result<bool> {
             Ok(false)
         }
     }
 
     impl Spawner for RecordingSpawner {
-        fn spawn(&self, _req: &SpawnReq) -> anyhow::Result<SpawnHandle> {
+        fn spawn(&self, _req: &HerdrLaunchPlan) -> anyhow::Result<RuntimeHandle> {
             unreachable!("registration tests provide the spawned handle")
         }
 
-        fn kill(&self, _h: &SpawnHandle) -> anyhow::Result<()> {
+        fn kill(&self, _h: &RuntimeHandle) -> anyhow::Result<()> {
             self.kills.fetch_add(1, Ordering::SeqCst);
             if let Some(log) = self.effects.lock().unwrap().as_ref() {
                 log.lock().unwrap().push("kill");
@@ -1092,7 +1093,7 @@ mod tests {
             Ok(())
         }
 
-        fn is_alive(&self, _h: &SpawnHandle) -> anyhow::Result<bool> {
+        fn is_alive(&self, _h: &RuntimeHandle) -> anyhow::Result<bool> {
             Ok(false)
         }
     }
@@ -1572,7 +1573,7 @@ mod tests {
         assert!(register_spawned_run(
             &d,
             run_id,
-            SpawnHandle {
+            RuntimeHandle {
                 pid: Some(41),
                 ..Default::default()
             },
@@ -1617,7 +1618,7 @@ mod tests {
         assert!(!register_spawned_run(
             &d,
             run_id,
-            SpawnHandle {
+            RuntimeHandle {
                 pid: Some(42),
                 ..Default::default()
             },
@@ -1838,7 +1839,7 @@ mod tests {
             run_id,
             ActiveRun {
                 card_id,
-                handle: SpawnHandle {
+                handle: RuntimeHandle {
                     pane_id: Some("pane".into()),
                     ..Default::default()
                 },
@@ -1939,7 +1940,7 @@ mod tests {
             run_id,
             ActiveRun {
                 card_id,
-                handle: SpawnHandle {
+                handle: RuntimeHandle {
                     pane_id: Some("pane".into()),
                     ..Default::default()
                 },
@@ -2072,7 +2073,7 @@ mod tests {
                     run_id,
                     ActiveRun {
                         card_id,
-                        handle: SpawnHandle {
+                        handle: RuntimeHandle {
                             pane_id: Some("pane".into()),
                             ..Default::default()
                         },
@@ -2169,7 +2170,7 @@ mod tests {
             run_id,
             ActiveRun {
                 card_id,
-                handle: SpawnHandle {
+                handle: RuntimeHandle {
                     pane_id: Some("pane".into()),
                     ..Default::default()
                 },

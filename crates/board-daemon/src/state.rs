@@ -7,9 +7,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use crate::spawner::{RuntimeHandle, Spawner};
 use board_core::config::Config;
 use board_core::protocol::{BoardChangedReason, Event, RunOutcome};
-use board_core::spawn::{SpawnHandle, Spawner};
 use board_herdr::{HerdrClient, NotificationSound};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, watch, Mutex as AsyncMutex};
@@ -29,7 +29,7 @@ fn system_wall_now_ms() -> i64 {
 /// In-memory bookkeeping for a started run.
 pub struct ActiveRun {
     pub card_id: i64,
-    pub handle: SpawnHandle,
+    pub handle: RuntimeHandle,
     pub started: Instant,
     pub timeout_deadline: Option<Instant>,
     /// When the agent last went idle (herdr status), for idle-grace detection.

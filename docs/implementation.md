@@ -38,7 +38,7 @@ tokio (daemon only: rt-multi-thread, net, sync, time, process, signal),
 ratatui + crossterm (tui), tui-textarea (tui), insta (dev, tui), tempfile (dev),
 directories (paths), tracing + tracing-subscriber (daemon logs), libc (daemonize) or nix.
 
-## Key traits (defined in board-core by Phase A — B/C/D implement/consume)
+## Key boundaries
 
 ```rust
 // board-core::client — blocking NDJSON client over UnixStream (TUI + CLI use it).
@@ -53,16 +53,21 @@ pub trait BoardClient {
 // Provide `FakeBoardClient` (in-memory board state) behind #[cfg(feature="fake-client")] for TUI tests.
 // CLI/TUI clients use these wrappers and never perform DB I/O.
 
-// board-core::spawn — how the daemon launches agent processes.
-pub struct SpawnReq { pub name: String, pub cwd: Option<PathBuf>, pub workspace_ref: Option<String>,
-                      pub env: Vec<(String,String)>, pub argv: Vec<String> }
+// board-core::launch — durable, runtime-neutral enqueue materialization.
+pub struct ExecutionSpec { /* exact argv, env, and managed prompt inputs */ }
+pub struct RunLaunchSpec { /* independently versioned durable ExecutionSpec */ }
+
+// board-daemon::spawner — runtime launch ownership.
+pub struct HerdrLaunchPlan { /* placement, socket, cwd, and execution inputs */ }
+pub struct RuntimeHandle { /* pane/workspace ids or local pid */ }
 pub trait Spawner: Send + Sync {
-    fn spawn(&self, req: &SpawnReq) -> Result<SpawnHandle>;   // handle: pane/workspace ids or pid
-    fn kill(&self, h: &SpawnHandle) -> Result<()>;
-    fn is_alive(&self, h: &SpawnHandle) -> Result<bool>;
+    fn spawn(&self, req: &HerdrLaunchPlan) -> Result<RuntimeHandle>;
+    fn kill(&self, h: &RuntimeHandle) -> Result<()>;
+    fn is_alive(&self, h: &RuntimeHandle) -> Result<bool>;
 }
-// Phase D implements HerdrSpawner (via board-herdr) AND LocalSpawner (plain child process,
-// used by integration tests with the fake harness — no herdr needed).
+// board-daemon implements HerdrSpawner (via board-herdr) and LocalSpawner (plain child process,
+// used by integration tests with the fake harness — no herdr needed). Runtime placement,
+// process handles, liveness, and cleanup never belong to board-core.
 ```
 
 ## Semantics source of truth
