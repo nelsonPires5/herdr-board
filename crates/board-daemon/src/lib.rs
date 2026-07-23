@@ -13,6 +13,7 @@ mod singleton;
 mod spawner;
 mod state;
 mod store;
+mod supervisor;
 mod template;
 mod watchers;
 
@@ -173,8 +174,10 @@ async fn async_main(db_path: PathBuf, socket_path: PathBuf) -> anyhow::Result<()
     }
     spawn_signal_handler(daemon.clone());
 
-    // Startup adoption of runs that were active at the last shutdown/crash.
-    adopt_runs(&daemon).await;
+    // Startup recovery is independent of the best-effort initial Herdr
+    // connection. The always-on stream supervisor remains T10; T09 performs
+    // this conservative snapshot pass even when that connection was absent.
+    startup_recovery(&daemon).await;
     daemon.wake_dispatch();
 
     // Bind the socket (removing any stale file first) and serve.
@@ -190,6 +193,39 @@ async fn async_main(db_path: PathBuf, socket_path: PathBuf) -> anyhow::Result<()
     // Graceful: leave running panes alone; just clean up the socket.
     let _ = std::fs::remove_file(&socket_path);
     Ok(())
+}
+
+async fn startup_recovery(d: &Arc<Daemon>) {
+    if matches!(d.settings.spawner, SpawnerKind::Herdr) {
+        if let Some(registry) = &d.session_registry {
+            startup_recovery_with(
+                d,
+                Arc::new(crate::session::SessionRegistry::new(
+                    registry.default_socket().to_path_buf(),
+                )),
+                Arc::new(supervisor::HerdrRuntime),
+                Arc::new(supervisor::SystemClock),
+            )
+            .await;
+        }
+    } else {
+        adopt_runs(d).await;
+    }
+}
+
+/// Injectable startup branch used to prove that Herdr reconciliation runs even
+/// when the daemon's initial best-effort client connection failed.
+async fn startup_recovery_with(
+    d: &Arc<Daemon>,
+    resolver: Arc<dyn supervisor::SessionResolver>,
+    runtime: Arc<dyn supervisor::Runtime>,
+    clock: Arc<dyn supervisor::ReconcileClock>,
+) {
+    if matches!(d.settings.spawner, SpawnerKind::Herdr) {
+        supervisor::reconcile_once(d, resolver, runtime, clock).await;
+    } else {
+        adopt_runs(d).await;
+    }
 }
 
 /// On startup, reconcile runs that were started but never ended.
