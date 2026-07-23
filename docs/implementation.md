@@ -68,7 +68,7 @@ pub trait Spawner: Send + Sync {
 ## Semantics source of truth
 
 `docs/protocol.md` + `docs/design.md` §5–§8. `schema.sql` at repo root is the current fresh schema
-(embedded and versioned with `PRAGMA user_version`). Schema v9 is current. v8 adds the partial
+(embedded and versioned with `PRAGMA user_version`). Schema v11 is current. v8 adds the partial
 unique index `idx_runs_one_open_per_card` and transactional enqueue/promotion/finalization units of
 work. v9 adds nullable durable timeout deadline/pause timestamps. Promotion writes the deadline in
 its transaction; awaiting pause/resume updates the card and timeout atomically and idempotently,
@@ -79,7 +79,12 @@ as `Global` (`scope_path=NULL`) and scoped-board rows, v6's `awaiting`/`done` st
 v7's nullable `runs.system_prompt_snapshot`. New v7 queued runs store the exact resolved,
 trailer-inclusive system prompt; pre-v7 rows remain `NULL` with no backfill. v10 adds partial
 FIFO-queued and active-open run indexes; daemon queue reads use direct SQL pairs instead of scanning
-every card's run history. The typed `SpaceKey` preserves session/kind/ref null identity. A
+every card's run history. v11 adds nullable `runs.launch_spec_json`: v10 rows remain NULL, while new
+runs persist a version-1 tagged materialization of exact argv, env, managed prompt channels, and the
+run's Herdr session. Unsupported spec versions fail decoding. Dispatch consumes `runs.session` for
+v11 placement; pre-v11 rows explicitly retain current-card session lookup. The launch spec and
+system snapshot are both private DB state omitted from board wire DTOs. The typed `SpaceKey`
+preserves session/kind/ref null identity. A
 per-daemon async pass lock prevents competing passes from duplicating claims; each pass claims
 per-space/global slots before concurrently launching independent spaces. That legacy
 `NULL` is intentional: built-ins keep their persisted all-in-one argv, while configured rows keep

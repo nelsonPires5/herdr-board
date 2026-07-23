@@ -84,6 +84,7 @@ CREATE TABLE runs (
   argv_json          TEXT NOT NULL,
   prompt_snapshot    TEXT NOT NULL,
   system_prompt_snapshot TEXT,                    -- NULL marks a legacy pre-v7 launch
+  launch_spec_json TEXT,                          -- NULL marks a pre-v11 launch
   herdr_workspace_id TEXT,
   herdr_pane_id      TEXT,
   session_id         TEXT,                     -- harness conversation id (--resume)

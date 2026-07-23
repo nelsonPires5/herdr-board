@@ -27,6 +27,7 @@ struct PreparedEnqueue {
     argv_json: String,
     prompt: String,
     system_prompt: String,
+    launch_spec_json: String,
     session_id: Option<String>,
     session: Option<String>,
 }
@@ -40,12 +41,13 @@ impl PreparedEnqueue {
             argv_json: &self.argv_json,
             prompt_snapshot: &self.prompt,
             system_prompt_snapshot: Some(&self.system_prompt),
+            launch_spec_json: Some(&self.launch_spec_json),
             session_id: self.session_id.as_deref(),
             session: self.session.as_deref(),
         }
     }
 }
-use board_core::spawn::SpawnReq;
+use board_core::spawn::{ExecutionSpec, RunLaunchSpec, SpawnReq};
 use board_core::{Error, Result};
 use board_herdr::{HerdrClient, NotificationSound, WorkspaceCreateParams, WorkspaceInfo};
 use uuid::Uuid;
@@ -162,6 +164,13 @@ fn enqueue_run_inner(d: &Arc<Daemon>, card_id: i64, column_id: i64, is_retry: bo
         argv_json: &argv_json,
         prompt_snapshot: &prompt,
         system_prompt_snapshot: Some(&system_prompt_snapshot),
+        launch_spec_json: Some(&serde_json::to_string(&RunLaunchSpec::v1(ExecutionSpec {
+            argv: invocation.argv.clone(),
+            env: invocation.env.clone(),
+            agent_kind: invocation.agent_kind.clone(),
+            initial_prompt: invocation.initial_prompt.clone(),
+            system_prompt: invocation.system_prompt.clone(),
+        }))?),
         session_id: session_for_run.as_deref(),
         session: card.session.as_deref(),
     })?;
@@ -219,6 +228,13 @@ fn prepare_enqueue_values(
         system_prompt: invocation.system_prompt.clone().unwrap_or_else(|| {
             board_core::harness::protocol_system_prompt(settings.system_prompt.as_deref())
         }),
+        launch_spec_json: serde_json::to_string(&RunLaunchSpec::v1(ExecutionSpec {
+            argv: invocation.argv.clone(),
+            env: invocation.env.clone(),
+            agent_kind: invocation.agent_kind.clone(),
+            initial_prompt: invocation.initial_prompt.clone(),
+            system_prompt: invocation.system_prompt.clone(),
+        }))?,
         session_id,
         session: card.session.clone(),
     })
@@ -287,6 +303,16 @@ pub async fn dispatch_pass(d: &Arc<Daemon>) {
     }
 }
 
+/// Select placement for dispatch. v11 rows use the enqueue-time run snapshot;
+/// pre-v11 rows explicitly retain the historical current-card behavior.
+fn launch_session<'a>(run: &'a Run, card: &'a Card) -> Option<&'a str> {
+    if run.launch_spec.is_some() {
+        run.session.as_deref()
+    } else {
+        card.session.as_deref()
+    }
+}
+
 /// Promote one queued run to running. Returns `Ok(true)` if it started,
 /// `Ok(false)` if the spawn failed (the run is finished `fail`).
 async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result<bool> {
@@ -337,7 +363,35 @@ async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result<bool> {
         std::env::current_exe()?.to_string_lossy().into_owned(),
     ));
 
-    let argv: Vec<String> = serde_json::from_str(&run.argv_json)?;
+    let mut argv: Vec<String> = serde_json::from_str(&run.argv_json)?;
+    // v11 rows consume the single enqueue-time materialization. Older rows use
+    // the v7+ snapshot adapter above, or the pre-v7 fallback.
+    if let Some(spec) = &run.launch_spec {
+        let execution = spec.execution();
+        argv.clone_from(&execution.argv);
+        env = execution.env.clone();
+        env.push(("BOARD_CARD_ID".into(), card.id.to_string()));
+        env.push(("BOARD_RUN_ID".into(), run.id.to_string()));
+        env.push((
+            "BOARD_SOCKET".into(),
+            d.socket_path.to_string_lossy().into_owned(),
+        ));
+        env.push((
+            "BOARD_BIN".into(),
+            std::env::current_exe()?.to_string_lossy().into_owned(),
+        ));
+    }
+    let (agent_kind, initial_prompt, system_prompt) = match run.launch_spec.as_ref() {
+        Some(spec) => {
+            let execution = spec.execution();
+            (
+                execution.agent_kind.clone(),
+                execution.initial_prompt.clone(),
+                execution.system_prompt.clone(),
+            )
+        }
+        None => (agent_kind, initial_prompt, system_prompt),
+    };
     let mut req = SpawnReq {
         // Stable, human-readable pane name `card-<id>-<column-slug>`. herdr
         // agent names are exclusive while a pane using one is open (and finished
@@ -357,11 +411,13 @@ async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result<bool> {
         argv,
     };
 
-    // Resolve the card's herdr session to a concrete socket. `None` session →
-    // the daemon's default socket. An unknown/stopped session fails the run
-    // with a clear error listing the known sessions.
+    // v11 launch placement is part of the enqueue-time run snapshot. Legacy
+    // rows have no launch spec and retain their historical current-card lookup.
+    let launch_session = launch_session(run, card);
+    // Resolve that herdr session to a concrete socket. `None` session → the
+    // daemon's default socket. An unknown/stopped session fails the run.
     if let Some(reg) = &d.session_registry {
-        match reg.resolve(card.session.as_deref()) {
+        match reg.resolve(launch_session) {
             Ok(resolved) => {
                 // Only stamp a non-default socket on the req (keeps the default
                 // path implicit, matching the spawner's fallback).
@@ -883,7 +939,8 @@ mod tests {
 
     use super::{
         dispatch_pass, enqueue_run, finalize_run, finalize_run_timeout, find_workspace_by_label,
-        harness_prompt_env, register_spawned_run, resolve_space, resolve_workspace_ref,
+        harness_prompt_env, launch_session, register_spawned_run, resolve_space,
+        resolve_workspace_ref,
     };
     use crate::settings::DaemonSettings;
     use crate::state::{ActiveRun, Daemon};
@@ -1281,6 +1338,11 @@ mod tests {
         let new_session = card.session_id.unwrap();
         assert_ne!(new_session, old_session);
         assert_eq!(run.session_id.as_deref(), Some(new_session.as_str()));
+        assert!(run.launch_spec.is_some());
+        assert_eq!(
+            run.launch_spec.as_ref().unwrap().execution().argv,
+            serde_json::from_str::<Vec<String>>(&run.argv_json).unwrap()
+        );
         let argv: Vec<String> = serde_json::from_str(&run.argv_json).unwrap();
         assert!(argv
             .windows(2)
@@ -1434,6 +1496,7 @@ mod tests {
                 argv_json: "[]",
                 prompt_snapshot: "prompt",
                 system_prompt_snapshot: Some("system"),
+                launch_spec_json: None,
                 session_id: None,
                 session: None,
             })
@@ -1624,6 +1687,12 @@ mod tests {
         let runs = d.store.lock().list_runs(card_id).unwrap();
         assert_eq!(runs.len(), 2);
         assert_eq!(runs.iter().filter(|run| run.ended_at.is_none()).count(), 1);
+        let next = runs.iter().find(|run| run.ended_at.is_none()).unwrap();
+        assert!(
+            next.launch_spec.is_some(),
+            "auto-hop must materialize exactly one v11 spec"
+        );
+        assert_eq!(next.session, card.session);
     }
 
     #[test]
@@ -2268,7 +2337,17 @@ mod tests {
             (card.id, column.id)
         };
         let run = enqueue_run(&d, card_id, column_id, false).unwrap();
+        let exact = run.launch_spec.as_ref().unwrap().execution().clone();
         let old = board_core::harness::protocol_system_prompt(Some("old column instructions"));
+        d.store
+            .lock()
+            .update_card(&CardUpdateParams {
+                id: card_id,
+                description: Some("edited task must not launch".into()),
+                model: Patch::Set("edited-model".into()),
+                ..Default::default()
+            })
+            .unwrap();
         d.store
             .lock()
             .update_column(&ColumnUpdateParams {
@@ -2282,6 +2361,10 @@ mod tests {
 
         let requests = spawner.requests.lock().unwrap();
         let req = &requests[0];
+        assert_eq!(req.argv, exact.argv);
+        assert_eq!(req.agent_kind, exact.agent_kind);
+        assert_eq!(req.initial_prompt, exact.initial_prompt);
+        assert_eq!(req.system_prompt, exact.system_prompt);
         assert_eq!(req.agent_kind.as_deref(), Some("pi"));
         assert_eq!(
             req.initial_prompt.as_deref(),
@@ -2326,7 +2409,23 @@ mod tests {
                 .unwrap();
             (card.id, column.id)
         };
-        enqueue_run(&d, card_id, column_id, false).unwrap();
+        let run = enqueue_run(&d, card_id, column_id, false).unwrap();
+        let exact = run.launch_spec.as_ref().unwrap().execution().clone();
+        Arc::get_mut(&mut d)
+            .unwrap()
+            .config
+            .harness
+            .get_mut("custom")
+            .unwrap()
+            .argv = vec!["edited-agent-must-not-launch".into()];
+        d.store
+            .lock()
+            .update_card(&CardUpdateParams {
+                id: card_id,
+                description: Some("edited configured task".into()),
+                ..Default::default()
+            })
+            .unwrap();
         d.store
             .lock()
             .update_column(&ColumnUpdateParams {
@@ -2337,7 +2436,14 @@ mod tests {
             .unwrap();
         dispatch_pass(&d).await;
         let requests = spawner.requests.lock().unwrap();
-        let env = &requests[0].env;
+        let req = &requests[0];
+        assert_eq!(req.argv, exact.argv);
+        assert_eq!(req.agent_kind, exact.agent_kind);
+        assert_eq!(req.initial_prompt, exact.initial_prompt);
+        assert_eq!(req.system_prompt, exact.system_prompt);
+        assert_eq!(&req.env[..exact.env.len()], exact.env.as_slice());
+        assert_eq!(req.env.len(), exact.env.len() + 4);
+        let env = &req.env;
         assert_eq!(
             env.iter()
                 .find(|(k, _)| k == "BOARD_SYSTEM_PROMPT")
@@ -2354,6 +2460,115 @@ mod tests {
                     .into_owned()
             )
         );
+    }
+
+    #[test]
+    fn v11_placement_uses_run_session_while_legacy_uses_current_card_session() {
+        let d = test_daemon(Arc::new(MissingPiSpawner));
+        let card = d
+            .store
+            .lock()
+            .create_card(&CardCreateParams {
+                title: "session snapshot".into(),
+                session: Some("enqueue-session".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let mut run = enqueue_run(&d, card.id, card.column_id, false).unwrap();
+        assert!(run.launch_spec.is_some());
+        assert_eq!(run.session.as_deref(), Some("enqueue-session"));
+
+        // Model a queued card edit in the dispatch snapshot: v11 ignores it.
+        let mut edited_card = card;
+        edited_card.session = Some("edited-session".into());
+        assert_eq!(launch_session(&run, &edited_card), Some("enqueue-session"));
+
+        // The same row shape without a v11 spec follows the documented legacy
+        // adapter and therefore observes the current card session.
+        run.launch_spec = None;
+        assert_eq!(launch_session(&run, &edited_card), Some("edited-session"));
+    }
+
+    #[tokio::test]
+    async fn v7_and_pre_v7_launch_adapters_remain_explicit() {
+        let spawner = Arc::new(CapturingSpawner::default());
+        let mut config = Config::default();
+        config.harness.insert(
+            "custom".into(),
+            board_core::config::HarnessDef {
+                argv: vec!["custom".into()],
+                ..Default::default()
+            },
+        );
+        let (d, _, _) = test_daemon_with_config(spawner.clone(), config);
+        let (v7_card, legacy_card, column_id) = {
+            let db = d.store.lock();
+            let column = db
+                .create_column(&ColumnCreateParams {
+                    name: "Adapters".into(),
+                    system_prompt: Some("current".into()),
+                    ..Default::default()
+                })
+                .unwrap();
+            let v7 = db
+                .create_card(&CardCreateParams {
+                    title: "v7".into(),
+                    column_id: Some(column.id),
+                    harness: Some("custom".into()),
+                    space_ref: Some("v7".into()),
+                    ..Default::default()
+                })
+                .unwrap();
+            let legacy = db
+                .create_card(&CardCreateParams {
+                    title: "legacy".into(),
+                    column_id: Some(column.id),
+                    harness: Some("custom".into()),
+                    space_ref: Some("legacy".into()),
+                    ..Default::default()
+                })
+                .unwrap();
+            db.create_run_with_prompt_snapshots(
+                v7.id,
+                column.id,
+                "custom",
+                r#"["v7-command"]"#,
+                "v7-prompt",
+                Some("v7-system-exact"),
+                None,
+                None,
+            )
+            .unwrap();
+            db.create_run(
+                legacy.id,
+                column.id,
+                "custom",
+                r#"["legacy-command"]"#,
+                "legacy-prompt",
+                None,
+                None,
+            )
+            .unwrap();
+            db.set_card_status(v7.id, CardStatus::Queued).unwrap();
+            db.set_card_status(legacy.id, CardStatus::Queued).unwrap();
+            (v7.id, legacy.id, column.id)
+        };
+        dispatch_pass(&d).await;
+        let requests = spawner.requests.lock().unwrap();
+        let v7 = requests.iter().find(|r| r.argv == ["v7-command"]).unwrap();
+        assert!(v7
+            .env
+            .contains(&("BOARD_SYSTEM_PROMPT".into(), "v7-system-exact".into())));
+        let legacy = requests
+            .iter()
+            .find(|r| r.argv == ["legacy-command"])
+            .unwrap();
+        assert!(legacy.env.contains(&(
+            "BOARD_SYSTEM_PROMPT".into(),
+            board_core::harness::protocol_system_prompt(Some("current"))
+        )));
+        assert_ne!(v7_card, legacy_card);
+        assert!(column_id > 0);
     }
 
     #[tokio::test]

@@ -18,7 +18,7 @@ use crate::{Error, Result};
 const SCHEMA_SQL: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../schema.sql"));
 
 /// The latest schema version embedded in [`SCHEMA_SQL`].
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 
 /// v1 → v2 migration. SQLite cannot alter a CHECK constraint or drop a column
 /// in place, so `cards` is rebuilt. Legacy `space_kind` values `cwd`/`worktree`
@@ -213,6 +213,7 @@ const V10_QUEUED_INDEX_SQL: &str =
     "CREATE INDEX idx_runs_queued_fifo ON runs(id) WHERE started_at IS NULL AND ended_at IS NULL";
 const V10_ACTIVE_INDEX_SQL: &str =
     "CREATE INDEX idx_runs_active_open ON runs(id) WHERE started_at IS NOT NULL AND ended_at IS NULL";
+const V11_MIGRATION_SQL: &str = "ALTER TABLE runs ADD COLUMN launch_spec_json TEXT";
 
 /// Deterministic statement boundaries used by crash-atomicity tests. Hooks are
 /// opt-in per [`Db`] instance and receive no row or effect DTO.
@@ -234,6 +235,7 @@ pub struct EnqueueRun<'a> {
     pub argv_json: &'a str,
     pub prompt_snapshot: &'a str,
     pub system_prompt_snapshot: Option<&'a str>,
+    pub launch_spec_json: Option<&'a str>,
     pub session_id: Option<&'a str>,
     pub session: Option<&'a str>,
 }
@@ -473,6 +475,15 @@ impl Db {
                             )));
                         }
                     }
+                }
+            }
+            if version < 11 {
+                let has_spec: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('runs') WHERE name='launch_spec_json')",
+                    [], |r| r.get(0),
+                )?;
+                if !has_spec {
+                    tx.execute_batch(V11_MIGRATION_SQL)?;
                 }
             }
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -1230,10 +1241,10 @@ impl Db {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
             "INSERT INTO runs
-             (card_id,column_id,harness,argv_json,prompt_snapshot,system_prompt_snapshot,session_id,session)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+             (card_id,column_id,harness,argv_json,prompt_snapshot,system_prompt_snapshot,launch_spec_json,session_id,session)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
             params![p.card_id,p.column_id,p.harness,p.argv_json,p.prompt_snapshot,
-                    p.system_prompt_snapshot,p.session_id,p.session],
+                    p.system_prompt_snapshot,p.launch_spec_json,p.session_id,p.session],
         )?;
         let id = tx.last_insert_rowid();
         self.lifecycle_fault(LifecycleFaultPoint::EnqueueAfterRunInsert)?;
@@ -1360,7 +1371,7 @@ impl Db {
         let next_id = if let Some(next) = &p.next {
             tx.execute(
                 "INSERT INTO runs(card_id,column_id,harness,argv_json,prompt_snapshot,
-                 system_prompt_snapshot,session_id,session) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                 system_prompt_snapshot,launch_spec_json,session_id,session) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
                 params![
                     next.card_id,
                     next.column_id,
@@ -1368,6 +1379,7 @@ impl Db {
                     next.argv_json,
                     next.prompt_snapshot,
                     next.system_prompt_snapshot,
+                    next.launch_spec_json,
                     next.session_id,
                     next.session
                 ],
@@ -1656,6 +1668,18 @@ fn row_to_run(row: &Row) -> rusqlite::Result<Run> {
         argv_json: row.get("argv_json")?,
         prompt_snapshot: row.get("prompt_snapshot")?,
         system_prompt_snapshot: row.get("system_prompt_snapshot")?,
+        launch_spec: row
+            .get::<_, Option<String>>("launch_spec_json")?
+            .map(|json| {
+                serde_json::from_str(&json).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })
+            })
+            .transpose()?,
         herdr_workspace_id: row.get("herdr_workspace_id")?,
         herdr_pane_id: row.get("herdr_pane_id")?,
         session_id: row.get("session_id")?,

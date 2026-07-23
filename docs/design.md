@@ -87,6 +87,7 @@ cards(id, board_id, column_id, position, title, description,
 comments(id, card_id, author, body, created_at)
 runs(id, card_id, column_id, harness, argv_json, prompt_snapshot,
      system_prompt_snapshot,                    -- nullable; enqueue-time, trailer-inclusive
+     launch_spec_json,                          -- nullable pre-v11; tagged durable execution spec
      herdr_workspace_id, herdr_pane_id, session_id,
      session,                                    -- herdr session the run spawned into
      started_at, timeout_deadline_at_ms, timeout_paused_at_ms,
@@ -94,8 +95,8 @@ runs(id, card_id, column_id, harness, argv_json, prompt_snapshot,
      result_summary, log_path)
 ```
 
-Schema is versioned via `PRAGMA user_version` (current = **v9**). A fresh DB is built straight from
-`schema.sql` and stamped v9. Existing v1→v4 migrations retain their space/session, archive, and Pi
+Schema is versioned via `PRAGMA user_version` (current = **v11**). A fresh DB is built straight from
+`schema.sql` and stamped v11. Existing v1→v4 migrations retain their space/session, archive, and Pi
 effort behavior. v5 adds unique non-null `boards.scope_path`, preserves board `id=1` plus every
 related row as `Global`, and leaves existing card harnesses unchanged. v6 rebuilds `cards` to admit
 the `awaiting`/`done` statuses and adds `cards.awaiting_reason` (NULL outside `awaiting`). v7 adds
@@ -106,13 +107,19 @@ ambiguous, so upgrade reports every duplicate card/run ID and changes neither sc
 `user_version`. v9 persists each run's wall-clock timeout deadline and optional awaiting pause point.
 Upgrade derives an open timed run's deadline once from `started_at` plus its column timeout; an
 awaiting run uses `cards.updated_at` as the best durable pause point. Reopen never derives either
-value again, so daemon restart cannot replenish the budget. New runs atomically preserve the
-fully resolved, board-protocol-trailer-inclusive system prompt at enqueue time, so a queued run is
-not changed by later column edits. A legacy NULL remains a launch-version marker: pre-v7 built-ins
+value again, so daemon restart cannot replenish the budget. v10 adds partial scheduler indexes for
+queued and active open-run scans without rewriting run rows. v11 adds nullable
+`runs.launch_spec_json`; existing v10 rows remain byte-identical with NULL, while every new run
+stores a format-tagged (`version: 1`) fully materialized argv/env/prompt launch spec. Unsupported
+format versions are rejected rather than interpreted. Dispatch uses that spec and the persisted
+`runs.session`, so queued runs, retries, and auto-hops are unaffected by later card, column, or
+configuration edits. New runs also atomically preserve the fully resolved,
+board-protocol-trailer-inclusive system prompt at enqueue time. A legacy NULL remains a
+launch-version marker: pre-v7 built-ins
 execute their persisted all-in-one argv unchanged, while pre-v7 configured rows retain their
 historical spawn-time current-column reconstruction. `Run` deserialization defaults an omitted field
 to NULL, but serialization always omits `system_prompt_snapshot` and its contents from boardd wire
-responses.
+responses. `launch_spec_json` is likewise internal and omitted in full from boardd wire responses.
 
 ### Partial updates
 

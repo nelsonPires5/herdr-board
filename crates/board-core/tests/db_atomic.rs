@@ -40,11 +40,11 @@ fn scheduler_index_sql(conn: &Connection, name: &str) -> Option<String> {
 }
 
 #[test]
-fn fresh_v10_has_exact_partial_scheduler_indexes_and_query_plans() {
+fn fresh_v11_has_exact_partial_scheduler_indexes_and_query_plans() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("board.db");
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 10);
+    assert_eq!(db.user_version().unwrap(), 11);
     drop(db);
     let conn = Connection::open(path).unwrap();
     for (name, expected) in [
@@ -76,7 +76,7 @@ fn fresh_v10_has_exact_partial_scheduler_indexes_and_query_plans() {
 }
 
 #[test]
-fn v9_file_fixture_upgrades_to_v10_without_changing_card_or_run_bytes() {
+fn v9_file_fixture_upgrades_through_v11_without_changing_existing_bytes() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("v9.db");
     let (card_id, run_id) = {
@@ -114,7 +114,7 @@ fn v9_file_fixture_upgrades_to_v10_without_changing_card_or_run_bytes() {
     drop(conn);
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 10);
+    assert_eq!(db.user_version().unwrap(), 11);
     assert_eq!(db.get_card(card_id).unwrap().unwrap().id, card_id);
     assert_eq!(db.get_run(run_id).unwrap().id, run_id);
     drop(db);
@@ -126,7 +126,7 @@ fn v9_file_fixture_upgrades_to_v10_without_changing_card_or_run_bytes() {
         assert_eq!(
             conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            10
+            11
         );
         assert_eq!(
             scheduler_index_sql(&conn, "idx_runs_queued_fifo").as_deref(),
@@ -138,6 +138,35 @@ fn v9_file_fixture_upgrades_to_v10_without_changing_card_or_run_bytes() {
         );
         drop(conn);
         drop(Db::open(&path).unwrap());
+    }
+}
+
+#[test]
+fn v10_to_v11_migration_failure_is_atomic_and_stable_on_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("malformed-v10.db");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch("CREATE VIEW runs AS SELECT 1 AS id; PRAGMA user_version=10;")
+        .unwrap();
+    drop(conn);
+
+    for attempt in 0..2 {
+        let error = match Db::open(&path) {
+            Ok(_) => panic!("attempt {attempt}: malformed v10 unexpectedly migrated"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("Cannot add a column to a view"), "{error}");
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            10
+        );
+        let has_column: i64 = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('runs') WHERE name='launch_spec_json')",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(has_column, 0);
     }
 }
 
@@ -184,6 +213,7 @@ fn enqueue<'a>(card_id: i64, column_id: i64) -> EnqueueRun<'a> {
         argv_json: "[]",
         prompt_snapshot: "p",
         system_prompt_snapshot: Some("s"),
+        launch_spec_json: None,
         session_id: None,
         session: None,
     }
@@ -508,7 +538,7 @@ fn v8_upgrade_retains_a_single_open_run_byte_for_byte() {
         .unwrap();
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 10);
+    assert_eq!(db.user_version().unwrap(), 11);
     assert_eq!(db.get_run(before.id).unwrap(), before);
 }
 
@@ -526,7 +556,7 @@ fn fresh_and_v7_upgrade_install_exact_partial_unique_index_sql() {
                 .unwrap();
         }
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.user_version().unwrap(), 10);
+        assert_eq!(db.user_version().unwrap(), 11);
         drop(db);
         let sql: String = Connection::open(&path)
             .unwrap()

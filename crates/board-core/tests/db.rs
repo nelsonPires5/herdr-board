@@ -1,11 +1,12 @@
 //! Db migrations, seed, CRUD, and position management.
 
-use board_core::db::{Db, BOARD_ID};
+use board_core::db::{Db, EnqueueRun, BOARD_ID};
 use board_core::protocol::{
     AwaitingReason, CardCreateParams, CardStatus, ColumnCreateParams, ColumnUpdateParams, Effort,
     Patch, RunOutcome, SpaceKind, Trigger,
 };
-use rusqlite::Connection;
+use board_core::spawn::{ExecutionSpec, RunLaunchSpec};
+use rusqlite::{Connection, OptionalExtension};
 
 fn mem() -> Db {
     Db::open_in_memory().unwrap()
@@ -14,7 +15,7 @@ fn mem() -> Db {
 #[test]
 fn migration_seeds_board_and_todo_column() {
     let db = mem();
-    assert_eq!(db.user_version().unwrap(), 10);
+    assert_eq!(db.user_version().unwrap(), 11);
     let board = db.get_board(BOARD_ID).unwrap();
     assert_eq!(board.name, "Global");
     assert_eq!(board.scope_path, None);
@@ -23,6 +24,30 @@ fn migration_seeds_board_and_todo_column() {
     assert_eq!(cols[0].name, "Todo");
     assert_eq!(cols[0].position, 0);
     assert_eq!(cols[0].trigger, Trigger::Manual);
+}
+
+#[test]
+fn fresh_v11_launch_spec_column_has_exact_nullable_default() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    drop(Db::open(&path).unwrap());
+    let conn = Connection::open(path).unwrap();
+    let shape: (String, String, i64, Option<String>) = conn
+        .query_row(
+            "SELECT name,type,\"notnull\",dflt_value FROM pragma_table_info('runs') WHERE name='launch_spec_json'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(shape, ("launch_spec_json".into(), "TEXT".into(), 0, None));
+    let default_value: Option<String> = conn
+        .query_row("SELECT launch_spec_json FROM runs LIMIT 1", [], |row| {
+            row.get(0)
+        })
+        .optional()
+        .unwrap()
+        .flatten();
+    assert_eq!(default_value, None);
 }
 
 #[test]
@@ -36,7 +61,7 @@ fn migration_idempotent_on_reopen() {
     // Reopen: must not re-seed (still exactly one board, one column).
     {
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.user_version().unwrap(), 10);
+        assert_eq!(db.user_version().unwrap(), 11);
         assert_eq!(db.list_columns(BOARD_ID).unwrap().len(), 1);
         assert_eq!(db.get_board(BOARD_ID).unwrap().name, "Global");
     }
@@ -126,7 +151,7 @@ fn migration_v2_upgrades_v1_database() {
     }
     // Open via Db → runs the v2 through v7 migrations.
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 10);
+    assert_eq!(db.user_version().unwrap(), 11);
     let cards = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(cards.len(), 2);
     for c in &cards {
@@ -492,7 +517,7 @@ fn migration_v4_preserves_claude_cards_and_accepts_pi_efforts() {
     }
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 10);
+    assert_eq!(db.user_version().unwrap(), 11);
     let existing = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(existing[0].harness, "claude");
     assert_eq!(db.list_comments(existing[0].id).unwrap().len(), 1);
@@ -514,14 +539,14 @@ fn migration_does_not_downgrade_future_schema_version() {
     let path = tmp.path().to_path_buf();
     {
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.user_version().unwrap(), 10);
+        assert_eq!(db.user_version().unwrap(), 11);
     }
     {
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch("PRAGMA user_version = 8;").unwrap();
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 10);
+    assert_eq!(db.user_version().unwrap(), 11);
 }
 
 #[test]
@@ -546,7 +571,7 @@ fn migration_v3_adds_archived_at_to_v2_database() {
         .unwrap();
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 10);
+    assert_eq!(db.user_version().unwrap(), 11);
     let cards = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(cards.len(), 1);
     assert!(cards[0].archived_at.is_none());
@@ -586,6 +611,141 @@ fn run_system_prompt_snapshot_roundtrips_across_file_reopen() {
 }
 
 #[test]
+fn launch_spec_json_roundtrips_exactly_across_file_reopen() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    let spec = RunLaunchSpec::v1(ExecutionSpec {
+        argv: vec!["agent".into(), "arg\n\0  ".into()],
+        env: vec![("KEY".into(), "value\n\0  ".into())],
+        agent_kind: None,
+        initial_prompt: Some("prompt  ".into()),
+        system_prompt: None,
+    });
+    let exact_json = serde_json::to_string(&spec).unwrap();
+    let run_id = {
+        let db = Db::open(&path).unwrap();
+        let card = db
+            .create_card(&CardCreateParams {
+                title: "spec".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        db.enqueue_run_uow(&EnqueueRun {
+            card_id: card.id,
+            column_id: card.column_id,
+            harness: "custom",
+            argv_json: r#"["legacy"]"#,
+            prompt_snapshot: "p",
+            system_prompt_snapshot: Some("s"),
+            launch_spec_json: Some(&exact_json),
+            session_id: None,
+            session: Some("enqueue-session"),
+        })
+        .unwrap()
+        .id
+    };
+    for _ in 0..2 {
+        let db = Db::open(&path).unwrap();
+        assert_eq!(
+            db.get_run(run_id).unwrap().launch_spec.as_ref(),
+            Some(&spec)
+        );
+        drop(db);
+        let conn = Connection::open(&path).unwrap();
+        let stored: String = conn
+            .query_row(
+                "SELECT launch_spec_json FROM runs WHERE id=?1",
+                [run_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored.as_bytes(), exact_json.as_bytes());
+    }
+}
+
+#[test]
+fn unsupported_persisted_launch_spec_is_rejected_on_read() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    let run_id = {
+        let db = Db::open(&path).unwrap();
+        let card = db
+            .create_card(&CardCreateParams {
+                title: "future".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        db.create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
+            .unwrap()
+            .id
+    };
+    Connection::open(&path).unwrap().execute(
+        "UPDATE runs SET launch_spec_json='{\"version\":99,\"execution\":{\"argv\":[],\"env\":[],\"agent_kind\":null,\"initial_prompt\":null,\"system_prompt\":null}}' WHERE id=?1",
+        [run_id],
+    ).unwrap();
+    let error = Db::open(&path).unwrap().get_run(run_id).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported launch spec version 99"),
+        "{error}"
+    );
+}
+
+#[test]
+fn v10_to_v11_preserves_existing_run_bytes_and_null_across_reopen() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    let run_id = {
+        let db = Db::open(&path).unwrap();
+        let card = db
+            .create_card(&CardCreateParams {
+                title: "v10".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        db.create_run_with_prompt_snapshots(
+            card.id,
+            card.column_id,
+            "pi",
+            r#"["pi","exact\\n\u0000  "]"#,
+            "prompt\n\0  ",
+            Some("system\n  "),
+            Some("sid"),
+            Some("herdr-session"),
+        )
+        .unwrap()
+        .id
+    };
+    let conn = Connection::open(&path).unwrap();
+    let before: (String, String, String, String) = conn
+        .query_row(
+            "SELECT argv_json,prompt_snapshot,system_prompt_snapshot,session FROM runs WHERE id=?1",
+            [run_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    conn.execute_batch("ALTER TABLE runs DROP COLUMN launch_spec_json; PRAGMA user_version=10;")
+        .unwrap();
+    drop(conn);
+    for _ in 0..2 {
+        let db = Db::open(&path).unwrap();
+        let run = db.get_run(run_id).unwrap();
+        assert_eq!(run.launch_spec, None);
+        drop(db);
+        let conn = Connection::open(&path).unwrap();
+        let after: (String, String, String, String, Option<String>) = conn.query_row(
+            "SELECT argv_json,prompt_snapshot,system_prompt_snapshot,session,launch_spec_json FROM runs WHERE id=?1",
+            [run_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).unwrap();
+        assert_eq!(
+            (&after.0, &after.1, &after.2, &after.3),
+            (&before.0, &before.1, &before.2, &before.3)
+        );
+        assert_eq!(after.4, None);
+    }
+}
+
+#[test]
 fn v6_to_v7_migration_preserves_legacy_queued_run_byte_for_byte() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let path = tmp.path().to_path_buf();
@@ -612,7 +772,7 @@ fn v6_to_v7_migration_preserves_legacy_queued_run_byte_for_byte() {
         .unwrap();
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 10);
+    assert_eq!(db.user_version().unwrap(), 11);
     let run = &db.list_runs(1).unwrap()[0];
     assert_eq!(run.argv_json, argv);
     assert_eq!(run.prompt_snapshot, prompt);
@@ -998,7 +1158,7 @@ fn migration_v5_preserves_global_data_and_renames_it() {
 
     let db = Db::open(&path).unwrap();
     let global = db.get_board(BOARD_ID).unwrap();
-    assert_eq!(db.user_version().unwrap(), 10);
+    assert_eq!(db.user_version().unwrap(), 11);
     assert_eq!(global.name, "Global");
     assert!(global.scope_path.is_none());
     let cards = db.list_cards(BOARD_ID).unwrap();
@@ -1140,7 +1300,7 @@ fn migration_v6_rebuilds_cards_check_and_preserves_data() {
     }
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 10);
+    assert_eq!(db.user_version().unwrap(), 11);
     let cards = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(cards.len(), 2);
     let kept = &cards[0];

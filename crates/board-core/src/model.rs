@@ -105,6 +105,9 @@ pub struct Run {
     /// identifies a legacy pre-v7 launch whose persisted argv is authoritative.
     #[serde(default, skip_serializing)]
     pub system_prompt_snapshot: Option<String>,
+    /// Internal durable launch inputs; intentionally absent from board wire DTOs.
+    #[serde(default, skip_serializing)]
+    pub launch_spec: Option<crate::spawn::RunLaunchSpec>,
     pub herdr_workspace_id: Option<String>,
     pub herdr_pane_id: Option<String>,
     /// harness conversation id (`--resume`); distinct from the herdr `session`.

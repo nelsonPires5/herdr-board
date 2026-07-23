@@ -9,6 +9,7 @@ use board_core::protocol::{
     RunFocusResult, RunOutcome, RunPaneExitedParams, SpaceInfo, SpaceKind, SpaceListResult,
     TemplateApplyParams, Trigger,
 };
+use board_core::spawn::{ExecutionSpec, RunLaunchSpec};
 use serde_json::json;
 
 fn roundtrip<T>(value: &T)
@@ -71,11 +72,27 @@ fn run_system_prompt_snapshot_serde_compatibility_and_privacy() {
     let secret = "system instructions\nprivate line";
     let run = Run {
         system_prompt_snapshot: Some(secret.into()),
+        launch_spec: Some(RunLaunchSpec::v1(ExecutionSpec {
+            argv: vec!["private-argv".into()],
+            env: vec![("PRIVATE_ENV".into(), "private-value".into())],
+            agent_kind: None,
+            initial_prompt: Some("private-prompt".into()),
+            system_prompt: Some(secret.into()),
+        })),
         ..legacy
     };
     let serialized = serde_json::to_string(&run).unwrap();
     assert!(!serialized.contains("system_prompt_snapshot"));
-    assert!(!serialized.contains(secret));
+    assert!(!serialized.contains("launch_spec"));
+    for private in [
+        secret,
+        "private-argv",
+        "PRIVATE_ENV",
+        "private-value",
+        "private-prompt",
+    ] {
+        assert!(!serialized.contains(private));
+    }
 }
 
 #[test]
