@@ -40,7 +40,9 @@ only `Todo`.
 ## Install
 
 Requires exactly **Herdr 0.7.5 (protocol 17)**, Git, and a Rust toolchain with `cargo`. Linux
-and macOS are supported. Ensure `~/.local/bin` is on your `PATH`.
+and macOS are supported. Ensure `~/.local/bin` is on your `PATH`. The board protocol is v1 and the
+current SQLite schema is v11; `schema.sql` defines fresh databases and the daemon applies tested
+upgrades through `board-core::db`.
 
 The daemon checks the selected Herdr socket before workspace discovery and pane launch. It rejects
 any Herdr version other than 0.7.5 and any protocol other than 17; protocol 16 is not supported.
@@ -123,6 +125,14 @@ board permission mode and rejects `--permission`. Claude remains available expli
   its outcome.
 - The daemon applies the column transition. It either dispatches the next automatic stage or stops
   at a manual gate.
+
+The CLI and TUI share typed `board-core::client::BoardClient` wrappers; only boardd owns SQLite.
+`RootConfig` parses the complete TOML document once, including typed `[daemon]` settings, then applies
+process-environment overrides. Runtime launch ownership stays in `board-daemon`: it consumes the
+versioned neutral launch spec, owns Herdr pane placement and process handles, and runs an always-on,
+per-session supervisor that reconnects conservatively after outages. Board snapshots include an
+additive active-run summary, so the TUI timer follows the open run's `started_at` rather than card
+activity timestamps.
 
 All board state lives under `~/.local/share/herdr-board/`; Herdr's own state is never modified.
 
@@ -453,7 +463,9 @@ The Unix-socket transport retains only the raw request primitive; production cli
 - `scripts/install.sh` — local-development setup;
 - `scripts/open-board.sh` — open-or-focus plugin action;
 - `scripts/board-rpc.py` — raw daemon protocol client;
-- `e2e/` — live end-to-end suite against disposable Herdr sessions/workspaces.
+- `e2e/` — scenarios 01–21 against disposable Herdr sessions/workspaces; checked-in fake Pi,
+  Claude, and configured harnesses keep the standard suite provider-free. `e2e/test-harness.sh`
+  performs static ownership/safety checks without starting Herdr; the live suite is a separate gate.
 
 ### Test gates
 
@@ -470,9 +482,11 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`AGENTS.md`](AGENTS.md) before con
 
 ## Status
 
-**v1.** Rust with Ratatui, Rusqlite, and Tokio. Pi is the default built-in harness and Claude Code
-remains explicitly selectable; config-defined harnesses are also supported. Execution happens in
-visible Herdr panes, and extension-owned state remains separate from Herdr's state.
+**v1 board protocol / schema v11.** Rust with Ratatui, Rusqlite, and Tokio. Pi is the default
+built-in harness and Claude Code remains explicitly selectable; config-defined harnesses are also
+supported. Execution happens in visible Herdr panes, and extension-owned state remains separate from
+Herdr's state. See [`docs/README.md`](docs/README.md) for version, source-ownership, and test-gate
+links.
 
 ## License
 

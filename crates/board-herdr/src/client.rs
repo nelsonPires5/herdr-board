@@ -22,7 +22,7 @@ use crate::error::{HerdrError, Result};
 use crate::types::{
     AgentInfo, AgentStarted, AgentStatus, Layout, NotificationShown, NotificationSound, PaneInfo,
     PaneReadResult, Pong, ReadSource, SessionSnapshot, SplitDirection, TabCreated, TabInfo,
-    WorkspaceCreated, WorkspaceInfo, WorktreeCreated, WorktreeRemoved,
+    WorkspaceCreated, WorkspaceInfo,
 };
 
 /// Default socket path: `$HERDR_SOCKET_PATH` (herdr's canonical variable,
@@ -129,24 +129,6 @@ pub struct PaneSplitParams {
 pub struct PaneRenameParams {
     pub pane_id: String,
     pub label: String,
-}
-
-/// Params for `worktree.create`.
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct WorktreeCreateParams {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub workspace_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub branch: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub base: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    pub focus: bool,
 }
 
 // -- client ------------------------------------------------------------------
@@ -529,19 +511,6 @@ impl HerdrClient {
     /// focused tab).
     pub fn pane_layout(&mut self, pane_id: Option<&str>) -> Result<Layout> {
         self.call_field("pane.layout", json!({ "pane_id": pane_id }), "layout")
-    }
-
-    // -- worktree ------------------------------------------------------------
-
-    pub fn worktree_create(&mut self, p: &WorktreeCreateParams) -> Result<WorktreeCreated> {
-        self.call_into("worktree.create", serde_json::to_value(p)?)
-    }
-
-    pub fn worktree_remove(&mut self, workspace_id: &str, force: bool) -> Result<WorktreeRemoved> {
-        self.call_into(
-            "worktree.remove",
-            json!({ "workspace_id": workspace_id, "force": force }),
-        )
     }
 
     // -- notification --------------------------------------------------------

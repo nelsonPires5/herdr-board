@@ -9,14 +9,17 @@ TUI + daemon + CLI. Rust, cargo workspace, edition 2021, all crates share the wo
 | Crate | Owns | Never leaks into |
 |---|---|---|
 | `board-core` | models, `board-core::protocol` types, SQLite db + migrations, the pure column engine, prompt assembly, harness adapters, config, the blocking boardd client | herdr/tokio/ratatui specifics |
-| `board-herdr` | the herdr unix-socket client (envelope, typed calls, event stream) | board state |
+| `board-herdr` | the Herdr unix-socket client (envelope, typed workspace/tab/agent/pane/notification/session calls, event stream) | board state; no worktree API |
 | `board-tui` | the ratatui app (`run()` entry), forms, snapshot tests | daemon logic |
 | `board-daemon` | boardd server: run queue, dispatch, per-session herdr clients, watchers, spawner | — |
 | `board-cli` | the `board` binary: clap subcommands wiring the above | business logic |
 
 Ownership is strict: edit your crate(s) + append to root `[workspace.dependencies]`. Semantics
 source of truth: `docs/protocol.md` + `docs/design.md`. Docs live in `docs/` (index: `docs/README.md`);
-`schema.sql` at the root is the migration source of truth.
+`schema.sql` is the fresh-schema source of truth and `board-core::db` owns upgrades. Final compatibility
+is board protocol v1, SQLite schema v11, and exactly Herdr 0.7.5 / socket protocol 17. The complete
+live catalog is `e2e/README.md` (scenarios 01–21); `e2e/test-harness.sh` is the provider-free static
+safety gate.
 
 ## Build / test gates (keep green)
 
@@ -68,9 +71,17 @@ Full layering, harness details, and how to add tests live in [`docs/testing.md`]
   (`BOARD_DB`, `BOARD_SOCKET`). No wall-clock flakiness in tests.
 - Commit style: **Conventional Commits** grouped by crate/intent, as in the git log —
   `feat(core): …`, `feat(daemon,cli): …`, `docs: …`.
-- The daemon opens a **fresh herdr connection per operation** (`HerdrClient::connect` in
+- The daemon opens a **fresh Herdr connection per operation** (`HerdrClient::connect` in
   `dispatch.rs`/`ops.rs`/`spawner.rs`); one `HerdrClient` = one request/response connection, event
-  streaming lives on its own connection.
+  streaming lives on its own connection. Runtime launch ownership is daemon-only: `board-core`
+  persists the neutral schema-v11 launch spec, while `board-daemon` owns placement, pane/process
+  handles, liveness, cleanup, and the Herdr supervisor.
+- `RootConfig` is parsed once at daemon startup; typed `[daemon]` settings are resolved before
+  environment overrides, and malformed existing config is fatal. CLI and TUI use typed
+  `board-core::client::BoardClient` wrappers rather than raw method/result handling.
+- Auto-start creates one child process-group leader (no double-fork/`setsid`); stop is an exact
+  socket/identity-gated operation. The active-run summary drives TUI timers, and the always-on
+  per-session supervisor reconnects and reconciles conservatively.
 - Definition of done for a user-facing change: update the docs and `CHANGELOG.md` in the same change.
 - Release/version changes follow [`docs/releasing.md`](docs/releasing.md). Agents must never create,
   push, move, or delete release tags manually: a maintainer starts **Prepare Release**, merges its PR,

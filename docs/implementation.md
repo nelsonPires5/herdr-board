@@ -8,8 +8,8 @@ crates/
   board-core/    # OWNED BY PHASE A. models, protocol types, db(rusqlite)+migrations,
                  # column engine (pure), prompt assembly, harness adapters, config,
                  # blocking NDJSON client (used by CLI + TUI)
-  board-herdr/   # OWNED BY PHASE B. herdr socket client: envelope, typed calls
-                 # (workspace/tab/agent/pane/worktree/notification), events stream
+  board-herdr/   # herdr socket client: envelope, typed workspace/tab/agent/pane/
+                 # notification/session calls, events stream (no worktree API)
   board-tui/     # OWNED BY PHASE C. ratatui app (lib with run() entry)
   board-daemon/  # OWNED BY PHASE D. boardd server (lib with run() entry)
   board-cli/     # OWNED BY PHASE D. the single `board` binary: clap subcommands
@@ -19,6 +19,16 @@ crates/
 Ownership is strict: an agent only edits its crate(s) + may append to `[workspace.dependencies]`
 in root Cargo.toml. Never edit another crate. Phase A creates all five crates compiling
 (stubs for B/C/D).
+
+## Contract versions and source ownership
+
+The final compatibility matrix is: board protocol **v1**, SQLite schema **v11**, and exactly
+Herdr **0.7.5 / socket protocol 17**. The versioned source of truth is `schema.sql` for fresh
+SQLite databases and `board-core::db` migrations for upgrades; `board-core::protocol` owns the
+board wire DTOs; `board-herdr` owns only the verified Herdr socket surface; and `docs/design.md`
+and `docs/protocol.md` explain behavior rather than defining duplicate serde shapes. The complete
+live use-case catalog is [`../e2e/README.md`](../e2e/README.md), scenarios **01–21**; the safe
+static harness is `e2e/test-harness.sh`, while `e2e/run-all.sh` is the opt-in live gate.
 
 ## Configuration boundary
 
@@ -36,7 +46,7 @@ best-effort parser or substitute defaults on failure.
 serde, serde_json, rusqlite (bundled), uuid (v4), clap (derive), anyhow, thiserror,
 tokio (daemon only: rt-multi-thread, net, sync, time, process, signal),
 ratatui + crossterm (tui), tui-textarea (tui), insta (dev, tui), tempfile (dev),
-directories (paths), tracing + tracing-subscriber (daemon logs), libc (daemonize) or nix.
+directories (paths), tracing + tracing-subscriber (daemon logs), libc or nix for platform primitives.
 
 ## Key boundaries
 
@@ -134,4 +144,7 @@ A (core+scaffold) → B (herdr client) ∥ C (TUI) → D (daemon+CLI+integration
 - C: insta snapshots via `ratatui::backend::TestBackend` + synthetic key events + FakeBoardClient: empty board (Todo only + hints), board with example pipeline & cards (status glyphs), new-card modal, column form, card detail w/ comments+runs, `?` help, delete-column prompt, move flow.
 - Restart recovery (`board-daemon::supervisor`) is a conservative one-pass classifier. Session resolution and snapshot I/O are injectable and happen before mutation. `Alive` adopts scheduler/watch intent and replays terminal status, `Gone` uses the existing pane-exit finalizer, and `Unknown` does nothing. The apply phase re-reads the open run/card, making duplicate passes idempotent and rejecting stale observations. Startup constructs/runs this pass for the Herdr spawner regardless of whether its initial best-effort client connected. The always-on supervisor then maintains independent per-socket streams and backoff, subscribes before taking a fresh bounded snapshot, and periodically reconciles missed events without resetting healthy sockets.
 - D: integration test (no herdr): start daemon on temp socket + temp DB with LocalSpawner + fake harness script → create card → move to auto column → fake agent comments + done → assert auto-transition, comments, run rows, statuses; timeout path; cancel path; queue serialization (two cards same space key run serially).
-- E: `scripts/e2e.sh` (real herdr, fake harness): disposable workspace, drive TUI via `herdr pane send-keys`, assert via `pane read` + sqlite3.
+- E: scenarios `e2e/01-core.sh` through `e2e/21-active-run-timer.sh` (real Herdr, fake
+  harnesses): disposable workspaces, protocol-17 placement, typed prompt delivery, supervisor
+  recovery, timer refresh, and identity-gated cleanup. Run `bash e2e/test-harness.sh` for the
+  provider-free static safety checks; reserve `e2e/run-all.sh` for the separate live gate.

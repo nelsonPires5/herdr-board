@@ -8,7 +8,12 @@ exercises the herdr wire integration end to end.
 
 For the layers below this one (unit, daemon+CLI integration, TUI snapshots), the
 isolation/safety design, and the **how-to-write-a-scenario** guide, see
-[`../docs/testing.md`](../docs/testing.md). This file is the use case catalog.
+[`../docs/testing.md`](../docs/testing.md). This file is the authoritative use-case catalog for board protocol v1 / SQLite schema v11:
+every numbered scenario from **01 through 21** must appear here and in `run-all.sh`. The provider-free
+safe boundary is `fake-agent.sh`,
+`fake-bin/{pi,claude}`, and `test-harness.sh`; prompt/system-prompt contents are never logged.
+Scenario 21 is the active-run timer/event-refresh characterization. The catalog describes the live
+gate, but this cleanup task runs only the static harness—not the full live suite.
 
 ## Use case ↔ scenario ↔ status
 
@@ -166,7 +171,10 @@ personal Claude state. Its intended contract is one authorized attempt with no r
 | `12-cwd-boards.sh` | Scoped board identity/isolation plus real TUI title/picker. |
 | `13-jump-to-pane.sh` | Same-session pane focus through a real plugin overlay. |
 | `NN-*.sh` | The scenarios above. |
-| `run-all.sh` | Builds once, runs every scenario as an environment-scrubbed child with its own session, captures artifacts, and prints the summary (`--require-all` forbids skips). |
+| `run-all.sh` | Builds once, runs scenarios 01–21 as environment-scrubbed children with their own sessions, captures artifacts, and prints the summary (`--require-all` forbids skips). |
 
 Columns have no `board` CLI verb, so scenarios configure them over the boardd
-socket via `scripts/board-rpc.py` (wrapped by `lib.sh`'s `col_create` / `brpc`).
+socket via `scripts/board-rpc.py` (wrapped by `lib.sh`'s `col_create` / `brpc`). The
+scenario contract follows repository ownership boundaries: typed board requests/config enter through
+the CLI/TUI, SQLite remains daemon-owned, Herdr placement/process ownership remains in
+`board-daemon`, and the harness ledger authorizes only exact captured resources.

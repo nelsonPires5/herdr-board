@@ -6,7 +6,7 @@
 //! `{"id","result"}` or `{"id","error":{code,message}}`.
 //!
 //! Two connection types:
-//! - [`HerdrClient`] — request/response (workspace/tab/agent/pane/worktree/
+//! - [`HerdrClient`] — request/response (workspace/tab/agent/pane/
 //!   notification/session calls). Blocking; wrap in `spawn_blocking` in async
 //!   code.
 //! - [`HerdrEvents`] — a separate persistent connection streaming
@@ -24,7 +24,7 @@ mod types;
 pub use client::{
     default_socket_path, AgentPromptParams, AgentPromptWaitOptions, AgentStartParams,
     AgentWaitParams, HerdrClient, PaneRenameParams, PaneSplitParams, SocketDeadlines,
-    TabCreateParams, WorkspaceCreateParams, WorktreeCreateParams,
+    TabCreateParams, WorkspaceCreateParams,
 };
 pub use envelope::{ErrorBody, Request, Response};
 pub use error::{HerdrError, Result};
@@ -34,6 +34,5 @@ pub use events::{
 pub use types::{
     AgentInfo, AgentStarted, AgentStatus, Layout, LayoutPane, LayoutSplit, NotificationShown,
     NotificationSound, PaneInfo, PaneReadResult, Pong, ReadSource, Rect, SessionSnapshot,
-    SplitDirection, TabCreated, TabInfo, WorkspaceCreated, WorkspaceInfo, WorktreeCreated,
-    WorktreeInfo, WorktreeRemoved,
+    SplitDirection, TabCreated, TabInfo, WorkspaceCreated, WorkspaceInfo,
 };

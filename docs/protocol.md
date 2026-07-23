@@ -35,10 +35,13 @@ runner action. A mismatch fails the run before workspace mutation.
 
 ## Auto-start
 
-`board tui` and every CLI subcommand try to connect; on failure they spawn
-`board daemon` detached (double-fork / setsid, stdout+stderr → `~/.local/share/herdr-board/daemon.log`),
-then retry with backoff for ~3s. Daemon takes an exclusive flock on `<db>.lock` — a second
-daemon on the same DB must exit 0 silently (lost the race = someone else serves).
+`board tui` and every CLI subcommand try to connect; on failure they spawn one detached
+`board daemon` child (stdout+stderr → `~/.local/share/herdr-board/daemon.log`), then retry with
+backoff for ~3s. The child owns a new process group led by its exact PID; there is deliberately no
+double-fork or `setsid`, so diagnostics and the safe harness retain an unambiguous owner token.
+Lifecycle control uses the daemon socket (`daemon.stop`), never a broad process-group kill. Daemon
+takes an exclusive flock on `<db>.lock` — a second daemon on the same DB must exit 0 silently
+(lost the race = someone else serves).
 
 ## Client boundary
 
@@ -124,7 +127,10 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
     - `workspace` — an ALREADY-OPEN workspace in the session; `space_ref` = its workspace id (a case-insensitive label is also accepted at dispatch).
     - `new_workspace` — the daemon creates the workspace on first dispatch (label = `space_ref`, cwd = `space_cwd`), reusing an open workspace with that label if one exists. **Requires** non-empty `space_ref` and `space_cwd` on create (else error 1).
   - creating directly into an `auto` column dispatches immediately (same as move)
-  - (v2 schema) the legacy `cwd`/`worktree` kinds and `worktree_base` are removed; worktree isolation is now the agent's job via prompt instructions, not a board concept. Existing DBs migrate `cwd`/`worktree` cards to `workspace` (best effort, `space_ref` kept).
+  - In the legacy v1→v2 migration, `cwd`/`worktree` kinds and `worktree_base` were removed;
+    current schema v11 treats worktree isolation as the agent's job via prompt instructions, not a
+    board concept. Existing databases migrate those cards to `workspace` (best effort,
+    `space_ref` kept).
 - `card.update {id, …subset}` → `Card`; nullable update fields use the tri-state encoding below. Harness/model/effort/permission/session/space fields are refused while the card has an open run (`queued|running|blocked|awaiting`). Title/description remain editable; `done` is not open.
 - `card.delete {id}` → `{deleted:true}`; refused while the card has an open run (`queued|running|blocked|awaiting`; cancel first). `done` is not open.
 - `card.archive {id, archived:true|false}` → `Card` — archives or restores without deleting

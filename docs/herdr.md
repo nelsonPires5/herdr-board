@@ -104,6 +104,11 @@ These transport failures do not log request or response payloads.
 
 ## Version drift
 
+`board-herdr` deliberately exposes only the typed Herdr methods used by the daemon and tests:
+workspace, tab, pane, agent, notification, session, and events. The upstream worktree methods and
+DTOs are not part of this crate's public surface; repository isolation belongs in the agent prompt.
+The checked-in schema fixture remains an upstream reference and is not rewritten during API cleanup.
+
 This repo's herdr facts — [`docs/research.md`](research.md), [`docs/design.md`](design.md),
 and the wire shapes hard-coded in `board-herdr` — were **verified against
 Herdr 0.7.5 / protocol 17 on 2026-07-22**.

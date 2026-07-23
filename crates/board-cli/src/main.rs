@@ -328,20 +328,32 @@ fn spawn_daemon() -> Result<()> {
     if let Some(parent) = log_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    daemon_command(&exe, &log_path)?.spawn()?;
+    Ok(())
+}
+
+/// Build the detached daemon child without a double-fork or a session-wide
+/// `setsid`. The child is its own process-group leader (`setpgid(0, 0)` via
+/// [`CommandExt::process_group`]) and is therefore independent of the CLI's
+/// process group while remaining addressable by its exact PID for diagnostics.
+/// Lifecycle control still goes through `daemon.stop`; the process group is not
+/// used as a broad cleanup authority.
+fn daemon_command(exe: &Path, log_path: &Path) -> Result<Command> {
     let out = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&log_path)?;
+        .open(log_path)?;
     let err = out.try_clone()?;
     let mut cmd = Command::new(exe);
     cmd.arg("daemon")
         .stdin(std::process::Stdio::null())
         .stdout(out)
         .stderr(err);
-    // Detach into a new process group so it outlives this CLI invocation.
+    // One child, one owned process group. Do not replace this with a
+    // double-fork/setsid sequence: it would lose the exact child identity that
+    // callers and the safe harness use for ownership checks.
     cmd.process_group(0);
-    cmd.spawn()?;
-    Ok(())
+    Ok(cmd)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -932,4 +944,60 @@ fn resolve_column_in(snap: &BoardSnapshot, s: &str) -> Result<i64> {
 fn print_json<T: serde::Serialize>(v: &T) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(v)?);
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::daemon_command;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn daemon_child_owns_a_distinct_process_group() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script = dir.path().join("probe-daemon.sh");
+        let evidence = dir.path().join("process-group");
+        fs::write(
+            &script,
+            "#!/bin/sh\nprintf '%s %s %s\\n' \"$$\" \"$(ps -o pgid= -p $$)\" \"$(ps -o pgid= -p $PPID)\" > \"$BOARD_TEST_PROCESS_GROUP\"\nsleep 30\n",
+        )
+        .expect("write probe");
+        let mut permissions = fs::metadata(&script)
+            .expect("script metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&script, permissions).expect("chmod probe");
+
+        let log = dir.path().join("daemon.log");
+        let mut command = daemon_command(Path::new(&script), &log).expect("build command");
+        command.env("BOARD_TEST_PROCESS_GROUP", &evidence);
+        let mut child = command.spawn().expect("spawn probe");
+
+        for _ in 0..100 {
+            if evidence.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let values = fs::read_to_string(&evidence).expect("read process-group evidence");
+        let mut fields = values.split_whitespace();
+        let pid: i32 = fields.next().expect("pid").parse().expect("numeric pid");
+        let pgid: i32 = fields.next().expect("pgid").parse().expect("numeric pgid");
+        let parent_pgid: i32 = fields
+            .next()
+            .expect("parent pgid")
+            .parse()
+            .expect("numeric parent pgid");
+        assert_eq!(pid, pgid, "daemon child must lead its owned process group");
+        assert_ne!(
+            pgid, parent_pgid,
+            "daemon group must be distinct from its parent"
+        );
+
+        child.kill().expect("kill probe");
+        child.wait().expect("reap probe");
+    }
 }

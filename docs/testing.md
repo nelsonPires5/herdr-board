@@ -1,7 +1,8 @@
 # Testing
 
-How herdr-board is tested, and how to add tests for a change. Four layers, cheap
-and hermetic first, expensive and live last:
+How herdr-board is tested, and how to add tests for a change. The final contract is board
+protocol v1, SQLite schema v11, and Herdr 0.7.5 / protocol 17. Four layers, cheap and hermetic
+first, expensive and live last:
 
 ```
 unit / pure (per crate)                 no I/O, no daemon        — cargo test
@@ -44,8 +45,9 @@ scenario 18 covers the nullable and merged-validation wiring.
 Inject clocks and paths; never sleep or read the wall clock in a unit test.
 
 Configuration tests cover the missing-file and missing-section defaults, typed
-spawner and daemon values, malformed TOML/type errors, and the fact that an
-existing malformed file is never replaced by defaults. Daemon settings tests
+`RootConfig`/daemon values, malformed TOML/type errors, and the fact that an existing malformed
+file is never replaced by defaults. The CLI and TUI typed `BoardClient` boundary is tested without
+SQLite I/O in production clients. Daemon settings tests
 use an injected environment lookup to prove overrides win over TOML without
 mutating process-global environment state; the daemon startup path parses the
 shared root once and applies those overrides afterward.
@@ -327,9 +329,9 @@ E2E_REAL_CLAUDE_HAIKU=1 e2e/real-claude-haiku-smoke.sh  # one authorized Haiku/l
   session; scenario 03 additionally owns an independently tokened secondary session.
 - Exit codes: scenario `0` = PASS, `3` = SKIP, other = FAIL; `run-all.sh` exits
   non-zero if any scenario FAILED.
-- **Not in CI.** CI runs `cargo fmt`/`clippy`/`test` (layers 1–3); the live e2e
-  suite needs Herdr 0.7.5 to boot a real ephemeral protocol-17 server and is run
-  by a human/orchestrator.
+- **Not in CI.** CI runs `cargo fmt`/`clippy`/`test` (layers 1–3); `bash e2e/test-harness.sh`
+  adds provider-free static ownership checks. The live e2e suite needs Herdr 0.7.5 to boot a real
+  ephemeral protocol-17 server and is run by a human/orchestrator, separately from this cleanup.
 
 ### Multi-session (`03-sessions.sh`)
 

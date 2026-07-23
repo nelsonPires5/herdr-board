@@ -37,7 +37,9 @@ Separation card ↔ run is deliberate (vibe-kanban converged on task/attempt/exe
 - **boardd** is the only SQLite writer. One DB at `~/.local/share/herdr-board/board.db` stores every independent scoped board; cards still explicitly target Herdr sessions/workspaces.
 - **TUI** is packaged as a herdr plugin: `herdr-plugin.toml` declares a `[[panes]]` entry (herdr spawns the TUI binary in a split/tab) and `[[actions]]` (e.g. "add focused pane's repo as a card") bindable via `[[keys.command]]`. Plugin processes receive `HERDR_BIN_PATH`, `HERDR_PLUGIN_CONFIG_DIR`, `HERDR_PLUGIN_CONTEXT_JSON`.
 - **`board` CLI** subcommands hit the boardd socket — never SQLite directly (single-writer rule).
-- boardd holds a persistent connection to herdr's socket for `events.subscribe`; fallback is polling `herdr api snapshot`.
+- boardd's always-on supervisor owns one persistent `events.subscribe` stream per resolved Herdr
+  session socket. Each socket has independent subscription generation, reconnect backoff, and
+  bounded snapshot reconciliation; a disconnected or late Herdr session never blocks another.
 
 ### Root configuration and startup
 
@@ -168,7 +170,11 @@ Then proceed identically to a `workspace` card (cwd snapshot, pane-first kanban-
 
 ### Worktree removal
 
-The `cwd` and `worktree` space kinds are gone. Worktree isolation is now the **agent's** job — instructed via the column/card prompt (create a worktree, work in it) — not a board primitive, keeping the board's space model to "which session, which workspace".
+The `cwd` and `worktree` space kinds are gone, and `board-herdr` no longer exposes the unused
+`worktree.create`/`worktree.remove` client methods or result DTOs. Worktree isolation is now the
+**agent's** job — instructed via the column/card prompt (create a worktree, work in it) — not a
+board primitive, keeping the board's space model to "which session, which workspace". The pinned
+Herdr schema fixture remains an upstream compatibility reference and is not edited by this cleanup.
 
 ## 4. Column configuration
 
@@ -418,6 +424,9 @@ executes the returned plan; it performs no Herdr or SQLite I/O in the pure decis
 - **Per-space FIFO**: two agents mutating one working tree collide; cards sharing the typed
   `SpaceKey(session, space_kind, space_ref)` run serially. Null/default values remain typed and are
   never separator-encoded.
+- **Active-run timer source**: board snapshots expose only additive summaries for started, open
+  runs. The TUI joins those summaries by card id, so comments/card edits cannot reset the elapsed
+  timer; `started_at` remains the authoritative clock across event refreshes.
 - **Global concurrency cap** (default 3) limits active runs across spaces. A per-daemon async mutex
   serializes complete dispatch passes through launch registration/failure. Inside that lock, a pass
   claims capacity and each space's FIFO head before any launch starts; claimed independent spaces
