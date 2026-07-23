@@ -413,10 +413,11 @@ assert_audit_fails 'missing registry'
 
 # Production creation/cleanup sites are wired to the same ledger, including
 # settled session replacement, daemon, roots, workspace markers, and runner.
-python3 - "$E2E_LIB_DIR/lib.sh" "$E2E_LIB_DIR/17-configured-p17-runner.sh" <<'PY'
+python3 - "$E2E_LIB_DIR/lib.sh" "$E2E_LIB_DIR/17-configured-p17-runner.sh" "$E2E_LIB_DIR/20-herdr-recovery.sh" <<'PY'
 import sys
 lib=open(sys.argv[1],encoding='utf-8').read()
 runner=open(sys.argv[2],encoding='utf-8').read()
+recovery=open(sys.argv[3],encoding='utf-8').read()
 assert lib.count('e2e_session_resource_register "$name"') >= 2
 assert 'e2e_process_resource_register board-daemon board-daemon' in lib
 assert 'e2e_root_resource_register scenario scenario-root' in lib
@@ -425,6 +426,9 @@ assert 'e2e_root_resource_register scenario scenario-temp' in lib
 assert 'e2e_workspace_resource_register "$ws" "$marker"' in lib
 assert 'export TMPDIR="$E2E_TMP"' in lib
 assert 'e2e_script_resource_register configured-runner p17-configured-runner' in runner
+assert 'e2e_process_resource_register "$role" "$logical"' in lib
+assert 'e2e_owned_process_stop %q' in lib
+assert 'e2e_proxy_start' in recovery and 'e2e_proxy_command' in recovery
 assert 'p17-runner-script' not in runner
 PY
 

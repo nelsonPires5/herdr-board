@@ -20,6 +20,7 @@ mod watchers;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use board_core::config::Config;
 use board_core::db::Db;
@@ -168,15 +169,40 @@ async fn async_main(db_path: PathBuf, socket_path: PathBuf) -> anyhow::Result<()
     }
     tokio::spawn(watchers::timeout_ticker(daemon.clone()));
     tokio::spawn(watchers::local_liveness_poller(daemon.clone()));
-    if daemon.herdr.is_some() {
+    if matches!(daemon.settings.spawner, SpawnerKind::Herdr) {
+        // The supervisor is independent of the startup best-effort client: a
+        // Herdr server may appear after boardd and must still be discovered.
         let d = daemon.clone();
         std::thread::spawn(move || watchers::herdr_event_thread(d));
+        // Durable runs that could not be adopted at startup are not in the
+        // in-memory watch set yet. Retry the conservative pass slowly until a
+        // socket becomes available; successful adoption feeds the per-socket
+        // stream supervisor above.
+        if let Some(registry) = &daemon.session_registry {
+            let d = daemon.clone();
+            let default_socket = registry.default_socket().to_path_buf();
+            tokio::spawn(async move {
+                while !d.is_shutdown() {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    if d.is_shutdown() {
+                        break;
+                    }
+                    supervisor::reconcile_once(
+                        &d,
+                        Arc::new(crate::session::SessionRegistry::new(default_socket.clone())),
+                        Arc::new(supervisor::HerdrRuntime),
+                        Arc::new(supervisor::SystemClock),
+                    )
+                    .await;
+                }
+            });
+        }
     }
     spawn_signal_handler(daemon.clone());
 
     // Startup recovery is independent of the best-effort initial Herdr
-    // connection. The always-on stream supervisor remains T10; T09 performs
-    // this conservative snapshot pass even when that connection was absent.
+    // connection. The always-on supervisor subsequently repeats conservative
+    // reconciliation after every connection and at a slow interval.
     startup_recovery(&daemon).await;
     daemon.wake_dispatch();
 

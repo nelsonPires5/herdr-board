@@ -34,7 +34,7 @@ cargo fmt --all --check                      # formatted
   your real sessions; each uses a marker-gated mode-0700 short HOME with explicit AF_UNIX margin,
   an isolated temp DB + socket, and **disposable**
   marked workspaces, prefixes every Herdr mutation `HERDR MUTATION:`, and tears everything down on exit
-  (`--keep` leaves sessions/workspaces for review). The forced-build standard suite passes 01–17
+  (`--keep` leaves sessions/workspaces for review). The forced-build standard suite passes 01–20
   provider-free under a mode-0700 root with controlled HOME/ZDOT/rc/PATH, never sourcing user rc;
   Herdr is resolved absolutely before PATH narrowing. Session mutation, board-daemon signals, workspace close, and session stop/delete are authorized
   only by a captured Linux `/proc` identity token (start time, executable, complete exact

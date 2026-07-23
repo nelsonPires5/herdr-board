@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
-- Daemon restart recovery now performs a conservative one-pass Herdr snapshot reconciliation independent of initial connection success: only confirmed missing panes fail, while unresolved sessions and probe failures remain open and continue occupying queue capacity. Present panes restore watches and terminal status. Always-on reconnect/stream supervision remains deferred to T10.
+- Daemon restart recovery now performs conservative Herdr reconciliation independent of initial connection success. An always-on per-socket supervisor connects when Herdr appears, isolates subscription changes and reconnect backoff to the affected socket, subscribes before snapshot reconciliation, and periodically repairs missed-event gaps. Only confirmed missing panes fail; unresolved sessions and probe failures remain open.
 - Schema v9 preserves timeout deadlines and awaiting pauses across daemon restarts; pause/resume is atomic and restart never resets a run's budget.
 - Schema v8 enforces one open run per card and makes enqueue, promotion, and finalization durable atomic DB units of work. Daemon board-done, cancel, timeout, and pane-exit paths now execute final comments, card transitions, and auto-hop enqueue in that single finalization transaction; failures leave the exact prior durable state, duplicate or stale losers are idempotent, and post-commit effects run in deterministic order.
 

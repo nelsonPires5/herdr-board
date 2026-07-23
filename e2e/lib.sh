@@ -670,7 +670,7 @@ e2e_cleanup() {
   [ "$rc" -ne 0 ] && return "$rc"
   return "$cleanup_rc"
 }
-e2e_init() {
+e2e_init_common() {
   trap e2e_cleanup EXIT
   e2e_scenario_root_ensure
   e2e_resource_manifest_init || fail "cannot initialize exact-resource manifest"
@@ -690,8 +690,23 @@ e2e_init() {
   export E2E_STANDALONE_SESSION E2E_MANAGED_ROOT_OWNER="$E2E_STANDALONE_SESSION"
   e2e_defer "e2e_managed_root_remove_owned '${E2E_MANAGED_ROOT_OWNER}'"
   e2e_require
+}
+
+e2e_start_reserved_session() {
   e2e_session_ensure
   e2e_protocol_preflight
+}
+
+e2e_init() {
+  e2e_init_common
+  e2e_start_reserved_session
+}
+
+# Scenario 19 deliberately starts boardd before its reserved Herdr session.
+# This installs the identical ownership/cleanup boundary but performs no Herdr
+# mutation until e2e_start_reserved_session is called explicitly.
+e2e_init_late_session() {
+  e2e_init_common
 }
 
 # --- ephemeral herdr session ------------------------------------------------
@@ -1044,6 +1059,100 @@ PY
   e2e_resource_register_json process "$role" "$logical" "$payload"
 }
 e2e_process_resource_release() { e2e_resource_release process "$1"; }
+
+# Start a bounded scenario helper/proxy as an exact direct child and ledger its
+# complete /proc identity before returning. Arguments identifying its listen
+# and control sockets are included in the identity token; payloads are never
+# logged. Sets E2E_OWNED_PROCESS_PID / E2E_OWNED_PROCESS_IDENTITY.
+declare -Ag E2E_OWNED_PROCESS_PIDS=() E2E_OWNED_PROCESS_IDENTITIES=()
+e2e_owned_process_start() {
+  local role="$1" logical="$2" identity_session="$3" identity_name="$4" log="$5" command="$6"
+  shift 6
+  local owner_token pid provisional identity i deferred provisional_logical="process-provisional-$logical"
+  case "$role" in helper|proxy) ;; *) fail "invalid owned process role: $role" ;; esac
+  [[ "$command" == /* ]] && [ -x "$command" ] || fail "owned process command must be absolute"
+  owner_token="$(python3 -c 'import secrets; print(secrets.token_hex(16))')" \
+    || fail "cannot generate helper ownership token"
+  env E2E_HERDR_OWNER_TOKEN="$owner_token" "$command" "$@" >"$log" 2>&1 &
+  pid=$!
+  provisional=""
+  for (( i=0; i<20; i++ )); do
+    provisional="$(e2e_provisional_child_capture "$pid" "$owner_token")" && break
+    [ -e "/proc/$pid" ] || break
+    sleep 0.005
+  done
+  [ -n "$provisional" ] || fail "cannot capture provisional exact-child for $logical"
+  E2E_PROVISIONAL_CHILD_ARMED["$provisional_logical"]=1
+  printf -v deferred 'e2e_provisional_child_abort %q %q %q' \
+    "$provisional_logical" "$pid" "$provisional"
+  e2e_defer "$deferred"
+  e2e_process_resource_register helper "$provisional_logical" "$pid" "$provisional" \
+    || fail "cannot ledger provisional process $logical"
+  identity=""
+  for (( i=0; i<30; i++ )); do
+    identity="$(e2e_process_identity_capture "$pid" "$identity_session" "$identity_name" \
+      "$command" "$owner_token")" && break
+    sleep 0.01
+  done
+  if [ -z "$identity" ]; then
+    e2e_provisional_child_abort "$provisional_logical" "$pid" "$provisional" \
+      || fail "refusing unsafe provisional cleanup for $logical"
+    fail "cannot capture exact process identity for $logical"
+  fi
+  e2e_process_resource_register "$role" "$logical" "$pid" "$identity" \
+    || fail "cannot ledger exact process $logical"
+  e2e_process_resource_release "$provisional_logical" \
+    || fail "cannot release provisional process $logical"
+  E2E_PROVISIONAL_CHILD_ARMED["$provisional_logical"]=0
+  E2E_OWNED_PROCESS_PIDS["$logical"]="$pid"
+  E2E_OWNED_PROCESS_IDENTITIES["$logical"]="$identity"
+  printf -v deferred 'e2e_owned_process_stop %q' "$logical"
+  e2e_defer "$deferred"
+  E2E_OWNED_PROCESS_PID="$pid"
+  E2E_OWNED_PROCESS_IDENTITY="$identity"
+}
+
+e2e_owned_process_stop() {
+  local logical="$1" pid="${E2E_OWNED_PROCESS_PIDS[$1]:-}" identity="${E2E_OWNED_PROCESS_IDENTITIES[$1]:-}"
+  [ -n "$pid" ] || return 0
+  e2e_process_identity_verify "$pid" "$identity" || {
+    printf 'E2E FAIL: refusing helper stop for %s: identity changed\n' "$logical" >&2; return 1;
+  }
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  e2e_process_resource_release "$logical" || return 1
+  unset 'E2E_OWNED_PROCESS_PIDS[$logical]' 'E2E_OWNED_PROCESS_IDENTITIES[$logical]'
+}
+
+e2e_proxy_start() {
+  local listen="$1" control="$2" target="$3" python
+  python="$(type -P python3)"
+  e2e_owned_process_start proxy herdr-proxy "$listen" "$control" "$E2E_TMP/proxy.log" \
+    "$python" "$E2E_LIB_DIR/herdr-proxy.py" --listen "$listen" --control "$control" --target "$target"
+  local i
+  for (( i=0; i<50; i++ )); do
+    [ -S "$listen" ] && [ -S "$control" ] && break
+    sleep 0.02
+  done
+  [ -S "$listen" ] && [ -S "$control" ] || fail "Herdr proxy did not create owned sockets"
+  E2E_PROXY_SOCKET="$listen" E2E_PROXY_CONTROL="$control"
+  export E2E_PROXY_SOCKET E2E_PROXY_CONTROL
+}
+
+e2e_proxy_command() {
+  local command="$1"
+  e2e_process_identity_verify "${E2E_OWNED_PROCESS_PIDS[herdr-proxy]:-}" \
+    "${E2E_OWNED_PROCESS_IDENTITIES[herdr-proxy]:-}" \
+    || fail "refusing proxy control: identity changed"
+  python3 - "$E2E_PROXY_CONTROL" "$command" <<'PY'
+import json,socket,sys
+s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.connect(sys.argv[1])
+s.sendall(json.dumps({"command":sys.argv[2]}).encode()+b"\n")
+f=s.makefile(); response=json.loads(f.readline())
+if not response.get("ok"): raise SystemExit(response.get("error","proxy command failed"))
+print(json.dumps(response,separators=(",",":"),sort_keys=True))
+PY
+}
 
 e2e_session_resource_register() {
   local name="$1" identity="$2" registry="$3" owner_marker="$4" pid digest payload
@@ -1581,6 +1690,19 @@ e2e_daemon_stop() {
   kill "$E2E_DAEMON_PID" 2>/dev/null || true
   wait "$E2E_DAEMON_PID" 2>/dev/null || true
   e2e_process_resource_release board-daemon
+  E2E_DAEMON_PID="" E2E_DAEMON_IDENTITY=""
+}
+
+# Crash/restart scenarios use SIGKILL only after a fresh exact identity check.
+e2e_daemon_kill_owned() {
+  [ -n "${E2E_DAEMON_PID:-}" ] || return 0
+  e2e_process_identity_verify "$E2E_DAEMON_PID" "${E2E_DAEMON_IDENTITY:-}" || {
+    printf 'E2E FAIL: refusing daemon kill for pid %s: identity changed\n' "$E2E_DAEMON_PID" >&2; return 1;
+  }
+  kill -KILL "$E2E_DAEMON_PID" 2>/dev/null || true
+  wait "$E2E_DAEMON_PID" 2>/dev/null || true
+  e2e_process_resource_release board-daemon || return 1
+  E2E_DAEMON_PID="" E2E_DAEMON_IDENTITY=""
 }
 
 # Remove only the exact marker-bearing scenario temp root created by
