@@ -431,6 +431,7 @@ fn board_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
             app.form_from_detail = false;
             app.form = Some(Form::column_create(&app.board.columns));
             app.screen = Screen::ColumnForm;
+            return vec![Effect::LoadFormOptions];
         }
         KeyCode::Char('e') => {
             if let Some(card) = app.selected_card().cloned() {
@@ -445,6 +446,7 @@ fn board_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
                 app.form_from_detail = false;
                 app.form = Some(Form::column_edit(&col, &app.board.columns));
                 app.screen = Screen::ColumnForm;
+                return vec![Effect::LoadFormOptions];
             }
         }
         KeyCode::Char('a') => return archive_selected_card(app),

@@ -1480,6 +1480,37 @@ mod tests {
     }
 
     #[test]
+    fn column_options_rebuild_preserves_values_and_focus() {
+        let mut form = Form::column_create(&[]);
+        form.fields
+            .iter_mut()
+            .find(|field| field.id == FieldId::Name)
+            .unwrap()
+            .set_text("stage");
+        form.fields
+            .iter_mut()
+            .find(|field| field.id == FieldId::SystemPrompt)
+            .unwrap()
+            .set_text("instructions");
+        form.fields
+            .iter_mut()
+            .find(|field| field.id == FieldId::Timeout)
+            .unwrap()
+            .set_text("15");
+        form.focus = idx_of(&form, FieldId::Timeout);
+
+        form.apply_options(Some(pi_capabilities()), None, None, None);
+
+        assert_eq!(form.focus, idx_of(&form, FieldId::Timeout));
+        assert_eq!(field(&form, FieldId::Name).get_text(), "stage");
+        assert_eq!(
+            field(&form, FieldId::SystemPrompt).get_text(),
+            "instructions"
+        );
+        assert_eq!(field(&form, FieldId::Timeout).get_text(), "15");
+    }
+
+    #[test]
     fn column_submit_none_harness_override_extracts_none() {
         // `(none)` harness override extracts to `None` (no override).
         let mut form = Form::column_create(&[]);

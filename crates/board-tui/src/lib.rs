@@ -366,20 +366,24 @@ impl Driver {
             .status();
     }
 
-    /// Fetch the capability catalog + workspace list for the open card form and
-    /// hand them to the form. A failed fetch is non-fatal: the affected
-    /// selectors fall back to free-text and the user gets a status-line warning.
+    /// Fetch form metadata and hand it to the open form. Column forms only
+    /// need capabilities and the harness catalog; card forms additionally load
+    /// sessions and their session-scoped workspaces. A failed fetch is
+    /// non-fatal: affected selectors fall back to free-text and the user gets a
+    /// status-line warning.
     fn load_form_options(&mut self) {
         let Some(form) = self.app.form.as_ref() else {
             return;
         };
         let harness = form.current_harness();
-        // The workspace list is scoped to the currently selected session.
+        let is_card_form = form.is_card_form();
+        // Column forms only need the selected harness metadata. They have no
+        // session or workspace selectors, so avoid unrelated RPCs entirely.
         let session = form.current_session();
         let caps = fetch_capabilities(self.client.as_mut(), &harness);
         let harnesses = fetch_harness_list(self.client.as_mut());
-        let sessions = fetch_sessions(self.client.as_mut());
-        let spaces = fetch_spaces(self.client.as_mut(), session.as_deref());
+        let sessions = is_card_form.then(|| fetch_sessions(self.client.as_mut()));
+        let spaces = is_card_form.then(|| fetch_spaces(self.client.as_mut(), session.as_deref()));
 
         let mut warning: Option<String> = None;
         let caps_opt = match caps {
@@ -392,16 +396,17 @@ impl Driver {
         // harness.list failing is non-fatal: the selectors keep the built-ins.
         let harnesses_opt = harnesses.ok();
         let spaces_opt = match spaces {
-            Ok(s) => Some(s),
-            Err(e) => {
+            Some(Ok(s)) => Some(s),
+            Some(Err(e)) => {
                 if warning.is_none() {
                     warning = Some(format!("spaces unavailable ({e}); free-text"));
                 }
                 None
             }
+            None => None,
         };
         // Sessions failing is non-fatal: keep `(default)` + any preselection.
-        let sessions_opt = sessions.ok();
+        let sessions_opt = sessions.and_then(Result::ok);
         if let Some(form) = self.app.form.as_mut() {
             form.apply_options(caps_opt, harnesses_opt, spaces_opt, sessions_opt);
         }

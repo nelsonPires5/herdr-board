@@ -92,7 +92,10 @@ the `fake-client` feature.
   `pin()` helper that rewrites Running cards' `updated_at`, so timers don't drift.
 - `crates/board-tui/tests/update.rs` unit-tests the pure reducer
   (`board_tui::app::update`) — navigation, archive filtering/toggling, scoped board picker/switch,
-  scoped form submission, jump-to-pane success/error, selectors, drag state, and templates.
+  scoped form submission, immediate column-form metadata loading without session/workspace RPCs,
+  jump-to-pane success/error, selectors, drag state, and templates.
+- Column-form snapshots cover default and hostile Herdr origin contexts; form rebuild tests verify
+  typed values and focus survive metadata refreshes while permission controls follow capabilities.
 - `cargo run -p board-tui --example tui_fake --features fake-client` runs the
   full TUI against the seeded client for a manual look.
 

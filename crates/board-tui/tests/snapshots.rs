@@ -205,6 +205,30 @@ fn column_form() {
 }
 
 #[test]
+fn column_form_hostile_origin_is_metadata_only() {
+    let mut baseline = driver(demo_client().unwrap());
+    key(&mut baseline, KeyCode::Char('N'));
+    let baseline_output = render(&mut baseline, 80, 24);
+
+    let mut hostile = Driver::with_editor_and_origin(
+        Box::new(demo_client().unwrap()),
+        Box::new(FakeEditor::new("edited via $EDITOR")),
+        OriginContext {
+            origin_socket: Some("/hostile/socket".into()),
+            session: Some("hostile-session".into()),
+            plugin_id: Some("hostile-plugin-sentinel".into()),
+            pane_id: Some("hostile-pane-sentinel".into()),
+            herdr_bin_path: Some("/hostile/herdr-sentinel".into()),
+        },
+    )
+    .unwrap();
+    key(&mut hostile, KeyCode::Char('N'));
+    let hostile_output = render(&mut hostile, 80, 24);
+    assert_eq!(hostile_output, baseline_output);
+    insta::assert_snapshot!("column_form_hostile", hostile_output);
+}
+
+#[test]
 fn card_detail_with_comments_and_runs() {
     let mut d = driver(demo_client().unwrap());
     // Navigate to the failed card in Review (column index 3).

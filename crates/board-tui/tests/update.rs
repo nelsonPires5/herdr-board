@@ -5,7 +5,7 @@ use board_core::capability::{
     claude_capabilities, pi_capabilities, HarnessCapabilities, ModelInfo,
 };
 use board_core::client::BoardClient;
-use board_core::protocol::{CardStatus, Effort, Patch, RunOutcome, SpaceInfo};
+use board_core::protocol::{CardStatus, Effort, Event, Patch, RunOutcome, SpaceInfo};
 use board_tui::app::{update, App, CardFilter, DetailScrollTarget, Effect, Msg, Screen};
 use board_tui::editor::FakeEditor;
 use board_tui::forms::{ChoiceVal, FieldId, FieldKind, Form, FormKind, Submit};
@@ -13,6 +13,8 @@ use board_tui::testkit::demo_client;
 use board_tui::Driver;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
+use serde_json::Value;
+use std::sync::{Arc, Mutex};
 
 fn key(code: KeyCode) -> Msg {
     Msg::Key(KeyEvent::new(code, KeyModifiers::empty()))
@@ -25,6 +27,22 @@ fn demo_app() -> App {
 
 fn driver_of<C: BoardClient + 'static>(client: C) -> Driver {
     Driver::with_editor(Box::new(client), Box::new(FakeEditor::new("x"))).unwrap()
+}
+
+struct RecordingClient<C> {
+    inner: C,
+    calls: Arc<Mutex<Vec<String>>>,
+}
+
+impl<C: BoardClient> BoardClient for RecordingClient<C> {
+    fn call(&mut self, method: &str, params: Value) -> anyhow::Result<Value> {
+        self.calls.lock().unwrap().push(method.to_string());
+        self.inner.call(method, params)
+    }
+
+    fn subscribe(&mut self) -> anyhow::Result<Box<dyn Iterator<Item = Event> + Send>> {
+        self.inner.subscribe()
+    }
 }
 
 /// A two-model catalog where the models carry *different* effort sets, so tests
@@ -843,6 +861,51 @@ fn new_card_defaults_to_pi_and_lists_both_builtins() {
     assert_eq!(form.current_harness(), "pi");
     assert_eq!(opt_labels(form, FieldId::Harness), vec!["pi", "claude"]);
     assert_eq!(form.caps.as_ref().unwrap().harness, "pi");
+}
+
+#[test]
+fn opening_column_form_loads_only_column_metadata() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut d = driver_of(RecordingClient {
+        inner: demo_client().unwrap(),
+        calls: Arc::clone(&calls),
+    });
+    calls.lock().unwrap().clear();
+
+    d.handle(key(KeyCode::Char('N')));
+    let form = d.app.form.as_ref().unwrap();
+    assert_eq!(d.app.screen, Screen::ColumnForm);
+    assert_eq!(form.caps.as_ref().unwrap().harness, "pi");
+    assert_eq!(
+        opt_labels(form, FieldId::HarnessOverride),
+        vec!["none", "pi", "claude"]
+    );
+    assert!(form.spaces.is_empty(), "column forms do not load spaces");
+    assert!(
+        form.sessions.is_empty(),
+        "column forms do not load sessions"
+    );
+    assert!(!form
+        .fields
+        .iter()
+        .any(|field| field.id == FieldId::PermissionOverride
+            && form.field_visible(form.fields.iter().position(|f| f.id == field.id).unwrap())));
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec!["harness.capabilities", "harness.list"]
+    );
+
+    // Edit follows the same metadata path; a newly opened form starts at Name.
+    d.handle(key(KeyCode::Esc));
+    calls.lock().unwrap().clear();
+    d.handle(key(KeyCode::Char('E')));
+    let form = d.app.form.as_ref().unwrap();
+    assert_eq!(form.caps.as_ref().unwrap().harness, "pi");
+    assert_eq!(form.fields[form.focus].id, FieldId::Name);
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec!["harness.capabilities", "harness.list"]
+    );
 }
 
 #[test]
