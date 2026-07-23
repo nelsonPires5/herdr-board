@@ -10,7 +10,7 @@
 # and rejects every socket protocol other than 17.
 id = "herdr-board"
 name = "Herdr Board"
-version = "0.7.0"
+version = "0.8.0"
 description = "Kanban board for AI coding agents: cards are prompts, columns are pipeline stages; moving a card dispatches an agent into a herdr pane."
 min_herdr_version = "0.7.5"
 platforms = ["linux", "macos"]
