@@ -8,11 +8,13 @@ use std::sync::Arc;
 use board_core::capability::{available_harnesses, capabilities_for};
 use board_core::db::BOARD_ID;
 use board_core::engine::{
-    decide_entry, merge_card_update, merge_column_update, validate_card_archive,
+    decide_entry, decide_lifecycle, merge_card_update, merge_column_update, validate_card_archive,
     validate_card_edit, validate_card_settings, validate_card_values, validate_column_delete,
-    validate_column_update, validate_column_values, PermissionContext,
+    validate_column_update, validate_column_values, LifecycleAction, LifecycleDecision,
+    LifecycleFacts, LifecycleHarness, LifecycleRejection, PermissionContext,
 };
-use board_core::harness::{is_builtin_harness, DEFAULT_HARNESS};
+use board_core::harness::DEFAULT_HARNESS;
+use board_core::model::Run;
 use board_core::pi_catalog;
 use board_core::protocol::*;
 use board_core::{Error, Result};
@@ -83,6 +85,51 @@ fn require_column(d: &Arc<Daemon>, id: i64) -> Result<board_core::model::Column>
         .lock()
         .get_column(id)?
         .ok_or_else(|| Error::NotFound(format!("column {id}")))
+}
+
+fn lifecycle_facts(
+    run: &Run,
+    card: &board_core::model::Card,
+    supplied_run_id: Option<i64>,
+) -> LifecycleFacts {
+    LifecycleFacts {
+        open_run_id: Some(run.id),
+        supplied_run_id,
+        started: run.started_at.is_some(),
+        harness: if board_core::harness::is_builtin_harness(&run.harness) {
+            LifecycleHarness::BuiltIn
+        } else {
+            LifecycleHarness::Configured
+        },
+        card_status: card.status,
+    }
+}
+
+fn lifecycle_rejection(card_id: i64, rejection: LifecycleRejection) -> Error {
+    match rejection {
+        LifecycleRejection::NoOpenRun
+        | LifecycleRejection::QueuedCompletionRequiresRunId
+        | LifecycleRejection::QueuedBuiltinCompletion => {
+            Error::NotFound(format!("no active run for card {card_id}"))
+        }
+        LifecycleRejection::SuppliedRunIdMismatch { expected, supplied } => Error::InvalidState(
+            format!(
+                "no active run for card {card_id}: run {supplied} does not match active run {expected}"
+            ),
+        ),
+        LifecycleRejection::PaneExitRequiresRunId => Error::InvalidState(format!(
+            "pane-exited callback for card {card_id} must supply a run id"
+        )),
+        LifecycleRejection::PaneExitBuiltin => Error::InvalidState(
+            "pane-exited callback is only valid for configured harnesses".into(),
+        ),
+        LifecycleRejection::TimeoutBeforeStart => {
+            Error::InvalidState(format!("run for card {card_id} has not started"))
+        }
+        LifecycleRejection::TimeoutPaused => {
+            Error::InvalidState(format!("run for card {card_id} is awaiting review"))
+        }
+    }
 }
 
 // -- daemon / board ---------------------------------------------------------
@@ -372,79 +419,71 @@ fn comment_add(d: &Arc<Daemon>, p: CommentAddParams) -> Result<Value> {
 }
 
 fn run_done(d: &Arc<Daemon>, p: RunDoneParams) -> Result<Value> {
-    let run = {
+    let (run, plan) = {
         // Keep the scheduler -> store lock order and finalization guard used
-        // by the normal active-run path. A configured runner can call board
-        // done before pane registration, while its run is still queued; only
-        // that exact, sole queued run is eligible for this narrow exception.
+        // by the normal active-run path. The pure engine owns callback
+        // eligibility, including the narrow queued configured-run exception.
         let sched = d.sched.lock().unwrap();
         let db = d.store.lock();
         sched.ensure_card_not_finalizing(p.card_id)?;
-        if let Some(run) = db.active_run_for_card(p.card_id)? {
-            if let Some(run_id) = p.run_id {
-                if run.id != run_id {
-                    return Err(Error::InvalidState(format!(
-                        "run {run_id} does not match active run {} for card {}",
-                        run.id, p.card_id
-                    )));
-                }
-            }
-            run
-        } else {
-            let card = db
-                .get_card(p.card_id)?
-                .ok_or_else(|| Error::NotFound(format!("no active run for card {}", p.card_id)))?;
-            match db.open_run_for_card(p.card_id)? {
-                Some(run)
-                    if card.status == CardStatus::Queued
-                        && run.started_at.is_none()
-                        && !is_builtin_harness(&run.harness)
-                        && p.run_id == Some(run.id) =>
-                {
-                    run
-                }
-                _ => {
-                    return Err(Error::NotFound(format!(
-                        "no active run for card {}",
-                        p.card_id
-                    )))
-                }
-            }
-        }
+        let run = db
+            .open_run_for_card(p.card_id)?
+            .ok_or_else(|| Error::NotFound(format!("no active run for card {}", p.card_id)))?;
+        let card = db
+            .get_card(p.card_id)?
+            .ok_or_else(|| Error::NotFound(format!("card {}", p.card_id)))?;
+        let facts = lifecycle_facts(&run, &card, p.run_id);
+        let decision = decide_lifecycle(&facts, LifecycleAction::Done { outcome: p.outcome });
+        let LifecycleDecision::Finalize(plan) = decision else {
+            let LifecycleDecision::Reject(rejection) = decision else {
+                unreachable!("lifecycle decision matched twice")
+            };
+            return Err(lifecycle_rejection(p.card_id, rejection));
+        };
+        (run, plan)
     };
-    let (run, card) = finalize_run(d, run.id, p.outcome, p.summary, None, false, true)?;
+    let (run, card) = finalize_run(
+        d,
+        run.id,
+        plan.outcome,
+        p.summary,
+        None,
+        plan.kill,
+        plan.transition,
+    )?;
     Ok(json!(RunActionResult { run, card }))
 }
 
 fn run_pane_exited(d: &Arc<Daemon>, p: RunPaneExitedParams) -> Result<Value> {
-    {
+    let (run, plan) = {
         let sched = d.sched.lock().unwrap();
         let db = d.store.lock();
         sched.ensure_card_not_finalizing(p.card_id)?;
         let open = db
             .open_run_for_card(p.card_id)?
             .ok_or_else(|| Error::NotFound(format!("no open run for card {}", p.card_id)))?;
-        if open.id != p.run_id {
-            return Err(Error::InvalidState(format!(
-                "open run {} for card {} does not match pane-exited run {}",
-                open.id, p.card_id, p.run_id
-            )));
-        }
-        if is_builtin_harness(&open.harness) {
-            return Err(Error::InvalidState(
-                "pane-exited callback is only valid for configured harnesses".into(),
-            ));
-        }
-    }
+        let card = db
+            .get_card(p.card_id)?
+            .ok_or_else(|| Error::NotFound(format!("card {}", p.card_id)))?;
+        let facts = lifecycle_facts(&open, &card, Some(p.run_id));
+        let decision = decide_lifecycle(&facts, LifecycleAction::PaneExited);
+        let LifecycleDecision::Finalize(plan) = decision else {
+            let LifecycleDecision::Reject(rejection) = decision else {
+                unreachable!("lifecycle decision matched twice")
+            };
+            return Err(lifecycle_rejection(p.card_id, rejection));
+        };
+        (open, plan)
+    };
 
     let (run, card) = finalize_run(
         d,
-        p.run_id,
-        RunOutcome::Fail,
+        run.id,
+        plan.outcome,
         Some("configured harness exited without calling board done".into()),
         Some("pane exited without board done".into()),
-        false,
-        false,
+        plan.kill,
+        plan.transition,
     )?;
     Ok(json!(RunActionResult { run, card }))
 }

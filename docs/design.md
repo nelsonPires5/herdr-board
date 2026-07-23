@@ -345,7 +345,11 @@ Watchers only **observe**: herdr pane statuses and idle expiry are translated in
 (`board_core::engine::decide_signal`) is the **single decider** mapping a signal plus the current
 card status onto a `SignalDecision` (new status, optional `awaiting_reason`, optional
 notification). The daemon applies the decision in one place; pane-exit, column timeout, and cancel
-keep their existing `finalize_run` paths.
+keep their existing `finalize_run` paths. The same core-owned lifecycle policy exposes
+`LifecycleDecision` and `FinalizePlan`: it validates supplied run identity, distinguishes
+queued configured runs from queued built-ins, and selects kill/transition behavior for
+cancel, timeout, pane exit, and explicit completion. The daemon supplies DB facts and
+executes the returned plan; it performs no Herdr or SQLite I/O in the pure decision.
 
 - `awaiting` = the agent finished(?) without `board done`. The run stays **OPEN** — it never
   becomes a failure on its own. The **column timeout is paused**: entering `awaiting` records the
@@ -364,6 +368,10 @@ keep their existing `finalize_run` paths.
 - **Atomic enqueue snapshot**: scheduler→store locking builds the card/column/comments/settings/task,
   system, and session snapshot together; the queued run is never assembled from stale reads and
   `run.session` matches the launch target.
+- **Lifecycle policy ownership**: `board-core::engine` owns Herdr-neutral `LifecycleDecision`/
+  `FinalizePlan`, auto-hop limits, and resumability evidence (a started run plus its
+  `agent:<run_id>` comment). `board-daemon` gathers facts, performs DB/process effects, and
+  preserves the scheduler→store lock order; this slice does not change transaction execution.
 - **Atomic card finalization**: the scheduler claims a card while closing/removing its old run and
   keeps that claim through comments, transition/status writes, and any internal auto-target
   enqueue. Public enqueue/retry and conflicting card/column mutations reject the claimed card;

@@ -4,7 +4,7 @@
 
 use crate::capability::{capabilities_for, efforts_for};
 use crate::config::Config;
-use crate::model::{Card, Column};
+use crate::model::{Card, Column, Comment, Run};
 use crate::protocol::{
     AwaitingReason, CardStatus, CardUpdateParams, ColumnUpdateParams, Patch, RunOutcome, SpaceKind,
     Trigger,
@@ -55,6 +55,200 @@ impl ValidationError {
             | ValidationError::InvalidPermission(_)
             | ValidationError::OrphanedColumnOverride => 1,
         }
+    }
+}
+
+/// The maximum number of automatic column hops allowed before human action.
+///
+/// This is a domain policy, not a daemon scheduling setting: keeping it in the
+/// pure engine ensures every lifecycle entry point applies the same guard.
+pub const MAX_AUTO_HOPS: u32 = 8;
+
+/// The lifecycle operation observed by the daemon. The enum deliberately uses
+/// board-domain concepts only; Herdr events are translated at the daemon edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LifecycleAction {
+    /// Explicit `board done`, the only operation that can confirm success.
+    Done {
+        outcome: RunOutcome,
+    },
+    Cancel,
+    Timeout,
+    PaneExited,
+}
+
+/// Whether an open run belongs to a managed built-in or a configured harness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LifecycleHarness {
+    BuiltIn,
+    Configured,
+}
+
+/// Facts needed to decide whether one lifecycle operation may close an open
+/// run. The daemon gathers these facts under its scheduler/store lock; this
+/// function performs no I/O and does not inspect Herdr-specific types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LifecycleFacts {
+    pub open_run_id: Option<i64>,
+    pub supplied_run_id: Option<i64>,
+    pub started: bool,
+    pub harness: LifecycleHarness,
+    pub card_status: CardStatus,
+}
+
+/// A pure description of the durable finalization work. The executor owns the
+/// transaction and all process/event/notification effects; this value only
+/// states the policy those effects must implement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FinalizePlan {
+    pub outcome: RunOutcome,
+    pub kill: bool,
+    pub transition: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LifecycleRejection {
+    NoOpenRun,
+    SuppliedRunIdMismatch { expected: i64, supplied: i64 },
+    QueuedCompletionRequiresRunId,
+    QueuedBuiltinCompletion,
+    PaneExitRequiresRunId,
+    PaneExitBuiltin,
+    TimeoutBeforeStart,
+    TimeoutPaused,
+}
+
+/// The pure result of applying a lifecycle operation to the currently known
+/// run facts. Rejected observations are intentionally explicit so callers do
+/// not accidentally turn stale callbacks into terminal writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LifecycleDecision {
+    Finalize(FinalizePlan),
+    Reject(LifecycleRejection),
+}
+
+/// Decide whether a lifecycle operation is eligible to finalize its run.
+pub fn decide_lifecycle(facts: &LifecycleFacts, action: LifecycleAction) -> LifecycleDecision {
+    let Some(open_run_id) = facts.open_run_id else {
+        return LifecycleDecision::Reject(LifecycleRejection::NoOpenRun);
+    };
+
+    if let Some(supplied) = facts.supplied_run_id {
+        if supplied != open_run_id {
+            return LifecycleDecision::Reject(LifecycleRejection::SuppliedRunIdMismatch {
+                expected: open_run_id,
+                supplied,
+            });
+        }
+    }
+
+    match action {
+        LifecycleAction::Done { outcome } => {
+            if !facts.started {
+                if facts.harness == LifecycleHarness::BuiltIn {
+                    return LifecycleDecision::Reject(LifecycleRejection::QueuedBuiltinCompletion);
+                }
+                if facts.supplied_run_id.is_none() {
+                    return LifecycleDecision::Reject(
+                        LifecycleRejection::QueuedCompletionRequiresRunId,
+                    );
+                }
+            }
+            LifecycleDecision::Finalize(FinalizePlan {
+                outcome,
+                kill: false,
+                transition: true,
+            })
+        }
+        LifecycleAction::Cancel => LifecycleDecision::Finalize(FinalizePlan {
+            outcome: RunOutcome::Cancelled,
+            kill: facts.started,
+            transition: false,
+        }),
+        LifecycleAction::Timeout => {
+            if !facts.started {
+                LifecycleDecision::Reject(LifecycleRejection::TimeoutBeforeStart)
+            } else if facts.card_status == CardStatus::Awaiting {
+                LifecycleDecision::Reject(LifecycleRejection::TimeoutPaused)
+            } else {
+                LifecycleDecision::Finalize(FinalizePlan {
+                    outcome: RunOutcome::Fail,
+                    kill: true,
+                    transition: true,
+                })
+            }
+        }
+        LifecycleAction::PaneExited => {
+            if facts.supplied_run_id.is_none() {
+                return LifecycleDecision::Reject(LifecycleRejection::PaneExitRequiresRunId);
+            }
+            if facts.harness == LifecycleHarness::BuiltIn {
+                LifecycleDecision::Reject(LifecycleRejection::PaneExitBuiltin)
+            } else {
+                LifecycleDecision::Finalize(FinalizePlan {
+                    outcome: RunOutcome::Fail,
+                    kill: false,
+                    transition: false,
+                })
+            }
+        }
+    }
+}
+
+/// Result of applying the automatic-hop guard to a transition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutoHopDecision {
+    Continue { hop: u32 },
+    Stop { message: String },
+    Reset,
+}
+
+/// Decide the next automatic-hop state without mutating scheduler state.
+pub fn decide_auto_hop(current_hops: u32, transition: &TransitionDecision) -> AutoHopDecision {
+    if !transition.enqueue {
+        return AutoHopDecision::Reset;
+    }
+    let hop = current_hops.saturating_add(1);
+    if hop > MAX_AUTO_HOPS {
+        AutoHopDecision::Stop {
+            message: format!(
+                "auto-chain limit ({MAX_AUTO_HOPS}) reached without human action; stopping"
+            ),
+        }
+    } else {
+        AutoHopDecision::Continue { hop }
+    }
+}
+
+/// Whether the stored harness conversation is safe to resume. A session id is
+/// evidence only when a started run for that id posted the run-scoped agent
+/// comment; a row or an arbitrary comment alone is not proof that the harness
+/// conversation exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumabilityDecision {
+    Resumable,
+    Fresh,
+}
+
+pub fn decide_resumability(
+    session_id: Option<&str>,
+    runs: &[Run],
+    comments: &[Comment],
+) -> ResumabilityDecision {
+    let Some(session_id) = session_id else {
+        return ResumabilityDecision::Fresh;
+    };
+    let resumable = runs.iter().any(|run| {
+        run.started_at.is_some()
+            && run.session_id.as_deref() == Some(session_id)
+            && comments
+                .iter()
+                .any(|comment| comment.author == format!("agent:{}", run.id))
+    });
+    if resumable {
+        ResumabilityDecision::Resumable
+    } else {
+        ResumabilityDecision::Fresh
     }
 }
 

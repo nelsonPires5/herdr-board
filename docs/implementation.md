@@ -62,7 +62,10 @@ The completion race is harness-specific: `RunDoneParams.run_id` is optional so m
 completion remains compatible, while the CLI forwards `BOARD_RUN_ID` when present. An immediate
 configured-harness `board done` may finalize only its exact queued run before runner registration;
 a queued built-in Pi/Claude run is rejected until its managed pane is registered. A supplied
-mismatched id is rejected, preventing stale children from completing replacement runs.
+mismatched id is rejected, preventing stale children from completing replacement runs. The
+Herdr-neutral eligibility and finalizer policy is centralized in
+`board_core::engine::{LifecycleDecision, FinalizePlan}`; boardd remains responsible for gathering
+facts and applying DB/process/events effects.
 
 ## Conventions
 
@@ -79,7 +82,11 @@ A (core+scaffold) → B (herdr client) ∥ C (TUI) → D (daemon+CLI+integration
 
 ## Testing per phase
 
-- A: unit tests: engine transitions (ok/fail/no-target/manual entry), prompt assembly (with/without comments, truncation to last 20), adapter argv building (session mint/resume/fork; bypass refusal; overrides), migrations idempotent, config parsing.
+- A: unit tests: engine transitions (ok/fail/no-target/manual entry), lifecycle decisions
+  (run identity, queued harness eligibility, cancel/timeout/pane-exit plans, auto-hop guard,
+  resumability evidence), prompt assembly (with/without comments, truncation to last 20), adapter
+  argv building (session mint/resume/fork; bypass refusal; overrides), migrations idempotent,
+  config parsing.
 - B: unit: envelope encode/decode. Integration (ignored-by-default `#[ignore]` + run when HERDR_SOCK exists): read-only calls `session.snapshot`, `workspace.list` against live herdr.
 - C: insta snapshots via `ratatui::backend::TestBackend` + synthetic key events + FakeBoardClient: empty board (Todo only + hints), board with example pipeline & cards (status glyphs), new-card modal, column form, card detail w/ comments+runs, `?` help, delete-column prompt, move flow.
 - D: integration test (no herdr): start daemon on temp socket + temp DB with LocalSpawner + fake harness script → create card → move to auto column → fake agent comments + done → assert auto-transition, comments, run rows, statuses; timeout path; cancel path; queue serialization (two cards same space key run serially).

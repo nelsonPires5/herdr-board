@@ -18,10 +18,6 @@ use crate::session::SessionRegistry;
 use crate::settings::DaemonSettings;
 use crate::store::Store;
 
-/// Max consecutive auto-transitions for one card without a human action before
-/// the daemon stops the chain (cycle protection).
-pub const MAX_AUTO_HOPS: u32 = 8;
-
 /// In-memory bookkeeping for a started run.
 pub struct ActiveRun {
     pub card_id: i64,

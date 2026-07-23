@@ -2,15 +2,17 @@
 
 use board_core::config::{Config, HarnessDef};
 use board_core::engine::{
-    decide_entry, decide_signal, decide_transition, format_duration, validate_card_archive,
-    validate_card_edit, validate_card_space, validate_column_delete,
-    validate_column_permission_override, AgentSignal, SignalDecision, ValidationError,
+    decide_auto_hop, decide_entry, decide_lifecycle, decide_resumability, decide_signal,
+    decide_transition, format_duration, validate_card_archive, validate_card_edit,
+    validate_card_space, validate_column_delete, validate_column_permission_override, AgentSignal,
+    AutoHopDecision, FinalizePlan, LifecycleAction, LifecycleDecision, LifecycleFacts,
+    LifecycleHarness, LifecycleRejection, ResumabilityDecision, SignalDecision, ValidationError,
 };
 use board_core::engine::{
     merge_card_update, merge_column_update, validate_card_settings, validate_column_settings,
     validate_column_update, validate_effective_settings, PermissionContext,
 };
-use board_core::model::{Card, Column};
+use board_core::model::{Card, Column, Comment, Run};
 use board_core::protocol::{
     AwaitingReason, CardStatus, CardUpdateParams, ColumnUpdateParams, Effort, Patch, RunOutcome,
     SpaceKind, Trigger,
@@ -455,4 +457,231 @@ fn duration_formatting() {
     assert_eq!(format_duration(Some(42)), "42s");
     assert_eq!(format_duration(Some(252)), "4m12s");
     assert_eq!(format_duration(Some(3720)), "1h2m");
+}
+
+fn lifecycle_facts(
+    started: bool,
+    harness: LifecycleHarness,
+    supplied_run_id: Option<i64>,
+) -> LifecycleFacts {
+    LifecycleFacts {
+        open_run_id: Some(42),
+        supplied_run_id,
+        started,
+        harness,
+        card_status: if started {
+            CardStatus::Running
+        } else {
+            CardStatus::Queued
+        },
+    }
+}
+
+#[test]
+fn lifecycle_rejects_stale_and_missing_supplied_run_ids() {
+    let stale = LifecycleFacts {
+        open_run_id: Some(42),
+        supplied_run_id: Some(41),
+        started: true,
+        harness: LifecycleHarness::Configured,
+        card_status: CardStatus::Running,
+    };
+    assert_eq!(
+        decide_lifecycle(
+            &stale,
+            LifecycleAction::Done {
+                outcome: RunOutcome::Ok
+            }
+        ),
+        LifecycleDecision::Reject(LifecycleRejection::SuppliedRunIdMismatch {
+            expected: 42,
+            supplied: 41,
+        })
+    );
+
+    let queued_without_id = lifecycle_facts(false, LifecycleHarness::Configured, None);
+    assert_eq!(
+        decide_lifecycle(
+            &queued_without_id,
+            LifecycleAction::Done {
+                outcome: RunOutcome::Ok
+            }
+        ),
+        LifecycleDecision::Reject(LifecycleRejection::QueuedCompletionRequiresRunId)
+    );
+}
+
+#[test]
+fn lifecycle_allows_only_exact_queued_configured_completion() {
+    let configured = lifecycle_facts(false, LifecycleHarness::Configured, Some(42));
+    assert_eq!(
+        decide_lifecycle(
+            &configured,
+            LifecycleAction::Done {
+                outcome: RunOutcome::Ok
+            }
+        ),
+        LifecycleDecision::Finalize(FinalizePlan {
+            outcome: RunOutcome::Ok,
+            kill: false,
+            transition: true,
+        })
+    );
+
+    let builtin = lifecycle_facts(false, LifecycleHarness::BuiltIn, Some(42));
+    assert_eq!(
+        decide_lifecycle(
+            &builtin,
+            LifecycleAction::Done {
+                outcome: RunOutcome::Ok
+            }
+        ),
+        LifecycleDecision::Reject(LifecycleRejection::QueuedBuiltinCompletion)
+    );
+}
+
+#[test]
+fn lifecycle_plans_cancel_timeout_and_pane_exit_without_herdr_types() {
+    let started = lifecycle_facts(true, LifecycleHarness::Configured, Some(42));
+    assert_eq!(
+        decide_lifecycle(&started, LifecycleAction::Cancel),
+        LifecycleDecision::Finalize(FinalizePlan {
+            outcome: RunOutcome::Cancelled,
+            kill: true,
+            transition: false,
+        })
+    );
+    assert_eq!(
+        decide_lifecycle(&started, LifecycleAction::Timeout),
+        LifecycleDecision::Finalize(FinalizePlan {
+            outcome: RunOutcome::Fail,
+            kill: true,
+            transition: true,
+        })
+    );
+    assert_eq!(
+        decide_lifecycle(&started, LifecycleAction::PaneExited),
+        LifecycleDecision::Finalize(FinalizePlan {
+            outcome: RunOutcome::Fail,
+            kill: false,
+            transition: false,
+        })
+    );
+    let awaiting = LifecycleFacts {
+        card_status: CardStatus::Awaiting,
+        ..started
+    };
+    assert_eq!(
+        decide_lifecycle(&awaiting, LifecycleAction::Timeout),
+        LifecycleDecision::Reject(LifecycleRejection::TimeoutPaused)
+    );
+
+    let builtin = lifecycle_facts(true, LifecycleHarness::BuiltIn, Some(42));
+    assert_eq!(
+        decide_lifecycle(&builtin, LifecycleAction::PaneExited),
+        LifecycleDecision::Reject(LifecycleRejection::PaneExitBuiltin)
+    );
+}
+
+#[test]
+fn lifecycle_rejects_timeout_before_start_and_no_open_run() {
+    let queued = lifecycle_facts(false, LifecycleHarness::Configured, Some(42));
+    assert_eq!(
+        decide_lifecycle(&queued, LifecycleAction::Timeout),
+        LifecycleDecision::Reject(LifecycleRejection::TimeoutBeforeStart)
+    );
+    let missing = LifecycleFacts {
+        open_run_id: None,
+        supplied_run_id: None,
+        started: false,
+        harness: LifecycleHarness::Configured,
+        card_status: CardStatus::Queued,
+    };
+    assert_eq!(
+        decide_lifecycle(&missing, LifecycleAction::Cancel),
+        LifecycleDecision::Reject(LifecycleRejection::NoOpenRun)
+    );
+}
+
+#[test]
+fn auto_hop_policy_preserves_target_and_stops_at_limit() {
+    let cols = pipeline();
+    let transition = decide_transition(&cols[1], &cols, RunOutcome::Ok, Some(1));
+    assert_eq!(
+        decide_auto_hop(7, &transition),
+        AutoHopDecision::Continue { hop: 8 }
+    );
+    assert_eq!(
+        decide_auto_hop(8, &transition),
+        AutoHopDecision::Stop {
+            message: "auto-chain limit (8) reached without human action; stopping".into()
+        }
+    );
+
+    let terminal = decide_transition(&cols[0], &cols, RunOutcome::Ok, Some(1));
+    assert_eq!(decide_auto_hop(8, &terminal), AutoHopDecision::Reset);
+}
+
+fn run_with_session(id: i64, started: bool, session_id: Option<&str>) -> Run {
+    Run {
+        id,
+        card_id: 7,
+        column_id: 1,
+        harness: "pi".into(),
+        argv_json: "[]".into(),
+        prompt_snapshot: "prompt".into(),
+        system_prompt_snapshot: None,
+        herdr_workspace_id: None,
+        herdr_pane_id: None,
+        session_id: session_id.map(str::to_owned),
+        session: None,
+        started_at: started.then(|| "started".into()),
+        ended_at: None,
+        outcome: None,
+        result_summary: None,
+        log_path: None,
+    }
+}
+
+fn comment(author: &str) -> Comment {
+    Comment {
+        id: 1,
+        card_id: 7,
+        author: author.into(),
+        body: "finished".into(),
+        created_at: "now".into(),
+    }
+}
+
+#[test]
+fn resumability_requires_started_run_and_matching_agent_comment() {
+    let run = run_with_session(9, true, Some("session-1"));
+    assert_eq!(
+        decide_resumability(
+            Some("session-1"),
+            std::slice::from_ref(&run),
+            &[comment("agent:9")],
+        ),
+        ResumabilityDecision::Resumable
+    );
+    for (runs, comments) in [
+        (
+            vec![run_with_session(9, false, Some("session-1"))],
+            vec![comment("agent:9")],
+        ),
+        (
+            vec![run_with_session(9, true, Some("other"))],
+            vec![comment("agent:9")],
+        ),
+        (vec![run], vec![comment("agent:8")]),
+    ] {
+        assert_eq!(
+            decide_resumability(Some("session-1"), &runs, &comments),
+            ResumabilityDecision::Fresh
+        );
+    }
+    assert_eq!(
+        decide_resumability(None, &[], &[]),
+        ResumabilityDecision::Fresh
+    );
 }

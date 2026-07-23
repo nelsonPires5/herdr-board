@@ -8,7 +8,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use board_core::capability::{run_pane_name, run_pane_name_unique};
-use board_core::engine::{decide_transition, validate_effective_settings, TransitionDecision};
+use board_core::engine::{
+    decide_auto_hop, decide_resumability, decide_transition, validate_effective_settings,
+    AutoHopDecision, ResumabilityDecision, TransitionDecision,
+};
 use board_core::harness::{
     build_invocation, is_builtin_harness, plan_session, HarnessError, SessionPlan,
 };
@@ -20,7 +23,7 @@ use board_core::{Error, Result};
 use board_herdr::{HerdrClient, NotificationSound, WorkspaceCreateParams, WorkspaceInfo};
 use uuid::Uuid;
 
-use crate::state::{ActiveRun, Daemon, MAX_AUTO_HOPS};
+use crate::state::{ActiveRun, Daemon};
 use crate::store::space_key_str;
 
 const HERDR_PROTOCOL: u32 = 17;
@@ -104,19 +107,16 @@ fn enqueue_run_inner(
         .get_column(column_id)?
         .ok_or_else(|| Error::NotFound(format!("column {column_id}")))?;
     let comments = db.list_comments(card_id)?;
-    // Resume/fork only sessions PROVEN to exist on the harness side — claude
-    // exits with "no conversation found" otherwise. A spawned pane is not
-    // proof; an `agent:<run_id>` comment can only be posted from a live run.
-    let session_used = match &card.session_id {
-        Some(sid) => db.list_runs(card_id)?.iter().any(|r| {
-            r.started_at.is_some()
-                && r.session_id.as_deref() == Some(sid)
-                && comments
-                    .iter()
-                    .any(|comment| comment.author == format!("agent:{}", r.id))
-        }),
-        None => false,
-    };
+    // Resume/fork only sessions proven to exist on the harness side. The pure
+    // engine owns the evidence rule; the daemon only supplies DB facts.
+    let session_used = matches!(
+        decide_resumability(
+            card.session_id.as_deref(),
+            &db.list_runs(card_id)?,
+            &comments
+        ),
+        ResumabilityDecision::Resumable
+    );
     // Revalidate the merged effective state at the enqueue boundary. This
     // protects dispatch from legacy rows and from a column/card changing after
     // an earlier client-side capability lookup.
@@ -755,20 +755,21 @@ fn apply_transition(
     let target = cols.iter().find(|c| c.id == tid);
 
     if dec.enqueue {
-        let hops = {
-            let mut s = d.sched.lock().unwrap();
-            let h = s.chain_hops.entry(card_id).or_insert(0);
-            *h += 1;
-            *h
+        let hop_decision = {
+            let s = d.sched.lock().unwrap();
+            let current = s.chain_hops.get(&card_id).copied().unwrap_or(0);
+            decide_auto_hop(current, dec)
         };
-        if hops > MAX_AUTO_HOPS {
-            d.sched.lock().unwrap().chain_hops.remove(&card_id);
-            let msg = format!(
-                "auto-chain limit ({MAX_AUTO_HOPS}) reached without human action; stopping"
-            );
-            d.store.lock().add_comment(card_id, "system", &msg)?;
-            return d.store.lock().set_card_status(card_id, CardStatus::Failed);
-        }
+        let hops = match hop_decision {
+            AutoHopDecision::Continue { hop } => hop,
+            AutoHopDecision::Stop { message } => {
+                d.sched.lock().unwrap().chain_hops.remove(&card_id);
+                d.store.lock().add_comment(card_id, "system", &message)?;
+                return d.store.lock().set_card_status(card_id, CardStatus::Failed);
+            }
+            AutoHopDecision::Reset => unreachable!("an enqueued transition cannot reset hops"),
+        };
+        d.sched.lock().unwrap().chain_hops.insert(card_id, hops);
         enqueue_run_inner(
             d,
             card_id,
