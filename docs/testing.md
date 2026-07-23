@@ -29,7 +29,7 @@ do no I/O beyond in-memory SQLite and never touch herdr.
 | `crates/board-core/tests/engine.rs` | The **pure column engine** — `decide_transition`, `decide_entry`, `decide_signal` (agent signals → `awaiting`/`running`/`blocked` decisions), Herdr-neutral `decide_lifecycle`/`FinalizePlan` (identity and queued-harness eligibility plus cancel/timeout/pane-exit policy), `decide_auto_hop`, `decide_resumability`, `validate_*`, `format_duration`. No wall clock: elapsed time is passed as an explicit seconds argument (e.g. `decide_transition(.., Some(252))` → `"4m12s"`), so results are deterministic. |
 | `crates/board-core/tests/db_atomic.rs` | File-backed abort-trigger rollback/reopen checks for enqueue, promotion, finalization comments/transitions, and auto-hop; a subprocess hard-exit fault between an internal statement and commit with zero returned effect/event; schema-v8 duplicate rejection and exact partial-index SQL; schema-v9 fresh/v8/legacy timeout derivation-once, unlimited/ended exclusions, and transactional idempotent/saturating pause-resume. Daemon tests additionally inject comment and next-enqueue failures, reopen the DB to compare the exact prior run/card/comments, assert no pre-commit kill/event/wake, cover the board-done/cancel/timeout/pane-exit duplicate-and-stale winner matrix, and record the exact post-commit effect order. |
 | `crates/board-core/tests/db.rs` | SQLite upgrade fixtures for every supported source version v1–v7 plus fresh creation (v5 scoped boards + preserved Global; v6 status/`awaiting_reason`; v7 nullable `runs.system_prompt_snapshot`; v8 one-open-run invariant), board-boundary invariants, seed/CRUD, position compaction, FIFO queued-runs, and latest pane lookup. |
-| `crates/board-core/tests/{capability,config,prompt,harness,protocol,fake_client}.rs` | Harness catalog + pane-name slug rules; config defaults/parsing; prompt assembly + effective-settings; harness argv/session planning; protocol serde round-trips; the in-memory `FakeBoardClient`. |
+| `crates/board-core/tests/{capability,config,prompt,harness,protocol,fake_client}.rs` | Harness catalog + pane-name slug rules; typed `RootConfig` board/daemon defaults and fatal parsing; prompt assembly + effective-settings; harness argv/session planning; protocol serde round-trips; the in-memory `FakeBoardClient`. |
 | `crates/board-herdr/tests/{events,socket}.rs` | herdr event decoding; socket client against an **in-process fake herdr server** on a temp unix socket (`serve_calls`/`serve_stream`), covering one-request-per-connection, bounded hanging peers/subscription acknowledgements, exact response IDs and matching errors, buffered pre-ack events, timeout reset, error mapping, and mid-call disconnect. |
 | `board-daemon::supervisor` and watcher tests | Scripted resolver/runtime probes enforce conservative restart classification: unresolved sessions and runtime timeout/malformed/panic failures are `Unknown`, only a successful missing-pane snapshot is `Gone`, and `Alive` adoption is revalidated and idempotent. The always-on watcher scopes streams and duplicate pane IDs by socket, subscribes before snapshot reconciliation, and treats duplicate terminal observations idempotently. |
 
@@ -42,6 +42,13 @@ effective settings at enqueue time; daemon rejection tests assert no partial row
 scenario 18 covers the nullable and merged-validation wiring.
 
 Inject clocks and paths; never sleep or read the wall clock in a unit test.
+
+Configuration tests cover the missing-file and missing-section defaults, typed
+spawner and daemon values, malformed TOML/type errors, and the fact that an
+existing malformed file is never replaced by defaults. Daemon settings tests
+use an injected environment lookup to prove overrides win over TOML without
+mutating process-global environment state; the daemon startup path parses the
+shared root once and applies those overrides afterward.
 
 ### 2. Daemon + CLI integration (real boardd socket, no herdr)
 

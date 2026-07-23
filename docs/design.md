@@ -39,6 +39,22 @@ Separation card ↔ run is deliberate (vibe-kanban converged on task/attempt/exe
 - **`board` CLI** subcommands hit the boardd socket — never SQLite directly (single-writer rule).
 - boardd holds a persistent connection to herdr's socket for `events.subscribe`; fallback is polling `herdr api snapshot`.
 
+### Root configuration and startup
+
+`board-core::config::RootConfig` is the typed representation of the complete
+`config.toml`: board fields remain at the document root for compatibility,
+while daemon runtime knobs live under `[daemon]`. `RootConfig::load` reads the
+resolved path once; a missing file or omitted section yields defaults. An
+existing file is not optional: malformed TOML, type errors, and invalid enum
+values (such as an unknown `spawner`) return `Error::Config`.
+
+At the daemon edge, `RootConfig` is parsed once, then `DaemonSettings` applies
+injected process-environment overrides (`BOARD_SPAWNER`,
+`BOARD_TIMEOUT_UNIT_SECS`, `BOARD_LOCAL_POLL_MS`, and `BOARD_TICK_MS`) with
+environment taking precedence. There is no second best-effort TOML parser and
+no `unwrap_or_default` fallback, so board and daemon settings cannot disagree
+about whether the document is valid.
+
 ### Herdr compatibility and launch boundary
 
 The public boardd socket protocol remains **v1**. That is independent of the upstream Herdr socket

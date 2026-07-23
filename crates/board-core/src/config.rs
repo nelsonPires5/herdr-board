@@ -14,8 +14,56 @@ fn default_max_concurrent() -> usize {
 fn default_idle_grace_seconds() -> u64 {
     90
 }
+fn default_timeout_unit_secs() -> u64 {
+    60
+}
+fn default_local_poll_ms() -> u64 {
+    2000
+}
+fn default_tick_ms() -> u64 {
+    1000
+}
 
-/// Daemon configuration.
+/// The kind of process spawner used by the daemon.
+///
+/// This lives in `board-core` because it is part of the on-disk configuration,
+/// rather than a daemon implementation detail. Keeping it typed means a bad
+/// value in `config.toml` is reported instead of silently falling back.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SpawnerKind {
+    /// Launch agents as herdr panes (the production default).
+    #[default]
+    Herdr,
+    /// Launch agents as plain child processes.
+    Local,
+}
+
+/// Settings in the root `[daemon]` table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonConfig {
+    #[serde(default)]
+    pub spawner: SpawnerKind,
+    #[serde(default = "default_timeout_unit_secs")]
+    pub timeout_unit_secs: u64,
+    #[serde(default = "default_local_poll_ms")]
+    pub local_poll_ms: u64,
+    #[serde(default = "default_tick_ms")]
+    pub tick_ms: u64,
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            spawner: SpawnerKind::default(),
+            timeout_unit_secs: default_timeout_unit_secs(),
+            local_poll_ms: default_local_poll_ms(),
+            tick_ms: default_tick_ms(),
+        }
+    }
+}
+
+/// Board configuration (the top-level fields and `[harness.*]` tables).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     /// Global cap on concurrent runs across all spaces.
@@ -66,22 +114,63 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Parse config from a TOML string.
+    /// Parse a TOML document and return its board portion.
+    ///
+    /// The complete document is still validated, including `[daemon]`, in the
+    /// same serde pass used by [`RootConfig::from_toml`]. This projection is
+    /// retained for callers that only need board settings.
     pub fn from_toml(s: &str) -> Result<Config> {
-        toml::from_str(s).map_err(|e| Error::Config(e.to_string()))
+        Ok(RootConfig::from_toml(s)?.board)
     }
 
     /// Load from `path`; a missing file returns defaults.
     pub fn load_from(path: &Path) -> Result<Config> {
+        Ok(RootConfig::load_from(path)?.board)
+    }
+
+    /// Load from the resolved config path (env override then XDG).
+    pub fn load() -> Result<Config> {
+        Ok(RootConfig::load()?.board)
+    }
+}
+
+/// The complete configuration document.
+///
+/// Board settings intentionally remain at the TOML document root for
+/// backwards compatibility; daemon settings occupy `[daemon]`. The flatten is
+/// important: it lets one serde pass validate board, harness, and daemon
+/// values together.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RootConfig {
+    #[serde(flatten)]
+    pub board: Config,
+    #[serde(default)]
+    pub daemon: DaemonConfig,
+}
+
+impl RootConfig {
+    /// Parse the complete configuration document from TOML.
+    pub fn from_toml(s: &str) -> Result<Self> {
+        toml::from_str(s).map_err(|e| Error::Config(e.to_string()))
+    }
+
+    /// Load the complete document from `path`; a missing file returns all
+    /// defaults. Existing files are never treated as optional: malformed TOML
+    /// and type errors are returned as [`Error::Config`].
+    pub fn load_from(path: &Path) -> Result<Self> {
         match std::fs::read_to_string(path) {
-            Ok(s) => Config::from_toml(&s),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+            Ok(s) => Self::from_toml(&s),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(Error::Io(e)),
         }
     }
 
     /// Load from the resolved config path (env override then XDG).
-    pub fn load() -> Result<Config> {
-        Config::load_from(&crate::paths::config_path())
+    pub fn load() -> Result<Self> {
+        Self::load_from(&crate::paths::config_path())
     }
 }
+
+/// Backwards-compatible name for callers that refer to the board section as a
+/// board config.
+pub type BoardConfig = Config;

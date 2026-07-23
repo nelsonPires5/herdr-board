@@ -20,6 +20,17 @@ Ownership is strict: an agent only edits its crate(s) + may append to `[workspac
 in root Cargo.toml. Never edit another crate. Phase A creates all five crates compiling
 (stubs for B/C/D).
 
+## Configuration boundary
+
+`board-core::config::RootConfig` owns the complete typed TOML document. Board
+settings stay at the root for compatibility; daemon settings are the typed
+`[daemon]` table (`SpawnerKind`, timeout-unit, and polling/tick defaults).
+`RootConfig::load` is the only file parse at daemon startup. Missing files and
+sections use defaults, but malformed existing files are fatal `Error::Config`
+errors. `board-daemon` applies injected environment overrides after parsing,
+with environment values taking precedence, and does not run a second
+best-effort parser or substitute defaults on failure.
+
 ## Shared dependencies (workspace-pinned by Phase A)
 
 serde, serde_json, rusqlite (bundled), uuid (v4), clap (derive), anyhow, thiserror,

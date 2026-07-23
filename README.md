@@ -279,6 +279,9 @@ idle_grace_seconds = 90    # idle without board done before the card is parked i
 
 [daemon]
 spawner = "herdr"          # herdr = agent panes (default); local = child processes
+timeout_unit_secs = 60      # seconds per column timeout_minutes unit
+tick_ms = 1000              # timeout/idle watcher interval
+local_poll_ms = 2000        # local-spawner liveness interval
 
 [harness.myharness]
 argv = ["mytool", "--model", "{model}"]
@@ -286,6 +289,12 @@ argv = ["mytool", "--model", "{model}"]
 
 Custom harness prompts are delivered through `$BOARD_PROMPT`. The placeholders `{model}`, `{effort}`,
 and `{permission_mode}` are available in `argv`.
+
+The daemon parses the complete document once, including `[daemon]`, into typed settings. A missing
+file or omitted section uses the defaults shown above. An existing file with malformed TOML or an
+invalid typed value (including an unknown `spawner`) is an error: the daemon does not silently fall
+back to defaults. Environment overrides are applied after parsing and take precedence; malformed
+override values also prevent daemon startup.
 
 ### Environment variables
 

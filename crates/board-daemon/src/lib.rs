@@ -22,14 +22,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use board_core::config::Config;
+use board_core::config::{Config, RootConfig};
 use board_core::db::Db;
 use board_core::paths;
 use board_core::spawn::{SpawnHandle, Spawner};
 use board_herdr::HerdrClient;
 use tokio::sync::{broadcast, mpsc, watch};
 
-use crate::settings::{DaemonSettings, SpawnerKind};
+use crate::settings::{DaemonSettings, ProcessEnv, SpawnerKind};
 use crate::spawner::{HerdrSpawner, LocalSpawner};
 use crate::state::Daemon;
 use crate::store::Store;
@@ -103,14 +103,17 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for FileWriter {
 }
 
 async fn async_main(db_path: PathBuf, socket_path: PathBuf) -> anyhow::Result<()> {
-    let mut config = Config::load().unwrap_or_default();
+    // Parse the root document exactly once. In particular, do not let the
+    // daemon settings' legacy parser turn malformed TOML into defaults.
+    let root = RootConfig::load()?;
+    let settings = DaemonSettings::from_root(&root, &ProcessEnv)?;
+    let mut config: Config = root.board;
     // Resolve the Pi agent dir for live model discovery unless the user pinned
     // it in config.toml. Tests construct Config directly (pi_agent_dir stays
     // None), so this never runs for them and the pi catalog stays static.
     if config.pi_agent_dir.is_none() {
         config.pi_agent_dir = board_core::pi_catalog::default_agent_dir();
     }
-    let settings = DaemonSettings::load(&paths::config_path());
     tracing::info!(
         "spawner={:?} max_concurrent={}",
         settings.spawner,
