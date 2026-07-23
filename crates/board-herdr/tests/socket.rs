@@ -488,6 +488,93 @@ fn event_stream_yields_events_then_ends() {
     assert!(matches!(collected[1], HerdrEvent::PaneExited { .. }));
 }
 
+#[test]
+fn poll_event_returns_bounded_on_partial_line_and_preserves_bytes() {
+    // Peer writes a partial event line (no newline) *after* the handshake
+    // completes, then stalls.  poll_event must return Ok(None) within
+    // bounded time and keep the pending bytes so a subsequent poll_event
+    // can deliver the completed event.
+    //
+    // RED (current code): poll_event hangs because BufRead::read_line
+    //      blocks with the sentinel read-timeout (~136 years) waiting for
+    //      the newline. The test hangs → killed by runner timeout.
+    // GREEN (after fix): poll_event returns Ok(None) after the deadline
+    //      and preserves partial bytes in self.pending.
+    use std::sync::{Arc, Barrier};
+
+    // bar_partial: server has written the partial line.
+    // bar_done: test's first poll_event has returned (or hung).
+    let bar_partial = Arc::new(Barrier::new(2));
+    let bar_done = Arc::new(Barrier::new(2));
+
+    let path = serve_stream({
+        let bar_partial = Arc::clone(&bar_partial);
+        let bar_done = Arc::clone(&bar_done);
+        move |stream| {
+            let mut writer = stream.try_clone().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                return;
+            }
+            // Send ONLY the subscribe ack (no extra data).  The BufReader
+            // will consume exactly this line and leave its buffer empty.
+            writeln!(
+                writer,
+                r#"{{"id":"subscribe","result":{{"type":"subscription_started"}}}}"#
+            )
+            .unwrap();
+            // Wait for the test to connect and be ready for events.
+            bar_partial.wait();
+            // NOW write a partial event line (no newline).  This ensures
+            // the BufReader has no buffered data when the partial line
+            // arrives, so poll sees data → read_line consumes partial
+            // bytes → no newline → loops → read_line blocks.
+            let partial = r#"{"event":"pane_exited","data":{"type":"pane_exited","pane_id":"p1""#;
+            write!(writer, "{partial}").unwrap();
+            writer.flush().unwrap();
+            // Wait for the test's first poll_event to return.
+            bar_done.wait();
+            // Now finish the line.
+            writeln!(writer, r#"}}}}"#).unwrap();
+        }
+    });
+
+    let deadlines = short_deadlines();
+    let mut events =
+        HerdrEvents::connect_with_deadlines(&path, &[Subscription::pane_exited()], deadlines)
+            .unwrap();
+
+    // Let the server write the partial line.
+    bar_partial.wait();
+
+    // RED: this call hangs because poll_read_ready sees data (true),
+    // read_line consumes the partial bytes (no newline), loops, and
+    // read_line blocks forever (sentinel timeout ≈ 136 years) waiting
+    // for the newline that won't arrive until bar_done is signaled.
+    // GREEN: returns Ok(None) within ~deadlines.handshake (50ms).
+    let result = events.poll_event(deadlines.handshake);
+
+    match &result {
+        Ok(None) => {} // Good: timed out cleanly, pending bytes preserved.
+        Ok(Some(ev)) => panic!("unexpected event before line completed: {ev:?}"),
+        Err(e) => panic!("unexpected error: {e}"),
+    }
+
+    // Signal the server to finish the line.
+    bar_done.wait();
+
+    // Second poll: should now receive the completed event, proving
+    // pending bytes survived the first poll_event.
+    let result = events.poll_event(Duration::from_millis(2000));
+    match result {
+        Ok(Some(HerdrEvent::PaneExited { pane_id, .. })) => {
+            assert_eq!(pane_id, "p1", "pending bytes should be preserved");
+        }
+        other => panic!("expected PaneExited(p1), got {other:?}"),
+    }
+}
+
 fn short_deadlines() -> SocketDeadlines {
     SocketDeadlines {
         connect: Duration::from_millis(50),

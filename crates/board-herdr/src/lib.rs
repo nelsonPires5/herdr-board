@@ -19,18 +19,21 @@ mod client;
 mod envelope;
 mod error;
 mod events;
+mod params;
+mod transport;
 mod types;
 
-pub use client::{
-    default_socket_path, AgentPromptParams, AgentPromptWaitOptions, AgentStartParams,
-    AgentWaitParams, HerdrClient, PaneRenameParams, PaneSplitParams, SocketDeadlines,
-    TabCreateParams, WorkspaceCreateParams,
-};
+pub use client::HerdrClient;
 pub use envelope::{ErrorBody, Request, Response};
 pub use error::{HerdrError, Result};
 pub use events::{
     parse_event_line, watch_subscriptions, Backoff, HerdrEvent, HerdrEvents, Subscription,
 };
+pub use params::{
+    AgentPromptParams, AgentPromptWaitOptions, AgentStartParams, AgentWaitParams, PaneRenameParams,
+    PaneSplitParams, TabCreateParams, WorkspaceCreateParams,
+};
+pub use transport::{default_socket_path, SocketDeadlines};
 pub use types::{
     AgentInfo, AgentStarted, AgentStatus, Layout, LayoutPane, LayoutSplit, NotificationShown,
     NotificationSound, PaneInfo, PaneReadResult, Pong, ReadSource, Rect, SessionSnapshot,
