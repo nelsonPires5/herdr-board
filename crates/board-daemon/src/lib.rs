@@ -5,6 +5,7 @@
 //! spawner) to launch agents.
 
 mod dispatch;
+mod herdr_snapshot;
 mod ops;
 mod server;
 mod session;
@@ -31,8 +32,11 @@ use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::settings::{DaemonSettings, ProcessEnv, SpawnerKind};
 use crate::spawner::{HerdrSpawner, LocalSpawner};
-use crate::state::Daemon;
+use crate::state::{ActiveRun, Daemon};
 use crate::store::Store;
+
+/// The herdr protocol version the daemon requires.
+pub(crate) const HERDR_PROTOCOL: u32 = 17;
 
 /// Run the daemon. `foreground` mirrors logs to stderr and is used by
 /// `board daemon --foreground`. Returns `Ok(())` immediately if another daemon
@@ -298,27 +302,25 @@ async fn adopt_runs(d: &Arc<Daemon>) {
             let adopted_at = std::time::Instant::now();
             let wall_now_ms = d.wall_now_ms();
             // v9 deadlines are authoritative: restart never grants a fresh budget.
-            let deadline = run.timeout_deadline_at_ms.and_then(|ms| {
-                adopted_at.checked_add(std::time::Duration::from_millis(
-                    ms.saturating_sub(wall_now_ms).max(0) as u64,
-                ))
-            });
+            let deadline = ActiveRun::reconstruct_deadline(
+                adopted_at,
+                wall_now_ms,
+                run.timeout_deadline_at_ms,
+            );
             let mut sched = d.sched.lock().unwrap();
             sched.active.insert(
                 run.id,
-                crate::state::ActiveRun {
+                ActiveRun {
                     card_id: card.id,
                     handle,
                     started: adopted_at,
                     timeout_deadline: deadline,
                     idle_since: None,
-                    awaiting_since: run.timeout_paused_at_ms.map(|paused| {
-                        adopted_at
-                            .checked_sub(std::time::Duration::from_millis(
-                                wall_now_ms.saturating_sub(paused).max(0) as u64,
-                            ))
-                            .unwrap_or(adopted_at)
-                    }),
+                    awaiting_since: ActiveRun::reconstruct_awaiting_since(
+                        adopted_at,
+                        wall_now_ms,
+                        run.timeout_paused_at_ms,
+                    ),
                     is_local: false,
                     pane_id: run.herdr_pane_id.clone(),
                 },

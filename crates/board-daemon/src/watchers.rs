@@ -241,15 +241,10 @@ fn apply_signal_guarded(
         // shifts the deadline by exactly the review span.
         match (card.status, dec.new_status) {
             (before, CardStatus::Awaiting) if before != CardStatus::Awaiting => {
-                active.idle_since = None;
-                active.awaiting_since = Some(applied_at);
+                active.enter_awaiting(applied_at);
             }
             (CardStatus::Awaiting, after) if after != CardStatus::Awaiting => {
-                if let Some(paused) = active.awaiting_since.take() {
-                    if let Some(deadline) = &mut active.timeout_deadline {
-                        *deadline += applied_at.saturating_duration_since(paused);
-                    }
-                }
+                active.leave_awaiting(applied_at);
             }
             _ => {}
         }
@@ -371,19 +366,7 @@ impl WatchConnector for HerdrWatchConnector {
     fn snapshot(&self, socket: &std::path::Path) -> board_herdr::Result<WatchSnapshot> {
         let mut client = HerdrClient::connect(socket)?;
         let snapshot = client.session_snapshot()?;
-        let panes = snapshot
-            .panes
-            .into_iter()
-            .map(|pane| {
-                let status = snapshot
-                    .agents
-                    .iter()
-                    .find(|agent| agent.pane_id == pane.pane_id)
-                    .map(|agent| agent.agent_status)
-                    .unwrap_or(pane.agent_status);
-                (pane.pane_id, status)
-            })
-            .collect();
+        let panes = crate::herdr_snapshot::snapshot_pane_statuses(snapshot);
         Ok(WatchSnapshot { panes })
     }
 }

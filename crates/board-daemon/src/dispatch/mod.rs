@@ -45,8 +45,6 @@ impl PreparedEnqueue {
     }
 }
 
-pub(crate) const HERDR_PROTOCOL: u32 = 17;
-
 pub(crate) fn map_harness_err(e: HarnessError) -> Error {
     match e {
         HarnessError::UnknownHarness(h) => Error::BadRequest(format!("unknown harness: {h}")),

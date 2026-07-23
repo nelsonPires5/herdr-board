@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::spawner::{RuntimeHandle, Spawner};
 use board_core::config::Config;
@@ -39,6 +39,62 @@ pub struct ActiveRun {
     pub awaiting_since: Option<Instant>,
     pub is_local: bool,
     pub pane_id: Option<String>,
+}
+
+impl ActiveRun {
+    /// Reconstruct the monotonic timeout deadline from a durable wall-clock
+    /// millisecond timestamp. Returns `None` only for an unlimited durable
+    /// deadline; an overdue deadline reconstructs as `adopted_at` so it fires
+    /// immediately instead of receiving a fresh budget.
+    #[inline]
+    pub fn reconstruct_deadline(
+        adopted_at: Instant,
+        wall_now_ms: i64,
+        deadline_at_ms: Option<i64>,
+    ) -> Option<Instant> {
+        deadline_at_ms.and_then(|ms| {
+            adopted_at.checked_add(Duration::from_millis(
+                ms.saturating_sub(wall_now_ms).max(0) as u64
+            ))
+        })
+    }
+
+    /// Reconstruct the monotonic `awaiting_since` instant from a durable
+    /// wall-clock millisecond timestamp. Saturates at `adopted_at` (the run
+    /// cannot have entered awaiting before it was adopted).
+    #[inline]
+    pub fn reconstruct_awaiting_since(
+        adopted_at: Instant,
+        wall_now_ms: i64,
+        paused_at_ms: Option<i64>,
+    ) -> Option<Instant> {
+        paused_at_ms.map(|paused| {
+            adopted_at
+                .checked_sub(Duration::from_millis(
+                    wall_now_ms.saturating_sub(paused).max(0) as u64,
+                ))
+                .unwrap_or(adopted_at)
+        })
+    }
+
+    /// Enter awaiting: disarm idle tracking and begin the timeout pause.
+    #[inline]
+    pub fn enter_awaiting(&mut self, now: Instant) {
+        self.idle_since = None;
+        self.awaiting_since = Some(now);
+    }
+
+    /// Leave awaiting: resume column timeout, shifting the deadline forward
+    /// by the time spent awaiting. A clock observation before the pause point
+    /// contributes zero via `saturating_duration_since`.
+    #[inline]
+    pub fn leave_awaiting(&mut self, now: Instant) {
+        if let Some(paused) = self.awaiting_since.take() {
+            if let Some(deadline) = &mut self.timeout_deadline {
+                *deadline += now.saturating_duration_since(paused);
+            }
+        }
+    }
 }
 
 /// In-memory scheduler state.

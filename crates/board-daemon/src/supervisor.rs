@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::spawner::RuntimeHandle;
 use board_core::engine::AgentSignal;
@@ -123,19 +123,10 @@ impl Runtime for HerdrRuntime {
         let socket = target.socket().ok_or(ProbeFailure::Transport)?;
         let mut client = HerdrClient::connect(socket).map_err(classify_herdr_error)?;
         let snapshot = client.session_snapshot().map_err(classify_herdr_error)?;
-        let panes = snapshot
-            .panes
-            .into_iter()
-            .map(|pane| {
-                let status = snapshot
-                    .agents
-                    .iter()
-                    .find(|agent| agent.pane_id == pane.pane_id)
-                    .map(|agent| agent.agent_status)
-                    .unwrap_or(pane.agent_status);
-                (pane.pane_id, status)
-            })
-            .collect();
+        let panes: Vec<(String, AgentStatus)> =
+            crate::herdr_snapshot::snapshot_pane_statuses(snapshot)
+                .into_iter()
+                .collect();
         Ok(RuntimeSnapshot { panes })
     }
 }
@@ -246,11 +237,11 @@ fn adopt_alive(
     };
     let adopted_at = clock.now();
     let wall_now_ms = clock.wall_now_ms();
-    let deadline = current_run.timeout_deadline_at_ms.and_then(|ms| {
-        adopted_at.checked_add(Duration::from_millis(
-            ms.saturating_sub(wall_now_ms).max(0) as u64
-        ))
-    });
+    let deadline = ActiveRun::reconstruct_deadline(
+        adopted_at,
+        wall_now_ms,
+        current_run.timeout_deadline_at_ms,
+    );
     let socket = match target {
         SessionTarget::Default(_) => None,
         SessionTarget::Resolved(socket) => Some(socket),
@@ -275,13 +266,11 @@ fn adopt_alive(
                 started: adopted_at,
                 timeout_deadline: deadline,
                 idle_since: None,
-                awaiting_since: current_run.timeout_paused_at_ms.map(|paused| {
-                    adopted_at
-                        .checked_sub(Duration::from_millis(
-                            wall_now_ms.saturating_sub(paused).max(0) as u64,
-                        ))
-                        .unwrap_or(adopted_at)
-                }),
+                awaiting_since: ActiveRun::reconstruct_awaiting_since(
+                    adopted_at,
+                    wall_now_ms,
+                    current_run.timeout_paused_at_ms,
+                ),
                 is_local: false,
                 pane_id: current_run.herdr_pane_id.clone(),
             },

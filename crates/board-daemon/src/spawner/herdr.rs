@@ -20,9 +20,10 @@ use super::placement::{
     RetryablePlacementRace, ERR_PANE_NOT_FOUND,
 };
 use super::{
-    HerdrLaunchPlan, RuntimeHandle, Spawner, AGENT_START_TIMEOUT_MS, HERDR_PROTOCOL,
-    IMMEDIATE_READINESS_PROBES, READINESS_BACKOFF, READINESS_TIMEOUT,
+    HerdrLaunchPlan, RuntimeHandle, Spawner, AGENT_START_TIMEOUT_MS, IMMEDIATE_READINESS_PROBES,
+    READINESS_BACKOFF, READINESS_TIMEOUT,
 };
+use crate::HERDR_PROTOCOL;
 
 // ---------------------------------------------------------------------------
 // PaneRunner bridge

@@ -1,7 +1,7 @@
 use board_core::protocol::SpaceKind;
 use board_herdr::{HerdrClient, WorkspaceCreateParams, WorkspaceInfo};
 
-use crate::dispatch::HERDR_PROTOCOL;
+use crate::HERDR_PROTOCOL;
 
 /// Resolve a card's space within its session to `(workspace_id, cwd)`.
 ///

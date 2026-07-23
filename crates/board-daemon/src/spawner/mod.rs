@@ -67,7 +67,6 @@ pub trait Spawner: Send + Sync {
     fn is_alive(&self, h: &RuntimeHandle) -> anyhow::Result<bool>;
 }
 
-pub(crate) const HERDR_PROTOCOL: u32 = 17;
 pub(crate) const AGENT_START_TIMEOUT_MS: u64 = 30_000;
 pub(crate) const READINESS_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const READINESS_BACKOFF: Duration = Duration::from_millis(100);
