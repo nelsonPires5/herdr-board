@@ -20,6 +20,8 @@ e2e_isolate
 # isolated config BEFORE the daemon starts (it reads config once at startup).
 cat >> "$HERDR_BOARD_CONFIG" <<EOF
 [harness.fake-ov]
+efforts = ["low"]
+permission_modes = ["auto"]
 argv = ["env", "BOARD_BIN=$BOARD_BIN", "bash", "$E2E_FAKE_AGENT", "{model}", "{effort}", "{permission_mode}"]
 EOF
 
