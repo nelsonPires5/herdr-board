@@ -47,7 +47,7 @@ card_json="$("$BOARD_BIN" card new --title "Awaiting Card" \
   --space-kind workspace --space-ref "$WS_ID" --json)"
 CARD_ID="$(printf '%s' "$card_json" | jget id)" || fail "could not parse card id"
 mut "board move $CARD_ID 'Await Execute' -> agent.start in $WS_ID"
-"$BOARD_BIN" move "$CARD_ID" "Await Execute" --json >/dev/null
+e2e_board_herdr_mutate -- move "$CARD_ID" "Await Execute" --json >/dev/null
 
 step "Wait for the run to start and retain its live pane"
 PANE_ID=""
@@ -60,7 +60,7 @@ for _ in $(seq 1 80); do
   fi
   sleep .1
 done
-[ -n "$PANE_ID" ] || { tail -50 "$E2E_TMP/daemon.log"; fail "run never recorded a live pane"; }
+[ -n "$PANE_ID" ] || { fail "run never recorded a live pane"; }
 monotonic_ms() { python3 -c 'import time; print(time.monotonic_ns() // 1_000_000)'; }
 RUN_STARTED_OBSERVED_MS="$(monotonic_ms)"
 ok "run started in live pane $PANE_ID"
@@ -81,8 +81,7 @@ SEQ="$(( $(date +%s) * 1000 ))"
 report_agent() {
   local state="$1"
   SEQ=$((SEQ + 1))
-  mut "pane report-agent $PANE_ID --source herdr:pi --agent pi --state $state --seq $SEQ"
-  "$HERDR_BIN" pane report-agent "$PANE_ID" \
+  e2e_herdr_mutate -- pane report-agent "$PANE_ID" \
     --source herdr:pi --agent pi --state "$state" --seq "$SEQ" >/dev/null
 }
 
@@ -111,16 +110,16 @@ AWAITING_OBSERVED_MS="$(monotonic_ms)"
 import json, sys
 x = json.load(sys.stdin)
 card, run = x["card"], x["runs"][-1]
-assert card["status"] == "awaiting", card
-assert card["awaiting_reason"] == "agent_done", card
-assert run["outcome"] is None, run
-assert run["ended_at"] is None, run
+assert card["status"] == "awaiting"
+assert card["awaiting_reason"] == "agent_done"
+assert run["outcome"] is None
+assert run["ended_at"] is None
 print("  awaiting_reason=agent_done; run remains open")
 ' || fail "awaiting/open-run assertions failed"
 hrpc pane.get "{\"pane_id\":\"$PANE_ID\"}" | python3 -c '
 import json, sys
 pane = json.load(sys.stdin)["pane"]
-assert pane["agent_status"] == "done", pane
+assert pane["agent_status"] == "done"
 print("  live Herdr pane agent_status=done")
 ' || fail "agent pane is not live with Herdr status done"
 
@@ -150,18 +149,18 @@ AWAITING_ELAPSED_MS=$((NOW_MS - AWAITING_OBSERVED_MS))
 ok "card stayed awaiting with an open run/pane for ${AWAITING_ELAPSED_MS}ms after awaiting was observed (${RUN_OBSERVED_ELAPSED_MS}ms since confirmed run start)"
 
 step "Confirm through the supported board run.done CLI contract"
-"$BOARD_BIN" done "$CARD_ID" --outcome ok --json >/dev/null
+e2e_board_herdr_mutate -- done "$CARD_ID" --outcome ok --json >/dev/null
 
 "$BOARD_BIN" card show "$CARD_ID" --json | python3 -c '
 import json, sys
 expected_column = int(sys.argv[1])
 x = json.load(sys.stdin)
 card, run = x["card"], x["runs"][-1]
-assert card["status"] == "done", card
-assert card["column_id"] == expected_column, card
-assert card["awaiting_reason"] is None, card
-assert run["outcome"] == "ok", run
-assert run["ended_at"] is not None, run
+assert card["status"] == "done"
+assert card["column_id"] == expected_column
+assert card["awaiting_reason"] is None
+assert run["outcome"] == "ok"
+assert run["ended_at"] is not None
 print(f"  done in column {expected_column}; run outcome=ok and ended_at set")
 ' "$EXEC_ID" || fail "done/same-column/ended-run assertions failed"
 

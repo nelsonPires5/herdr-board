@@ -8,20 +8,53 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use board_core::capability::{run_pane_name, run_pane_name_unique};
-use board_core::engine::{decide_transition, TransitionDecision};
+use board_core::db::{Db, EnqueueRun, FinalizeRun};
+use board_core::engine::{
+    decide_auto_hop, decide_resumability, decide_transition, validate_effective_settings,
+    AutoHopDecision, ResumabilityDecision,
+};
 use board_core::harness::{
     build_invocation, is_builtin_harness, plan_session, HarnessError, SessionPlan,
 };
 use board_core::model::{Card, Run};
 use board_core::prompt::{assemble_prompt, effective_settings};
 use board_core::protocol::{BoardChangedReason, CardStatus, RunOutcome, SpaceKind};
-use board_core::spawn::SpawnReq;
+
+struct PreparedEnqueue {
+    card_id: i64,
+    column_id: i64,
+    harness: String,
+    argv_json: String,
+    prompt: String,
+    system_prompt: String,
+    launch_spec_json: String,
+    session_id: Option<String>,
+    session: Option<String>,
+}
+
+impl PreparedEnqueue {
+    fn borrowed(&self) -> EnqueueRun<'_> {
+        EnqueueRun {
+            card_id: self.card_id,
+            column_id: self.column_id,
+            harness: &self.harness,
+            argv_json: &self.argv_json,
+            prompt_snapshot: &self.prompt,
+            system_prompt_snapshot: Some(&self.system_prompt),
+            launch_spec_json: Some(&self.launch_spec_json),
+            session_id: self.session_id.as_deref(),
+            session: self.session.as_deref(),
+        }
+    }
+}
+use crate::spawner::HerdrLaunchPlan;
+use board_core::launch::{ExecutionSpec, RunLaunchSpec};
 use board_core::{Error, Result};
 use board_herdr::{HerdrClient, NotificationSound, WorkspaceCreateParams, WorkspaceInfo};
 use uuid::Uuid;
 
-use crate::state::{ActiveRun, Daemon, MAX_AUTO_HOPS};
-use crate::store::space_key_str;
+use crate::state::{ActiveRun, Daemon};
+use board_core::model::SpaceKey;
 
 const HERDR_PROTOCOL: u32 = 17;
 
@@ -43,29 +76,15 @@ fn map_harness_err(e: HarnessError) -> Error {
 /// Create a queued run row for `card` in `column`, minting/resuming/forking the
 /// session per policy. Sets the card to `queued`. Does not spawn.
 pub fn enqueue_run(d: &Arc<Daemon>, card_id: i64, column_id: i64, is_retry: bool) -> Result<Run> {
-    enqueue_run_inner(d, card_id, column_id, is_retry, EnqueueMode::Public)
+    enqueue_run_inner(d, card_id, column_id, is_retry)
 }
 
-#[derive(Clone, Copy)]
-enum EnqueueMode {
-    Public,
-    /// Only the finalizer owning this private run-id token may enqueue while
-    /// its card remains claimed.
-    Finalization(i64),
-}
-
-fn enqueue_run_inner(
-    d: &Arc<Daemon>,
-    card_id: i64,
-    column_id: i64,
-    is_retry: bool,
-    mode: EnqueueMode,
-) -> Result<Run> {
-    // The scheduler claim and every enqueue input share one critical section.
+fn enqueue_run_inner(d: &Arc<Daemon>, card_id: i64, column_id: i64, is_retry: bool) -> Result<Run> {
+    // Scheduler state and every enqueue input share one critical section.
     // In particular, do not prepare an invocation from a card snapshot before
     // this lock: a concurrent edit could otherwise update `card.session` (or
     // its settings/prompt) before this run persists the stale value.
-    let sched = d.sched.lock().unwrap();
+    let _sched = d.sched.lock().unwrap();
     let db = d.store.lock();
     let card = db
         .get_card(card_id)?
@@ -74,20 +93,6 @@ fn enqueue_run_inner(
         return Err(Error::InvalidState(
             "archived card must be restored before starting a run".into(),
         ));
-    }
-    match (mode, sched.finalizing_cards.get(&card_id)) {
-        (EnqueueMode::Public, None) => {}
-        (EnqueueMode::Finalization(run_id), Some(owner)) if run_id == *owner => {}
-        (EnqueueMode::Public, Some(_)) => {
-            return Err(Error::InvalidState(
-                "card finalization is in progress; retry after it completes".into(),
-            ));
-        }
-        (EnqueueMode::Finalization(_), _) => {
-            return Err(Error::InvalidState(
-                "internal enqueue lost its card finalization claim".into(),
-            ));
-        }
     }
     if db.open_run_for_card(card_id)?.is_some() {
         return Err(Error::InvalidState(
@@ -104,19 +109,20 @@ fn enqueue_run_inner(
         .get_column(column_id)?
         .ok_or_else(|| Error::NotFound(format!("column {column_id}")))?;
     let comments = db.list_comments(card_id)?;
-    // Resume/fork only sessions PROVEN to exist on the harness side — claude
-    // exits with "no conversation found" otherwise. A spawned pane is not
-    // proof; an `agent:<run_id>` comment can only be posted from a live run.
-    let session_used = match &card.session_id {
-        Some(sid) => db.list_runs(card_id)?.iter().any(|r| {
-            r.started_at.is_some()
-                && r.session_id.as_deref() == Some(sid)
-                && comments
-                    .iter()
-                    .any(|comment| comment.author == format!("agent:{}", r.id))
-        }),
-        None => false,
-    };
+    // Resume/fork only sessions proven to exist on the harness side. The pure
+    // engine owns the evidence rule; the daemon only supplies DB facts.
+    let session_used = matches!(
+        decide_resumability(
+            card.session_id.as_deref(),
+            &db.list_runs(card_id)?,
+            &comments
+        ),
+        ResumabilityDecision::Resumable
+    );
+    // Revalidate the merged effective state at the enqueue boundary. This
+    // protects dispatch from legacy rows and from a column/card changing after
+    // an earlier client-side capability lookup.
+    validate_effective_settings(&card, &column, &d.config)?;
     let settings = effective_settings(&card, &column)?;
     let prompt = assemble_prompt(&card.description, &comments);
     let existing_session = card.session_id.as_deref().filter(|_| session_used);
@@ -152,28 +158,96 @@ fn enqueue_run_inner(
         board_core::harness::protocol_system_prompt(settings.system_prompt.as_deref())
     });
 
-    if let Some(session_id) = &session_for_run {
-        if card.session_id.as_deref() != Some(session_id) {
-            db.set_card_session(card_id, session_id)?;
-        }
-    }
-    let run = db.create_run_with_prompt_snapshots(
+    let run = db.enqueue_run_uow(&EnqueueRun {
         card_id,
         column_id,
-        &settings.harness,
-        &argv_json,
-        &prompt,
-        Some(&system_prompt_snapshot),
-        session_for_run.as_deref(),
-        card.session.as_deref(),
-    )?;
-    db.set_card_status(card_id, CardStatus::Queued)?;
+        harness: &settings.harness,
+        argv_json: &argv_json,
+        prompt_snapshot: &prompt,
+        system_prompt_snapshot: Some(&system_prompt_snapshot),
+        launch_spec_json: Some(&serde_json::to_string(&RunLaunchSpec::v1(ExecutionSpec {
+            argv: invocation.argv.clone(),
+            env: invocation.env.clone(),
+            agent_kind: invocation.agent_kind.clone(),
+            initial_prompt: invocation.initial_prompt.clone(),
+            system_prompt: invocation.system_prompt.clone(),
+        }))?),
+        session_id: session_for_run.as_deref(),
+        session: card.session.as_deref(),
+    })?;
     Ok(run)
+}
+
+fn prepare_enqueue_values(
+    d: &Daemon,
+    db: &Db,
+    card: &Card,
+    column_id: i64,
+    is_retry: bool,
+) -> Result<PreparedEnqueue> {
+    let column = db
+        .get_column(column_id)?
+        .ok_or_else(|| Error::NotFound(format!("column {column_id}")))?;
+    let comments = db.list_comments(card.id)?;
+    let session_used = matches!(
+        decide_resumability(
+            card.session_id.as_deref(),
+            &db.list_runs(card.id)?,
+            &comments
+        ),
+        ResumabilityDecision::Resumable
+    );
+    validate_effective_settings(card, &column, &d.config)?;
+    let settings = effective_settings(card, &column)?;
+    let prompt = assemble_prompt(&card.description, &comments);
+    let existing_session = card.session_id.as_deref().filter(|_| session_used);
+    let plan = plan_session(existing_session, settings.fresh_session, is_retry);
+    let target_session = matches!(plan, SessionPlan::Mint | SessionPlan::Fork(_))
+        .then(|| Uuid::new_v4().to_string());
+    let invocation = build_invocation(
+        &settings.harness,
+        &d.config,
+        &settings,
+        &plan,
+        target_session.as_deref(),
+        &prompt,
+    )
+    .map_err(map_harness_err)?;
+    let session_id = invocation
+        .resulting_session_id
+        .clone()
+        .or_else(|| match &plan {
+            SessionPlan::Mint => target_session.clone(),
+            SessionPlan::Resume(id) | SessionPlan::Fork(id) => Some(id.clone()),
+        });
+    Ok(PreparedEnqueue {
+        card_id: card.id,
+        column_id,
+        harness: settings.harness.clone(),
+        argv_json: serde_json::to_string(&invocation.argv)?,
+        prompt,
+        system_prompt: invocation.system_prompt.clone().unwrap_or_else(|| {
+            board_core::harness::protocol_system_prompt(settings.system_prompt.as_deref())
+        }),
+        launch_spec_json: serde_json::to_string(&RunLaunchSpec::v1(ExecutionSpec {
+            argv: invocation.argv.clone(),
+            env: invocation.env.clone(),
+            agent_kind: invocation.agent_kind.clone(),
+            initial_prompt: invocation.initial_prompt.clone(),
+            system_prompt: invocation.system_prompt.clone(),
+        }))?,
+        session_id,
+        session: card.session.clone(),
+    })
 }
 
 /// Evaluate the queue and promote as many queued runs as the per-space FIFO and
 /// the global concurrency cap allow.
 pub async fn dispatch_pass(d: &Arc<Daemon>) {
+    // A claim lives in this pass until spawn registration/failure is durable.
+    // Serializing passes prevents another caller from observing those claimed
+    // rows as queued and independently claiming the same capacity or space.
+    let _pass = d.dispatch_pass.lock().await;
     let active = match d.store.active_runs() {
         Ok(v) => v,
         Err(e) => {
@@ -181,7 +255,10 @@ pub async fn dispatch_pass(d: &Arc<Daemon>) {
             return;
         }
     };
-    let mut busy: HashSet<String> = active.iter().map(|(_, c)| space_key_str(c)).collect();
+    let mut busy: HashSet<SpaceKey> = active
+        .iter()
+        .map(|(_, card)| SpaceKey::from_card(card))
+        .collect();
     let mut active_count = active.len();
     let max = d.config.max_concurrent.max(1);
 
@@ -193,33 +270,47 @@ pub async fn dispatch_pass(d: &Arc<Daemon>) {
         }
     };
 
+    // Claim capacity and one FIFO head per space before any launch starts.
+    // Independent spaces then launch concurrently; a second run for a claimed
+    // space cannot slip in while its first launch is in flight.
+    let mut claimed = Vec::new();
     for (run, card) in queued {
         if active_count >= max {
             break;
         }
-        // The finalizer wakes dispatch after releasing its claim. Until then,
-        // keep an internally enqueued next hop queued so its final status is
-        // stable and no new agent starts inside the finalization window.
-        if d.sched
-            .lock()
-            .unwrap()
-            .finalizing_cards
-            .contains_key(&card.id)
-        {
-            continue;
+        let key = SpaceKey::from_card(&card);
+        if busy.insert(key) {
+            active_count += 1;
+            claimed.push((run, card));
         }
-        let key = space_key_str(&card);
-        if busy.contains(&key) {
-            continue;
-        }
-        match spawn_one(d, &run, &card).await {
-            Ok(true) => {
-                busy.insert(key);
-                active_count += 1;
+    }
+
+    let mut launches = tokio::task::JoinSet::new();
+    for (run, card) in claimed {
+        let daemon = Arc::clone(d);
+        launches.spawn(async move {
+            let run_id = run.id;
+            (run_id, spawn_one(&daemon, &run, &card).await)
+        });
+    }
+    while let Some(result) = launches.join_next().await {
+        match result {
+            Ok((_, Ok(true) | Ok(false))) => {}
+            Ok((run_id, Err(error))) => {
+                tracing::error!("dispatch: spawn_one run {run_id} failed: {error}");
             }
-            Ok(false) => {} // spawn failed; run finished, slot not taken
-            Err(e) => tracing::error!("dispatch: spawn_one run {} failed: {e}", run.id),
+            Err(error) => tracing::error!("dispatch: launch task failed: {error}"),
         }
+    }
+}
+
+/// Select placement for dispatch. v11 rows use the enqueue-time run snapshot;
+/// pre-v11 rows explicitly retain the historical current-card behavior.
+fn launch_session<'a>(run: &'a Run, card: &'a Card) -> Option<&'a str> {
+    if run.launch_spec.is_some() {
+        run.session.as_deref()
+    } else {
+        card.session.as_deref()
     }
 }
 
@@ -273,8 +364,36 @@ async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result<bool> {
         std::env::current_exe()?.to_string_lossy().into_owned(),
     ));
 
-    let argv: Vec<String> = serde_json::from_str(&run.argv_json)?;
-    let mut req = SpawnReq {
+    let mut argv: Vec<String> = serde_json::from_str(&run.argv_json)?;
+    // v11 rows consume the single enqueue-time materialization. Older rows use
+    // the v7+ snapshot adapter above, or the pre-v7 fallback.
+    if let Some(spec) = &run.launch_spec {
+        let execution = spec.execution();
+        argv.clone_from(&execution.argv);
+        env = execution.env.clone();
+        env.push(("BOARD_CARD_ID".into(), card.id.to_string()));
+        env.push(("BOARD_RUN_ID".into(), run.id.to_string()));
+        env.push((
+            "BOARD_SOCKET".into(),
+            d.socket_path.to_string_lossy().into_owned(),
+        ));
+        env.push((
+            "BOARD_BIN".into(),
+            std::env::current_exe()?.to_string_lossy().into_owned(),
+        ));
+    }
+    let (agent_kind, initial_prompt, system_prompt) = match run.launch_spec.as_ref() {
+        Some(spec) => {
+            let execution = spec.execution();
+            (
+                execution.agent_kind.clone(),
+                execution.initial_prompt.clone(),
+                execution.system_prompt.clone(),
+            )
+        }
+        None => (agent_kind, initial_prompt, system_prompt),
+    };
+    let mut req = HerdrLaunchPlan {
         // Stable, human-readable pane name `card-<id>-<column-slug>`. herdr
         // agent names are exclusive while a pane using one is open (and finished
         // panes stay open, visible, by design), so on collision the spawner
@@ -293,11 +412,13 @@ async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result<bool> {
         argv,
     };
 
-    // Resolve the card's herdr session to a concrete socket. `None` session →
-    // the daemon's default socket. An unknown/stopped session fails the run
-    // with a clear error listing the known sessions.
+    // v11 launch placement is part of the enqueue-time run snapshot. Legacy
+    // rows have no launch spec and retain their historical current-card lookup.
+    let launch_session = launch_session(run, card);
+    // Resolve that herdr session to a concrete socket. `None` session → the
+    // daemon's default socket. An unknown/stopped session fails the run.
     if let Some(reg) = &d.session_registry {
-        match reg.resolve(card.session.as_deref()) {
+        match reg.resolve(launch_session) {
             Ok(resolved) => {
                 // Only stamp a non-default socket on the req (keeps the default
                 // path implicit, matching the spawner's fallback).
@@ -366,10 +487,14 @@ async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result<bool> {
     };
 
     let started = Instant::now();
-    let deadline = column
-        .timeout_minutes
-        .map(|m| started + Duration::from_secs(m.max(0) as u64 * d.settings.timeout_unit_secs));
-    if !register_spawned_run(d, run.id, handle, started, deadline)? {
+    let timeout_ms = column.timeout_minutes.map(|m| {
+        m.max(0)
+            .saturating_mul(d.settings.timeout_unit_secs as i64)
+            .saturating_mul(1000)
+    });
+    let deadline = timeout_ms.and_then(|ms| started.checked_add(Duration::from_millis(ms as u64)));
+    let deadline_at_ms = timeout_ms.map(|ms| d.wall_now_ms().saturating_add(ms));
+    if !register_spawned_run(d, run.id, handle, started, deadline, deadline_at_ms)? {
         return Ok(false);
     }
 
@@ -388,9 +513,10 @@ async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result<bool> {
 fn register_spawned_run(
     d: &Arc<Daemon>,
     run_id: i64,
-    handle: board_core::spawn::SpawnHandle,
+    handle: crate::spawner::RuntimeHandle,
     started: Instant,
     timeout_deadline: Option<Instant>,
+    timeout_deadline_at_ms: Option<i64>,
 ) -> Result<bool> {
     let mut handle = Some(handle);
     let registration = (|| {
@@ -409,12 +535,12 @@ fn register_spawned_run(
         })?;
         let is_local = spawned.pid.is_some();
         let pane_id = spawned.pane_id.clone();
-        db.start_run(
+        db.promote_run_uow(
             run_id,
             spawned.workspace_id.as_deref(),
             spawned.pane_id.as_deref(),
+            timeout_deadline_at_ms,
         )?;
-        db.set_card_status(card.id, CardStatus::Running)?;
         let registered_handle = handle.take().ok_or_else(|| {
             Error::InvalidState(format!(
                 "run {run_id} registration lost its spawn handle before bookkeeping"
@@ -540,21 +666,6 @@ pub fn finalize_run_timeout(
     )
 }
 
-struct FinalizationClaim<'a> {
-    d: &'a Daemon,
-    card_id: i64,
-    run_id: i64,
-}
-
-impl Drop for FinalizationClaim<'_> {
-    fn drop(&mut self) {
-        let mut sched = self.d.sched.lock().unwrap();
-        if sched.finalizing_cards.get(&self.card_id) == Some(&self.run_id) {
-            sched.finalizing_cards.remove(&self.card_id);
-        }
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn finalize_run_inner(
     d: &Arc<Daemon>,
@@ -566,25 +677,18 @@ fn finalize_run_inner(
     transition: bool,
     timeout_at: Option<Instant>,
 ) -> Result<Option<(Run, Card)>> {
-    // One claim order everywhere: scheduler, then store. Ending the DB row
-    // while both are held means a removed run is already terminal before any
-    // competing finalizer or signal can inspect it.
-    let (removed, elapsed, finished) = {
+    // Scheduler -> store is the sole lock order. The complete durable outcome
+    // is committed while both locks are held; all external effects follow it.
+    let (removed, effects, notify) = {
         let mut sched = d.sched.lock().unwrap();
         let db = d.store.lock();
         let existing = db.get_run(run_id)?;
-        // An ended row can still be mid-transition. A duplicate finalizer must
-        // neither return that intermediate card nor disturb the owner's claim.
-        if sched.finalizing_cards.contains_key(&existing.card_id) {
-            return Ok(None);
-        }
         if existing.ended_at.is_some() {
             let card = db
                 .get_card(existing.card_id)?
                 .ok_or_else(|| Error::NotFound(format!("card {}", existing.card_id)))?;
             return Ok(Some((existing, card)));
         }
-
         if let Some(classified_at) = timeout_at {
             let active_still_due = sched.active.get(&run_id).is_some_and(|active| {
                 active.card_id == existing.card_id
@@ -599,22 +703,90 @@ fn finalize_run_inner(
                 return Ok(None);
             }
         }
-
         let elapsed = sched
             .active
             .get(&run_id)
             .map(|active| active.started.elapsed().as_secs() as i64);
-        let finished = db.finish_run(run_id, outcome, summary.as_deref())?;
+        let mut card = db
+            .get_card(existing.card_id)?
+            .ok_or_else(|| Error::NotFound(format!("card {}", existing.card_id)))?;
+        let mut comments = Vec::<String>::new();
+        if let Some(comment) = extra_comment.as_ref() {
+            comments.push(comment.clone());
+        }
+        let mut target_column_id = None;
+        let mut final_status = match outcome {
+            RunOutcome::Ok => CardStatus::Idle,
+            _ => CardStatus::Failed,
+        };
+        let mut next = None;
+        let mut next_hops = None;
+        let mut notify = None;
+        if transition {
+            let current = db
+                .get_column(existing.column_id)?
+                .ok_or_else(|| Error::NotFound(format!("column {}", existing.column_id)))?;
+            let cols = db.list_columns(card.board_id)?;
+            let dec = decide_transition(&current, &cols, outcome, elapsed);
+            comments.push(dec.system_comment.clone());
+            target_column_id = dec.target_column_id;
+            final_status = dec.new_status;
+            if let Some(target_id) = dec.target_column_id {
+                card.column_id = target_id;
+                if dec.enqueue {
+                    let current_hops = sched.chain_hops.get(&card.id).copied().unwrap_or(0);
+                    match decide_auto_hop(current_hops, &dec) {
+                        AutoHopDecision::Continue { hop } => {
+                            next_hops = Some(hop);
+                            next = Some(prepare_enqueue_values(d, &db, &card, target_id, false)?);
+                        }
+                        AutoHopDecision::Stop { message } => {
+                            comments.push(message);
+                            final_status = CardStatus::Failed;
+                        }
+                        AutoHopDecision::Reset => unreachable!(),
+                    }
+                } else if cols
+                    .iter()
+                    .find(|c| c.id == target_id)
+                    .is_some_and(|c| c.trigger == board_core::protocol::Trigger::Manual)
+                {
+                    let target = cols.iter().find(|c| c.id == target_id).unwrap();
+                    notify = Some((
+                        format!("Card #{} ready for review", card.id),
+                        format!("Entered {}", target.name),
+                    ));
+                }
+            }
+        }
+        let comment_refs: Vec<(&str, &str)> = comments
+            .iter()
+            .map(|body| ("system", body.as_str()))
+            .collect();
+        let next_ref = next.as_ref().map(PreparedEnqueue::borrowed);
+        let effects = db.finalize_run_uow(&FinalizeRun {
+            run_id,
+            outcome,
+            summary: summary.as_deref(),
+            comments: &comment_refs,
+            target_column_id,
+            final_status,
+            final_awaiting_reason: None,
+            next: next_ref,
+        })?;
         let removed = sched.active.remove(&run_id);
-        sched.finalizing_cards.insert(existing.card_id, run_id);
-        (removed, elapsed, finished)
-    };
-    let claim = FinalizationClaim {
-        d,
-        card_id: finished.card_id,
-        run_id,
+        if let Some(hops) = next_hops {
+            sched.chain_hops.insert(card.id, hops);
+        } else {
+            sched.chain_hops.remove(&card.id);
+        }
+        #[cfg(test)]
+        d.record_effect("scheduler");
+        (removed, effects, notify)
     };
 
+    // Post-commit effects are deliberately ordered and contain no DB writes.
+    d.refresh_watch();
     if kill {
         if let Some(active) = &removed {
             if let Err(e) = d.spawner.kill(&active.handle) {
@@ -622,176 +794,12 @@ fn finalize_run_inner(
             }
         }
     }
-    d.refresh_watch();
-
-    let card_id = finished.card_id;
-    let completion = complete_post_close(
-        d,
-        card_id,
-        finished.column_id,
-        run_id,
-        outcome,
-        elapsed,
-        extra_comment.as_deref(),
-        transition,
-    );
-
-    match completion {
-        Ok(card) => {
-            drop(claim);
-            d.emit_run_ended(card_id, run_id, outcome);
-            d.wake_dispatch();
-            Ok(Some((finished, card)))
-        }
-        Err(original) => {
-            let recovery = recover_post_close_failure(d, card_id, run_id, &original);
-            // The claim remains authoritative through the recovery writes.
-            drop(claim);
-            d.emit_run_ended(card_id, run_id, outcome);
-            d.wake_dispatch();
-            match recovery {
-                Ok(()) => Err(original),
-                Err(recovery_error) => Err(Error::InvalidState(format!(
-                    "run {run_id} finalization failed after close: {original}; recovery incomplete: {recovery_error}"
-                ))),
-            }
-        }
+    if let Some((title, body)) = notify {
+        d.notify(title, Some(body), NotificationSound::Request);
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn complete_post_close(
-    d: &Arc<Daemon>,
-    card_id: i64,
-    column_id: i64,
-    run_id: i64,
-    outcome: RunOutcome,
-    elapsed: Option<i64>,
-    extra_comment: Option<&str>,
-    transition: bool,
-) -> Result<Card> {
-    if let Some(comment) = extra_comment {
-        d.store.lock().add_comment(card_id, "system", comment)?;
-    }
-
-    if transition {
-        let (current_col, cols) = {
-            let db = d.store.lock();
-            let card = db
-                .get_card(card_id)?
-                .ok_or_else(|| Error::NotFound(format!("card {card_id}")))?;
-            let col = db
-                .get_column(column_id)?
-                .ok_or_else(|| Error::NotFound(format!("column {column_id}")))?;
-            let cols = db.list_columns(card.board_id)?;
-            (col, cols)
-        };
-        let dec = decide_transition(&current_col, &cols, outcome, elapsed);
-        d.store
-            .lock()
-            .add_comment(card_id, "system", &dec.system_comment)?;
-        apply_transition(d, card_id, run_id, &dec, &cols)
-    } else {
-        d.sched.lock().unwrap().chain_hops.remove(&card_id);
-        let status = match outcome {
-            RunOutcome::Ok => CardStatus::Idle,
-            _ => CardStatus::Failed,
-        };
-        d.store.lock().set_card_status(card_id, status)
-    }
-}
-
-/// Best-effort repair for any failure after the run row was closed. Both writes
-/// are attempted so the diagnostic survives even if the status write fails.
-fn recover_post_close_failure(
-    d: &Arc<Daemon>,
-    card_id: i64,
-    run_id: i64,
-    failure: &Error,
-) -> std::result::Result<(), String> {
-    let mut sched = d.sched.lock().unwrap();
-    let db = d.store.lock();
-    sched.chain_hops.remove(&card_id);
-    let status = db.set_card_status(card_id, CardStatus::Failed);
-    let message = format!(
-        "run {run_id} finalization failed after the run was closed: {failure}; card recovered to failed"
-    );
-    let comment = db.add_comment(card_id, "system", &message);
-
-    let mut errors = Vec::new();
-    if let Err(e) = status {
-        errors.push(format!("setting card failed: {e}"));
-    }
-    if let Err(e) = comment {
-        errors.push(format!("adding recovery comment failed: {e}"));
-    }
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors.join("; "))
-    }
-}
-
-/// Apply a transition decision: move the card, enqueue the next auto run (with
-/// cycle protection), or notify on a manual landing.
-fn apply_transition(
-    d: &Arc<Daemon>,
-    card_id: i64,
-    finalizing_run_id: i64,
-    dec: &TransitionDecision,
-    cols: &[board_core::model::Column],
-) -> Result<Card> {
-    let Some(tid) = dec.target_column_id else {
-        // Stay put; chain ends.
-        d.sched.lock().unwrap().chain_hops.remove(&card_id);
-        return d.store.lock().set_card_status(card_id, dec.new_status);
-    };
-
-    d.store.lock().set_card_column(card_id, tid)?;
-    let target = cols.iter().find(|c| c.id == tid);
-
-    if dec.enqueue {
-        let hops = {
-            let mut s = d.sched.lock().unwrap();
-            let h = s.chain_hops.entry(card_id).or_insert(0);
-            *h += 1;
-            *h
-        };
-        if hops > MAX_AUTO_HOPS {
-            d.sched.lock().unwrap().chain_hops.remove(&card_id);
-            let msg = format!(
-                "auto-chain limit ({MAX_AUTO_HOPS}) reached without human action; stopping"
-            );
-            d.store.lock().add_comment(card_id, "system", &msg)?;
-            return d.store.lock().set_card_status(card_id, CardStatus::Failed);
-        }
-        enqueue_run_inner(
-            d,
-            card_id,
-            tid,
-            false,
-            EnqueueMode::Finalization(finalizing_run_id),
-        )?;
-        d.store
-            .lock()
-            .get_card(card_id)?
-            .ok_or_else(|| Error::NotFound(format!("card {card_id}")))
-    } else {
-        // Manual (or non-auto) landing: chain ends; notify (auto-transition).
-        d.sched.lock().unwrap().chain_hops.remove(&card_id);
-        let card = d.store.lock().set_card_status(card_id, dec.new_status)?;
-        if target
-            .map(|t| t.trigger == board_core::protocol::Trigger::Manual)
-            .unwrap_or(false)
-        {
-            d.notify(
-                format!("Card #{card_id} ready for review"),
-                target.map(|t| format!("Entered {}", t.name)),
-                NotificationSound::Request,
-            );
-        }
-        Ok(card)
-    }
+    d.emit_run_ended(effects.card.id, run_id, outcome);
+    d.wake_dispatch();
+    Ok(Some((effects.finished_run, effects.card)))
 }
 
 // ---------------------------------------------------------------------------
@@ -925,26 +933,29 @@ mod tests {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Condvar, Mutex};
     use std::thread;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use super::{
-        dispatch_pass, enqueue_run, finalize_run, find_workspace_by_label, harness_prompt_env,
-        register_spawned_run, resolve_space, resolve_workspace_ref,
+        dispatch_pass, enqueue_run, finalize_run, finalize_run_timeout, find_workspace_by_label,
+        harness_prompt_env, launch_session, register_spawned_run, resolve_space,
+        resolve_workspace_ref,
     };
     use crate::settings::DaemonSettings;
-    use crate::state::Daemon;
+    use crate::spawner::{HerdrLaunchPlan, RuntimeHandle, Spawner};
+    use crate::state::{ActiveRun, Daemon};
     use crate::store::Store;
     use board_core::config::Config;
-    use board_core::db::Db;
+    use board_core::db::{Db, EnqueueRun, LifecycleFaultPoint};
+    use board_core::model::{Card, Run};
     use board_core::prompt::{assemble_prompt, effective_settings};
     use board_core::protocol::{
-        AwaitingReason, BoardChangedReason, CardCreateParams, CardStatus, CardUpdateParams,
-        ColumnCreateParams, ColumnUpdateParams, Effort, Event, RunOutcome, SpaceKind, Trigger,
+        AwaitingReason, CardCreateParams, CardStatus, CardUpdateParams, ColumnCreateParams,
+        ColumnUpdateParams, Effort, Event, Patch, RunOutcome, SpaceKind, Trigger,
     };
-    use board_core::spawn::{SpawnHandle, SpawnReq, Spawner};
+    use board_core::{Error, Result};
     use board_herdr::{AgentStatus, HerdrClient, WorkspaceInfo};
     use serde_json::Value;
     use tokio::sync::{broadcast, mpsc, watch};
@@ -952,16 +963,16 @@ mod tests {
     struct MissingPiSpawner;
 
     impl Spawner for MissingPiSpawner {
-        fn spawn(&self, req: &SpawnReq) -> anyhow::Result<SpawnHandle> {
+        fn spawn(&self, req: &HerdrLaunchPlan) -> anyhow::Result<RuntimeHandle> {
             assert_eq!(req.argv.first().map(String::as_str), Some("pi"));
             Err(std::io::Error::new(std::io::ErrorKind::NotFound, "pi not found").into())
         }
 
-        fn kill(&self, _h: &SpawnHandle) -> anyhow::Result<()> {
+        fn kill(&self, _h: &RuntimeHandle) -> anyhow::Result<()> {
             Ok(())
         }
 
-        fn is_alive(&self, _h: &SpawnHandle) -> anyhow::Result<bool> {
+        fn is_alive(&self, _h: &RuntimeHandle) -> anyhow::Result<bool> {
             Ok(false)
         }
     }
@@ -969,42 +980,120 @@ mod tests {
     #[derive(Default)]
     struct RecordingSpawner {
         kills: AtomicUsize,
+        effects: Mutex<Option<Arc<Mutex<Vec<&'static str>>>>>,
     }
 
     #[derive(Default)]
     struct CapturingSpawner {
-        requests: std::sync::Mutex<Vec<SpawnReq>>,
+        requests: std::sync::Mutex<Vec<HerdrLaunchPlan>>,
     }
 
-    impl Spawner for CapturingSpawner {
-        fn spawn(&self, req: &SpawnReq) -> anyhow::Result<SpawnHandle> {
-            self.requests.lock().unwrap().push(req.clone());
-            Ok(SpawnHandle {
+    #[derive(Default)]
+    struct FaultPromotionSpawner {
+        kills: AtomicUsize,
+    }
+
+    #[derive(Default)]
+    struct PausedSpawner {
+        state: Mutex<PausedSpawnerState>,
+        changed: Condvar,
+        started_notify: tokio::sync::Notify,
+    }
+
+    #[derive(Default)]
+    struct PausedSpawnerState {
+        started: Vec<String>,
+        released: bool,
+    }
+
+    impl PausedSpawner {
+        fn started(&self) -> Vec<String> {
+            self.state.lock().unwrap().started.clone()
+        }
+
+        fn release(&self) {
+            let mut state = self.state.lock().unwrap();
+            state.released = true;
+            self.changed.notify_all();
+        }
+    }
+
+    impl Spawner for PausedSpawner {
+        fn spawn(&self, req: &HerdrLaunchPlan) -> anyhow::Result<RuntimeHandle> {
+            let mut state = self.state.lock().unwrap();
+            state.started.push(req.name.clone());
+            self.started_notify.notify_one();
+            self.changed.notify_all();
+            while !state.released {
+                state = self.changed.wait(state).unwrap();
+            }
+            Ok(RuntimeHandle {
                 pid: Some(4242),
                 ..Default::default()
             })
         }
 
-        fn kill(&self, _h: &SpawnHandle) -> anyhow::Result<()> {
+        fn kill(&self, _h: &RuntimeHandle) -> anyhow::Result<()> {
             Ok(())
         }
 
-        fn is_alive(&self, _h: &SpawnHandle) -> anyhow::Result<bool> {
+        fn is_alive(&self, _h: &RuntimeHandle) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+    }
+
+    impl Spawner for FaultPromotionSpawner {
+        fn spawn(&self, _req: &HerdrLaunchPlan) -> anyhow::Result<RuntimeHandle> {
+            Ok(RuntimeHandle {
+                pid: Some(4242),
+                workspace_id: Some("spawned-workspace".into()),
+                pane_id: Some("spawned-pane".into()),
+                ..Default::default()
+            })
+        }
+
+        fn kill(&self, _h: &RuntimeHandle) -> anyhow::Result<()> {
+            self.kills.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn is_alive(&self, _h: &RuntimeHandle) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+    }
+
+    impl Spawner for CapturingSpawner {
+        fn spawn(&self, req: &HerdrLaunchPlan) -> anyhow::Result<RuntimeHandle> {
+            self.requests.lock().unwrap().push(req.clone());
+            Ok(RuntimeHandle {
+                pid: Some(4242),
+                ..Default::default()
+            })
+        }
+
+        fn kill(&self, _h: &RuntimeHandle) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn is_alive(&self, _h: &RuntimeHandle) -> anyhow::Result<bool> {
             Ok(false)
         }
     }
 
     impl Spawner for RecordingSpawner {
-        fn spawn(&self, _req: &SpawnReq) -> anyhow::Result<SpawnHandle> {
+        fn spawn(&self, _req: &HerdrLaunchPlan) -> anyhow::Result<RuntimeHandle> {
             unreachable!("registration tests provide the spawned handle")
         }
 
-        fn kill(&self, _h: &SpawnHandle) -> anyhow::Result<()> {
+        fn kill(&self, _h: &RuntimeHandle) -> anyhow::Result<()> {
             self.kills.fetch_add(1, Ordering::SeqCst);
+            if let Some(log) = self.effects.lock().unwrap().as_ref() {
+                log.lock().unwrap().push("kill");
+            }
             Ok(())
         }
 
-        fn is_alive(&self, _h: &SpawnHandle) -> anyhow::Result<bool> {
+        fn is_alive(&self, _h: &RuntimeHandle) -> anyhow::Result<bool> {
             Ok(false)
         }
     }
@@ -1016,12 +1105,23 @@ mod tests {
         broadcast::Receiver<Event>,
         mpsc::UnboundedReceiver<()>,
     ) {
+        test_daemon_with_config(spawner, Config::default())
+    }
+
+    fn test_daemon_with_config(
+        spawner: Arc<dyn Spawner>,
+        config: Config,
+    ) -> (
+        Arc<Daemon>,
+        broadcast::Receiver<Event>,
+        mpsc::UnboundedReceiver<()>,
+    ) {
         let (events_tx, events_rx) = broadcast::channel(16);
         let (dispatch_tx, dispatch_rx) = mpsc::unbounded_channel();
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
         let daemon = Arc::new(Daemon::new(
             Store::new(Db::open_in_memory().unwrap()),
-            Config::default(),
+            config,
             DaemonSettings::default(),
             PathBuf::from("/tmp/board-test.db"),
             PathBuf::from("/tmp/board-test.sock"),
@@ -1239,6 +1339,11 @@ mod tests {
         let new_session = card.session_id.unwrap();
         assert_ne!(new_session, old_session);
         assert_eq!(run.session_id.as_deref(), Some(new_session.as_str()));
+        assert!(run.launch_spec.is_some());
+        assert_eq!(
+            run.launch_spec.as_ref().unwrap().execution().argv,
+            serde_json::from_str::<Vec<String>>(&run.argv_json).unwrap()
+        );
         let argv: Vec<String> = serde_json::from_str(&run.argv_json).unwrap();
         assert!(argv
             .windows(2)
@@ -1278,25 +1383,171 @@ mod tests {
         assert_eq!(open_runs[0].id, first.id);
     }
 
-    #[test]
-    fn public_enqueue_rejects_a_card_claimed_for_finalization() {
-        let d = test_daemon(Arc::new(MissingPiSpawner));
-        let (card_id, column_id) = {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dispatch_claims_a1_and_b1_before_launch_and_serializes_competing_passes() {
+        let spawner = Arc::new(PausedSpawner::default());
+        let config = Config {
+            max_concurrent: 2,
+            ..Default::default()
+        };
+        let (d, _, _) = test_daemon_with_config(spawner.clone(), config);
+        let (a1, a2, b1) = {
             let db = d.store.lock();
-            let card = db
-                .create_card(&CardCreateParams {
-                    title: "finishing".into(),
+            let make = |title: &str, space_ref: &str| {
+                db.create_card(&CardCreateParams {
+                    title: title.into(),
+                    space_kind: Some(SpaceKind::Workspace),
+                    space_ref: Some(space_ref.into()),
                     ..Default::default()
                 })
+                .unwrap()
+            };
+            let a1 = make("A1", "space-a");
+            let a2 = make("A2", "space-a");
+            let b1 = make("B1", "space-b");
+            for card in [&a1, &a2, &b1] {
+                db.create_run(
+                    card.id,
+                    card.column_id,
+                    "pi",
+                    "[]",
+                    card.title.as_str(),
+                    None,
+                    None,
+                )
                 .unwrap();
-            (card.id, card.column_id)
+            }
+            (a1, a2, b1)
         };
-        d.sched.lock().unwrap().finalizing_cards.insert(card_id, 99);
 
-        let err = enqueue_run(&d, card_id, column_id, true).unwrap_err();
-        assert_eq!(err.code(), 3);
-        assert!(err.to_string().contains("finalization"));
-        assert!(d.store.lock().list_runs(card_id).unwrap().is_empty());
+        // Deliberately race two callers. The per-daemon pass lock must keep the
+        // second caller behind the first pass's pre-launch claims.
+        let first = tokio::spawn({
+            let d = d.clone();
+            async move { dispatch_pass(&d).await }
+        });
+        let second = tokio::spawn({
+            let d = d.clone();
+            async move { dispatch_pass(&d).await }
+        });
+
+        while spawner.started().len() < 2 {
+            spawner.started_notify.notified().await;
+        }
+        let started = spawner.started();
+        assert_eq!(started.len(), 2, "global cap was exceeded: {started:?}");
+        assert!(started
+            .iter()
+            .any(|name| name.starts_with(&format!("card-{}-", a1.id))));
+        assert!(started
+            .iter()
+            .any(|name| name.starts_with(&format!("card-{}-", b1.id))));
+        assert!(!started
+            .iter()
+            .any(|name| name.starts_with(&format!("card-{}-", a2.id))));
+
+        spawner.release();
+        first.await.unwrap();
+        second.await.unwrap();
+
+        let db = d.store.lock();
+        let active_ids: Vec<_> = db
+            .active_runs_with_cards()
+            .unwrap()
+            .into_iter()
+            .map(|(_, card)| card.id)
+            .collect();
+        let queued_ids: Vec<_> = db
+            .queued_runs_with_cards()
+            .unwrap()
+            .into_iter()
+            .map(|(_, card)| card.id)
+            .collect();
+        assert_eq!(active_ids, vec![a1.id, b1.id]);
+        assert_eq!(queued_ids, vec![a2.id]);
+        assert_eq!(spawner.started().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn promotion_fault_reopens_queued_state_without_started_effects_and_kills_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("promotion-fault.db");
+        let armed = Arc::new(AtomicBool::new(false));
+        let fault_armed = armed.clone();
+        let db = Db::open_with_lifecycle_fault_hook(&path, move |point| {
+            if fault_armed.load(Ordering::SeqCst)
+                && point == LifecycleFaultPoint::PromoteAfterRunUpdate
+            {
+                return Err(Error::InvalidState("injected promotion fault".into()));
+            }
+            Ok(())
+        })
+        .unwrap();
+        let card = db
+            .create_card(&CardCreateParams {
+                title: "promotion fault".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let run = db
+            .enqueue_run_uow(&EnqueueRun {
+                card_id: card.id,
+                column_id: card.column_id,
+                harness: "pi",
+                argv_json: "[]",
+                prompt_snapshot: "prompt",
+                system_prompt_snapshot: Some("system"),
+                launch_spec_json: None,
+                session_id: None,
+                session: None,
+            })
+            .unwrap();
+        let card_id = card.id;
+        let run_id = run.id;
+        let spawner = Arc::new(FaultPromotionSpawner::default());
+        let (events_tx, mut events_rx) = broadcast::channel(16);
+        let (dispatch_tx, mut dispatch_rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let d = Arc::new(Daemon::new(
+            Store::new(db),
+            Config::default(),
+            DaemonSettings::default(),
+            path.clone(),
+            dir.path().join("board.sock"),
+            spawner.clone(),
+            None,
+            None,
+            events_tx,
+            dispatch_tx,
+            shutdown_tx,
+        ));
+        armed.store(true, Ordering::SeqCst);
+
+        dispatch_pass(&d).await;
+
+        assert_eq!(spawner.kills.load(Ordering::SeqCst), 1);
+        assert!(!d.sched.lock().unwrap().active.contains_key(&run_id));
+        let watch = d.watch.lock().unwrap();
+        assert!(watch.panes_by_socket.is_empty());
+        assert_eq!(watch.generation, 0);
+        drop(watch);
+        assert!(matches!(
+            events_rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            dispatch_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        drop(d);
+        let reopened = Db::open(&path).unwrap();
+        let card = reopened.get_card(card_id).unwrap().unwrap();
+        let run = reopened.get_run(run_id).unwrap();
+        assert_eq!(card.status, CardStatus::Queued);
+        assert!(run.started_at.is_none());
+        assert!(run.herdr_workspace_id.is_none());
+        assert!(run.herdr_pane_id.is_none());
     }
 
     #[test]
@@ -1322,11 +1573,12 @@ mod tests {
         assert!(register_spawned_run(
             &d,
             run_id,
-            SpawnHandle {
+            RuntimeHandle {
                 pid: Some(41),
                 ..Default::default()
             },
             started,
+            None,
             None,
         )
         .unwrap());
@@ -1366,11 +1618,12 @@ mod tests {
         assert!(!register_spawned_run(
             &d,
             run_id,
-            SpawnHandle {
+            RuntimeHandle {
                 pid: Some(42),
                 ..Default::default()
             },
             Instant::now(),
+            None,
             None,
         )
         .unwrap());
@@ -1389,7 +1642,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_transition_enqueues_once_inside_claim_and_releases_it() {
+    fn auto_transition_enqueues_once_inside_finalization_transaction() {
         let d = test_daemon(Arc::new(MissingPiSpawner));
         let (card_id, run_id, target_id) = {
             let db = d.store.lock();
@@ -1409,7 +1662,7 @@ mod tests {
                 .unwrap();
             db.update_column(&ColumnUpdateParams {
                 id: source.id,
-                on_success_column_id: Some(target.id),
+                on_success_column_id: Patch::Set(target.id),
                 ..Default::default()
             })
             .unwrap();
@@ -1435,16 +1688,16 @@ mod tests {
         let runs = d.store.lock().list_runs(card_id).unwrap();
         assert_eq!(runs.len(), 2);
         assert_eq!(runs.iter().filter(|run| run.ended_at.is_none()).count(), 1);
-        assert!(!d
-            .sched
-            .lock()
-            .unwrap()
-            .finalizing_cards
-            .contains_key(&card_id));
+        let next = runs.iter().find(|run| run.ended_at.is_none()).unwrap();
+        assert!(
+            next.launch_spec.is_some(),
+            "auto-hop must materialize exactly one v11 spec"
+        );
+        assert_eq!(next.session, card.session);
     }
 
     #[test]
-    fn finalization_error_recovers_failed_card_and_emits_completion() {
+    fn finalization_planning_error_preserves_exact_prior_state_and_emits_nothing() {
         let (d, mut events, mut dispatch) = test_daemon_with_receivers(Arc::new(MissingPiSpawner));
         let (card_id, run_id, target_id) = {
             let db = d.store.lock();
@@ -1463,7 +1716,7 @@ mod tests {
                 .unwrap();
             db.update_column(&ColumnUpdateParams {
                 id: source.id,
-                on_success_column_id: Some(target.id),
+                on_success_column_id: Patch::Set(target.id),
                 ..Default::default()
             })
             .unwrap();
@@ -1490,83 +1743,462 @@ mod tests {
         let db = d.store.lock();
         let run = db.get_run(run_id).unwrap();
         let card = db.get_card(card_id).unwrap().unwrap();
-        assert!(run.ended_at.is_some());
-        assert_eq!(run.outcome, Some(RunOutcome::Ok));
-        assert_eq!(card.column_id, target_id, "partial move is retained");
-        assert_eq!(card.status, CardStatus::Failed);
-        assert_eq!(card.awaiting_reason, None);
+        assert!(run.ended_at.is_none());
+        assert_eq!(run.outcome, None);
+        assert_ne!(card.column_id, target_id);
+        assert_eq!(card.status, CardStatus::Awaiting);
+        assert_eq!(card.awaiting_reason, Some(AwaitingReason::AgentDone));
         assert_eq!(db.list_runs(card_id).unwrap().len(), 1);
-        assert!(db.list_comments(card_id).unwrap().iter().any(|comment| {
-            comment.author == "system"
-                && comment.body.contains("finalization failed")
-                && comment.body.contains("unknown harness")
-        }));
+        assert!(db.list_comments(card_id).unwrap().is_empty());
         drop(db);
-
-        assert!(!d
-            .sched
-            .lock()
-            .unwrap()
-            .finalizing_cards
-            .contains_key(&card_id));
-        assert_eq!(
-            events.try_recv().unwrap(),
-            Event::RunEnded {
-                card_id,
-                run_id,
-                outcome: RunOutcome::Ok,
-            }
-        );
-        assert_eq!(
-            events.try_recv().unwrap(),
-            Event::BoardChanged {
-                reason: BoardChangedReason::RunEnded,
-                card_id: Some(card_id),
-                column_id: None,
-            }
-        );
-
-        let (duplicate_run, duplicate_card) =
-            finalize_run(&d, run_id, RunOutcome::Ok, None, None, false, true).unwrap();
-        assert!(duplicate_run.ended_at.is_some());
-        assert_eq!(duplicate_card.status, CardStatus::Failed);
-        assert_eq!(duplicate_card.awaiting_reason, None);
-        assert!(
-            events.try_recv().is_err(),
-            "a duplicate finalizer must not emit RunEnded again"
-        );
-        dispatch.try_recv().unwrap();
+        assert!(events.try_recv().is_err());
         assert!(dispatch.try_recv().is_err());
     }
 
+    fn file_daemon(
+        db: Db,
+        path: PathBuf,
+        spawner: Arc<dyn Spawner>,
+    ) -> (
+        Arc<Daemon>,
+        broadcast::Receiver<Event>,
+        mpsc::UnboundedReceiver<()>,
+    ) {
+        let (events_tx, events_rx) = broadcast::channel(32);
+        let (dispatch_tx, dispatch_rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let daemon = Arc::new(Daemon::new(
+            Store::new(db),
+            Config::default(),
+            DaemonSettings::default(),
+            path,
+            PathBuf::from("/tmp/board-finalize-test.sock"),
+            spawner,
+            None,
+            None,
+            events_tx,
+            dispatch_tx,
+            shutdown_tx,
+        ));
+        (daemon, events_rx, dispatch_rx)
+    }
+
+    fn assert_no_effects(
+        d: &Arc<Daemon>,
+        events: &mut broadcast::Receiver<Event>,
+        dispatch: &mut mpsc::UnboundedReceiver<()>,
+        spawner: &RecordingSpawner,
+        run_id: i64,
+    ) {
+        assert_eq!(spawner.kills.load(Ordering::SeqCst), 0);
+        assert!(d.sched.lock().unwrap().active.contains_key(&run_id));
+        assert!(
+            events.try_recv().is_err(),
+            "terminal event escaped rollback"
+        );
+        assert!(
+            dispatch.try_recv().is_err(),
+            "dispatch wake escaped rollback"
+        );
+    }
+
     #[test]
-    fn duplicate_finalizer_does_not_clear_an_existing_claim() {
-        let d = test_daemon(Arc::new(MissingPiSpawner));
-        let (card_id, run_id) = {
-            let db = d.store.lock();
+    fn daemon_comment_insert_fault_reopens_exact_prior_state_without_precommit_effects() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("comment-fault.db");
+        let db = Db::open(&path).unwrap();
+        let (card_id, run_id, column_id) = {
             let card = db
                 .create_card(&CardCreateParams {
-                    title: "already claimed".into(),
+                    title: "comment rollback".into(),
                     ..Default::default()
                 })
                 .unwrap();
             let run = db
-                .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
+                .create_run(card.id, card.column_id, "pi", "[]", "prompt", None, None)
                 .unwrap();
-            db.start_run(run.id, None, None).unwrap();
-            db.finish_run(run.id, RunOutcome::Ok, None).unwrap();
+            db.start_run(run.id, Some("workspace"), Some("pane"))
+                .unwrap();
+            db.set_card_awaiting(card.id, AwaitingReason::AgentDone)
+                .unwrap();
+            db.add_comment(card.id, "user", "durable before").unwrap();
+            (card.id, run.id, card.column_id)
+        };
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER abort_daemon_comment BEFORE INSERT ON comments
+                 BEGIN SELECT RAISE(ABORT, 'injected daemon comment failure'); END;",
+            )
+            .unwrap();
+        let spawner = Arc::new(RecordingSpawner::default());
+        let (d, mut events, mut dispatch) = file_daemon(db, path.clone(), spawner.clone());
+        let effects = Arc::new(Mutex::new(Vec::new()));
+        *d.effect_log.lock().unwrap() = Some(effects.clone());
+        d.sched.lock().unwrap().active.insert(
+            run_id,
+            ActiveRun {
+                card_id,
+                handle: RuntimeHandle {
+                    pane_id: Some("pane".into()),
+                    ..Default::default()
+                },
+                started: Instant::now(),
+                timeout_deadline: None,
+                idle_since: None,
+                awaiting_since: Some(Instant::now()),
+                is_local: false,
+                pane_id: Some("pane".into()),
+            },
+        );
+
+        let err = finalize_run(
+            &d,
+            run_id,
+            RunOutcome::Cancelled,
+            Some("must roll back".into()),
+            Some("must not persist".into()),
+            true,
+            true,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("injected daemon comment failure"));
+        assert_no_effects(&d, &mut events, &mut dispatch, &spawner, run_id);
+        assert!(effects.lock().unwrap().is_empty());
+        drop(d);
+
+        let reopened = Db::open(&path).unwrap();
+        let run = reopened.get_run(run_id).unwrap();
+        let card = reopened.get_card(card_id).unwrap().unwrap();
+        assert!(run.ended_at.is_none());
+        assert_eq!(run.outcome, None);
+        assert_eq!(run.result_summary, None);
+        assert_eq!(card.column_id, column_id);
+        assert_eq!(card.status, CardStatus::Awaiting);
+        assert_eq!(card.awaiting_reason, Some(AwaitingReason::AgentDone));
+        let comments = reopened.list_comments(card_id).unwrap();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].author, "user");
+        assert_eq!(comments[0].body, "durable before");
+        assert_eq!(reopened.list_runs(card_id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn daemon_auto_hop_enqueue_fault_reopens_exact_prior_state_without_precommit_effects() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auto-hop-fault.db");
+        let db = Db::open(&path).unwrap();
+        let (card_id, run_id, source_id) = {
+            let source = db
+                .create_column(&ColumnCreateParams {
+                    name: "Fault source".into(),
+                    ..Default::default()
+                })
+                .unwrap();
+            let target = db
+                .create_column(&ColumnCreateParams {
+                    name: "Fault auto target".into(),
+                    trigger: Some(Trigger::Auto),
+                    ..Default::default()
+                })
+                .unwrap();
+            db.update_column(&ColumnUpdateParams {
+                id: source.id,
+                on_success_column_id: Patch::Set(target.id),
+                ..Default::default()
+            })
+            .unwrap();
+            let card = db
+                .create_card(&CardCreateParams {
+                    title: "auto hop rollback".into(),
+                    column_id: Some(source.id),
+                    ..Default::default()
+                })
+                .unwrap();
+            let run = db
+                .create_run(card.id, source.id, "pi", "[]", "prompt", None, None)
+                .unwrap();
+            db.start_run(run.id, Some("workspace"), Some("pane"))
+                .unwrap();
+            db.set_card_status(card.id, CardStatus::Running).unwrap();
+            db.add_comment(card.id, "user", "durable before").unwrap();
+            (card.id, run.id, source.id)
+        };
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER abort_daemon_next BEFORE INSERT ON runs
+                 WHEN NEW.card_id={card_id}
+                 BEGIN SELECT RAISE(ABORT, 'injected daemon next enqueue failure'); END;"
+            ))
+            .unwrap();
+        let spawner = Arc::new(RecordingSpawner::default());
+        let (d, mut events, mut dispatch) = file_daemon(db, path.clone(), spawner.clone());
+        let effects = Arc::new(Mutex::new(Vec::new()));
+        *d.effect_log.lock().unwrap() = Some(effects.clone());
+        d.sched.lock().unwrap().active.insert(
+            run_id,
+            ActiveRun {
+                card_id,
+                handle: RuntimeHandle {
+                    pane_id: Some("pane".into()),
+                    ..Default::default()
+                },
+                started: Instant::now(),
+                timeout_deadline: None,
+                idle_since: None,
+                awaiting_since: None,
+                is_local: false,
+                pane_id: Some("pane".into()),
+            },
+        );
+
+        let err = finalize_run(
+            &d,
+            run_id,
+            RunOutcome::Ok,
+            Some("must roll back".into()),
+            Some("must not persist".into()),
+            true,
+            true,
+        )
+        .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("injected daemon next enqueue failure"));
+        assert_no_effects(&d, &mut events, &mut dispatch, &spawner, run_id);
+        assert!(effects.lock().unwrap().is_empty());
+        assert_eq!(d.sched.lock().unwrap().chain_hops.get(&card_id), None);
+        drop(d);
+
+        let reopened = Db::open(&path).unwrap();
+        let run = reopened.get_run(run_id).unwrap();
+        let card = reopened.get_card(card_id).unwrap().unwrap();
+        assert!(run.ended_at.is_none());
+        assert_eq!(run.outcome, None);
+        assert_eq!(run.result_summary, None);
+        assert_eq!(card.column_id, source_id);
+        assert_eq!(card.status, CardStatus::Running);
+        assert_eq!(card.awaiting_reason, None);
+        let comments = reopened.list_comments(card_id).unwrap();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].body, "durable before");
+        assert_eq!(reopened.list_runs(card_id).unwrap().len(), 1);
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum TerminalPath {
+        BoardDone,
+        Cancel,
+        Timeout,
+        PaneExit,
+    }
+
+    fn invoke_terminal_path(
+        d: &Arc<Daemon>,
+        run_id: i64,
+        path: TerminalPath,
+    ) -> Result<(Run, Card)> {
+        match path {
+            TerminalPath::BoardDone => finalize_run(
+                d,
+                run_id,
+                RunOutcome::Ok,
+                Some("board done".into()),
+                None,
+                false,
+                true,
+            ),
+            TerminalPath::Cancel => finalize_run(
+                d,
+                run_id,
+                RunOutcome::Cancelled,
+                Some("cancel".into()),
+                None,
+                true,
+                false,
+            ),
+            TerminalPath::Timeout => finalize_run_timeout(
+                d,
+                run_id,
+                Instant::now(),
+                RunOutcome::Fail,
+                Some("timeout".into()),
+                Some("timeout".into()),
+                true,
+                true,
+            )?
+            .ok_or_else(|| Error::InvalidState("timeout lost".into())),
+            TerminalPath::PaneExit => finalize_run(
+                d,
+                run_id,
+                RunOutcome::Fail,
+                Some("pane exit".into()),
+                Some("pane exit".into()),
+                false,
+                false,
+            ),
+        }
+    }
+
+    #[test]
+    fn terminal_winner_duplicate_and_stale_matrix_is_idempotent() {
+        let paths = [
+            TerminalPath::BoardDone,
+            TerminalPath::Cancel,
+            TerminalPath::Timeout,
+            TerminalPath::PaneExit,
+        ];
+        for winner in paths {
+            for loser in paths {
+                let spawner = Arc::new(RecordingSpawner::default());
+                let (d, mut events, mut dispatch) = test_daemon_with_receivers(spawner.clone());
+                let (card_id, run_id) = {
+                    let db = d.store.lock();
+                    let card = db
+                        .create_card(&CardCreateParams {
+                            title: format!("winner {winner:?}, loser {loser:?}"),
+                            ..Default::default()
+                        })
+                        .unwrap();
+                    let run = db
+                        .create_run(card.id, card.column_id, "pi", "[]", "prompt", None, None)
+                        .unwrap();
+                    db.start_run(run.id, Some("workspace"), Some("pane"))
+                        .unwrap();
+                    db.set_card_status(card.id, CardStatus::Running).unwrap();
+                    (card.id, run.id)
+                };
+                d.sched.lock().unwrap().active.insert(
+                    run_id,
+                    ActiveRun {
+                        card_id,
+                        handle: RuntimeHandle {
+                            pane_id: Some("pane".into()),
+                            ..Default::default()
+                        },
+                        started: Instant::now(),
+                        timeout_deadline: Some(Instant::now() - Duration::from_secs(1)),
+                        idle_since: None,
+                        awaiting_since: None,
+                        is_local: false,
+                        pane_id: Some("pane".into()),
+                    },
+                );
+
+                let (won_run, won_card) = invoke_terminal_path(&d, run_id, winner).unwrap();
+                let won_outcome = won_run.outcome;
+                let won_status = won_card.status;
+                let won_column = won_card.column_id;
+                let won_comments = d.store.lock().list_comments(card_id).unwrap();
+                while events.try_recv().is_ok() {}
+                while dispatch.try_recv().is_ok() {}
+                let kills = spawner.kills.load(Ordering::SeqCst);
+
+                let duplicate = invoke_terminal_path(&d, run_id, loser).unwrap();
+                assert_eq!(duplicate.0.outcome, won_outcome, "{winner:?} vs {loser:?}");
+                assert_eq!(duplicate.1.status, won_status, "{winner:?} vs {loser:?}");
+                assert!(events.try_recv().is_err());
+                assert!(dispatch.try_recv().is_err());
+                assert_eq!(spawner.kills.load(Ordering::SeqCst), kills);
+                assert_eq!(d.store.lock().list_comments(card_id).unwrap(), won_comments);
+
+                let replacement = enqueue_run(&d, card_id, won_column, true).unwrap();
+                while events.try_recv().is_ok() {}
+                while dispatch.try_recv().is_ok() {}
+                let stale = invoke_terminal_path(&d, run_id, loser).unwrap();
+                assert_eq!(
+                    stale.0.outcome, won_outcome,
+                    "stale {winner:?} vs {loser:?}"
+                );
+                assert_eq!(spawner.kills.load(Ordering::SeqCst), kills);
+                assert!(events.try_recv().is_err());
+                assert!(dispatch.try_recv().is_err());
+                let db = d.store.lock();
+                let replacement = db.get_run(replacement.id).unwrap();
+                assert!(replacement.ended_at.is_none());
+                assert_eq!(
+                    db.get_card(card_id).unwrap().unwrap().status,
+                    CardStatus::Queued
+                );
+                assert_eq!(db.list_comments(card_id).unwrap(), won_comments);
+            }
+        }
+    }
+
+    #[test]
+    fn successful_finalization_records_exact_postcommit_effect_order() {
+        let spawner = Arc::new(RecordingSpawner::default());
+        let (d, _events, _dispatch) = test_daemon_with_receivers(spawner.clone());
+        let (card_id, run_id) = {
+            let db = d.store.lock();
+            let source = db
+                .create_column(&ColumnCreateParams {
+                    name: "effect source".into(),
+                    ..Default::default()
+                })
+                .unwrap();
+            let review = db
+                .create_column(&ColumnCreateParams {
+                    name: "Review".into(),
+                    trigger: Some(Trigger::Manual),
+                    ..Default::default()
+                })
+                .unwrap();
+            db.update_column(&ColumnUpdateParams {
+                id: source.id,
+                on_success_column_id: Patch::Set(review.id),
+                ..Default::default()
+            })
+            .unwrap();
+            let card = db
+                .create_card(&CardCreateParams {
+                    title: "ordered effects".into(),
+                    column_id: Some(source.id),
+                    ..Default::default()
+                })
+                .unwrap();
+            let run = db
+                .create_run(card.id, source.id, "pi", "[]", "prompt", None, None)
+                .unwrap();
+            db.start_run(run.id, Some("workspace"), Some("pane"))
+                .unwrap();
+            db.set_card_status(card.id, CardStatus::Running).unwrap();
             (card.id, run.id)
         };
-        d.sched
-            .lock()
-            .unwrap()
-            .finalizing_cards
-            .insert(card_id, run_id);
+        d.sched.lock().unwrap().active.insert(
+            run_id,
+            ActiveRun {
+                card_id,
+                handle: RuntimeHandle {
+                    pane_id: Some("pane".into()),
+                    ..Default::default()
+                },
+                started: Instant::now(),
+                timeout_deadline: None,
+                idle_since: None,
+                awaiting_since: None,
+                is_local: false,
+                pane_id: Some("pane".into()),
+            },
+        );
+        let effects = Arc::new(Mutex::new(Vec::new()));
+        *d.effect_log.lock().unwrap() = Some(effects.clone());
+        *spawner.effects.lock().unwrap() = Some(effects.clone());
 
-        assert!(finalize_run(&d, run_id, RunOutcome::Ok, None, None, false, true).is_err());
+        finalize_run(&d, run_id, RunOutcome::Ok, None, None, true, true).unwrap();
+
         assert_eq!(
-            d.sched.lock().unwrap().finalizing_cards.get(&card_id),
-            Some(&run_id)
+            *effects.lock().unwrap(),
+            [
+                "scheduler",
+                "watch",
+                "kill",
+                "notification",
+                "run_ended",
+                "board_changed",
+                "dispatch_wake"
+            ]
         );
     }
 
@@ -1644,15 +2276,15 @@ mod tests {
             db.update_card(&CardUpdateParams {
                 id: card_id,
                 description: Some("new prompt".into()),
-                model: Some("new-model".into()),
-                session: Some("new-herdr-session".into()),
+                model: Patch::Set("new-model".into()),
+                session: Patch::Set("new-herdr-session".into()),
                 ..Default::default()
             })
             .unwrap();
             db.update_column(&ColumnUpdateParams {
                 id: column_id,
-                system_prompt: Some("new settings".into()),
-                model_override: Some("new-column-model".into()),
+                system_prompt: Patch::Set("new settings".into()),
+                model_override: Patch::Set("new-column-model".into()),
                 ..Default::default()
             })
             .unwrap();
@@ -1706,12 +2338,22 @@ mod tests {
             (card.id, column.id)
         };
         let run = enqueue_run(&d, card_id, column_id, false).unwrap();
+        let exact = run.launch_spec.as_ref().unwrap().execution().clone();
         let old = board_core::harness::protocol_system_prompt(Some("old column instructions"));
+        d.store
+            .lock()
+            .update_card(&CardUpdateParams {
+                id: card_id,
+                description: Some("edited task must not launch".into()),
+                model: Patch::Set("edited-model".into()),
+                ..Default::default()
+            })
+            .unwrap();
         d.store
             .lock()
             .update_column(&ColumnUpdateParams {
                 id: column_id,
-                system_prompt: Some("new column instructions".into()),
+                system_prompt: Patch::Set("new column instructions".into()),
                 ..Default::default()
             })
             .unwrap();
@@ -1720,6 +2362,10 @@ mod tests {
 
         let requests = spawner.requests.lock().unwrap();
         let req = &requests[0];
+        assert_eq!(req.argv, exact.argv);
+        assert_eq!(req.agent_kind, exact.agent_kind);
+        assert_eq!(req.initial_prompt, exact.initial_prompt);
+        assert_eq!(req.system_prompt, exact.system_prompt);
         assert_eq!(req.agent_kind.as_deref(), Some("pi"));
         assert_eq!(
             req.initial_prompt.as_deref(),
@@ -1764,18 +2410,41 @@ mod tests {
                 .unwrap();
             (card.id, column.id)
         };
-        enqueue_run(&d, card_id, column_id, false).unwrap();
+        let run = enqueue_run(&d, card_id, column_id, false).unwrap();
+        let exact = run.launch_spec.as_ref().unwrap().execution().clone();
+        Arc::get_mut(&mut d)
+            .unwrap()
+            .config
+            .harness
+            .get_mut("custom")
+            .unwrap()
+            .argv = vec!["edited-agent-must-not-launch".into()];
+        d.store
+            .lock()
+            .update_card(&CardUpdateParams {
+                id: card_id,
+                description: Some("edited configured task".into()),
+                ..Default::default()
+            })
+            .unwrap();
         d.store
             .lock()
             .update_column(&ColumnUpdateParams {
                 id: column_id,
-                system_prompt: Some("configured new".into()),
+                system_prompt: Patch::Set("configured new".into()),
                 ..Default::default()
             })
             .unwrap();
         dispatch_pass(&d).await;
         let requests = spawner.requests.lock().unwrap();
-        let env = &requests[0].env;
+        let req = &requests[0];
+        assert_eq!(req.argv, exact.argv);
+        assert_eq!(req.agent_kind, exact.agent_kind);
+        assert_eq!(req.initial_prompt, exact.initial_prompt);
+        assert_eq!(req.system_prompt, exact.system_prompt);
+        assert_eq!(&req.env[..exact.env.len()], exact.env.as_slice());
+        assert_eq!(req.env.len(), exact.env.len() + 4);
+        let env = &req.env;
         assert_eq!(
             env.iter()
                 .find(|(k, _)| k == "BOARD_SYSTEM_PROMPT")
@@ -1792,6 +2461,115 @@ mod tests {
                     .into_owned()
             )
         );
+    }
+
+    #[test]
+    fn v11_placement_uses_run_session_while_legacy_uses_current_card_session() {
+        let d = test_daemon(Arc::new(MissingPiSpawner));
+        let card = d
+            .store
+            .lock()
+            .create_card(&CardCreateParams {
+                title: "session snapshot".into(),
+                session: Some("enqueue-session".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let mut run = enqueue_run(&d, card.id, card.column_id, false).unwrap();
+        assert!(run.launch_spec.is_some());
+        assert_eq!(run.session.as_deref(), Some("enqueue-session"));
+
+        // Model a queued card edit in the dispatch snapshot: v11 ignores it.
+        let mut edited_card = card;
+        edited_card.session = Some("edited-session".into());
+        assert_eq!(launch_session(&run, &edited_card), Some("enqueue-session"));
+
+        // The same row shape without a v11 spec follows the documented legacy
+        // adapter and therefore observes the current card session.
+        run.launch_spec = None;
+        assert_eq!(launch_session(&run, &edited_card), Some("edited-session"));
+    }
+
+    #[tokio::test]
+    async fn v7_and_pre_v7_launch_adapters_remain_explicit() {
+        let spawner = Arc::new(CapturingSpawner::default());
+        let mut config = Config::default();
+        config.harness.insert(
+            "custom".into(),
+            board_core::config::HarnessDef {
+                argv: vec!["custom".into()],
+                ..Default::default()
+            },
+        );
+        let (d, _, _) = test_daemon_with_config(spawner.clone(), config);
+        let (v7_card, legacy_card, column_id) = {
+            let db = d.store.lock();
+            let column = db
+                .create_column(&ColumnCreateParams {
+                    name: "Adapters".into(),
+                    system_prompt: Some("current".into()),
+                    ..Default::default()
+                })
+                .unwrap();
+            let v7 = db
+                .create_card(&CardCreateParams {
+                    title: "v7".into(),
+                    column_id: Some(column.id),
+                    harness: Some("custom".into()),
+                    space_ref: Some("v7".into()),
+                    ..Default::default()
+                })
+                .unwrap();
+            let legacy = db
+                .create_card(&CardCreateParams {
+                    title: "legacy".into(),
+                    column_id: Some(column.id),
+                    harness: Some("custom".into()),
+                    space_ref: Some("legacy".into()),
+                    ..Default::default()
+                })
+                .unwrap();
+            db.create_run_with_prompt_snapshots(
+                v7.id,
+                column.id,
+                "custom",
+                r#"["v7-command"]"#,
+                "v7-prompt",
+                Some("v7-system-exact"),
+                None,
+                None,
+            )
+            .unwrap();
+            db.create_run(
+                legacy.id,
+                column.id,
+                "custom",
+                r#"["legacy-command"]"#,
+                "legacy-prompt",
+                None,
+                None,
+            )
+            .unwrap();
+            db.set_card_status(v7.id, CardStatus::Queued).unwrap();
+            db.set_card_status(legacy.id, CardStatus::Queued).unwrap();
+            (v7.id, legacy.id, column.id)
+        };
+        dispatch_pass(&d).await;
+        let requests = spawner.requests.lock().unwrap();
+        let v7 = requests.iter().find(|r| r.argv == ["v7-command"]).unwrap();
+        assert!(v7
+            .env
+            .contains(&("BOARD_SYSTEM_PROMPT".into(), "v7-system-exact".into())));
+        let legacy = requests
+            .iter()
+            .find(|r| r.argv == ["legacy-command"])
+            .unwrap();
+        assert!(legacy.env.contains(&(
+            "BOARD_SYSTEM_PROMPT".into(),
+            board_core::harness::protocol_system_prompt(Some("current"))
+        )));
+        assert_ne!(v7_card, legacy_card);
+        assert!(column_id > 0);
     }
 
     #[tokio::test]
@@ -1850,7 +2628,7 @@ mod tests {
                 .unwrap();
             db.update_column(&ColumnUpdateParams {
                 id: auto.id,
-                on_success_column_id: Some(done.id),
+                on_success_column_id: Patch::Set(done.id),
                 ..Default::default()
             })
             .unwrap();

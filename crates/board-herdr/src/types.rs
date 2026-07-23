@@ -9,8 +9,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-/// Agent status as reported by herdr. `idle` != finished — "done" is only
-/// produced by integrations that call `pane report-agent --state done`.
+/// Agent status as reported by herdr. `idle` is not finished; `done` is an
+/// output status derived by Herdr from an integration's end-of-turn report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentStatus {
@@ -129,18 +129,6 @@ pub struct AgentInfo {
     pub interactive_ready: bool,
 }
 
-/// A git worktree entry.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct WorktreeInfo {
-    pub path: String,
-    #[serde(default)]
-    pub branch: Option<String>,
-    #[serde(default)]
-    pub label: String,
-    #[serde(default)]
-    pub open_workspace_id: Option<String>,
-}
-
 /// Live session state (subset the daemon consumes).
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct SessionSnapshot {
@@ -224,36 +212,6 @@ impl AgentStarted {
     pub fn workspace_id(&self) -> &str {
         &self.agent.workspace_id
     }
-}
-
-/// Result of `worktree.create`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct WorktreeCreated {
-    pub workspace: WorkspaceInfo,
-    pub tab: TabInfo,
-    pub root_pane: PaneInfo,
-    pub worktree: WorktreeInfo,
-}
-
-impl WorktreeCreated {
-    pub fn path(&self) -> &str {
-        &self.worktree.path
-    }
-    pub fn workspace_id(&self) -> &str {
-        &self.workspace.workspace_id
-    }
-    pub fn root_pane_id(&self) -> &str {
-        &self.root_pane.pane_id
-    }
-}
-
-/// Result of `worktree.remove`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct WorktreeRemoved {
-    pub workspace_id: String,
-    pub path: String,
-    #[serde(default)]
-    pub forced: bool,
 }
 
 /// Result of `pane.read`.

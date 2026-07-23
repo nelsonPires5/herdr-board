@@ -20,19 +20,6 @@ pub struct Store {
     db: Arc<Mutex<Db>>,
 }
 
-/// A hashable string form of the per-space queue key: cards sharing a
-/// `(session, space_kind, space_ref)` run serially. Session is part of the key
-/// so the same label/ref in two herdr sessions are distinct spaces.
-/// (`SpaceKind` is not `Hash`.)
-pub fn space_key_str(card: &Card) -> String {
-    format!(
-        "{}\u{1f}{}\u{1f}{}",
-        card.session.as_deref().unwrap_or(""),
-        card.space_kind.as_str(),
-        card.space_ref.as_deref().unwrap_or("")
-    )
-}
-
 impl Store {
     pub fn new(db: Db) -> Store {
         Store {
@@ -49,26 +36,11 @@ impl Store {
 
     /// All runs that have started but not ended, paired with their card.
     pub fn active_runs(&self) -> Result<Vec<(Run, Card)>> {
-        self.collect_runs(|r| r.started_at.is_some() && r.ended_at.is_none())
+        self.lock().active_runs_with_cards()
     }
 
     /// All queued runs (never started, not ended), FIFO by run id, with card.
     pub fn queued_runs(&self) -> Result<Vec<(Run, Card)>> {
-        let mut v = self.collect_runs(|r| r.started_at.is_none() && r.ended_at.is_none())?;
-        v.sort_by_key(|(r, _)| r.id);
-        Ok(v)
-    }
-
-    fn collect_runs(&self, pred: impl Fn(&Run) -> bool) -> Result<Vec<(Run, Card)>> {
-        let db = self.lock();
-        let mut out = Vec::new();
-        for card in db.list_all_cards()? {
-            for run in db.list_runs(card.id)? {
-                if pred(&run) {
-                    out.push((run, card.clone()));
-                }
-            }
-        }
-        Ok(out)
+        self.lock().queued_runs_with_cards()
     }
 }

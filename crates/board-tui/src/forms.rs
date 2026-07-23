@@ -6,11 +6,11 @@
 //! owns construction, focus movement, field cycling, and turning a submitted form
 //! into a protocol params struct.
 
-use board_core::capability::HarnessCapabilities;
+use board_core::capability::{efforts_for, HarnessCapabilities};
 use board_core::harness::{BUILTIN_HARNESSES, DEFAULT_HARNESS};
 use board_core::model::{Card, Column};
 use board_core::protocol::{
-    CardCreateParams, CardUpdateParams, ColumnCreateParams, ColumnUpdateParams, Effort,
+    CardCreateParams, CardUpdateParams, ColumnCreateParams, ColumnUpdateParams, Effort, Patch,
     SessionInfo, SpaceInfo, SpaceKind, Trigger,
 };
 use tui_textarea::TextArea;
@@ -268,7 +268,11 @@ impl Form {
     // -- construction --------------------------------------------------------
 
     pub fn card_create(column_id: i64) -> Form {
-        let values = CardValues::from_card(None);
+        Self::card_create_with_session(column_id, None)
+    }
+
+    pub fn card_create_with_session(column_id: i64, session: Option<&str>) -> Form {
+        let values = CardValues::from_card(None, session);
         Form {
             kind: FormKind::CardCreate { column_id },
             fields: build_card_fields(&values, None, &default_harnesses(), &[], &[]),
@@ -282,7 +286,7 @@ impl Form {
     }
 
     pub fn card_edit(card: &Card) -> Form {
-        let values = CardValues::from_card(Some(card));
+        let values = CardValues::from_card(Some(card), None);
         Form {
             kind: FormKind::CardEdit { card_id: card.id },
             fields: build_card_fields(&values, None, &default_harnesses(), &[], &[]),
@@ -658,15 +662,17 @@ impl Form {
                     title: Some(title),
                     description: Some(self.trim(FieldId::Description)),
                     harness: self.opt_choice_str(FieldId::Harness),
-                    model: self.card_model(),
-                    effort: self.opt_effort(FieldId::Effort),
-                    permission_mode: (self.current_harness() != "pi")
-                        .then(|| self.opt_choice_str(FieldId::Permission))
-                        .flatten(),
-                    session: self.current_session(),
+                    model: patch(self.card_model()),
+                    effort: patch(self.opt_effort(FieldId::Effort)),
+                    permission_mode: patch(
+                        (self.current_harness() != "pi")
+                            .then(|| self.opt_choice_str(FieldId::Permission))
+                            .flatten(),
+                    ),
+                    session: patch(self.current_session()),
                     space_kind: self.opt_space_kind(),
-                    space_ref: self.card_space_ref(),
-                    space_cwd: self.new_workspace_cwd(),
+                    space_ref: patch(self.card_space_ref()),
+                    space_cwd: patch(self.new_workspace_cwd()),
                 }))
             }
             FormKind::ColumnCreate => {
@@ -699,16 +705,16 @@ impl Form {
                     id: column_id,
                     name: Some(name),
                     position: None,
-                    system_prompt: Some(self.trim(FieldId::SystemPrompt)),
+                    system_prompt: patch(self.opt_text(FieldId::SystemPrompt)),
                     trigger: self.opt_trigger(),
-                    on_success_column_id: self.opt_col(FieldId::OnSuccess),
-                    on_fail_column_id: self.opt_col(FieldId::OnFail),
+                    on_success_column_id: patch(self.opt_col(FieldId::OnSuccess)),
+                    on_fail_column_id: patch(self.opt_col(FieldId::OnFail)),
                     fresh_session: self.opt_bool(FieldId::FreshSession),
-                    harness_override: self.opt_str_field(FieldId::HarnessOverride),
-                    model_override: self.opt_text(FieldId::ModelOverride),
-                    effort_override: self.opt_str_field(FieldId::EffortOverride),
-                    permission_override: self.opt_str_field(FieldId::PermissionOverride),
-                    timeout_minutes: self.opt_int(FieldId::Timeout),
+                    harness_override: patch(self.opt_str_field(FieldId::HarnessOverride)),
+                    model_override: patch(self.opt_text(FieldId::ModelOverride)),
+                    effort_override: patch(self.opt_str_field(FieldId::EffortOverride)),
+                    permission_override: patch(self.opt_str_field(FieldId::PermissionOverride)),
+                    timeout_minutes: patch(self.opt_int(FieldId::Timeout)),
                 }))
             }
             FormKind::Comment { card_id } => {
@@ -789,24 +795,22 @@ impl Form {
     }
 }
 
-/// Parse the current herdr session name from a `HERDR_SOCKET_PATH` value.
+fn patch<T>(value: Option<T>) -> Patch<T> {
+    value.map(Patch::Set).unwrap_or(Patch::Clear)
+}
+
+/// Parse a herdr session name from a `HERDR_SOCKET_PATH` value.
 ///
 /// A named session's socket lives at `…/sessions/<name>/herdr.sock`; anything
 /// else (unset, or the plain default `…/herdr.sock`) means the daemon's default
-/// session, represented as `None`. Pure so it can be unit-tested; the env read
-/// lives in [`detect_current_session`].
+/// session, represented as `None`. This function is pure so production
+/// composition can inject its result without test-time environment reads.
 pub fn session_name_from_socket(path: Option<&str>) -> Option<String> {
     // Expect the tail `sessions/<name>/herdr.sock`.
     let rest = path?.strip_suffix("/herdr.sock")?;
     let (parent, name) = rest.rsplit_once('/')?;
     let last_seg = parent.rsplit('/').next().unwrap_or(parent);
     (last_seg == "sessions" && !name.is_empty()).then(|| name.to_string())
-}
-
-/// Read `HERDR_SOCKET_PATH` and resolve it to the current session name
-/// (`None` = the daemon's default session).
-fn detect_current_session() -> Option<String> {
-    session_name_from_socket(std::env::var("HERDR_SOCKET_PATH").ok().as_deref())
 }
 
 // -- field templates ---------------------------------------------------------
@@ -904,7 +908,7 @@ struct CardValues {
 }
 
 impl CardValues {
-    fn from_card(card: Option<&Card>) -> CardValues {
+    fn from_card(card: Option<&Card>, default_session: Option<&str>) -> CardValues {
         match card {
             Some(c) => CardValues {
                 title: c.title.clone(),
@@ -921,31 +925,12 @@ impl CardValues {
             },
             None => CardValues {
                 harness: DEFAULT_HARNESS.to_string(),
-                // A new card defaults to the session the TUI itself runs in.
-                session: detect_current_session(),
+                session: default_session.map(str::to_string),
                 space_kind: "workspace".to_string(),
                 ..CardValues::default()
             },
         }
     }
-}
-
-/// The reasoning efforts to offer for a catalog + selected model.
-///
-/// A known model contributes its own efforts; a custom/unknown model gets the
-/// union of every catalog model's efforts (canonical order).
-fn union_efforts(caps: &HarnessCapabilities) -> Vec<Effort> {
-    EFFORT_ORDER
-        .iter()
-        .copied()
-        .filter(|effort| {
-            caps.default_efforts.contains(effort)
-                || caps
-                    .models
-                    .iter()
-                    .any(|model| model.efforts.contains(effort))
-        })
-        .collect()
 }
 
 /// Build the guided card fields from the current values and (optional) live
@@ -1019,15 +1004,7 @@ fn build_card_fields(
             } else {
                 None
             };
-            match selected_id {
-                Some(id) => caps
-                    .models
-                    .iter()
-                    .find(|m| m.id == id)
-                    .map(|m| m.efforts.clone())
-                    .unwrap_or_else(|| union_efforts(caps)),
-                None => union_efforts(caps),
-            }
+            efforts_for(caps, selected_id.as_deref())
         }
         None if v.harness == "pi" => EFFORT_ORDER.to_vec(),
         None => EFFORT_ORDER[2..].to_vec(),
@@ -1290,7 +1267,7 @@ fn column_fields_from_values(
     // Efforts for the override harness (its default/free-form set); fallback
     // to the canonical ladder when caps aren't loaded yet.
     let efforts: Vec<Effort> = match caps {
-        Some(c) => union_efforts(c),
+        Some(c) => efforts_for(c, None),
         None => EFFORT_ORDER.to_vec(),
     };
     let (eff_opts, eff_idx) = effort_choice_opts(&efforts, v.effort_override.as_deref());
@@ -1500,6 +1477,37 @@ mod tests {
         let after = choice_labels(&form, FieldId::EffortOverride);
         assert!(!after.contains(&"xhigh".to_string()));
         assert!(after.contains(&"low".to_string()));
+    }
+
+    #[test]
+    fn column_options_rebuild_preserves_values_and_focus() {
+        let mut form = Form::column_create(&[]);
+        form.fields
+            .iter_mut()
+            .find(|field| field.id == FieldId::Name)
+            .unwrap()
+            .set_text("stage");
+        form.fields
+            .iter_mut()
+            .find(|field| field.id == FieldId::SystemPrompt)
+            .unwrap()
+            .set_text("instructions");
+        form.fields
+            .iter_mut()
+            .find(|field| field.id == FieldId::Timeout)
+            .unwrap()
+            .set_text("15");
+        form.focus = idx_of(&form, FieldId::Timeout);
+
+        form.apply_options(Some(pi_capabilities()), None, None, None);
+
+        assert_eq!(form.focus, idx_of(&form, FieldId::Timeout));
+        assert_eq!(field(&form, FieldId::Name).get_text(), "stage");
+        assert_eq!(
+            field(&form, FieldId::SystemPrompt).get_text(),
+            "instructions"
+        );
+        assert_eq!(field(&form, FieldId::Timeout).get_text(), "15");
     }
 
     #[test]

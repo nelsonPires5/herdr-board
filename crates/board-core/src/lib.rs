@@ -11,7 +11,7 @@
 //! - [`config`]: `~/.config/herdr-board/config.toml` loader.
 //! - [`paths`]: db/socket/log/config path resolution.
 //! - [`client`]: blocking NDJSON `BoardClient` (+ `FakeBoardClient` behind a feature).
-//! - [`spawn`]: `Spawner` trait + request/handle types (implemented by Phase D).
+//! - [`launch`]: durable, harness-neutral execution specifications.
 
 pub mod capability;
 pub mod client;
@@ -19,13 +19,13 @@ pub mod config;
 pub mod db;
 pub mod engine;
 pub mod harness;
+pub mod launch;
 pub mod model;
 pub mod paths;
 pub mod pi_catalog;
 pub mod prompt;
 pub mod protocol;
 pub mod scope;
-pub mod spawn;
 
 pub use engine::ValidationError;
 

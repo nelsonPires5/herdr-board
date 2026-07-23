@@ -18,7 +18,12 @@ protocol version.
 - A connection may send `{"id":"...","method":"events.subscribe"}`; boardd replies
   `{"id":"...","result":{"subscribed":true}}` and then streams event objects
   (no `id` field) on that connection until it closes. A subscribed connection can still
-  send further requests.
+  send further requests. Each connection has a bounded outbound queue: consecutive
+  `board_changed` events may coalesce to the latest coarse refresh while preserving response and
+  terminal-event order. Responses are never silently dropped. If a slow subscriber cannot accept
+  a non-coalescible event (including a terminal `run_ended`), boardd disconnects it; clients must
+  reconnect, resubscribe, and refetch board state. Broadcast lag likewise becomes a coarse
+  `board_changed` refresh rather than silently losing the refresh signal.
 
 ## Herdr compatibility gate
 
@@ -30,16 +35,33 @@ runner action. A mismatch fails the run before workspace mutation.
 
 ## Auto-start
 
-`board tui` and every CLI subcommand try to connect; on failure they spawn
-`board daemon` detached (double-fork / setsid, stdout+stderr → `~/.local/share/herdr-board/daemon.log`),
-then retry with backoff for ~3s. Daemon takes an exclusive flock on `<db>.lock` — a second
-daemon on the same DB must exit 0 silently (lost the race = someone else serves).
+`board tui` and every CLI subcommand try to connect; on failure they spawn one detached
+`board daemon` child (stdout+stderr → `~/.local/share/herdr-board/daemon.log`), then retry with
+backoff for ~3s. The child owns a new process group led by its exact PID; there is deliberately no
+double-fork or `setsid`, so diagnostics and the safe harness retain an unambiguous owner token.
+Lifecycle control uses the daemon socket (`daemon.stop`), never a broad process-group kill. Daemon
+takes an exclusive flock on `<db>.lock` — a second daemon on the same DB must exit 0 silently
+(lost the race = someone else serves).
+
+## Client boundary
+
+`board-core::client::BoardClient` is the shared typed client boundary used by the CLI and TUI.
+Its wrappers encode the v1 method parameters and decode result DTOs; the CLI and TUI do not build
+method strings or inspect raw result values for these operations. `UnixClient` keeps the blocking
+NDJSON `call(method, params)` primitive internally for transport implementations and compatibility
+with lightweight recording/fake clients. Production clients perform no SQLite I/O; only boardd owns
+and mutates the database.
+
+The typed catalog/action surface includes `harness.capabilities`, `harness.list`,
+`space.list`, `session.list`, `run.cancel`, and `run.retry`, in addition to the existing board,
+column, card, comment, and run wrappers. `space.list(None)` deliberately serializes as `{}` while
+a named session serializes as `{ "session": "..." }`, preserving the v1 wire contract.
 
 ## Methods
 
 ### daemon
 - `daemon.status` → `{version, db_path, herdr_connected: bool, active_runs: int, queued_runs: int}`
-- `daemon.stop` → `{stopping:true}` (graceful: cancels nothing; running panes keep running, runs are re-adopted on next start via herdr pane liveness check)
+- `daemon.stop` → `{stopping:true}` (graceful: cancels nothing; running panes keep running, runs are re-adopted on next start via herdr pane liveness check). The CLI stop command treats this as an acknowledgement, not completion: it returns success only after the listener disappears. RPC errors, a listener that remains live past the bounded wait, and socket-path replacement are errors and preserve the socket. If the initial connect fails, a stale socket is removed only after a fresh failed connect and matching device/inode/socket-type identity checks; a replacement path is preserved.
 
 ### board / columns
 
@@ -49,10 +71,13 @@ Boards are independent pipelines keyed by canonical path. `Global` is board `id=
 - `board.open {scope_path}` → `BoardSnapshot`; idempotently gets/creates the path board, seeding a
   new board with exactly one manual `Todo` column.
 - `board.list {}` → `{boards:[Board…]}`; `Global` first, then scoped boards ordered by full path.
-- `board.get {board_id?}` → `{board:{id,name,scope_path}, columns:[Column…ordered], cards:[Card…]}`.
+- `board.get {board_id?}` → `{board:{id,name,scope_path}, columns:[Column…ordered], cards:[Card…], active_runs:[{card_id,started_at}…]}`.
   Omitted `board_id` means `Global`. Cards include active and archived rows for local filtering.
+  `active_runs` is additive in protocol v1 and contains only started, open runs whose cards belong
+  to the requested board; queued, ended, and other-board runs are omitted. Older clients may omit
+  the field when decoding a snapshot, which is treated as an empty list.
 - `column.create {name, board_id?, position?, system_prompt?, trigger?, on_success_column_id?, on_fail_column_id?, fresh_session?, harness_override?, model_override?, effort_override?, permission_override?, timeout_minutes?}` → `Column`; omitted `board_id` means `Global`.
-- `column.update {id, …any subset of the above}` → `Column` (name/trigger/etc.; unset a nullable by passing `null`)
+- `column.update {id, …any subset of the above}` → `Column` (name/trigger/etc.; nullable update fields use the tri-state encoding below)
 - `column.reorder {id, position}` → `[Column…]`
 - `column.delete {id, move_cards_to?}` → `{deleted:true}`; destination must belong to the same board; error 3 if cards lack a destination or any card has an open run (`queued|running|blocked|awaiting`; `done` is not open).
 - `template.apply {name:"pipeline", board_id?}` → the requested board's full column set (omitted = `Global`; error 3 unless it has only seed `Todo` and no cards).
@@ -60,6 +85,39 @@ Boards are independent pipelines keyed by canonical path. `Global` is board `id=
 The store enforces board boundaries: card create/move, column-delete destinations,
 `on_success`/`on_fail`, templates, and automatic transitions cannot reference another board.
 Scheduler adoption and watchers still scan runs across every board.
+
+### Partial update fields (v1)
+
+Nullable fields in `column.update` and `card.update` distinguish three wire states:
+
+| JSON member | Meaning |
+|---|---|
+| omitted | leave the stored value unchanged |
+| present with `null` | clear the stored value |
+| present with a value | replace the stored value |
+
+For columns this applies to `system_prompt`, `on_success_column_id`, `on_fail_column_id`,
+`harness_override`, `model_override`, `effort_override`, `permission_override`, and
+`timeout_minutes`. For cards it applies to `model`, `effort`, `permission_mode`, `session`,
+`space_ref`, and `space_cwd`. The remaining partial-update fields retain their existing
+non-null/optional semantics; create DTOs are unchanged. A TUI edit submits the current value
+or an explicit `null` when the user clears a nullable field.
+
+### Validation and effective settings
+
+Card and column mutations are validated against the complete merged row before
+SQLite is updated or a `BoardChanged` event is emitted. Omitted update members
+remain unchanged while `null` clears them, so validation applies to the
+post-merge state (including `new_workspace` requiring both a non-empty
+`space_ref` and `space_cwd`). Unknown harnesses and unsupported model, effort,
+or permission combinations return error 1 without a partial update or event.
+
+A column may provide model/effort/permission values without a harness override;
+they are checked against the entering card at enqueue time. A column
+`bypassPermissions` override is always refused, while an explicit card
+`bypassPermissions` value is allowed for Claude. Pi has no permission modes.
+The daemon repeats validation against the effective card+column settings at the
+enqueue boundary, including for legacy rows.
 
 ### cards
 A card selects a **herdr session** (`session`, `null` = the daemon's default session) AND a **space** within it.
@@ -69,8 +127,11 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
     - `workspace` — an ALREADY-OPEN workspace in the session; `space_ref` = its workspace id (a case-insensitive label is also accepted at dispatch).
     - `new_workspace` — the daemon creates the workspace on first dispatch (label = `space_ref`, cwd = `space_cwd`), reusing an open workspace with that label if one exists. **Requires** non-empty `space_ref` and `space_cwd` on create (else error 1).
   - creating directly into an `auto` column dispatches immediately (same as move)
-  - (v2 schema) the legacy `cwd`/`worktree` kinds and `worktree_base` are removed; worktree isolation is now the agent's job via prompt instructions, not a board concept. Existing DBs migrate `cwd`/`worktree` cards to `workspace` (best effort, `space_ref` kept).
-- `card.update {id, …subset}` → `Card`; harness/model/effort/permission/session/space fields are refused while the card has an open run (`queued|running|blocked|awaiting`). Title/description remain editable; `done` is not open.
+  - In the legacy v1→v2 migration, `cwd`/`worktree` kinds and `worktree_base` were removed;
+    current schema v11 treats worktree isolation as the agent's job via prompt instructions, not a
+    board concept. Existing databases migrate those cards to `workspace` (best effort,
+    `space_ref` kept).
+- `card.update {id, …subset}` → `Card`; nullable update fields use the tri-state encoding below. Harness/model/effort/permission/session/space fields are refused while the card has an open run (`queued|running|blocked|awaiting`). Title/description remain editable; `done` is not open.
 - `card.delete {id}` → `{deleted:true}`; refused while the card has an open run (`queued|running|blocked|awaiting`; cancel first). `done` is not open.
 - `card.archive {id, archived:true|false}` → `Card` — archives or restores without deleting
   comments/runs. Archiving is refused while the card has an open run (`queued|running|blocked|awaiting`); `done` cards can be archived. Archived cards must be restored before move/retry.
@@ -122,7 +183,7 @@ it, a residual configured-script orphan is an explicitly documented limitation.
 - `harness.capabilities {harness}` → `{harness, models:[{id, efforts:[…]}], model_freeform: bool, default_efforts:[…], permission_modes:[…]}`. `default_efforts` is serde-defaulted for backward-compatible clients and applies when model is omitted/free-form; a known model's own efforts remain authoritative.
   - Built-in `pi`: static `models:[]`, `model_freeform:true`, `default_efforts:["off","minimal","low","medium","high","xhigh","max"]`, `permission_modes:[]`. Pi's catalog is user/provider-specific, so the daemon overlays a **live** catalog when it can resolve the pi agent dir (`$PI_CODING_AGENT_DIR`, else `~/.pi/agent`): it reads `auth.json` for the authenticated providers, then `models-store.json` and keeps only those providers' models as `provider/model` ids with per-model efforts from each model's `thinkingLevelMap` (the full thinking ladder when a model has none). This reproduces `pi --list-models` (provider-auth scoped) with richer per-model effort data. If the files are missing/unreadable it falls back to shelling out to `pi --list-models`, and finally to the static free-form catalog. `model_freeform` stays `true`, so arbitrary model strings remain valid. Tests leave the agent dir unset, so the catalog stays the static `models:[]`.
   - Built-in `claude` (CLI 2.1.209): models `fable`/`opus`/`sonnet`/`haiku`, each with `low|medium|high|xhigh|max`; the same levels are `default_efforts`; `model_freeform:true`; permissions are `["acceptEdits","auto","bypassPermissions","manual","dontAsk","plan"]`.
-  - config-defined harnesses report `model_freeform:true` and the declared `models`/`efforts`/`permission_modes`; declared efforts also populate `default_efforts`.
+  - config-defined harnesses report `model_freeform:true` and the declared `models`/`efforts`/`permission_modes`; declared efforts also populate `default_efforts`. Known model aliases use their declared effort set; omitted or free-form models use `default_efforts` (with a model-union fallback for older payloads that omitted `default_efforts`).
   - error 2 (not found) for an unknown harness, listing the known harnesses.
 - `harness.list` (no params) → `{harnesses:[…]}` — every harness the daemon knows about: the built-ins `pi`/`claude` in their default order (pi first), then every config-defined `[harness.NAME]` sorted, de-duplicated. This is the single source for BOTH the card `harness` and column `harness_override` selects in the TUI, so every harness menu shares one list in one (default-first) order.
 - `space.list {session?}` → `{spaces:[{id, label}]}` — workspaces in the given session (`null` = default), filled from that session's herdr `workspace.list`. Unknown/not-running session → error 4 listing the known sessions.
@@ -164,7 +225,7 @@ decider, and the daemon applies its decision in one place.
 | herdr `unknown`, or any signal on a non-live card | ignored. |
 | Herdr `pane_exited` without `board done` | run `fail`, card `failed`, **no** transition (unchanged); watcher identity is `(session socket, pane id)`. |
 | configured child returns while its exact run is open (`queued` or `started`) | internal run-id guard records `fail`, card `failed`, **no** transition; callback-before-registration is accepted, while stale/completed and built-in runs are rejected. `board done` likewise requires the exact `BOARD_RUN_ID` during the queued exception, preventing a stale child from completing a replacement. |
-| column `timeout_minutes` exceeded | **paused while `awaiting`** (the deadline shifts forward by the review span on exit); otherwise run `fail` + `on_fail`. |
+| column `timeout_minutes` exceeded | **paused while `awaiting`** (the durable deadline shifts forward by the review span on exit); otherwise run `fail` + `on_fail`. The original deadline survives daemon restart, including already-overdue runs; `NULL` remains unlimited. |
 | `run.done ok` | `on_success` target → move; no target → `done`. |
 | `run.done fail` | `on_fail` target → move; no target → `failed`. |
 | `run.cancel` | outcome `cancelled`, card `failed`, no transition. |

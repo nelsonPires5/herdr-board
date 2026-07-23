@@ -94,6 +94,27 @@ class E2ESafetyTests(unittest.TestCase):
         path.chmod(0o755)
         return path
 
+    def _write_server_executable(self, directory: Path) -> Path:
+        """Build a tiny exact-argv fake Herdr server for identity-gated tests."""
+        source = r"""
+#include <unistd.h>
+int main(void) {
+    for (;;) pause();
+}
+"""
+        path = directory / "fake-herdr-server"
+        result = subprocess.run(
+            ["cc", "-x", "c", "-O2", "-o", str(path), "-"],
+            input=source,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr)
+        path.chmod(0o755)
+        return path
+
     def _run_bash(
         self, script: str, *, env: dict[str, str], timeout: float = 5
     ) -> subprocess.CompletedProcess[str]:
@@ -256,19 +277,29 @@ class E2ESafetyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             managed = Path(tempfile.mkdtemp(prefix="hb-e2e-managed.", dir="/tmp"))
+            fake_herdr = self._write_executable(root, "herdr", "exit 0\\n")
             try:
-                (managed / ".herdr-board-fake-managed").write_text(
-                    "herdr-board fake-managed boundary\\n", encoding="utf-8"
-                )
                 (managed / "home").mkdir()
                 (managed / "zdot").mkdir()
+                for directory in (managed, managed / "home", managed / "zdot"):
+                    directory.chmod(0o700)
                 result = self._run_bash(
                     f"""
                     source {shlex.quote(str(E2E_LIB))}
-                    export HERDR_BIN_PATH={shlex.quote(str(root / 'missing-herdr'))}
-                    HERDR_BIN={shlex.quote(str(root / 'missing-herdr'))}
+                    export HERDR_BIN_PATH={shlex.quote(str(fake_herdr))}
+                    export HERDR_BIN={shlex.quote(str(fake_herdr))}
+                    unset E2E_INVOCATION_TOKEN
+                    export E2E_OWNER_ID=standalone-$$
                     export E2E_MANAGED_ROOT={shlex.quote(str(managed))}
-                    export E2E_MANAGED_ROOT_OWNER=hb-e2e-$$
+                    export E2E_LOCAL_MANAGED_ROOT="$E2E_MANAGED_ROOT"
+                    export E2E_MANAGED_ROOT_CREATOR_PID=$$
+                    e2e_scenario_root_ensure
+                    printf 'herdr-board fake-managed boundary\\nowner=%s\\ntoken=%s\\n' \\
+                        "$E2E_OWNER_ID" "$E2E_INVOCATION_TOKEN" >"$E2E_MANAGED_ROOT/.herdr-board-fake-managed"
+                    chmod 600 "$E2E_MANAGED_ROOT/.herdr-board-fake-managed"
+                    # Fail before reserved-session boot, after init has installed
+                    # its cleanup trap and recorded the exact managed root.
+                    export E2E_FAKE_AGENT={shlex.quote(str(root / 'missing-agent'))}
                     ( e2e_init )
                     status=$?
                     printf 'init-status=%s root-exists=%s\\n' "$status" "$([ -e {shlex.quote(str(managed))} ] && echo yes || echo no)"
@@ -410,6 +441,7 @@ class E2ESafetyTests(unittest.TestCase):
             )
             env = self._base_env(herdr=fake)
             env["HERDR_CALLS"] = str(calls)
+            server = self._write_server_executable(root)
             session = "hb-test-live-session"
 
             for operation in ("e2e_session_abort_owned", "e2e_session_teardown"):
@@ -419,15 +451,17 @@ class E2ESafetyTests(unittest.TestCase):
                         f"""
                         set -u
                         source {shlex.quote(str(E2E_LIB))}
-                        python3 -c 'import time; time.sleep(30)' \\
-                            --session {shlex.quote(session)} --name live-server &
+                        server={shlex.quote(str(server))}
+                        owner_token=live-session-fixture-token
+                        env E2E_HERDR_OWNER_TOKEN="$owner_token" "$server" \\
+                            --session {shlex.quote(session)} server >/dev/null 2>&1 &
                         pid=$!
                         cleanup() {{ kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; }}
                         trap cleanup EXIT
                         for _ in 1 2 3 4 5; do kill -0 "$pid" 2>/dev/null && break; sleep 0.02; done
                         kill -0 "$pid" 2>/dev/null
-                        token=$(e2e_process_identity_capture "$pid" {shlex.quote(session)} live-server)
-                        bad_token=${{token/live-server/reused-server}}
+                        token=$(e2e_process_identity_capture "$pid" {shlex.quote(session)} {shlex.quote(session)} "$server" "$owner_token")
+                        bad_token=${{token/{session}/reused-session}}
                         [ "$bad_token" != "$token" ]
                         if {operation} {shlex.quote(session)} "$pid" "$bad_token"; then exit 41; fi
                         kill -0 "$pid" 2>/dev/null
@@ -464,6 +498,7 @@ class E2ESafetyTests(unittest.TestCase):
             session = "hb-test-workspace-session"
             name = "hb-test-workspace-server"
             secondary_socket = root / "secondary.sock"
+            server = self._write_server_executable(root)
 
             for shape in ("primary", "secondary"):
                 for identity_mode, expected_calls in (("mismatch", 0), ("exact", 1)):
@@ -488,15 +523,21 @@ class E2ESafetyTests(unittest.TestCase):
                             f"""
                             set -u
                             source {shlex.quote(str(E2E_LIB))}
-                            python3 -c 'import time; time.sleep(30)' \\
-                                --session {shlex.quote(session)} --name {shlex.quote(name)} &
+                            e2e_scenario_root_ensure
+                            secondary_socket={shlex.quote(str(secondary_socket))}
+                            E2E_SESSION_SOCKET="$secondary_socket"
+                            E2E_SESSION_SOCKETS[{shlex.quote(session)}]="$secondary_socket"
+                            server={shlex.quote(str(server))}
+                            owner_token=workspace-session-fixture-token
+                            env E2E_HERDR_OWNER_TOKEN="$owner_token" "$server" \\
+                                --session {shlex.quote(session)} server >/dev/null 2>&1 &
                             pid=$!
                             cleanup() {{ kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; }}
                             trap cleanup EXIT
                             for _ in 1 2 3 4 5; do kill -0 "$pid" 2>/dev/null && break; sleep 0.02; done
                             kill -0 "$pid" 2>/dev/null
-                            identity=$(e2e_process_identity_capture "$pid" {shlex.quote(session)} {shlex.quote(name)})
-                            bad_token=${{identity/{name}/reused-workspace-server}}
+                            identity=$(e2e_process_identity_capture "$pid" {shlex.quote(session)} {shlex.quote(session)} "$server" "$owner_token")
+                            bad_token=${{identity/{session}/reused-workspace-server}}
                             {textwrap.dedent(register)}
                             E2E_KEEP=0
                             e2e_cleanup
@@ -570,8 +611,8 @@ class E2ESafetyTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
     @unittest.skipUnless(Path("/proc").is_dir(), "process identity tests require Linux /proc")
-    def test_session_cleanup_propagates_stop_delete_failures_and_finishes_cleanup(self) -> None:
-        """Session mutation failures remain visible while every owned cleanup is attempted."""
+    def test_session_cleanup_propagates_stop_failure_and_refuses_delete(self) -> None:
+        """A failed stop remains visible and fail-closed delete is not attempted."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             calls = root / "herdr-calls.log"
@@ -591,26 +632,38 @@ class E2ESafetyTests(unittest.TestCase):
             )
             env = self._base_env(herdr=fake)
             env["HERDR_CALLS"] = str(calls)
+            server = self._write_server_executable(root)
             result = self._run_bash(
                 f"""
                 set -u
                 source {shlex.quote(str(E2E_LIB))}
-                python3 -c 'import time; time.sleep(30)' \\
-                    --session hb-test-cleanup --name hb-test-cleanup &
+                unset E2E_INVOCATION_TOKEN
+                export E2E_OWNER_ID=hb-test-cleanup
+                e2e_scenario_root_ensure
+                E2E_MANAGED_ROOT={shlex.quote(str(managed))}
+                export E2E_LOCAL_MANAGED_ROOT="$E2E_MANAGED_ROOT"
+                export E2E_MANAGED_ROOT_OWNER=hb-test-cleanup E2E_MANAGED_ROOT_CREATOR_PID=$$
+                printf 'herdr-board fake-managed boundary\\nowner=%s\\ntoken=%s\\n' \\
+                    "$E2E_OWNER_ID" "$E2E_INVOCATION_TOKEN" >"$E2E_MANAGED_ROOT/.herdr-board-fake-managed"
+                chmod 600 "$E2E_MANAGED_ROOT/.herdr-board-fake-managed"
+                e2e_root_resource_register managed managed-root "$E2E_MANAGED_ROOT" \\
+                    "$E2E_MANAGED_ROOT/.herdr-board-fake-managed"
+                e2e_defer "e2e_managed_root_remove_owned 'hb-test-cleanup'"
+                server={shlex.quote(str(server))}
+                owner_token=cleanup-session-fixture-token
+                env E2E_HERDR_OWNER_TOKEN="$owner_token" "$server" \\
+                    --session hb-test-cleanup server >/dev/null 2>&1 &
                 pid=$!
                 fallback() {{ kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; }}
                 trap fallback EXIT
                 for _ in 1 2 3 4 5; do kill -0 "$pid" 2>/dev/null && break; sleep 0.02; done
-                identity=$(e2e_process_identity_capture "$pid" hb-test-cleanup hb-test-cleanup)
-                E2E_MANAGED_ROOT={shlex.quote(str(managed))}
-                E2E_MANAGED_ROOT_OWNER=hb-test-cleanup
-                E2E_MANAGED_ROOT_CREATOR_PID=$$
+                identity=$(e2e_process_identity_capture "$pid" hb-test-cleanup hb-test-cleanup "$server" "$owner_token")
                 e2e_defer_session_teardown hb-test-cleanup "$pid" "$identity"
                 e2e_cleanup
                 status=$?
                 [ "$status" -ne 0 ] || exit 71
                 grep -qx 'session stop hb-test-cleanup' "$HERDR_CALLS" || exit 72
-                grep -qx 'session delete hb-test-cleanup' "$HERDR_CALLS" || exit 73
+                ! grep -qx 'session delete hb-test-cleanup' "$HERDR_CALLS" || exit 73
                 [ ! -e "$E2E_MANAGED_ROOT" ] || exit 74
                 """,
                 env=env,

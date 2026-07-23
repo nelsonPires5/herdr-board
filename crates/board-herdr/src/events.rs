@@ -18,6 +18,7 @@
 //! entries use **dotted** names (`pane.agent_status_changed`). Both are handled
 //! here.
 
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -26,9 +27,21 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::client::{connect_with_deadline, SocketDeadlines};
 use crate::envelope::{Request, Response};
 use crate::error::{HerdrError, Result};
 use crate::types::AgentStatus;
+
+fn map_deadline(error: std::io::Error, operation: &'static str) -> HerdrError {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+    ) {
+        HerdrError::Deadline { operation }
+    } else {
+        HerdrError::Io(error)
+    }
+}
 
 /// One subscription entry for `events.subscribe`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,13 +221,27 @@ pub struct HerdrEvents {
     /// Partial line carried across [`HerdrEvents::poll_event`] timeouts so a
     /// read deadline mid-line never drops event bytes.
     pending: String,
+    pending_events: VecDeque<HerdrEvent>,
+    deadlines: SocketDeadlines,
+    subscribe_id: u64,
 }
 
 impl HerdrEvents {
     /// Connect and subscribe. Reads and validates the `subscription_started`
     /// ack before returning.
     pub fn connect(path: &Path, subscriptions: &[Subscription]) -> Result<HerdrEvents> {
-        let stream = UnixStream::connect(path)?;
+        Self::connect_with_deadlines(path, subscriptions, SocketDeadlines::default())
+    }
+
+    /// Connect using injectable socket deadlines.
+    pub fn connect_with_deadlines(
+        path: &Path,
+        subscriptions: &[Subscription],
+        deadlines: SocketDeadlines,
+    ) -> Result<HerdrEvents> {
+        let stream = connect_with_deadline(path, deadlines.connect)?;
+        stream.set_read_timeout(Some(deadlines.handshake))?;
+        stream.set_write_timeout(Some(deadlines.write))?;
         let reader = BufReader::new(stream.try_clone()?);
         let writer = stream;
         let mut ev = HerdrEvents {
@@ -222,9 +249,13 @@ impl HerdrEvents {
             reader,
             writer,
             pending: String::new(),
+            pending_events: VecDeque::new(),
+            deadlines,
+            subscribe_id: 0,
         };
-        ev.send_subscribe(subscriptions)?;
-        ev.read_ack()?;
+        let id = ev.send_subscribe(subscriptions)?;
+        ev.read_ack(&id)?;
+        ev.reader.get_ref().set_read_timeout(None)?;
         Ok(ev)
     }
 
@@ -257,8 +288,14 @@ impl HerdrEvents {
     /// pane). Sends another `events.subscribe`; on failure the daemon should
     /// reconnect with the full set instead.
     pub fn add_subscriptions(&mut self, subscriptions: &[Subscription]) -> Result<()> {
-        self.send_subscribe(subscriptions)?;
-        self.read_ack()
+        self.reader
+            .get_ref()
+            .set_read_timeout(Some(self.deadlines.handshake))?;
+        let result = self
+            .send_subscribe(subscriptions)
+            .and_then(|id| self.read_ack(&id));
+        let reset = self.reader.get_ref().set_read_timeout(None);
+        result.and_then(|()| reset.map_err(HerdrError::from))
     }
 
     /// The socket path (for reconnects).
@@ -271,10 +308,13 @@ impl HerdrEvents {
     /// housekeeping (shutdown checks, watch-set changes) with a blocking read.
     /// Non-event lines (acks) are skipped within the same call.
     pub fn poll_event(&mut self, timeout: Duration) -> Result<Option<HerdrEvent>> {
+        if let Some(event) = self.pending_events.pop_front() {
+            return Ok(Some(event));
+        }
         self.reader.get_ref().set_read_timeout(Some(timeout))?;
-        loop {
+        let result = loop {
             match self.reader.read_line(&mut self.pending) {
-                Ok(0) => return Err(HerdrError::Disconnected),
+                Ok(0) => break Err(HerdrError::Disconnected),
                 Ok(_) => {
                     if !self.pending.ends_with('\n') {
                         // Partial line (deadline hit mid-line): keep and retry.
@@ -282,47 +322,69 @@ impl HerdrEvents {
                     }
                     let line = std::mem::take(&mut self.pending);
                     if let Some(ev) = parse_event_line(&line) {
-                        return Ok(Some(ev));
+                        break Ok(Some(ev));
                     }
                 }
                 Err(e)
                     if e.kind() == std::io::ErrorKind::WouldBlock
                         || e.kind() == std::io::ErrorKind::TimedOut =>
                 {
-                    return Ok(None);
+                    break Ok(None);
                 }
-                Err(e) => return Err(HerdrError::from(e)),
+                Err(e) => break Err(HerdrError::from(e)),
             }
-        }
+        };
+        let reset = self.reader.get_ref().set_read_timeout(None);
+        result.and_then(|event| reset.map(|()| event).map_err(HerdrError::from))
     }
 
-    fn send_subscribe(&mut self, subscriptions: &[Subscription]) -> Result<()> {
+    fn send_subscribe(&mut self, subscriptions: &[Subscription]) -> Result<String> {
         let subs: Vec<Value> = subscriptions
             .iter()
             .cloned()
             .map(Subscription::into_value)
             .collect();
+        self.subscribe_id += 1;
+        let id = if self.subscribe_id == 1 {
+            "subscribe".to_string()
+        } else {
+            format!("subscribe-{}", self.subscribe_id)
+        };
         let req = Request {
-            id: "subscribe".to_string(),
+            id: id.clone(),
             method: "events.subscribe".to_string(),
             params: json!({ "subscriptions": subs }),
         };
-        self.writer.write_all(req.to_line()?.as_bytes())?;
-        self.writer.flush()?;
-        Ok(())
+        self.writer
+            .write_all(req.to_line()?.as_bytes())
+            .map_err(|e| map_deadline(e, "subscribe write"))?;
+        self.writer
+            .flush()
+            .map_err(|e| map_deadline(e, "subscribe write"))?;
+        Ok(id)
     }
 
-    fn read_ack(&mut self) -> Result<()> {
+    fn read_ack(&mut self, expected_id: &str) -> Result<()> {
         loop {
             let mut buf = String::new();
-            let n = self.reader.read_line(&mut buf)?;
+            let n = self
+                .reader
+                .read_line(&mut buf)
+                .map_err(|e| map_deadline(e, "subscribe ack"))?;
             if n == 0 {
                 return Err(HerdrError::Disconnected);
             }
             if buf.trim().is_empty() {
                 continue;
             }
+            if let Some(event) = parse_event_line(&buf) {
+                self.pending_events.push_back(event);
+                continue;
+            }
             let resp = Response::from_line(&buf)?;
+            if resp.id != expected_id {
+                continue;
+            }
             if let Some(err) = resp.error {
                 return Err(HerdrError::Protocol {
                     code: err.code,
@@ -339,6 +401,9 @@ impl Iterator for HerdrEvents {
     type Item = HerdrEvent;
 
     fn next(&mut self) -> Option<HerdrEvent> {
+        if let Some(event) = self.pending_events.pop_front() {
+            return Some(event);
+        }
         loop {
             let mut buf = String::new();
             match self.reader.read_line(&mut buf) {

@@ -4,12 +4,12 @@
 
 use std::path::Path;
 
-use rusqlite::{params, Connection, Row};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use crate::model::{Board, Card, Column, Comment, Run};
 use crate::protocol::{
-    AwaitingReason, CardCreateParams, CardStatus, CardUpdateParams, ColumnCreateParams,
-    ColumnUpdateParams, Effort, RunOutcome, SpaceKind, Trigger,
+    ActiveRunSummary, AwaitingReason, CardCreateParams, CardStatus, CardUpdateParams,
+    ColumnCreateParams, ColumnUpdateParams, Effort, Patch, RunOutcome, SpaceKind, Trigger,
 };
 use crate::{Error, Result};
 
@@ -18,7 +18,7 @@ use crate::{Error, Result};
 const SCHEMA_SQL: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../schema.sql"));
 
 /// The latest schema version embedded in [`SCHEMA_SQL`].
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 11;
 
 /// v1 → v2 migration. SQLite cannot alter a CHECK constraint or drop a column
 /// in place, so `cards` is rebuilt. Legacy `space_kind` values `cwd`/`worktree`
@@ -186,12 +186,87 @@ PRAGMA foreign_keys = ON;
 /// all-in-one argv keeps its legacy launch semantics.
 const V7_MIGRATION_SQL: &str = "ALTER TABLE runs ADD COLUMN system_prompt_snapshot TEXT;";
 
+/// v7 → v8 migration: enforce the lifecycle invariant in SQLite, including
+/// direct SQL writers. Duplicate open runs are ambiguous and are never guessed
+/// away by migration.
+const V8_MIGRATION_SQL: &str =
+    "CREATE UNIQUE INDEX idx_runs_one_open_per_card ON runs(card_id) WHERE ended_at IS NULL";
+
+/// v8 → v9: persist timeout accounting. Legacy running runs derive their
+/// deadline once from their original start; awaiting runs are paused at the
+/// card's last durable transition time.
+const V9_MIGRATION_SQL: &str = "
+UPDATE runs
+SET timeout_deadline_at_ms = CAST(unixepoch(started_at) * 1000 AS INTEGER)
+    + (SELECT MAX(columns.timeout_minutes, 0) * 60000 FROM columns WHERE columns.id=runs.column_id)
+WHERE started_at IS NOT NULL AND ended_at IS NULL
+  AND (SELECT timeout_minutes FROM columns WHERE columns.id=runs.column_id) IS NOT NULL;
+UPDATE runs
+SET timeout_paused_at_ms = (SELECT CAST(unixepoch(cards.updated_at) * 1000 AS INTEGER)
+                            FROM cards WHERE cards.id=runs.card_id)
+WHERE ended_at IS NULL AND EXISTS
+  (SELECT 1 FROM cards WHERE cards.id=runs.card_id AND cards.status='awaiting');
+";
+
+/// v9 → v10: cover the two scheduler queue scans without indexing history.
+const V10_QUEUED_INDEX_SQL: &str =
+    "CREATE INDEX idx_runs_queued_fifo ON runs(id) WHERE started_at IS NULL AND ended_at IS NULL";
+const V10_ACTIVE_INDEX_SQL: &str =
+    "CREATE INDEX idx_runs_active_open ON runs(id) WHERE started_at IS NOT NULL AND ended_at IS NULL";
+const V11_MIGRATION_SQL: &str = "ALTER TABLE runs ADD COLUMN launch_spec_json TEXT";
+
+/// Deterministic statement boundaries used by crash-atomicity tests. Hooks are
+/// opt-in per [`Db`] instance and receive no row or effect DTO.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LifecycleFaultPoint {
+    EnqueueAfterRunInsert,
+    PromoteAfterRunUpdate,
+    FinalizeAfterRunUpdate,
+}
+
+/// All values needed to insert one queued run. Prompt building and external I/O
+/// happen before this value enters the transaction.
+#[derive(Debug, Clone)]
+pub struct EnqueueRun<'a> {
+    pub card_id: i64,
+    pub column_id: i64,
+    pub harness: &'a str,
+    pub argv_json: &'a str,
+    pub prompt_snapshot: &'a str,
+    pub system_prompt_snapshot: Option<&'a str>,
+    pub launch_spec_json: Option<&'a str>,
+    pub session_id: Option<&'a str>,
+    pub session: Option<&'a str>,
+}
+
+/// Optional next run inserted atomically with finalization (an auto hop).
+pub struct FinalizeRun<'a> {
+    pub run_id: i64,
+    pub outcome: RunOutcome,
+    pub summary: Option<&'a str>,
+    pub comments: &'a [(&'a str, &'a str)],
+    pub target_column_id: Option<i64>,
+    pub final_status: CardStatus,
+    pub final_awaiting_reason: Option<AwaitingReason>,
+    pub next: Option<EnqueueRun<'a>>,
+}
+
+/// Durable values callers may use for effects only after commit.
+#[derive(Debug, Clone)]
+pub struct FinalizeEffects {
+    pub card: Card,
+    pub finished_run: Run,
+    pub next_run: Option<Run>,
+}
+
 /// The preserved Global board id and legacy protocol default.
 pub const BOARD_ID: i64 = 1;
 
 /// SQLite-backed board store.
 pub struct Db {
     conn: Connection,
+    lifecycle_fault_hook: Option<Box<dyn Fn(LifecycleFaultPoint) -> Result<()> + Send + Sync>>,
 }
 
 fn conv_err(field: &str) -> rusqlite::Error {
@@ -216,19 +291,49 @@ impl Db {
         }
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
-        Db::init(conn)
+        Db::init(conn, None)
+    }
+
+    /// Open a file DB with an opt-in lifecycle statement hook. This is exposed
+    /// only for deterministic fault tests; production callers use [`Db::open`].
+    #[doc(hidden)]
+    pub fn open_with_lifecycle_fault_hook(
+        path: &Path,
+        hook: impl Fn(LifecycleFaultPoint) -> Result<()> + Send + Sync + 'static,
+    ) -> Result<Db> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        let conn = Connection::open(path)?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        Db::init(conn, Some(Box::new(hook)))
     }
 
     /// Open an in-memory db (tests, `FakeBoardClient`).
     pub fn open_in_memory() -> Result<Db> {
-        Db::init(Connection::open_in_memory()?)
+        Db::init(Connection::open_in_memory()?, None)
     }
 
-    fn init(conn: Connection) -> Result<Db> {
+    fn init(
+        conn: Connection,
+        lifecycle_fault_hook: Option<Box<dyn Fn(LifecycleFaultPoint) -> Result<()> + Send + Sync>>,
+    ) -> Result<Db> {
         conn.pragma_update(None, "foreign_keys", true)?;
-        let db = Db { conn };
+        let db = Db {
+            conn,
+            lifecycle_fault_hook,
+        };
         db.migrate()?;
         Ok(db)
+    }
+
+    fn lifecycle_fault(&self, point: LifecycleFaultPoint) -> Result<()> {
+        if let Some(hook) = &self.lifecycle_fault_hook {
+            hook(point)?;
+        }
+        Ok(())
     }
 
     /// Apply migrations gated on `PRAGMA user_version`. Idempotent.
@@ -256,6 +361,35 @@ impl Db {
             self.conn
                 .execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
         } else if version < SCHEMA_VERSION {
+            // Check the v8 invariant before any earlier shape migration can
+            // persist. Ambiguous lifecycle data must leave both shape and
+            // user_version untouched.
+            if version < 8 {
+                let duplicates = {
+                    let mut statement = self.conn.prepare(
+                        "SELECT card_id, group_concat(id, ',')
+                         FROM (SELECT card_id, id FROM runs WHERE ended_at IS NULL
+                               ORDER BY card_id, id)
+                         GROUP BY card_id HAVING count(*) > 1 ORDER BY card_id",
+                    )?;
+                    let rows = statement
+                        .query_map([], |row| {
+                            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                        })?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    rows
+                };
+                if !duplicates.is_empty() {
+                    let details = duplicates
+                        .iter()
+                        .map(|(card_id, run_ids)| format!("card {card_id} runs [{run_ids}]"))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    return Err(Error::InvalidState(format!(
+                        "schema v8 migration blocked by duplicate open runs: {details}"
+                    )));
+                }
+            }
             if version < 2 {
                 // Existing v1 DB: upgrade the space model in place.
                 self.conn.execute_batch(V2_MIGRATION_SQL)?;
@@ -272,24 +406,88 @@ impl Db {
             if version < 6 {
                 self.conn.execute_batch(V6_MIGRATION_SQL)?;
             }
+            let tx = self.conn.unchecked_transaction()?;
             if version < 7 {
-                // Normally every pre-v7 database lacks this column. The guard
-                // also makes migration resilient to databases whose shape was
-                // upgraded before their user_version stamp was persisted.
-                let has_snapshot: bool = self.conn.query_row(
-                    "SELECT EXISTS(
-                       SELECT 1 FROM pragma_table_info('runs')
-                       WHERE name='system_prompt_snapshot'
-                     )",
+                let has_snapshot: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('runs')
+                                   WHERE name='system_prompt_snapshot')",
                     [],
                     |row| row.get(0),
                 )?;
                 if !has_snapshot {
-                    self.conn.execute_batch(V7_MIGRATION_SQL)?;
+                    tx.execute_batch(V7_MIGRATION_SQL)?;
                 }
             }
-            self.conn
-                .execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
+            if version < 8 {
+                let existing_index_sql: Option<String> = tx
+                    .query_row(
+                        "SELECT sql FROM sqlite_master
+                         WHERE type='index' AND name='idx_runs_one_open_per_card'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                match existing_index_sql {
+                    None => tx.execute_batch(V8_MIGRATION_SQL)?,
+                    Some(sql) if sql == V8_MIGRATION_SQL => {}
+                    Some(sql) => {
+                        return Err(Error::InvalidState(format!(
+                            "schema v8 migration blocked: idx_runs_one_open_per_card has unexpected SQL: {sql}"
+                        )));
+                    }
+                }
+            }
+            if version < 9 {
+                let has_deadline: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('runs') WHERE name='timeout_deadline_at_ms')",
+                    [], |r| r.get(0),
+                )?;
+                if !has_deadline {
+                    tx.execute_batch("ALTER TABLE runs ADD COLUMN timeout_deadline_at_ms INTEGER")?;
+                }
+                let has_paused: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('runs') WHERE name='timeout_paused_at_ms')",
+                    [], |r| r.get(0),
+                )?;
+                if !has_paused {
+                    tx.execute_batch("ALTER TABLE runs ADD COLUMN timeout_paused_at_ms INTEGER")?;
+                }
+                tx.execute_batch(V9_MIGRATION_SQL)?;
+            }
+            if version < 10 {
+                for (name, expected) in [
+                    ("idx_runs_queued_fifo", V10_QUEUED_INDEX_SQL),
+                    ("idx_runs_active_open", V10_ACTIVE_INDEX_SQL),
+                ] {
+                    let existing: Option<String> = tx
+                        .query_row(
+                            "SELECT sql FROM sqlite_master WHERE type='index' AND name=?1",
+                            params![name],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    match existing {
+                        None => tx.execute_batch(expected)?,
+                        Some(sql) if sql == expected => {}
+                        Some(sql) => {
+                            return Err(Error::InvalidState(format!(
+                                "schema v10 migration blocked: {name} has unexpected SQL: {sql}"
+                            )));
+                        }
+                    }
+                }
+            }
+            if version < 11 {
+                let has_spec: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('runs') WHERE name='launch_spec_json')",
+                    [], |r| r.get(0),
+                )?;
+                if !has_spec {
+                    tx.execute_batch(V11_MIGRATION_SQL)?;
+                }
+            }
+            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            tx.commit()?;
         }
         Ok(())
     }
@@ -436,35 +634,51 @@ impl Db {
         if let Some(v) = &p.name {
             c.name = v.clone();
         }
-        if let Some(v) = &p.system_prompt {
-            c.system_prompt = Some(v.clone());
+        match &p.system_prompt {
+            Patch::Unchanged => {}
+            Patch::Clear => c.system_prompt = None,
+            Patch::Set(v) => c.system_prompt = Some(v.clone()),
         }
         if let Some(v) = p.trigger {
             c.trigger = v;
         }
-        if let Some(v) = p.on_success_column_id {
-            c.on_success_column_id = Some(v);
+        match p.on_success_column_id {
+            Patch::Unchanged => {}
+            Patch::Clear => c.on_success_column_id = None,
+            Patch::Set(v) => c.on_success_column_id = Some(v),
         }
-        if let Some(v) = p.on_fail_column_id {
-            c.on_fail_column_id = Some(v);
+        match p.on_fail_column_id {
+            Patch::Unchanged => {}
+            Patch::Clear => c.on_fail_column_id = None,
+            Patch::Set(v) => c.on_fail_column_id = Some(v),
         }
         if let Some(v) = p.fresh_session {
             c.fresh_session = v;
         }
-        if let Some(v) = &p.harness_override {
-            c.harness_override = Some(v.clone());
+        match &p.harness_override {
+            Patch::Unchanged => {}
+            Patch::Clear => c.harness_override = None,
+            Patch::Set(v) => c.harness_override = Some(v.clone()),
         }
-        if let Some(v) = &p.model_override {
-            c.model_override = Some(v.clone());
+        match &p.model_override {
+            Patch::Unchanged => {}
+            Patch::Clear => c.model_override = None,
+            Patch::Set(v) => c.model_override = Some(v.clone()),
         }
-        if let Some(v) = &p.effort_override {
-            c.effort_override = Some(v.clone());
+        match &p.effort_override {
+            Patch::Unchanged => {}
+            Patch::Clear => c.effort_override = None,
+            Patch::Set(v) => c.effort_override = Some(v.clone()),
         }
-        if let Some(v) = &p.permission_override {
-            c.permission_override = Some(v.clone());
+        match &p.permission_override {
+            Patch::Unchanged => {}
+            Patch::Clear => c.permission_override = None,
+            Patch::Set(v) => c.permission_override = Some(v.clone()),
         }
-        if let Some(v) = p.timeout_minutes {
-            c.timeout_minutes = Some(v);
+        match p.timeout_minutes {
+            Patch::Unchanged => {}
+            Patch::Clear => c.timeout_minutes = None,
+            Patch::Set(v) => c.timeout_minutes = Some(v),
         }
         self.validate_column_targets(c.board_id, c.on_success_column_id, c.on_fail_column_id)?;
         self.conn.execute(
@@ -686,26 +900,38 @@ impl Db {
                 c.effort = None;
             }
         }
-        if let Some(v) = &p.model {
-            c.model = Some(v.clone());
+        match &p.model {
+            Patch::Unchanged => {}
+            Patch::Clear => c.model = None,
+            Patch::Set(v) => c.model = Some(v.clone()),
         }
-        if let Some(v) = p.effort {
-            c.effort = Some(v);
+        match p.effort {
+            Patch::Unchanged => {}
+            Patch::Clear => c.effort = None,
+            Patch::Set(v) => c.effort = Some(v),
         }
-        if let Some(v) = &p.permission_mode {
-            c.permission_mode = Some(v.clone());
+        match &p.permission_mode {
+            Patch::Unchanged => {}
+            Patch::Clear => c.permission_mode = None,
+            Patch::Set(v) => c.permission_mode = Some(v.clone()),
         }
-        if let Some(v) = &p.session {
-            c.session = Some(v.clone());
+        match &p.session {
+            Patch::Unchanged => {}
+            Patch::Clear => c.session = None,
+            Patch::Set(v) => c.session = Some(v.clone()),
         }
         if let Some(v) = p.space_kind {
             c.space_kind = v;
         }
-        if let Some(v) = &p.space_ref {
-            c.space_ref = Some(v.clone());
+        match &p.space_ref {
+            Patch::Unchanged => {}
+            Patch::Clear => c.space_ref = None,
+            Patch::Set(v) => c.space_ref = Some(v.clone()),
         }
-        if let Some(v) = &p.space_cwd {
-            c.space_cwd = Some(v.clone());
+        match &p.space_cwd {
+            Patch::Unchanged => {}
+            Patch::Clear => c.space_cwd = None,
+            Patch::Set(v) => c.space_cwd = Some(v.clone()),
         }
         self.conn.execute(
             "UPDATE cards SET title=?1,description=?2,harness=?3,model=?4,effort=?5,
@@ -834,6 +1060,64 @@ impl Db {
         self.require_card(id)
     }
 
+    /// Atomically enter awaiting and pause the open run's durable timeout.
+    /// Repeated calls preserve the original pause instant.
+    pub fn pause_run_timeout_uow(
+        &self,
+        card_id: i64,
+        reason: AwaitingReason,
+        now_ms: i64,
+    ) -> Result<Card> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE cards SET status='awaiting',awaiting_reason=?1,updated_at=datetime('now') WHERE id=?2",
+            params![reason.as_str(), card_id],
+        )?;
+        tx.execute(
+            "UPDATE runs SET timeout_paused_at_ms=COALESCE(timeout_paused_at_ms,?1)
+             WHERE card_id=?2 AND ended_at IS NULL AND started_at IS NOT NULL",
+            params![now_ms, card_id],
+        )?;
+        tx.commit()?;
+        self.require_card(card_id)
+    }
+
+    /// Atomically leave awaiting and shift the deadline by the paused span.
+    /// Clearing the pause marker makes retries idempotent.
+    pub fn resume_run_timeout_uow(
+        &self,
+        card_id: i64,
+        status: CardStatus,
+        now_ms: i64,
+    ) -> Result<Card> {
+        if status == CardStatus::Awaiting {
+            return Err(Error::InvalidState("cannot resume into awaiting".into()));
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let timing: Option<(Option<i64>, Option<i64>)> = tx
+            .query_row(
+                "SELECT timeout_deadline_at_ms,timeout_paused_at_ms FROM runs
+             WHERE card_id=?1 AND ended_at IS NULL AND started_at IS NOT NULL",
+                params![card_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if let Some((deadline, Some(paused))) = timing {
+            let shifted = deadline.map(|d| d.saturating_add(now_ms.saturating_sub(paused).max(0)));
+            tx.execute(
+                "UPDATE runs SET timeout_deadline_at_ms=?1,timeout_paused_at_ms=NULL
+                 WHERE card_id=?2 AND ended_at IS NULL",
+                params![shifted, card_id],
+            )?;
+        }
+        tx.execute(
+            "UPDATE cards SET status=?1,awaiting_reason=NULL,updated_at=datetime('now') WHERE id=?2",
+            params![status.as_str(), card_id],
+        )?;
+        tx.commit()?;
+        self.require_card(card_id)
+    }
+
     pub fn set_card_column(&self, id: i64, column_id: i64) -> Result<Card> {
         self.move_card(id, column_id, None)
     }
@@ -944,6 +1228,178 @@ impl Db {
         self.get_run(self.conn.last_insert_rowid())
     }
 
+    /// Atomically insert a queued run and publish the card's queued state.
+    /// No process, socket, notification, or other external I/O occurs here.
+    pub fn enqueue_run_uow(&self, p: &EnqueueRun<'_>) -> Result<Run> {
+        let card = self.require_card(p.card_id)?;
+        let column = self.require_column(p.column_id)?;
+        if card.board_id != column.board_id {
+            return Err(Error::InvalidState(
+                "run column belongs to another board".into(),
+            ));
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO runs
+             (card_id,column_id,harness,argv_json,prompt_snapshot,system_prompt_snapshot,launch_spec_json,session_id,session)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![p.card_id,p.column_id,p.harness,p.argv_json,p.prompt_snapshot,
+                    p.system_prompt_snapshot,p.launch_spec_json,p.session_id,p.session],
+        )?;
+        let id = tx.last_insert_rowid();
+        self.lifecycle_fault(LifecycleFaultPoint::EnqueueAfterRunInsert)?;
+        let changed = tx.execute(
+            "UPDATE cards SET status='queued',awaiting_reason=NULL,session_id=COALESCE(?2,session_id),updated_at=datetime('now') WHERE id=?1",
+            params![p.card_id, p.session_id],
+        )?;
+        if changed != 1 {
+            return Err(Error::NotFound(format!("card {}", p.card_id)));
+        }
+        tx.commit()?;
+        self.get_run(id)
+    }
+
+    /// Atomically promote an exact queued run and its card to running.
+    pub fn promote_run_uow(
+        &self,
+        run_id: i64,
+        workspace_id: Option<&str>,
+        pane_id: Option<&str>,
+        timeout_deadline_at_ms: Option<i64>,
+    ) -> Result<Run> {
+        let tx = self.conn.unchecked_transaction()?;
+        let card_id: i64 = tx
+            .query_row(
+                "SELECT card_id FROM runs WHERE id=?1 AND started_at IS NULL AND ended_at IS NULL",
+                params![run_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    Error::InvalidState(format!("run {run_id} is not queued"))
+                }
+                other => Error::Sqlite(other),
+            })?;
+        tx.execute(
+            "UPDATE runs SET started_at=datetime('now'),herdr_workspace_id=?1,herdr_pane_id=?2,timeout_deadline_at_ms=?4,timeout_paused_at_ms=NULL WHERE id=?3",
+            params![workspace_id,pane_id,run_id,timeout_deadline_at_ms],
+        )?;
+        self.lifecycle_fault(LifecycleFaultPoint::PromoteAfterRunUpdate)?;
+        tx.execute(
+            "UPDATE cards SET status='running',awaiting_reason=NULL,updated_at=datetime('now') WHERE id=?1",
+            params![card_id],
+        )?;
+        tx.commit()?;
+        self.get_run(run_id)
+    }
+
+    /// Atomically close a run, append its optional durable comment, transition
+    /// the card, and optionally enqueue the already-planned next auto-hop.
+    pub fn finalize_run_uow(&self, p: &FinalizeRun<'_>) -> Result<FinalizeEffects> {
+        let tx = self.conn.unchecked_transaction()?;
+        let card_id: i64 = tx
+            .query_row(
+                "SELECT card_id FROM runs WHERE id=?1 AND ended_at IS NULL",
+                params![p.run_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    Error::InvalidState(format!("run {} is not open", p.run_id))
+                }
+                other => Error::Sqlite(other),
+            })?;
+        if let Some(next) = &p.next {
+            if next.card_id != card_id {
+                return Err(Error::InvalidState(
+                    "next run belongs to another card".into(),
+                ));
+            }
+            let board_matches: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM cards c JOIN columns col ON col.id=?1
+                               WHERE c.id=?2 AND c.board_id=col.board_id)",
+                params![next.column_id, card_id],
+                |row| row.get(0),
+            )?;
+            if !board_matches {
+                return Err(Error::InvalidState(
+                    "next run column belongs to another board".into(),
+                ));
+            }
+        }
+        tx.execute(
+            "UPDATE runs SET ended_at=datetime('now'),outcome=?1,result_summary=?2 WHERE id=?3",
+            params![p.outcome.as_str(), p.summary, p.run_id],
+        )?;
+        self.lifecycle_fault(LifecycleFaultPoint::FinalizeAfterRunUpdate)?;
+        for (author, body) in p.comments {
+            tx.execute(
+                "INSERT INTO comments(card_id,author,body) VALUES(?1,?2,?3)",
+                params![card_id, author, body],
+            )?;
+        }
+        if let Some(column_id) = p.target_column_id {
+            let board_matches: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM cards c JOIN columns col ON col.id=?1
+                               WHERE c.id=?2 AND c.board_id=col.board_id)",
+                params![column_id, card_id],
+                |r| r.get(0),
+            )?;
+            if !board_matches {
+                return Err(Error::InvalidState(
+                    "target column belongs to another board".into(),
+                ));
+            }
+            let position: i64 = tx.query_row(
+                "SELECT COALESCE(MAX(position)+1,0) FROM cards WHERE column_id=?1",
+                params![column_id],
+                |r| r.get(0),
+            )?;
+            tx.execute(
+                "UPDATE cards SET column_id=?1,position=?2 WHERE id=?3",
+                params![column_id, position, card_id],
+            )?;
+        }
+        tx.execute(
+            "UPDATE cards SET status=?1,awaiting_reason=?2,updated_at=datetime('now') WHERE id=?3",
+            params![
+                p.final_status.as_str(),
+                p.final_awaiting_reason.as_ref().map(AwaitingReason::as_str),
+                card_id
+            ],
+        )?;
+        let next_id = if let Some(next) = &p.next {
+            tx.execute(
+                "INSERT INTO runs(card_id,column_id,harness,argv_json,prompt_snapshot,
+                 system_prompt_snapshot,launch_spec_json,session_id,session) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                params![
+                    next.card_id,
+                    next.column_id,
+                    next.harness,
+                    next.argv_json,
+                    next.prompt_snapshot,
+                    next.system_prompt_snapshot,
+                    next.launch_spec_json,
+                    next.session_id,
+                    next.session
+                ],
+            )?;
+            tx.execute(
+                "UPDATE cards SET status='queued',awaiting_reason=NULL WHERE id=?1",
+                params![card_id],
+            )?;
+            Some(tx.last_insert_rowid())
+        } else {
+            None
+        };
+        tx.commit()?;
+        Ok(FinalizeEffects {
+            card: self.require_card(card_id)?,
+            finished_run: self.get_run(p.run_id)?,
+            next_run: next_id.map(|id| self.get_run(id)).transpose()?,
+        })
+    }
+
     /// Mark a run started, recording herdr ids.
     pub fn start_run(
         &self,
@@ -1033,31 +1489,66 @@ impl Db {
         ))
     }
 
-    /// Queued runs for a space key `(space_kind, space_ref)`, FIFO by run id.
-    pub fn queued_runs_by_space(
-        &self,
-        space_kind: SpaceKind,
-        space_ref: Option<&str>,
-    ) -> Result<Vec<Run>> {
-        let base = "SELECT r.* FROM runs r JOIN cards c ON c.id=r.card_id
-                    WHERE r.started_at IS NULL AND r.ended_at IS NULL AND c.space_kind=?1";
-        let rows = match space_ref {
-            Some(sr) => {
-                let sql = format!("{base} AND c.space_ref=?2 ORDER BY r.id");
-                self.conn
-                    .prepare(&sql)?
-                    .query_map(params![space_kind.as_str(), sr], row_to_run)?
-                    .collect::<rusqlite::Result<Vec<_>>>()?
-            }
-            None => {
-                let sql = format!("{base} AND c.space_ref IS NULL ORDER BY r.id");
-                self.conn
-                    .prepare(&sql)?
-                    .query_map(params![space_kind.as_str()], row_to_run)?
-                    .collect::<rusqlite::Result<Vec<_>>>()?
-            }
+    /// Started and open runs paired with their cards, using only the partial
+    /// active index rather than scanning card run histories.
+    pub fn active_runs_with_cards(&self) -> Result<Vec<(Run, Card)>> {
+        self.open_runs_with_cards(
+            "SELECT id, card_id FROM runs INDEXED BY idx_runs_active_open
+             WHERE started_at IS NOT NULL AND ended_at IS NULL ORDER BY id",
+        )
+    }
+
+    /// Started and open runs for cards on one board, reduced to the fields
+    /// needed by board snapshot consumers. This query is board-scoped at the
+    /// SQL boundary; it never exposes queued, ended, or other-board runs.
+    pub fn active_run_summaries(&self, board_id: i64) -> Result<Vec<ActiveRunSummary>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT r.card_id, r.started_at
+             FROM runs r
+             JOIN cards c ON c.id=r.card_id
+             WHERE c.board_id=?1
+               AND r.started_at IS NOT NULL
+               AND r.ended_at IS NULL
+             ORDER BY r.id",
+        )?;
+        let rows = stmt.query_map(params![board_id], |row| {
+            Ok(ActiveRunSummary {
+                card_id: row.get("card_id")?,
+                started_at: row.get("started_at")?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Alias using the list-oriented naming used by board snapshot callers.
+    pub fn list_active_run_summaries(&self, board_id: i64) -> Result<Vec<ActiveRunSummary>> {
+        self.active_run_summaries(board_id)
+    }
+
+    /// Never-started open runs paired with cards in global FIFO order.
+    pub fn queued_runs_with_cards(&self) -> Result<Vec<(Run, Card)>> {
+        self.open_runs_with_cards(
+            "SELECT id, card_id FROM runs INDEXED BY idx_runs_queued_fifo
+             WHERE started_at IS NULL AND ended_at IS NULL ORDER BY id",
+        )
+    }
+
+    fn open_runs_with_cards(&self, sql: &str) -> Result<Vec<(Run, Card)>> {
+        let ids = {
+            let mut stmt = self.conn.prepare(sql)?;
+            let rows =
+                stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
-        Ok(rows)
+        ids.into_iter()
+            .map(|(run_id, card_id)| {
+                let run = self.get_run(run_id)?;
+                let card = self
+                    .get_card(card_id)?
+                    .ok_or_else(|| Error::NotFound(format!("card {card_id}")))?;
+                Ok((run, card))
+            })
+            .collect()
     }
 
     pub fn count_active_runs(&self) -> Result<i64> {
@@ -1177,11 +1668,25 @@ fn row_to_run(row: &Row) -> rusqlite::Result<Run> {
         argv_json: row.get("argv_json")?,
         prompt_snapshot: row.get("prompt_snapshot")?,
         system_prompt_snapshot: row.get("system_prompt_snapshot")?,
+        launch_spec: row
+            .get::<_, Option<String>>("launch_spec_json")?
+            .map(|json| {
+                serde_json::from_str(&json).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })
+            })
+            .transpose()?,
         herdr_workspace_id: row.get("herdr_workspace_id")?,
         herdr_pane_id: row.get("herdr_pane_id")?,
         session_id: row.get("session_id")?,
         session: row.get("session")?,
         started_at: row.get("started_at")?,
+        timeout_deadline_at_ms: row.get("timeout_deadline_at_ms")?,
+        timeout_paused_at_ms: row.get("timeout_paused_at_ms")?,
         ended_at: row.get("ended_at")?,
         outcome,
         result_summary: row.get("result_summary")?,

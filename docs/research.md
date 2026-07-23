@@ -1,5 +1,9 @@
 # Research notes (verified through 2026-07-22)
 
+This page is historical research and verification context, not a runtime or wire-contract source.
+The current contract is the typed code plus [`docs/README.md`](README.md), `docs/protocol.md`,
+`schema.sql`, and the migration tests.
+
 Condensed output of three research passes: local herdr introspection, prior art, and technical building blocks.
 
 ## A. herdr capability map (v0.7.5, protocol 17, verified locally)

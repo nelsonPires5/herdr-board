@@ -442,9 +442,9 @@ for _ in $(seq 1 75); do
   sleep 0.2
 done
 [ -n "$SOCK" ] && [ -S "$SOCK" ] || fail "disposable Herdr session failed to boot"
-# Do not publish/adopt the socket unless the exact server still owns its token.
+# Do not publish the socket unless the exact server still owns its token.
 e2e_process_identity_verify "$SERVER_PID" "$SERVER_IDENTITY" \
-  || fail "disposable Herdr server failed identity check before socket adoption"
+  || fail "disposable Herdr server failed identity check before socket publication"
 write_state
 PING="$(HERDR_SOCKET_PATH="$SOCK" python3 "$ROOT/e2e/hrpc.py" ping '{}')"
 printf '%s' "$PING" | jq -e '.version == "0.7.5" and .protocol == 17' >/dev/null \
@@ -535,7 +535,7 @@ out = {
 with open(sys.argv[2], "w", encoding="utf-8") as stream:
     json.dump(out, stream, sort_keys=True)
     stream.write("\n")
-assert out["cards"] == 1 and out["runs"] == 1, out
+assert out["cards"] == 1 and out["runs"] == 1
 PY
 
 python3 - "$EVIDENCE/card-final.json" "$EVIDENCE/herdr-snapshot.json" \
@@ -547,40 +547,40 @@ snapshot = json.load(open(snapshot_path, encoding="utf-8"))
 card = show["card"]
 runs = show["runs"]
 comments = show["comments"]
-assert card["harness"] == "claude", card
-assert card["model"] == "haiku", card
-assert card["effort"] == "low", card
-assert card["permission_mode"] == "bypassPermissions", card
-assert card["space_kind"] == "workspace" and card["space_ref"] == workspace_id, card
-assert len(runs) == 1, runs
+assert card["harness"] == "claude"
+assert card["model"] == "haiku"
+assert card["effort"] == "low"
+assert card["permission_mode"] == "bypassPermissions"
+assert card["space_kind"] == "workspace" and card["space_ref"] == workspace_id
+assert len(runs) == 1
 run = runs[0]
-assert run["harness"] == "claude" and run["outcome"] == "ok", run
-assert run["herdr_workspace_id"] == workspace_id and run["herdr_pane_id"], run
-assert run["prompt_snapshot"].startswith(task + "\n\n"), (run["prompt_snapshot"], task)
-assert "board done --outcome ok" in run["prompt_snapshot"], run["prompt_snapshot"]
+assert run["harness"] == "claude" and run["outcome"] == "ok"
+assert run["herdr_workspace_id"] == workspace_id and run["herdr_pane_id"]
+assert run["prompt_snapshot"].startswith(task + "\n\n")
+assert "board done --outcome ok" in run["prompt_snapshot"]
 argv = json.loads(run["argv_json"])
 expected_prefix = [
     "claude", "--model", "haiku", "--effort", "low",
     "--permission-mode", "bypassPermissions", "--allowedTools", "Bash(board:*)",
     "--session-id",
 ]
-assert argv[:len(expected_prefix)] == expected_prefix, argv
-assert len(argv) == len(expected_prefix) + 1 and argv[-1] == run["session_id"], (argv, run)
-assert all(task not in arg and marker not in arg and result_path not in arg for arg in argv), argv
+assert argv[:len(expected_prefix)] == expected_prefix
+assert len(argv) == len(expected_prefix) + 1 and argv[-1] == run["session_id"]
+assert all(task not in arg and marker not in arg and result_path not in arg for arg in argv)
 agent_comments = [c for c in comments if c["author"] == f"agent:{run['id']}"]
-assert agent_comments, comments
-assert any(marker in c["body"] and result_path in c["body"] for c in agent_comments), agent_comments
+assert agent_comments
+assert any(marker in c["body"] and result_path in c["body"] for c in agent_comments)
 path = pathlib.Path(result_path)
-assert path.is_file() and not path.is_symlink(), path
-assert path.read_bytes() == marker.encode("utf-8") + b"\n", path.read_bytes()
+assert path.is_file() and not path.is_symlink()
+assert path.read_bytes() == marker.encode("utf-8") + b"\n"
 panes = snapshot["result"]["snapshot"].get("panes", [])
 matched = [p for p in panes if p.get("pane_id") == run["herdr_pane_id"]]
-assert len(matched) == 1, (run["herdr_pane_id"], panes)
+assert len(matched) == 1
 pane = matched[0]
-assert pane.get("agent") == "claude", pane
+assert pane.get("agent") == "claude"
 session = pane.get("agent_session")
-assert session and session.get("source") == "herdr:claude" and session.get("agent") == "claude", pane
-assert session.get("kind") in ("id", "path") and session.get("value"), session
+assert session and session.get("source") == "herdr:claude" and session.get("agent") == "claude"
+assert session.get("kind") in ("id", "path") and session.get("value")
 print("validated one Claude Haiku run, exact startup flags, SessionStart report, comment, and file bytes")
 PY
 
@@ -590,7 +590,7 @@ python3 - "$RESULT_FILE" "$WORKSPACE_DIR" <<'PY'
 import pathlib, sys
 result = pathlib.Path(sys.argv[1])
 workspace = pathlib.Path(sys.argv[2]).resolve()
-assert result.parent.resolve() == workspace, (result, workspace)
+assert result.parent.resolve() == workspace
 PY
 
 capture_runtime_evidence

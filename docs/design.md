@@ -37,7 +37,25 @@ Separation card ↔ run is deliberate (vibe-kanban converged on task/attempt/exe
 - **boardd** is the only SQLite writer. One DB at `~/.local/share/herdr-board/board.db` stores every independent scoped board; cards still explicitly target Herdr sessions/workspaces.
 - **TUI** is packaged as a herdr plugin: `herdr-plugin.toml` declares a `[[panes]]` entry (herdr spawns the TUI binary in a split/tab) and `[[actions]]` (e.g. "add focused pane's repo as a card") bindable via `[[keys.command]]`. Plugin processes receive `HERDR_BIN_PATH`, `HERDR_PLUGIN_CONFIG_DIR`, `HERDR_PLUGIN_CONTEXT_JSON`.
 - **`board` CLI** subcommands hit the boardd socket — never SQLite directly (single-writer rule).
-- boardd holds a persistent connection to herdr's socket for `events.subscribe`; fallback is polling `herdr api snapshot`.
+- boardd's always-on supervisor owns one persistent `events.subscribe` stream per resolved Herdr
+  session socket. Each socket has independent subscription generation, reconnect backoff, and
+  bounded snapshot reconciliation; a disconnected or late Herdr session never blocks another.
+
+### Root configuration and startup
+
+`board-core::config::RootConfig` is the typed representation of the complete
+`config.toml`: board fields remain at the document root for compatibility,
+while daemon runtime knobs live under `[daemon]`. `RootConfig::load` reads the
+resolved path once; a missing file or omitted section yields defaults. An
+existing file is not optional: malformed TOML, type errors, and invalid enum
+values (such as an unknown `spawner`) return `Error::Config`.
+
+At the daemon edge, `RootConfig` is parsed once, then `DaemonSettings` applies
+injected process-environment overrides (`BOARD_SPAWNER`,
+`BOARD_TIMEOUT_UNIT_SECS`, `BOARD_LOCAL_POLL_MS`, and `BOARD_TICK_MS`) with
+environment taking precedence. There is no second best-effort TOML parser and
+no `unwrap_or_default` fallback, so board and daemon settings cannot disagree
+about whether the document is valid.
 
 ### Herdr compatibility and launch boundary
 
@@ -71,24 +89,67 @@ cards(id, board_id, column_id, position, title, description,
 comments(id, card_id, author, body, created_at)
 runs(id, card_id, column_id, harness, argv_json, prompt_snapshot,
      system_prompt_snapshot,                    -- nullable; enqueue-time, trailer-inclusive
+     launch_spec_json,                          -- nullable pre-v11; tagged durable execution spec
      herdr_workspace_id, herdr_pane_id, session_id,
      session,                                    -- herdr session the run spawned into
-     started_at, ended_at, outcome ('ok'|'fail'|'cancelled'|'lost'),  -- 'lost' is legacy, no longer produced
+     started_at, timeout_deadline_at_ms, timeout_paused_at_ms,
+     ended_at, outcome ('ok'|'fail'|'cancelled'|'lost'),  -- 'lost' is legacy, no longer produced
      result_summary, log_path)
 ```
 
-Schema is versioned via `PRAGMA user_version` (current = **v7**). A fresh DB is built straight from
-`schema.sql` and stamped v7. Existing v1→v4 migrations retain their space/session, archive, and Pi
+Schema is versioned via `PRAGMA user_version` (current = **v11**). A fresh DB is built straight from
+`schema.sql` and stamped v11. Existing v1→v4 migrations retain their space/session, archive, and Pi
 effort behavior. v5 adds unique non-null `boards.scope_path`, preserves board `id=1` plus every
 related row as `Global`, and leaves existing card harnesses unchanged. v6 rebuilds `cards` to admit
 the `awaiting`/`done` statuses and adds `cards.awaiting_reason` (NULL outside `awaiting`). v7 adds
-nullable `runs.system_prompt_snapshot` without backfilling old rows. New runs atomically preserve the
-fully resolved, board-protocol-trailer-inclusive system prompt at enqueue time, so a queued run is
-not changed by later column edits. A legacy NULL remains a launch-version marker: pre-v7 built-ins
+nullable `runs.system_prompt_snapshot` without backfilling old rows. v8 adds the exact partial unique
+index `idx_runs_one_open_per_card` on `runs(card_id) WHERE ended_at IS NULL`. There is no safe
+residue normalization: one existing open run is retained byte-for-byte, while two or more are
+ambiguous, so upgrade reports every duplicate card/run ID and changes neither schema nor
+`user_version`. v9 persists each run's wall-clock timeout deadline and optional awaiting pause point.
+Upgrade derives an open timed run's deadline once from `started_at` plus its column timeout; an
+awaiting run uses `cards.updated_at` as the best durable pause point. Reopen never derives either
+value again, so daemon restart cannot replenish the budget. v10 adds partial scheduler indexes for
+queued and active open-run scans without rewriting run rows. v11 adds nullable
+`runs.launch_spec_json`; existing v10 rows remain byte-identical with NULL, while every new run
+stores a format-tagged (`version: 1`) fully materialized argv/env/prompt launch spec. Unsupported
+format versions are rejected rather than interpreted. Dispatch uses that spec and the persisted
+`runs.session`, so queued runs, retries, and auto-hops are unaffected by later card, column, or
+configuration edits. New runs also atomically preserve the fully resolved,
+board-protocol-trailer-inclusive system prompt at enqueue time. A legacy NULL remains a
+launch-version marker: pre-v7 built-ins
 execute their persisted all-in-one argv unchanged, while pre-v7 configured rows retain their
 historical spawn-time current-column reconstruction. `Run` deserialization defaults an omitted field
 to NULL, but serialization always omits `system_prompt_snapshot` and its contents from boardd wire
-responses.
+responses. `launch_spec_json` is likewise internal and omitted in full from boardd wire responses.
+
+### Partial updates
+
+The board protocol stays v1 while nullable partial-update fields use an explicit tri-state:
+
+- omitted means unchanged;
+- JSON `null` means clear the stored nullable value;
+- a JSON value means set/replace it.
+
+`board-core::protocol::Patch<T>` owns this serde mapping, and the database applies it field by
+field after merging with the current row. It is used only by update DTOs for nullable column
+settings (`system_prompt`, transition targets, overrides, and timeout) and card settings
+(`model`, `effort`, `permission_mode`, `session`, `space_ref`, and `space_cwd`). Create DTOs and
+non-null partial-update fields remain unchanged. The TUI sends `null` for an intentionally empty
+nullable edit rather than accidentally preserving the old value.
+
+### Authoritative validation
+
+The daemon merges an update with the stored card or column, validates the complete result, and
+only then writes SQLite and emits its coarse change event. Schema v8 additionally enforces one open
+run per card. Enqueue, promotion, and finalization—including a final comment, card transition, and
+optional auto-hop enqueue—are core transaction-scoped units of work. Their return DTOs are not
+available until commit; process/socket/event/notification effects occur only afterward. A rejected merged state therefore
+cannot leave a partial row or event. Card capability policy covers harness, model, effort,
+permission, and space combinations; column permission overrides use `PermissionContext::ColumnOverride`
+and never allow `bypassPermissions`, while an explicit Claude card value remains valid. Overrides
+without a harness are resolved against the entering card at enqueue time, where effective settings
+are validated again for legacy rows and concurrent changes.
 
 ### Session model
 
@@ -96,8 +157,9 @@ Cards target a **herdr session** plus a space in it. Because two sessions can ea
 
 - **Registry**: session enumeration is not in the herdr socket API (a session only knows itself), so the daemon shells out to `herdr session list --json` (binary via `$HERDR_BIN_PATH`, else `herdr`), caching ~3s. It maps `name/default/running/socket_path`.
 - **Default**: a card with `session = null` uses the daemon's own bound herdr socket; its display name is the registry entry whose `socket_path` matches (else the synthetic `"default"`).
-- **Per-session client**: spawn / kill / liveness / workspace resolve-or-create all build a `HerdrClient` on the resolved session socket (carried on `SpawnReq`/`SpawnHandle` as `herdr_socket`, and persisted as `runs.session` so kill/liveness work after a daemon restart).
-- **Per-session watchers**: a single watcher thread multiplexes one `HerdrEvents` stream **per session socket** that has active panes (agent-status subscriptions are validated per socket). It holds a `socket → stream` map, rebuilds all streams on a watch-set generation change, and (re)connects any watched socket missing a live stream — simpler than per-session thread lifecycles while fitting the existing loop. Event identity is the tuple `(session socket, pane id)`, not pane id alone.
+- **Per-session client**: spawn / kill / liveness / workspace resolve-or-create all build a `HerdrClient` on the resolved session socket. Runtime placement and identity live in daemon-owned `HerdrLaunchPlan` / `RuntimeHandle`; `runs.session` remains durable so kill/liveness target the correct socket after a daemon restart.
+- **Per-session watchers**: one always-on supervisor multiplexes a `HerdrEvents` stream **per session socket** with active panes. Generation, subscription state, reconnect backoff, and periodic reconciliation deadlines are independent per socket, so one session's pane-set change or disconnect never resets another. Each generation completes subscribe acknowledgement before its snapshot and event polling. Event identity is `(session socket, pane id)`, not pane id alone.
+- **Conservative restart reconciliation**: startup resolves each durable open run to `Default`, `Resolved`, or `Unresolved`, then probes a session snapshot outside scheduler/store locks. Only a successful snapshot that omits the pane is `Gone` and applies pane-exit failure policy. Transport errors, timeouts, malformed replies, resolver failures, and worker panics are `Unknown`: this pass leaves the run open and occupying queue capacity; a later daemon restart (or T10) may retry it. A present pane is adopted, watched, and its terminal status restores `awaiting`/`blocked`; durable state is revalidated after the probe so stale observations cannot beat `board done`. An always-on supervisor keeps independent stream generation/backoff per socket, reconnects after Herdr appears or recovers, subscribes before snapshot reconciliation, and periodically repairs missed-event gaps.
 
 ### new_workspace flow
 
@@ -108,7 +170,11 @@ Then proceed identically to a `workspace` card (cwd snapshot, pane-first kanban-
 
 ### Worktree removal
 
-The `cwd` and `worktree` space kinds are gone. Worktree isolation is now the **agent's** job — instructed via the column/card prompt (create a worktree, work in it) — not a board primitive, keeping the board's space model to "which session, which workspace".
+The `cwd` and `worktree` space kinds are gone, and `board-herdr` no longer exposes the unused
+`worktree.create`/`worktree.remove` client methods or result DTOs. Worktree isolation is now the
+**agent's** job — instructed via the column/card prompt (create a worktree, work in it) — not a
+board primitive, keeping the board's space model to "which session, which workspace". The pinned
+Herdr schema fixture remains an upstream compatibility reference and is not edited by this cleanup.
 
 ## 4. Column configuration
 
@@ -205,7 +271,7 @@ toast.
   title (`Board [<scope> · ACTIVE|ALL|ARCHIVED]`) while the footer contains only `? help`. Archived cards are
   inert until restored and render dimmed with `▣ ARCHIVED` when visible.
 - **Content-sized overlays:** card/column forms, move pickers, and help panels shrink to their content on large terminals and clamp to the available viewport on small terminals.
-- **Guided card & column forms** share one metadata source: both fetch `harness.capabilities` (models/efforts/permissions via the daemon-side `HarnessMeta` adapter trait) and `harness.list` (built-ins + config-defined harnesses). For cards: Pi is selected for new cards; Claude remains selectable. On open/harness change the form also fetches `space.list`. Model starts at `(default)` (unset), then catalog aliases and `(custom)` when free-form is supported. Effort follows the selected/default model. Permission is hidden and submits `None` for Pi; Claude shows its modes. Switching harness resets only incompatible values. Workspace labels are shown but ids are persisted. Fetch failures degrade to free text with a warning. For column config the same source drives the override fields: `harness_override` is a **select** over the available harnesses (`(none)` = no override), `effort_override` follows the override harness's catalog, and `permission_override` is **hidden** when the driving harness has no permission modes (e.g. Pi); changing the override harness refetches capabilities and resets only overrides that became invalid.
+- **Guided card & column forms** share one metadata source: both fetch `harness.capabilities` (models/efforts/permissions via the daemon-side `HarnessMeta` adapter trait) and `harness.list` (built-ins + config-defined harnesses). For cards: Pi is selected for new cards; Claude remains selectable. On open/harness change the form also fetches `space.list`. Model starts at `(default)` (unset), then catalog aliases and `(custom)` when free-form is supported. Effort follows the selected model's declared set, or the catalog default for omitted/free-form models. Permission is hidden and submits `None` for Pi; Claude shows its modes. Switching harness resets only incompatible values. Workspace labels are shown but ids are persisted. Fetch failures degrade to free text with a warning. For column config the same source drives the override fields: `harness_override` is a **select** over the available harnesses (`(none)` = no override), `effort_override` follows the override harness's catalog, and `permission_override` is **hidden** when the driving harness has no permission modes (e.g. Pi); changing the override harness refetches capabilities and resets only overrides that became invalid.
 - Long text (card description, column system prompt): modal textarea, `Ctrl+E` suspends the TUI into `$EDITOR`.
 - Deleting a column with cards asks where to move them; a running card's column can't be deleted.
 - Optional: apply a board template (e.g. the example pipeline above) onto an empty board.
@@ -320,7 +386,11 @@ Watchers only **observe**: herdr pane statuses and idle expiry are translated in
 (`board_core::engine::decide_signal`) is the **single decider** mapping a signal plus the current
 card status onto a `SignalDecision` (new status, optional `awaiting_reason`, optional
 notification). The daemon applies the decision in one place; pane-exit, column timeout, and cancel
-keep their existing `finalize_run` paths.
+keep their existing `finalize_run` paths. The same core-owned lifecycle policy exposes
+`LifecycleDecision` and `FinalizePlan`: it validates supplied run identity, distinguishes
+queued configured runs from queued built-ins, and selects kill/transition behavior for
+cancel, timeout, pane exit, and explicit completion. The daemon supplies DB facts and
+executes the returned plan; it performs no Herdr or SQLite I/O in the pure decision.
 
 - `awaiting` = the agent finished(?) without `board done`. The run stays **OPEN** — it never
   becomes a failure on its own. The **column timeout is paused**: entering `awaiting` records the
@@ -339,12 +409,28 @@ keep their existing `finalize_run` paths.
 - **Atomic enqueue snapshot**: scheduler→store locking builds the card/column/comments/settings/task,
   system, and session snapshot together; the queued run is never assembled from stale reads and
   `run.session` matches the launch target.
-- **Atomic card finalization**: the scheduler claims a card while closing/removing its old run and
-  keeps that claim through comments, transition/status writes, and any internal auto-target
-  enqueue. Public enqueue/retry and conflicting card/column mutations reject the claimed card;
-  only that finalizer's private enqueue token may create its next run.
-- **Per-space FIFO**: two agents mutating one working tree collide; cards sharing a `(session, space_kind, space_ref)` key run serially.
-- **Global semaphore** (default 3) caps concurrent runs across spaces (cost + machine load).
+- **Lifecycle and launch ownership**: `board-core::engine` owns Herdr-neutral
+  `LifecycleDecision` / `FinalizePlan`, auto-hop limits, and resumability evidence (a started run
+  plus its `agent:<run_id>` comment). `board-core::launch` contains only the durable neutral
+  `ExecutionSpec` / `RunLaunchSpec`. `board-daemon` owns `Spawner`, `HerdrLaunchPlan`,
+  `RuntimeHandle`, placement, liveness, and process effects while preserving the scheduler→store
+  lock order; this boundary does not change transaction execution or launch bytes.
+- **Atomic card finalization**: under scheduler→store locking, one core transaction closes the run,
+  writes all terminal comments, moves/statuses the card, and inserts any auto-hop run. Failed
+  planning or SQL restores the exact prior durable state. Only after commit does the daemon update
+  scheduler bookkeeping, refresh watches, kill a pane, schedule notification, emit terminal events,
+  and wake dispatch, in that order. The shared scheduler→store lock order supplies only transient
+  mutual exclusion; no separate finalizing-card state participates in durable decisions.
+- **Per-space FIFO**: two agents mutating one working tree collide; cards sharing the typed
+  `SpaceKey(session, space_kind, space_ref)` run serially. Null/default values remain typed and are
+  never separator-encoded.
+- **Active-run timer source**: board snapshots expose only additive summaries for started, open
+  runs. The TUI joins those summaries by card id, so comments/card edits cannot reset the elapsed
+  timer; `started_at` remains the authoritative clock across event refreshes.
+- **Global concurrency cap** (default 3) limits active runs across spaces. A per-daemon async mutex
+  serializes complete dispatch passes through launch registration/failure. Inside that lock, a pass
+  claims capacity and each space's FIFO head before any launch starts; claimed independent spaces
+  launch concurrently, while a second run for either space remains queued.
 - A `new_workspace` card that opens a distinct workspace per label gets its own queue key, so distinct labels run in parallel (up to the global cap). Agent-driven worktree isolation (see §3) is what escapes a per-repo bottleneck now.
 
 ## 8. Failure & safety rails

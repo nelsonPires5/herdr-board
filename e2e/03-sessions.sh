@@ -4,7 +4,7 @@
 # One boardd drives every herdr session. The primary ephemeral session (the one
 # e2e_init binds the daemon to = its "default") is session A; this scenario BOOTS
 # its OWN collision-resistant second ephemeral session B
-# (`hb-e2e-b-<pid>-<random>-<random>`) and exercises the
+# (`hb-e2e-<scenario-b>-<pid>-<random64>`) and exercises the
 # session/space-scoped paths against it:
 #   - space list scoped per session (A/default vs B differ),
 #   - a `workspace` card dispatched into B (pane lands in B's kanban tab),
@@ -21,7 +21,7 @@ set -euo pipefail
 
 export E2E_FAKE_ENV="FAKE_AGENT_HOLD=300"   # keep panes alive for the assertions
 
-e2e_init          # boots/adopts session A, binds the daemon's HERDR_SOCKET_PATH to it
+e2e_init          # boots owned session A and binds the daemon's HERDR_SOCKET_PATH to it
 e2e_build
 e2e_isolate
 e2e_daemon_start
@@ -86,8 +86,8 @@ card_json="$("$BOARD_BIN" card new --title "Sess WS Card" -d "cross-session ws" 
   --harness fake --space-kind workspace --space-ref "$WS_SESS" --session "$SESS" --json)"
 CARD_WS="$(printf '%s' "$card_json" | jget id)" || fail "could not parse card id"
 mut "board move $CARD_WS Execute -> agent.start in session $SESS / ws $WS_SESS"
-"$BOARD_BIN" move "$CARD_WS" Execute --json >/dev/null
-oc="$(wait_ok "$CARD_WS")" || { tail -40 "$E2E_TMP/daemon.log"; fail "card $CARD_WS outcome '$oc'"; }
+e2e_board_herdr_mutate "$SESS_B_PID" "$SESS_B_IDENTITY" -- move "$CARD_WS" Execute --json >/dev/null
+oc="$(wait_ok "$CARD_WS")" || { fail "card $CARD_WS outcome '$oc'"; }
 echo "  outcome: $oc"
 assert_kanban_pane "$WS_SESS" "$CARD_WS"
 ok "workspace card ran in session '$SESS' and landed a pane in its kanban tab"
@@ -99,8 +99,8 @@ card_json="$("$BOARD_BIN" card new --title "Sess New Card" -d "cross-session new
   --session "$SESS" --json)"
 CARD_NEW="$(printf '%s' "$card_json" | jget id)" || fail "could not parse card id"
 mut "board move $CARD_NEW Execute -> daemon workspace.create(label=bsess-new) in $SESS"
-"$BOARD_BIN" move "$CARD_NEW" Execute --json >/dev/null
-oc="$(wait_ok "$CARD_NEW")" || { tail -40 "$E2E_TMP/daemon.log"; fail "card $CARD_NEW outcome '$oc'"; }
+e2e_board_herdr_mutate "$SESS_B_PID" "$SESS_B_IDENTITY" -- move "$CARD_NEW" Execute --json >/dev/null
+oc="$(wait_ok "$CARD_NEW")" || { fail "card $CARD_NEW outcome '$oc'"; }
 echo "  outcome: $oc"
 
 # Find the workspace the daemon created (by label) and register its cleanup.

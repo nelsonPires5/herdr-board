@@ -53,8 +53,8 @@ with open(system_file, "r", encoding="utf-8", newline="") as source:
     system_prompt = source.read()
 protocol = """## herdr-board protocol
 You are running a herdr-board card ($BOARD_CARD_ID is preset). When this stage's goal is met you MUST finish with exactly two commands: first `board comment \"<your results, files touched, findings>\"`, then `board done --outcome ok`. If the stage goal was NOT met — something failed or you got lost — use `board done --outcome fail --summary \"<why>\"` instead. Always comment before done. Never use `board move`/`cancel`/`retry` on your own card. Finishing or going idle WITHOUT `board done` leaves the card in `awaiting` for human review — a run is never auto-completed."""
-assert mode == 0o600, f"system-prompt mode is {oct(mode)}, expected 0o600"
-assert system_prompt == protocol or system_prompt.endswith("\n\n" + protocol), system_prompt
+assert mode == 0o600
+assert system_prompt == protocol or system_prompt.endswith("\n\n" + protocol)
 with open(path, "w", encoding="utf-8") as target:
     json.dump({
         "run_id": int(run_id), "card_id": int(card_id), "cwd": cwd,

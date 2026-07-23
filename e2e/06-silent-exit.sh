@@ -42,24 +42,24 @@ card_json="$("$BOARD_BIN" card new --title "Silent Card" -d "crashes" \
 CARD_ID="$(printf '%s' "$card_json" | jget id)" || fail "could not parse card id"
 echo "  card: $CARD_ID"
 mut "board move $CARD_ID Execute -> agent.start in $WS_ID"
-"$BOARD_BIN" move "$CARD_ID" Execute --json >/dev/null
+e2e_board_herdr_mutate -- move "$CARD_ID" Execute --json >/dev/null
 
 step "Wait for the daemon to detect the pane exit and fail the run"
-oc="$(wait_runs "$CARD_ID" 1)" || { tail -40 "$E2E_TMP/daemon.log"; fail "run never finalized after silent exit"; }
-[ "$oc" = "fail" ] || { "$BOARD_BIN" card show "$CARD_ID" --json; fail "run outcome '$oc', expected 'fail'"; }
+oc="$(wait_runs "$CARD_ID" 1)" || { fail "run never finalized after silent exit"; }
+[ "$oc" = "fail" ] || { e2e_card_failure_diag "$CARD_ID"; fail "run outcome '$oc', expected 'fail'"; }
 ok "run finalized as fail after the pane exited"
 
 step "Assert NO auto-transition: card stayed in 'Execute' and is 'failed'"
 col_now="$(card_field "$CARD_ID" card.column_id || true)"
 st_now="$(card_field "$CARD_ID" card.status || true)"
 echo "  card column_id=$col_now status=$st_now (want column=$EXEC_ID status=failed)"
-[ "$col_now" = "$EXEC_ID" ] || { "$BOARD_BIN" card show "$CARD_ID" --json; fail "card moved to $col_now; pane-exit must NOT apply on_fail (expected still $EXEC_ID)"; }
+[ "$col_now" = "$EXEC_ID" ] || { e2e_card_failure_diag "$CARD_ID"; fail "card moved to $col_now; pane-exit must NOT apply on_fail (expected still $EXEC_ID)"; }
 [ "$st_now" = "failed" ] || fail "card status '$st_now', expected 'failed'"
 ok "card did not transition (still in Execute), status failed"
 
 step "Assert the 'pane exited without board done' system comment"
 "$BOARD_BIN" card show "$CARD_ID" --json | grep -q "pane exited without board done" \
-  || { "$BOARD_BIN" card show "$CARD_ID" --json; fail "missing 'pane exited without board done' comment"; }
+  || { e2e_card_failure_diag "$CARD_ID"; fail "missing 'pane exited without board done' comment"; }
 ok "system comment records the silent exit"
 
 step "06-silent-exit: ALL CHECKS PASSED"

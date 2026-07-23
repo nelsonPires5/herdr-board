@@ -15,7 +15,7 @@ EXEC_ID="$(col_create '{"name":"Execute","trigger":"auto"}')"
 card_json="$("$BOARD_BIN" card new --title jump-target --description 'focus this run' \
   --harness fake --space-kind workspace --space-ref "$WS_ID" --json)"
 CARD_ID="$(printf '%s' "$card_json" | jget id)"
-"$BOARD_BIN" move "$CARD_ID" "$EXEC_ID" --json >/dev/null
+e2e_board_herdr_mutate -- move "$CARD_ID" "$EXEC_ID" --json >/dev/null
 outcome="$(wait_ok "$CARD_ID")" || fail "run did not finish (outcome '$outcome')"
 [ "$outcome" = "ok" ] || fail "run outcome '$outcome' (expected ok)"
 TARGET_PANE="$(card_field "$CARD_ID" 'runs[-1].herdr_pane_id')"
@@ -25,13 +25,10 @@ hrpc pane.get "{\"pane_id\":\"$TARGET_PANE\"}" >/dev/null \
 ok "target pane $TARGET_PANE remains alive after board done"
 
 step "HERDR MUTATION: launch the real plugin overlay in the target workspace"
-mut "plugin link $REPO_ROOT in disposable session $E2E_SESSION"
-"$HERDR_BIN" --session "$E2E_SESSION" plugin link "$REPO_ROOT" >/dev/null
-mut "workspace focus $WS_ID and socket pane.focus $TARGET_PANE"
-"$HERDR_BIN" workspace focus "$WS_ID" >/dev/null
-hrpc pane.focus "{\"pane_id\":\"$TARGET_PANE\"}" >/dev/null
-mut "plugin pane open --plugin herdr-board --entrypoint board --placement overlay --focus"
-open_json="$("$HERDR_BIN" plugin pane open --plugin herdr-board --entrypoint board \
+e2e_herdr_mutate -- --session "$E2E_SESSION" plugin link "$REPO_ROOT" >/dev/null
+e2e_herdr_mutate -- workspace focus "$WS_ID" >/dev/null
+e2e_hrpc_mutate -- pane.focus "{\"pane_id\":\"$TARGET_PANE\"}" >/dev/null
+open_json="$(e2e_herdr_mutate -- plugin pane open --plugin herdr-board --entrypoint board \
   --placement overlay \
   --env "BOARD_SOCKET=$BOARD_SOCKET" --env "BOARD_DB=$BOARD_DB" \
   --env "HERDR_BOARD_CONFIG=$HERDR_BOARD_CONFIG" \
@@ -46,11 +43,13 @@ done
 printf '%s\n' "$screen" | grep -q 'jump-target' || fail "card not visible in board TUI"
 
 step "Open card detail and press o"
-mut "pane send-keys $BOARD_PANE right enter o"
-"$HERDR_BIN" pane send-keys "$BOARD_PANE" right
-"$HERDR_BIN" pane send-keys "$BOARD_PANE" enter
+e2e_herdr_mutate -- pane send-keys "$BOARD_PANE" right
+e2e_herdr_mutate -- pane send-keys "$BOARD_PANE" enter
 sleep 0.3
-"$HERDR_BIN" pane send-keys "$BOARD_PANE" o
+# `o` asks boardd to focus/close Herdr panes, so gate daemon and session too.
+e2e_process_identity_verify "$E2E_DAEMON_PID" "$E2E_DAEMON_IDENTITY" \
+  || fail "refusing jump action: daemon identity does not match"
+e2e_herdr_mutate -- pane send-keys "$BOARD_PANE" o
 
 step "Assert target pane focused and board pane exited"
 focused=""

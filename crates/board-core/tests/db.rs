@@ -1,11 +1,12 @@
 //! Db migrations, seed, CRUD, and position management.
 
-use board_core::db::{Db, BOARD_ID};
+use board_core::db::{Db, EnqueueRun, BOARD_ID};
+use board_core::launch::{ExecutionSpec, RunLaunchSpec};
 use board_core::protocol::{
     AwaitingReason, CardCreateParams, CardStatus, ColumnCreateParams, ColumnUpdateParams, Effort,
-    RunOutcome, SpaceKind, Trigger,
+    Patch, RunOutcome, SpaceKind, Trigger,
 };
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 fn mem() -> Db {
     Db::open_in_memory().unwrap()
@@ -14,7 +15,7 @@ fn mem() -> Db {
 #[test]
 fn migration_seeds_board_and_todo_column() {
     let db = mem();
-    assert_eq!(db.user_version().unwrap(), 7);
+    assert_eq!(db.user_version().unwrap(), 11);
     let board = db.get_board(BOARD_ID).unwrap();
     assert_eq!(board.name, "Global");
     assert_eq!(board.scope_path, None);
@@ -23,6 +24,30 @@ fn migration_seeds_board_and_todo_column() {
     assert_eq!(cols[0].name, "Todo");
     assert_eq!(cols[0].position, 0);
     assert_eq!(cols[0].trigger, Trigger::Manual);
+}
+
+#[test]
+fn fresh_v11_launch_spec_column_has_exact_nullable_default() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    drop(Db::open(&path).unwrap());
+    let conn = Connection::open(path).unwrap();
+    let shape: (String, String, i64, Option<String>) = conn
+        .query_row(
+            "SELECT name,type,\"notnull\",dflt_value FROM pragma_table_info('runs') WHERE name='launch_spec_json'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(shape, ("launch_spec_json".into(), "TEXT".into(), 0, None));
+    let default_value: Option<String> = conn
+        .query_row("SELECT launch_spec_json FROM runs LIMIT 1", [], |row| {
+            row.get(0)
+        })
+        .optional()
+        .unwrap()
+        .flatten();
+    assert_eq!(default_value, None);
 }
 
 #[test]
@@ -36,7 +61,7 @@ fn migration_idempotent_on_reopen() {
     // Reopen: must not re-seed (still exactly one board, one column).
     {
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.user_version().unwrap(), 7);
+        assert_eq!(db.user_version().unwrap(), 11);
         assert_eq!(db.list_columns(BOARD_ID).unwrap().len(), 1);
         assert_eq!(db.get_board(BOARD_ID).unwrap().name, "Global");
     }
@@ -126,7 +151,7 @@ fn migration_v2_upgrades_v1_database() {
     }
     // Open via Db → runs the v2 through v7 migrations.
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 7);
+    assert_eq!(db.user_version().unwrap(), 11);
     let cards = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(cards.len(), 2);
     for c in &cards {
@@ -144,10 +169,9 @@ fn migration_v2_upgrades_v1_database() {
     // Related rows survive both cards rebuilds, and runs.session defaults NULL.
     let card = cards.iter().find(|c| c.title == "wt").unwrap();
     assert_eq!(db.list_comments(card.id).unwrap()[0].body, "preserved");
-    assert_eq!(
-        db.list_runs(card.id).unwrap()[0].prompt_snapshot,
-        "preserved prompt"
-    );
+    let preserved = db.list_runs(card.id).unwrap()[0].clone();
+    assert_eq!(preserved.prompt_snapshot, "preserved prompt");
+    db.finish_run(preserved.id, RunOutcome::Ok, None).unwrap();
     let run = db
         .create_run(card.id, card.column_id, "claude", "[]", "p", None, None)
         .unwrap();
@@ -193,6 +217,130 @@ fn migration_v2_upgrades_v1_database() {
         )
         .unwrap();
     assert_eq!((comments, runs), (0, 0));
+}
+
+#[test]
+fn nullable_updates_set_then_clear_and_survive_reopen() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    let (column_id, card_id) = {
+        let db = Db::open(&path).unwrap();
+        let column = db
+            .create_column(&ColumnCreateParams {
+                name: "Configured".into(),
+                system_prompt: Some("instructions".into()),
+                on_success_column_id: Some(db.default_column_id(BOARD_ID).unwrap()),
+                on_fail_column_id: Some(db.default_column_id(BOARD_ID).unwrap()),
+                harness_override: Some("pi".into()),
+                model_override: Some("model".into()),
+                effort_override: Some("high".into()),
+                permission_override: Some("manual".into()),
+                timeout_minutes: Some(15),
+                ..Default::default()
+            })
+            .unwrap();
+        let card = db
+            .create_card(&CardCreateParams {
+                title: "Patch me".into(),
+                model: Some("model".into()),
+                effort: Some(Effort::High),
+                permission_mode: Some("manual".into()),
+                session: Some("session".into()),
+                space_ref: Some("workspace".into()),
+                space_cwd: Some("/repo".into()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        db.update_column(&ColumnUpdateParams {
+            id: column.id,
+            system_prompt: Patch::Set("updated instructions".into()),
+            on_success_column_id: Patch::Set(column.id),
+            on_fail_column_id: Patch::Set(column.id),
+            harness_override: Patch::Set("claude".into()),
+            model_override: Patch::Set("updated-model".into()),
+            effort_override: Patch::Set("medium".into()),
+            permission_override: Patch::Set("auto".into()),
+            timeout_minutes: Patch::Set(30),
+            ..Default::default()
+        })
+        .unwrap();
+        db.update_card(&board_core::protocol::CardUpdateParams {
+            id: card.id,
+            model: Patch::Set("updated-model".into()),
+            effort: Patch::Set(Effort::Medium),
+            permission_mode: Patch::Set("auto".into()),
+            session: Patch::Set("updated-session".into()),
+            space_ref: Patch::Set("updated-workspace".into()),
+            space_cwd: Patch::Set("/updated-repo".into()),
+            ..Default::default()
+        })
+        .unwrap();
+
+        // An omitted nullable member is an explicit Unchanged patch, not a
+        // request to clear the value that was just stored.
+        let unchanged_column = db
+            .update_column(&ColumnUpdateParams {
+                id: column.id,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            unchanged_column.system_prompt.as_deref(),
+            Some("updated instructions")
+        );
+        let unchanged_card = db
+            .update_card(&board_core::protocol::CardUpdateParams {
+                id: card.id,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(unchanged_card.model.as_deref(), Some("updated-model"));
+
+        db.update_column(&ColumnUpdateParams {
+            id: column.id,
+            system_prompt: Patch::Clear,
+            on_success_column_id: Patch::Clear,
+            on_fail_column_id: Patch::Clear,
+            harness_override: Patch::Clear,
+            model_override: Patch::Clear,
+            effort_override: Patch::Clear,
+            permission_override: Patch::Clear,
+            timeout_minutes: Patch::Clear,
+            ..Default::default()
+        })
+        .unwrap();
+        db.update_card(&board_core::protocol::CardUpdateParams {
+            id: card.id,
+            model: Patch::Clear,
+            effort: Patch::Clear,
+            permission_mode: Patch::Clear,
+            session: Patch::Clear,
+            space_ref: Patch::Clear,
+            space_cwd: Patch::Clear,
+            ..Default::default()
+        })
+        .unwrap();
+        (column.id, card.id)
+    };
+
+    let db = Db::open(&path).unwrap();
+    let column = db.get_column(column_id).unwrap().unwrap();
+    assert!(column.system_prompt.is_none());
+    assert!(column.on_success_column_id.is_none());
+    assert!(column.on_fail_column_id.is_none());
+    assert!(column.harness_override.is_none());
+    assert!(column.model_override.is_none());
+    assert!(column.effort_override.is_none());
+    assert!(column.permission_override.is_none());
+    assert!(column.timeout_minutes.is_none());
+    let card = db.get_card(card_id).unwrap().unwrap();
+    assert!(card.model.is_none());
+    assert!(card.effort.is_none());
+    assert!(card.permission_mode.is_none());
+    assert!(card.session.is_none());
+    assert!(card.space_ref.is_none());
+    assert!(card.space_cwd.is_none());
 }
 
 #[test]
@@ -369,7 +517,7 @@ fn migration_v4_preserves_claude_cards_and_accepts_pi_efforts() {
     }
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 7);
+    assert_eq!(db.user_version().unwrap(), 11);
     let existing = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(existing[0].harness, "claude");
     assert_eq!(db.list_comments(existing[0].id).unwrap().len(), 1);
@@ -391,14 +539,14 @@ fn migration_does_not_downgrade_future_schema_version() {
     let path = tmp.path().to_path_buf();
     {
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.user_version().unwrap(), 7);
+        assert_eq!(db.user_version().unwrap(), 11);
     }
     {
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch("PRAGMA user_version = 8;").unwrap();
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 8);
+    assert_eq!(db.user_version().unwrap(), 11);
 }
 
 #[test]
@@ -423,7 +571,7 @@ fn migration_v3_adds_archived_at_to_v2_database() {
         .unwrap();
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 7);
+    assert_eq!(db.user_version().unwrap(), 11);
     let cards = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(cards.len(), 1);
     assert!(cards[0].archived_at.is_none());
@@ -463,6 +611,141 @@ fn run_system_prompt_snapshot_roundtrips_across_file_reopen() {
 }
 
 #[test]
+fn launch_spec_json_roundtrips_exactly_across_file_reopen() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    let spec = RunLaunchSpec::v1(ExecutionSpec {
+        argv: vec!["agent".into(), "arg\n\0  ".into()],
+        env: vec![("KEY".into(), "value\n\0  ".into())],
+        agent_kind: None,
+        initial_prompt: Some("prompt  ".into()),
+        system_prompt: None,
+    });
+    let exact_json = serde_json::to_string(&spec).unwrap();
+    let run_id = {
+        let db = Db::open(&path).unwrap();
+        let card = db
+            .create_card(&CardCreateParams {
+                title: "spec".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        db.enqueue_run_uow(&EnqueueRun {
+            card_id: card.id,
+            column_id: card.column_id,
+            harness: "custom",
+            argv_json: r#"["legacy"]"#,
+            prompt_snapshot: "p",
+            system_prompt_snapshot: Some("s"),
+            launch_spec_json: Some(&exact_json),
+            session_id: None,
+            session: Some("enqueue-session"),
+        })
+        .unwrap()
+        .id
+    };
+    for _ in 0..2 {
+        let db = Db::open(&path).unwrap();
+        assert_eq!(
+            db.get_run(run_id).unwrap().launch_spec.as_ref(),
+            Some(&spec)
+        );
+        drop(db);
+        let conn = Connection::open(&path).unwrap();
+        let stored: String = conn
+            .query_row(
+                "SELECT launch_spec_json FROM runs WHERE id=?1",
+                [run_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored.as_bytes(), exact_json.as_bytes());
+    }
+}
+
+#[test]
+fn unsupported_persisted_launch_spec_is_rejected_on_read() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    let run_id = {
+        let db = Db::open(&path).unwrap();
+        let card = db
+            .create_card(&CardCreateParams {
+                title: "future".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        db.create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
+            .unwrap()
+            .id
+    };
+    Connection::open(&path).unwrap().execute(
+        "UPDATE runs SET launch_spec_json='{\"version\":99,\"execution\":{\"argv\":[],\"env\":[],\"agent_kind\":null,\"initial_prompt\":null,\"system_prompt\":null}}' WHERE id=?1",
+        [run_id],
+    ).unwrap();
+    let error = Db::open(&path).unwrap().get_run(run_id).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported launch spec version 99"),
+        "{error}"
+    );
+}
+
+#[test]
+fn v10_to_v11_preserves_existing_run_bytes_and_null_across_reopen() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    let run_id = {
+        let db = Db::open(&path).unwrap();
+        let card = db
+            .create_card(&CardCreateParams {
+                title: "v10".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        db.create_run_with_prompt_snapshots(
+            card.id,
+            card.column_id,
+            "pi",
+            r#"["pi","exact\\n\u0000  "]"#,
+            "prompt\n\0  ",
+            Some("system\n  "),
+            Some("sid"),
+            Some("herdr-session"),
+        )
+        .unwrap()
+        .id
+    };
+    let conn = Connection::open(&path).unwrap();
+    let before: (String, String, String, String) = conn
+        .query_row(
+            "SELECT argv_json,prompt_snapshot,system_prompt_snapshot,session FROM runs WHERE id=?1",
+            [run_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    conn.execute_batch("ALTER TABLE runs DROP COLUMN launch_spec_json; PRAGMA user_version=10;")
+        .unwrap();
+    drop(conn);
+    for _ in 0..2 {
+        let db = Db::open(&path).unwrap();
+        let run = db.get_run(run_id).unwrap();
+        assert_eq!(run.launch_spec, None);
+        drop(db);
+        let conn = Connection::open(&path).unwrap();
+        let after: (String, String, String, String, Option<String>) = conn.query_row(
+            "SELECT argv_json,prompt_snapshot,system_prompt_snapshot,session,launch_spec_json FROM runs WHERE id=?1",
+            [run_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).unwrap();
+        assert_eq!(
+            (&after.0, &after.1, &after.2, &after.3),
+            (&before.0, &before.1, &before.2, &before.3)
+        );
+        assert_eq!(after.4, None);
+    }
+}
+
+#[test]
 fn v6_to_v7_migration_preserves_legacy_queued_run_byte_for_byte() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let path = tmp.path().to_path_buf();
@@ -489,7 +772,7 @@ fn v6_to_v7_migration_preserves_legacy_queued_run_byte_for_byte() {
         .unwrap();
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 7);
+    assert_eq!(db.user_version().unwrap(), 11);
     let run = &db.list_runs(1).unwrap()[0];
     assert_eq!(run.argv_json, argv);
     assert_eq!(run.prompt_snapshot, prompt);
@@ -522,62 +805,161 @@ fn comments_and_runs_roundtrip() {
         .unwrap();
     assert!(run.started_at.is_none());
     assert_eq!(db.count_queued_runs().unwrap(), 1);
+    let queued = db.queued_runs_with_cards().unwrap();
+    assert_eq!((queued[0].0.id, queued[0].1.id), (run.id, card.id));
+    assert!(db.active_runs_with_cards().unwrap().is_empty());
 
     db.start_run(run.id, Some("w4"), Some("p9")).unwrap();
     assert_eq!(db.count_active_runs().unwrap(), 1);
+    assert!(db.queued_runs_with_cards().unwrap().is_empty());
+    assert_eq!(db.active_runs_with_cards().unwrap()[0].0.id, run.id);
     let active = db.active_run_for_card(card.id).unwrap().unwrap();
     assert_eq!(active.herdr_pane_id.as_deref(), Some("p9"));
 
     db.finish_run(run.id, RunOutcome::Ok, Some("done")).unwrap();
     assert_eq!(db.count_active_runs().unwrap(), 0);
+    assert!(db.queued_runs_with_cards().unwrap().is_empty());
+    assert!(db.active_runs_with_cards().unwrap().is_empty());
     let done = db.get_run(run.id).unwrap();
     assert_eq!(done.outcome, Some(RunOutcome::Ok));
     assert!(done.ended_at.is_some());
 }
 
 #[test]
-fn queued_runs_by_space_key_fifo() {
+fn direct_scheduler_queries_are_global_fifo_and_exclude_started_and_ended_rows() {
     let db = mem();
-    let c1 = db
-        .create_card(&CardCreateParams {
-            title: "1".into(),
-            space_kind: Some(SpaceKind::Workspace),
-            space_ref: Some("w4".into()),
+    let make = |title: &str| {
+        db.create_card(&CardCreateParams {
+            title: title.into(),
             ..Default::default()
         })
+        .unwrap()
+    };
+    let queued_one_card = make("queued one");
+    let ended_card = make("ended");
+    let queued_two_card = make("queued two");
+    let active_card = make("active");
+
+    let queued_one = db
+        .create_run(
+            queued_one_card.id,
+            queued_one_card.column_id,
+            "pi",
+            "[]",
+            "q1",
+            None,
+            None,
+        )
         .unwrap();
-    let c2 = db
-        .create_card(&CardCreateParams {
-            title: "2".into(),
-            space_kind: Some(SpaceKind::Workspace),
-            space_ref: Some("w4".into()),
-            ..Default::default()
-        })
+    let ended = db
+        .create_run(
+            ended_card.id,
+            ended_card.column_id,
+            "pi",
+            "[]",
+            "ended",
+            None,
+            None,
+        )
         .unwrap();
-    let other = db
-        .create_card(&CardCreateParams {
-            title: "3".into(),
-            space_kind: Some(SpaceKind::Workspace),
-            space_ref: Some("w9".into()),
-            ..Default::default()
-        })
+    db.finish_run(ended.id, RunOutcome::Ok, None).unwrap();
+    let queued_two = db
+        .create_run(
+            queued_two_card.id,
+            queued_two_card.column_id,
+            "pi",
+            "[]",
+            "q2",
+            None,
+            None,
+        )
         .unwrap();
-    db.create_run(c1.id, c1.column_id, "claude", "[]", "p", None, None)
+    let active = db
+        .create_run(
+            active_card.id,
+            active_card.column_id,
+            "pi",
+            "[]",
+            "active",
+            None,
+            None,
+        )
         .unwrap();
-    db.create_run(c2.id, c2.column_id, "claude", "[]", "p", None, None)
-        .unwrap();
-    db.create_run(other.id, other.column_id, "claude", "[]", "p", None, None)
+    db.start_run(active.id, Some("workspace"), Some("pane"))
         .unwrap();
 
-    let w4 = db
-        .queued_runs_by_space(SpaceKind::Workspace, Some("w4"))
+    let queued: Vec<_> = db
+        .queued_runs_with_cards()
+        .unwrap()
+        .into_iter()
+        .map(|(run, card)| (run.id, card.id))
+        .collect();
+    assert_eq!(
+        queued,
+        vec![
+            (queued_one.id, queued_one_card.id),
+            (queued_two.id, queued_two_card.id),
+        ]
+    );
+    let active_rows: Vec<_> = db
+        .active_runs_with_cards()
+        .unwrap()
+        .into_iter()
+        .map(|(run, card)| (run.id, card.id))
+        .collect();
+    assert_eq!(active_rows, vec![(active.id, active_card.id)]);
+    assert!(!queued
+        .iter()
+        .any(|(id, _)| *id == active.id || *id == ended.id));
+    assert!(!active_rows.iter().any(|(id, _)| *id == ended.id));
+}
+
+#[test]
+fn active_run_summaries_are_started_open_and_board_scoped() {
+    let db = mem();
+    let other = db.open_board("/tmp/other-board").unwrap();
+    let make = |board_id: i64, title: &str| {
+        db.create_card(&CardCreateParams {
+            board_id: Some(board_id),
+            title: title.into(),
+            ..Default::default()
+        })
+        .unwrap()
+    };
+    let active = make(BOARD_ID, "active");
+    let queued = make(BOARD_ID, "queued");
+    let ended = make(BOARD_ID, "ended");
+    let other_active = make(other.id, "other active");
+
+    let open = |card: &board_core::model::Card| {
+        let run = db
+            .create_run(card.id, card.column_id, "pi", "[]", "prompt", None, None)
+            .unwrap();
+        db.start_run(run.id, Some("workspace"), Some("pane"))
+            .unwrap();
+        run
+    };
+    let _active_run = open(&active);
+    let _queued_run = db
+        .create_run(
+            queued.id,
+            queued.column_id,
+            "pi",
+            "[]",
+            "prompt",
+            None,
+            None,
+        )
         .unwrap();
-    assert_eq!(w4.len(), 2);
-    assert!(w4[0].id < w4[1].id); // FIFO by run id
-    let w9 = db
-        .queued_runs_by_space(SpaceKind::Workspace, Some("w9"))
-        .unwrap();
-    assert_eq!(w9.len(), 1);
+    let ended_run = open(&ended);
+    db.finish_run(ended_run.id, RunOutcome::Ok, None).unwrap();
+    let _other_run = open(&other_active);
+
+    let summaries = db.active_run_summaries(BOARD_ID).unwrap();
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0].card_id, active.id);
+    assert!(!summaries[0].started_at.is_empty());
+    assert_eq!(db.active_run_summaries(other.id).unwrap().len(), 1);
 }
 
 #[test]
@@ -677,7 +1059,7 @@ fn scoped_crud_rejects_cross_board_references() {
     assert!(db
         .update_column(&ColumnUpdateParams {
             id: alpha_done.id,
-            on_success_column_id: Some(beta_todo),
+            on_success_column_id: Patch::Set(beta_todo),
             ..Default::default()
         })
         .is_err());
@@ -702,14 +1084,17 @@ fn all_cards_and_latest_run_with_pane_include_scoped_boards() {
         .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
         .unwrap();
     db.start_run(no_pane.id, Some("w"), None).unwrap();
+    db.finish_run(no_pane.id, RunOutcome::Ok, None).unwrap();
     let older = db
         .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
         .unwrap();
     db.start_run(older.id, Some("w"), Some("p-old")).unwrap();
+    db.finish_run(older.id, RunOutcome::Ok, None).unwrap();
     let latest = db
         .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
         .unwrap();
     db.start_run(latest.id, Some("w"), Some("p-new")).unwrap();
+    db.finish_run(latest.id, RunOutcome::Ok, None).unwrap();
     let newest_without_pane = db
         .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
         .unwrap();
@@ -773,7 +1158,7 @@ fn migration_v5_preserves_global_data_and_renames_it() {
 
     let db = Db::open(&path).unwrap();
     let global = db.get_board(BOARD_ID).unwrap();
-    assert_eq!(db.user_version().unwrap(), 7);
+    assert_eq!(db.user_version().unwrap(), 11);
     assert_eq!(global.name, "Global");
     assert!(global.scope_path.is_none());
     let cards = db.list_cards(BOARD_ID).unwrap();
@@ -915,7 +1300,7 @@ fn migration_v6_rebuilds_cards_check_and_preserves_data() {
     }
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 7);
+    assert_eq!(db.user_version().unwrap(), 11);
     let cards = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(cards.len(), 2);
     let kept = &cards[0];
@@ -1024,4 +1409,150 @@ fn delete_column_rolls_back_card_moves_when_delete_fails() {
         "the preceding move must roll back with the failed delete"
     );
     assert!(db.get_column(source.id).unwrap().is_some());
+}
+
+#[test]
+fn v8_to_v9_derives_timeout_state_once_from_durable_history() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    let (running_id, awaiting_id, unlimited_id, ended_id);
+    {
+        let db = Db::open(&path).unwrap();
+        let timed = db
+            .create_column(&ColumnCreateParams {
+                name: "timed".into(),
+                timeout_minutes: Some(7),
+                ..Default::default()
+            })
+            .unwrap();
+        let unlimited = db
+            .create_column(&ColumnCreateParams {
+                name: "unlimited".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let make = |title: &str, column_id: i64| {
+            db.create_card(&CardCreateParams {
+                title: title.into(),
+                column_id: Some(column_id),
+                ..Default::default()
+            })
+            .unwrap()
+        };
+        let running = make("running", timed.id);
+        let awaiting = make("awaiting", timed.id);
+        let unlimited_card = make("unlimited", unlimited.id);
+        let ended = make("ended", timed.id);
+        running_id = db
+            .create_run(running.id, timed.id, "pi", "[]", "p", None, None)
+            .unwrap()
+            .id;
+        awaiting_id = db
+            .create_run(awaiting.id, timed.id, "pi", "[]", "p", None, None)
+            .unwrap()
+            .id;
+        unlimited_id = db
+            .create_run(unlimited_card.id, unlimited.id, "pi", "[]", "p", None, None)
+            .unwrap()
+            .id;
+        ended_id = db
+            .create_run(ended.id, timed.id, "pi", "[]", "p", None, None)
+            .unwrap()
+            .id;
+    }
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(&format!(
+            "UPDATE runs SET started_at='2026-01-02 03:04:05', timeout_deadline_at_ms=NULL, timeout_paused_at_ms=NULL;
+             UPDATE runs SET ended_at='2026-01-02 03:05:05', outcome='ok' WHERE id={ended_id};
+             UPDATE cards SET status='running' WHERE id=(SELECT card_id FROM runs WHERE id={running_id});
+             UPDATE cards SET status='awaiting', awaiting_reason='agent_done', updated_at='2026-01-02 03:06:07' WHERE id=(SELECT card_id FROM runs WHERE id={awaiting_id});
+             UPDATE cards SET status='running' WHERE id=(SELECT card_id FROM runs WHERE id={unlimited_id});
+             PRAGMA user_version=8;"
+        )).unwrap();
+    }
+    let expected_start_ms: i64 = Connection::open_in_memory()
+        .unwrap()
+        .query_row("SELECT unixepoch('2026-01-02 03:04:05') * 1000", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let expected_pause_ms: i64 = Connection::open_in_memory()
+        .unwrap()
+        .query_row("SELECT unixepoch('2026-01-02 03:06:07') * 1000", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    {
+        let db = Db::open(&path).unwrap();
+        assert_eq!(
+            db.get_run(running_id).unwrap().timeout_deadline_at_ms,
+            Some(expected_start_ms + 420_000)
+        );
+        let awaiting = db.get_run(awaiting_id).unwrap();
+        assert_eq!(
+            awaiting.timeout_deadline_at_ms,
+            Some(expected_start_ms + 420_000)
+        );
+        assert_eq!(awaiting.timeout_paused_at_ms, Some(expected_pause_ms));
+        assert_eq!(
+            db.get_run(unlimited_id).unwrap().timeout_deadline_at_ms,
+            None
+        );
+        assert_eq!(db.get_run(ended_id).unwrap().timeout_deadline_at_ms, None);
+    }
+    let conn = Connection::open(&path).unwrap();
+    conn.execute(
+        "UPDATE runs SET timeout_deadline_at_ms=123 WHERE id=?1",
+        [running_id],
+    )
+    .unwrap();
+    drop(conn);
+    assert_eq!(
+        Db::open(&path)
+            .unwrap()
+            .get_run(running_id)
+            .unwrap()
+            .timeout_deadline_at_ms,
+        Some(123)
+    );
+}
+
+#[test]
+fn durable_timeout_pause_resume_is_atomic_idempotent_and_saturating() {
+    let db = mem();
+    let card = db
+        .create_card(&CardCreateParams {
+            title: "timed".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let run = db
+        .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
+        .unwrap();
+    db.promote_run_uow(run.id, None, None, Some(i64::MAX - 10))
+        .unwrap();
+
+    db.pause_run_timeout_uow(card.id, AwaitingReason::IdleExpired, 100)
+        .unwrap();
+    db.pause_run_timeout_uow(card.id, AwaitingReason::AgentDone, 200)
+        .unwrap();
+    let paused = db.get_run(run.id).unwrap();
+    assert_eq!(paused.timeout_paused_at_ms, Some(100));
+    assert_eq!(
+        db.get_card(card.id).unwrap().unwrap().awaiting_reason,
+        Some(AwaitingReason::AgentDone)
+    );
+
+    db.resume_run_timeout_uow(card.id, CardStatus::Running, 500)
+        .unwrap();
+    let resumed = db.get_run(run.id).unwrap();
+    assert_eq!(resumed.timeout_deadline_at_ms, Some(i64::MAX));
+    assert_eq!(resumed.timeout_paused_at_ms, None);
+    db.resume_run_timeout_uow(card.id, CardStatus::Running, 900)
+        .unwrap();
+    assert_eq!(
+        db.get_run(run.id).unwrap().timeout_deadline_at_ms,
+        Some(i64::MAX)
+    );
 }

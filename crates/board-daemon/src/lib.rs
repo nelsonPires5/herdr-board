@@ -13,21 +13,23 @@ mod singleton;
 mod spawner;
 mod state;
 mod store;
+mod supervisor;
 mod template;
 mod watchers;
 
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
-use board_core::config::Config;
+use crate::spawner::{RuntimeHandle, Spawner};
+use board_core::config::{Config, RootConfig};
 use board_core::db::Db;
 use board_core::paths;
-use board_core::spawn::{SpawnHandle, Spawner};
 use board_herdr::HerdrClient;
 use tokio::sync::{broadcast, mpsc, watch};
 
-use crate::settings::{DaemonSettings, SpawnerKind};
+use crate::settings::{DaemonSettings, ProcessEnv, SpawnerKind};
 use crate::spawner::{HerdrSpawner, LocalSpawner};
 use crate::state::Daemon;
 use crate::store::Store;
@@ -101,14 +103,17 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for FileWriter {
 }
 
 async fn async_main(db_path: PathBuf, socket_path: PathBuf) -> anyhow::Result<()> {
-    let mut config = Config::load().unwrap_or_default();
+    // Parse the root document exactly once. In particular, do not let the
+    // daemon settings' legacy parser turn malformed TOML into defaults.
+    let root = RootConfig::load()?;
+    let settings = DaemonSettings::from_root(&root, &ProcessEnv)?;
+    let mut config: Config = root.board;
     // Resolve the Pi agent dir for live model discovery unless the user pinned
     // it in config.toml. Tests construct Config directly (pi_agent_dir stays
     // None), so this never runs for them and the pi catalog stays static.
     if config.pi_agent_dir.is_none() {
         config.pi_agent_dir = board_core::pi_catalog::default_agent_dir();
     }
-    let settings = DaemonSettings::load(&paths::config_path());
     tracing::info!(
         "spawner={:?} max_concurrent={}",
         settings.spawner,
@@ -167,14 +172,41 @@ async fn async_main(db_path: PathBuf, socket_path: PathBuf) -> anyhow::Result<()
     }
     tokio::spawn(watchers::timeout_ticker(daemon.clone()));
     tokio::spawn(watchers::local_liveness_poller(daemon.clone()));
-    if daemon.herdr.is_some() {
+    if matches!(daemon.settings.spawner, SpawnerKind::Herdr) {
+        // The supervisor is independent of the startup best-effort client: a
+        // Herdr server may appear after boardd and must still be discovered.
         let d = daemon.clone();
         std::thread::spawn(move || watchers::herdr_event_thread(d));
+        // Durable runs that could not be adopted at startup are not in the
+        // in-memory watch set yet. Retry the conservative pass slowly until a
+        // socket becomes available; successful adoption feeds the per-socket
+        // stream supervisor above.
+        if let Some(registry) = &daemon.session_registry {
+            let d = daemon.clone();
+            let default_socket = registry.default_socket().to_path_buf();
+            tokio::spawn(async move {
+                while !d.is_shutdown() {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    if d.is_shutdown() {
+                        break;
+                    }
+                    supervisor::reconcile_once(
+                        &d,
+                        Arc::new(crate::session::SessionRegistry::new(default_socket.clone())),
+                        Arc::new(supervisor::HerdrRuntime),
+                        Arc::new(supervisor::SystemClock),
+                    )
+                    .await;
+                }
+            });
+        }
     }
     spawn_signal_handler(daemon.clone());
 
-    // Startup adoption of runs that were active at the last shutdown/crash.
-    adopt_runs(&daemon).await;
+    // Startup recovery is independent of the best-effort initial Herdr
+    // connection. The always-on supervisor subsequently repeats conservative
+    // reconciliation after every connection and at a slow interval.
+    startup_recovery(&daemon).await;
     daemon.wake_dispatch();
 
     // Bind the socket (removing any stale file first) and serve.
@@ -190,6 +222,39 @@ async fn async_main(db_path: PathBuf, socket_path: PathBuf) -> anyhow::Result<()
     // Graceful: leave running panes alone; just clean up the socket.
     let _ = std::fs::remove_file(&socket_path);
     Ok(())
+}
+
+async fn startup_recovery(d: &Arc<Daemon>) {
+    if matches!(d.settings.spawner, SpawnerKind::Herdr) {
+        if let Some(registry) = &d.session_registry {
+            startup_recovery_with(
+                d,
+                Arc::new(crate::session::SessionRegistry::new(
+                    registry.default_socket().to_path_buf(),
+                )),
+                Arc::new(supervisor::HerdrRuntime),
+                Arc::new(supervisor::SystemClock),
+            )
+            .await;
+        }
+    } else {
+        adopt_runs(d).await;
+    }
+}
+
+/// Injectable startup branch used to prove that Herdr reconciliation runs even
+/// when the daemon's initial best-effort client connection failed.
+async fn startup_recovery_with(
+    d: &Arc<Daemon>,
+    resolver: Arc<dyn supervisor::SessionResolver>,
+    runtime: Arc<dyn supervisor::Runtime>,
+    clock: Arc<dyn supervisor::ReconcileClock>,
+) {
+    if matches!(d.settings.spawner, SpawnerKind::Herdr) {
+        supervisor::reconcile_once(d, resolver, runtime, clock).await;
+    } else {
+        adopt_runs(d).await;
+    }
 }
 
 /// On startup, reconcile runs that were started but never ended.
@@ -210,7 +275,7 @@ async fn adopt_runs(d: &Arc<Daemon>) {
                 .filter(|r| Some(r.socket.as_path()) != Some(reg.default_socket()))
                 .map(|r| r.socket)
         });
-        let handle = SpawnHandle {
+        let handle = RuntimeHandle {
             pane_id: run.herdr_pane_id.clone(),
             workspace_id: run.herdr_workspace_id.clone(),
             pid: None,
@@ -231,15 +296,13 @@ async fn adopt_runs(d: &Arc<Daemon>) {
         if alive {
             tracing::info!("adopting live run {} (card {})", run.id, card.id);
             let adopted_at = std::time::Instant::now();
-            let deadline = {
-                let col = d.store.lock().get_column(run.column_id).ok().flatten();
-                col.and_then(|c| c.timeout_minutes).map(|m| {
-                    adopted_at
-                        + std::time::Duration::from_secs(
-                            m.max(0) as u64 * d.settings.timeout_unit_secs,
-                        )
-                })
-            };
+            let wall_now_ms = d.wall_now_ms();
+            // v9 deadlines are authoritative: restart never grants a fresh budget.
+            let deadline = run.timeout_deadline_at_ms.and_then(|ms| {
+                adopted_at.checked_add(std::time::Duration::from_millis(
+                    ms.saturating_sub(wall_now_ms).max(0) as u64,
+                ))
+            });
             let mut sched = d.sched.lock().unwrap();
             sched.active.insert(
                 run.id,
@@ -249,8 +312,13 @@ async fn adopt_runs(d: &Arc<Daemon>) {
                     started: adopted_at,
                     timeout_deadline: deadline,
                     idle_since: None,
-                    awaiting_since: (card.status == board_core::protocol::CardStatus::Awaiting)
-                        .then_some(adopted_at),
+                    awaiting_since: run.timeout_paused_at_ms.map(|paused| {
+                        adopted_at
+                            .checked_sub(std::time::Duration::from_millis(
+                                wall_now_ms.saturating_sub(paused).max(0) as u64,
+                            ))
+                            .unwrap_or(adopted_at)
+                    }),
                     is_local: false,
                     pane_id: run.herdr_pane_id.clone(),
                 },
@@ -303,22 +371,24 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    use crate::spawner::{HerdrLaunchPlan, Spawner};
     use board_core::engine::AgentSignal;
-    use board_core::protocol::{AwaitingReason, CardCreateParams, CardStatus, ColumnUpdateParams};
-    use board_core::spawn::{SpawnReq, Spawner};
+    use board_core::protocol::{
+        AwaitingReason, CardCreateParams, CardStatus, ColumnUpdateParams, Patch,
+    };
 
     struct AliveSpawner;
 
     impl Spawner for AliveSpawner {
-        fn spawn(&self, _req: &SpawnReq) -> anyhow::Result<SpawnHandle> {
+        fn spawn(&self, _req: &HerdrLaunchPlan) -> anyhow::Result<RuntimeHandle> {
             unreachable!("adoption test does not spawn")
         }
 
-        fn kill(&self, _handle: &SpawnHandle) -> anyhow::Result<()> {
+        fn kill(&self, _handle: &RuntimeHandle) -> anyhow::Result<()> {
             Ok(())
         }
 
-        fn is_alive(&self, _handle: &SpawnHandle) -> anyhow::Result<bool> {
+        fn is_alive(&self, _handle: &RuntimeHandle) -> anyhow::Result<bool> {
             Ok(true)
         }
     }
@@ -334,15 +404,20 @@ mod tests {
             .unwrap();
         db.update_column(&ColumnUpdateParams {
             id: card.column_id,
-            timeout_minutes: Some(1),
+            timeout_minutes: Patch::Set(1),
             ..Default::default()
         })
         .unwrap();
         let run = db
             .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
             .unwrap();
-        db.start_run(run.id, Some("w1"), Some("p1")).unwrap();
-        db.set_card_awaiting(card.id, AwaitingReason::AgentDone)
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        db.promote_run_uow(run.id, Some("w1"), Some("p1"), Some(now_ms + 60_000))
+            .unwrap();
+        db.pause_run_timeout_uow(card.id, AwaitingReason::AgentDone, now_ms)
             .unwrap();
 
         let (events_tx, _events_rx) = broadcast::channel(16);

@@ -5,7 +5,7 @@ use board_core::capability::{
     claude_capabilities, pi_capabilities, HarnessCapabilities, ModelInfo,
 };
 use board_core::client::BoardClient;
-use board_core::protocol::{CardStatus, Effort, RunOutcome, SpaceInfo};
+use board_core::protocol::{CardStatus, Effort, Event, Patch, RunOutcome, SpaceInfo};
 use board_tui::app::{update, App, CardFilter, DetailScrollTarget, Effect, Msg, Screen};
 use board_tui::editor::FakeEditor;
 use board_tui::forms::{ChoiceVal, FieldId, FieldKind, Form, FormKind, Submit};
@@ -13,6 +13,8 @@ use board_tui::testkit::demo_client;
 use board_tui::Driver;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
+use serde_json::Value;
+use std::sync::{Arc, Mutex};
 
 fn key(code: KeyCode) -> Msg {
     Msg::Key(KeyEvent::new(code, KeyModifiers::empty()))
@@ -25,6 +27,22 @@ fn demo_app() -> App {
 
 fn driver_of<C: BoardClient + 'static>(client: C) -> Driver {
     Driver::with_editor(Box::new(client), Box::new(FakeEditor::new("x"))).unwrap()
+}
+
+struct RecordingClient<C> {
+    inner: C,
+    calls: Arc<Mutex<Vec<String>>>,
+}
+
+impl<C: BoardClient> BoardClient for RecordingClient<C> {
+    fn call(&mut self, method: &str, params: Value) -> anyhow::Result<Value> {
+        self.calls.lock().unwrap().push(method.to_string());
+        self.inner.call(method, params)
+    }
+
+    fn subscribe(&mut self) -> anyhow::Result<Box<dyn Iterator<Item = Event> + Send>> {
+        self.inner.subscribe()
+    }
 }
 
 /// A two-model catalog where the models carry *different* effort sets, so tests
@@ -70,6 +88,92 @@ fn is_choice(form: &Form, id: FieldId) -> bool {
         form.fields.iter().find(|f| f.id == id).unwrap().kind,
         FieldKind::Choice { .. }
     )
+}
+
+#[test]
+fn editing_nullable_fields_emits_explicit_clears() {
+    let mut client = demo_client().unwrap();
+    let board = client.board_get().unwrap();
+    let mut card = board
+        .cards
+        .iter()
+        .find(|card| card.model.is_some())
+        .unwrap()
+        .clone();
+    // Include values that the demo card does not need for rendering, so this
+    // test proves that clearing populated fields is intentional.
+    card.session = Some("feature".into());
+    card.space_cwd = Some("/repo".into());
+    let mut card_form = Form::card_edit(&card);
+    card_form
+        .fields
+        .iter_mut()
+        .find(|field| field.id == FieldId::Model)
+        .unwrap()
+        .set_text("");
+    set_choice(&mut card_form, FieldId::Effort, "(default)");
+    set_choice(&mut card_form, FieldId::Permission, "(default)");
+    set_choice(&mut card_form, FieldId::Session, "(default)");
+    for id in [FieldId::SpaceRef, FieldId::SpaceCwd] {
+        card_form
+            .fields
+            .iter_mut()
+            .find(|field| field.id == id)
+            .unwrap()
+            .set_text("");
+    }
+    match card_form.submit().unwrap() {
+        Submit::CardUpdate(params) => {
+            assert!(matches!(params.model, Patch::Clear));
+            assert!(matches!(params.effort, Patch::Clear));
+            assert!(matches!(params.permission_mode, Patch::Clear));
+            assert!(matches!(params.session, Patch::Clear));
+            assert!(matches!(params.space_ref, Patch::Clear));
+            assert!(matches!(params.space_cwd, Patch::Clear));
+        }
+        _ => panic!("expected card update"),
+    }
+
+    let mut column = board.columns.first().unwrap().clone();
+    column.system_prompt = Some("instructions".into());
+    column.on_success_column_id = Some(column.id);
+    column.on_fail_column_id = Some(column.id);
+    column.harness_override = Some("claude".into());
+    column.model_override = Some("model".into());
+    column.effort_override = Some("high".into());
+    column.permission_override = Some("manual".into());
+    column.timeout_minutes = Some(15);
+    let mut column_form = Form::column_edit(&column, &[column.clone()]);
+    for id in [
+        FieldId::SystemPrompt,
+        FieldId::ModelOverride,
+        FieldId::Timeout,
+    ] {
+        column_form
+            .fields
+            .iter_mut()
+            .find(|field| field.id == id)
+            .unwrap()
+            .set_text("");
+    }
+    set_choice(&mut column_form, FieldId::OnSuccess, "none");
+    set_choice(&mut column_form, FieldId::OnFail, "none");
+    set_choice(&mut column_form, FieldId::HarnessOverride, "none");
+    set_choice(&mut column_form, FieldId::EffortOverride, "(default)");
+    set_choice(&mut column_form, FieldId::PermissionOverride, "(default)");
+    match column_form.submit().unwrap() {
+        Submit::ColumnUpdate(params) => {
+            assert!(matches!(params.system_prompt, Patch::Clear));
+            assert!(matches!(params.on_success_column_id, Patch::Clear));
+            assert!(matches!(params.on_fail_column_id, Patch::Clear));
+            assert!(matches!(params.harness_override, Patch::Clear));
+            assert!(matches!(params.model_override, Patch::Clear));
+            assert!(matches!(params.effort_override, Patch::Clear));
+            assert!(matches!(params.permission_override, Patch::Clear));
+            assert!(matches!(params.timeout_minutes, Patch::Clear));
+        }
+        _ => panic!("expected column update"),
+    }
 }
 
 #[test]
@@ -757,6 +861,51 @@ fn new_card_defaults_to_pi_and_lists_both_builtins() {
     assert_eq!(form.current_harness(), "pi");
     assert_eq!(opt_labels(form, FieldId::Harness), vec!["pi", "claude"]);
     assert_eq!(form.caps.as_ref().unwrap().harness, "pi");
+}
+
+#[test]
+fn opening_column_form_loads_only_column_metadata() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut d = driver_of(RecordingClient {
+        inner: demo_client().unwrap(),
+        calls: Arc::clone(&calls),
+    });
+    calls.lock().unwrap().clear();
+
+    d.handle(key(KeyCode::Char('N')));
+    let form = d.app.form.as_ref().unwrap();
+    assert_eq!(d.app.screen, Screen::ColumnForm);
+    assert_eq!(form.caps.as_ref().unwrap().harness, "pi");
+    assert_eq!(
+        opt_labels(form, FieldId::HarnessOverride),
+        vec!["none", "pi", "claude"]
+    );
+    assert!(form.spaces.is_empty(), "column forms do not load spaces");
+    assert!(
+        form.sessions.is_empty(),
+        "column forms do not load sessions"
+    );
+    assert!(!form
+        .fields
+        .iter()
+        .any(|field| field.id == FieldId::PermissionOverride
+            && form.field_visible(form.fields.iter().position(|f| f.id == field.id).unwrap())));
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec!["harness.capabilities", "harness.list"]
+    );
+
+    // Edit follows the same metadata path; a newly opened form starts at Name.
+    d.handle(key(KeyCode::Esc));
+    calls.lock().unwrap().clear();
+    d.handle(key(KeyCode::Char('E')));
+    let form = d.app.form.as_ref().unwrap();
+    assert_eq!(form.caps.as_ref().unwrap().harness, "pi");
+    assert_eq!(form.fields[form.focus].id, FieldId::Name);
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec!["harness.capabilities", "harness.list"]
+    );
 }
 
 #[test]

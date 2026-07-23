@@ -31,6 +31,26 @@ pub struct Column {
     pub timeout_minutes: Option<i64>,
 }
 
+/// Typed identity of a serialized execution space. The session is part of the
+/// identity; `None` is the daemon's default session and remains distinct from
+/// every explicitly named session. Null refs are preserved rather than encoded.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SpaceKey {
+    pub session: Option<String>,
+    pub kind: SpaceKind,
+    pub reference: Option<String>,
+}
+
+impl SpaceKey {
+    pub fn from_card(card: &Card) -> Self {
+        Self {
+            session: card.session.clone(),
+            kind: card.space_kind,
+            reference: card.space_ref.clone(),
+        }
+    }
+}
+
 /// A unit of work.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Card {
@@ -85,6 +105,9 @@ pub struct Run {
     /// identifies a legacy pre-v7 launch whose persisted argv is authoritative.
     #[serde(default, skip_serializing)]
     pub system_prompt_snapshot: Option<String>,
+    /// Internal durable launch inputs; intentionally absent from board wire DTOs.
+    #[serde(default, skip_serializing)]
+    pub launch_spec: Option<crate::launch::RunLaunchSpec>,
     pub herdr_workspace_id: Option<String>,
     pub herdr_pane_id: Option<String>,
     /// harness conversation id (`--resume`); distinct from the herdr `session`.
@@ -92,6 +115,12 @@ pub struct Run {
     /// herdr session name this run spawned into; `None` = default session.
     pub session: Option<String>,
     pub started_at: Option<String>,
+    /// Durable Unix-epoch millisecond deadline. `None` means unlimited.
+    #[serde(default)]
+    pub timeout_deadline_at_ms: Option<i64>,
+    /// Unix-epoch milliseconds at which timeout accounting was paused.
+    #[serde(default)]
+    pub timeout_paused_at_ms: Option<i64>,
     pub ended_at: Option<String>,
     pub outcome: Option<RunOutcome>,
     pub result_summary: Option<String>,

@@ -129,11 +129,11 @@ dependencies = [
  "board-core",
  "board-herdr",
  "libc",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
- "toml",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -143,6 +143,7 @@ dependencies = [
 name = "board-herdr"
 version = "0.7.0"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
  "tempfile",

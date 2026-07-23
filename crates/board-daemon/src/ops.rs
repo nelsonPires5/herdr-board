@@ -8,10 +8,13 @@ use std::sync::Arc;
 use board_core::capability::{available_harnesses, capabilities_for};
 use board_core::db::BOARD_ID;
 use board_core::engine::{
-    decide_entry, validate_card_archive, validate_card_edit, validate_card_space,
-    validate_column_delete, validate_column_permission_override,
+    decide_entry, decide_lifecycle, merge_card_update, merge_column_update, validate_card_archive,
+    validate_card_edit, validate_card_settings, validate_card_values, validate_column_delete,
+    validate_column_update, validate_column_values, LifecycleAction, LifecycleDecision,
+    LifecycleFacts, LifecycleHarness, LifecycleRejection, PermissionContext,
 };
-use board_core::harness::{is_builtin_harness, DEFAULT_HARNESS};
+use board_core::harness::DEFAULT_HARNESS;
+use board_core::model::Run;
 use board_core::pi_catalog;
 use board_core::protocol::*;
 use board_core::{Error, Result};
@@ -84,6 +87,51 @@ fn require_column(d: &Arc<Daemon>, id: i64) -> Result<board_core::model::Column>
         .ok_or_else(|| Error::NotFound(format!("column {id}")))
 }
 
+fn lifecycle_facts(
+    run: &Run,
+    card: &board_core::model::Card,
+    supplied_run_id: Option<i64>,
+) -> LifecycleFacts {
+    LifecycleFacts {
+        open_run_id: Some(run.id),
+        supplied_run_id,
+        started: run.started_at.is_some(),
+        harness: if board_core::harness::is_builtin_harness(&run.harness) {
+            LifecycleHarness::BuiltIn
+        } else {
+            LifecycleHarness::Configured
+        },
+        card_status: card.status,
+    }
+}
+
+fn lifecycle_rejection(card_id: i64, rejection: LifecycleRejection) -> Error {
+    match rejection {
+        LifecycleRejection::NoOpenRun
+        | LifecycleRejection::QueuedCompletionRequiresRunId
+        | LifecycleRejection::QueuedBuiltinCompletion => {
+            Error::NotFound(format!("no active run for card {card_id}"))
+        }
+        LifecycleRejection::SuppliedRunIdMismatch { expected, supplied } => Error::InvalidState(
+            format!(
+                "no active run for card {card_id}: run {supplied} does not match active run {expected}"
+            ),
+        ),
+        LifecycleRejection::PaneExitRequiresRunId => Error::InvalidState(format!(
+            "pane-exited callback for card {card_id} must supply a run id"
+        )),
+        LifecycleRejection::PaneExitBuiltin => Error::InvalidState(
+            "pane-exited callback is only valid for configured harnesses".into(),
+        ),
+        LifecycleRejection::TimeoutBeforeStart => {
+            Error::InvalidState(format!("run for card {card_id} has not started"))
+        }
+        LifecycleRejection::TimeoutPaused => {
+            Error::InvalidState(format!("run for card {card_id} is awaiting review"))
+        }
+    }
+}
+
 // -- daemon / board ---------------------------------------------------------
 
 fn daemon_status(d: &Arc<Daemon>) -> Result<Value> {
@@ -113,6 +161,7 @@ fn board_snapshot(d: &Arc<Daemon>, board_id: i64) -> Result<Value> {
         board: db.get_board(board_id)?,
         columns: db.list_columns(board_id)?,
         cards: db.list_cards(board_id)?,
+        active_runs: db.active_run_summaries(board_id)?,
     }))
 }
 
@@ -134,18 +183,29 @@ fn board_get(d: &Arc<Daemon>, p: BoardGetParams) -> Result<Value> {
 // -- columns ----------------------------------------------------------------
 
 fn column_create(d: &Arc<Daemon>, p: ColumnCreateParams) -> Result<Value> {
-    validate_column_permission_override(p.permission_override.as_deref())?;
+    validate_column_values(
+        p.harness_override.as_deref(),
+        p.model_override.as_deref(),
+        p.effort_override.as_deref(),
+        p.permission_override.as_deref(),
+        &d.config,
+        PermissionContext::ColumnOverride,
+    )?;
     let col = d.store.lock().create_column(&p)?;
     d.emit_changed(BoardChangedReason::ColumnChanged, None, Some(col.id));
     Ok(json!(col))
 }
 
 fn column_update(d: &Arc<Daemon>, p: ColumnUpdateParams) -> Result<Value> {
-    validate_column_permission_override(p.permission_override.as_deref())?;
     let col = {
-        let sched = d.sched.lock().unwrap();
-        sched.ensure_no_finalizing_cards("update a column")?;
-        d.store.lock().update_column(&p)?
+        let _sched = d.sched.lock().unwrap();
+        let db = d.store.lock();
+        let current = db
+            .get_column(p.id)?
+            .ok_or_else(|| Error::NotFound(format!("column {}", p.id)))?;
+        let merged = merge_column_update(&current, &p);
+        validate_column_update(&current, &merged, &p, &d.config)?;
+        db.update_column(&p)?
     };
     d.emit_changed(BoardChangedReason::ColumnChanged, None, Some(col.id));
     Ok(json!(col))
@@ -159,10 +219,9 @@ fn column_reorder(d: &Arc<Daemon>, p: ColumnReorderParams) -> Result<Value> {
 
 fn column_delete(d: &Arc<Daemon>, p: ColumnDeleteParams) -> Result<Value> {
     {
-        // A pending transition may still read its source or move into its
-        // target, so column deletion pauses briefly for any finalizing card.
-        let sched = d.sched.lock().unwrap();
-        sched.ensure_no_finalizing_cards("delete a column")?;
+        // Match finalization's scheduler→store order so the delete and its
+        // open-run check cannot interleave with the final transaction.
+        let _sched = d.sched.lock().unwrap();
         let db = d.store.lock();
         let cards = db.list_cards_in_column(p.id)?;
         let has_open_run = db.column_has_open_run(p.id)?;
@@ -176,14 +235,15 @@ fn column_delete(d: &Arc<Daemon>, p: ColumnDeleteParams) -> Result<Value> {
 // -- cards ------------------------------------------------------------------
 
 fn card_create(d: &Arc<Daemon>, p: CardCreateParams) -> Result<Value> {
-    validate_harness_permission(
+    validate_card_values(
         p.harness.as_deref().unwrap_or(DEFAULT_HARNESS),
+        p.model.as_deref(),
+        p.effort,
         p.permission_mode.as_deref(),
-    )?;
-    validate_card_space(
         p.space_kind.unwrap_or(SpaceKind::Workspace),
         p.space_ref.as_deref(),
         p.space_cwd.as_deref(),
+        &d.config,
     )?;
     let card = d.store.lock().create_card(&p)?;
     let column = require_column(d, card.column_id)?;
@@ -207,35 +267,29 @@ fn card_create(d: &Arc<Daemon>, p: CardCreateParams) -> Result<Value> {
 
 fn card_update(d: &Arc<Daemon>, p: CardUpdateParams) -> Result<Value> {
     let edits_locked = p.harness.is_some()
-        || p.model.is_some()
-        || p.effort.is_some()
-        || p.permission_mode.is_some()
-        || p.session.is_some()
+        || !p.model.is_unchanged()
+        || !p.effort.is_unchanged()
+        || !p.permission_mode.is_unchanged()
+        || !p.session.is_unchanged()
         || p.space_kind.is_some()
-        || p.space_ref.is_some()
-        || p.space_cwd.is_some();
+        || !p.space_ref.is_unchanged()
+        || !p.space_cwd.is_unchanged();
     let card = {
-        let sched = d.sched.lock().unwrap();
+        let _sched = d.sched.lock().unwrap();
         let db = d.store.lock();
         let card = db
             .get_card(p.id)?
             .ok_or_else(|| Error::NotFound(format!("card {}", p.id)))?;
-        // Status validation remains a defense against inconsistent card state;
-        // the open-run/finalization checks are authoritative and serialized
-        // with locked-field updates.
-        if edits_locked {
-            sched.ensure_card_not_finalizing(p.id)?;
-        }
+        // The scheduler→store critical section serializes this validation and
+        // update with an entire finalization transaction.
         validate_card_edit(card.status, edits_locked)?;
         if edits_locked && db.open_run_for_card(p.id)?.is_some() {
             return Err(Error::InvalidState(
                 "card has an open run; cannot edit harness/space fields".into(),
             ));
         }
-        validate_harness_permission(
-            p.harness.as_deref().unwrap_or(&card.harness),
-            p.permission_mode.as_deref(),
-        )?;
+        let merged = merge_card_update(&card, &p);
+        validate_card_settings(&merged, &d.config)?;
         db.update_card(&p)?
     };
     d.emit_changed(BoardChangedReason::CardUpdated, Some(card.id), None);
@@ -244,11 +298,10 @@ fn card_update(d: &Arc<Daemon>, p: CardUpdateParams) -> Result<Value> {
 
 fn card_delete(d: &Arc<Daemon>, p: CardIdParams) -> Result<Value> {
     {
-        let sched = d.sched.lock().unwrap();
+        let _sched = d.sched.lock().unwrap();
         let db = d.store.lock();
         db.get_card(p.id)?
             .ok_or_else(|| Error::NotFound(format!("card {}", p.id)))?;
-        sched.ensure_card_not_finalizing(p.id)?;
         if db.open_run_for_card(p.id)?.is_some() {
             return Err(Error::InvalidState(
                 "card has an open run; cancel it first".into(),
@@ -262,12 +315,11 @@ fn card_delete(d: &Arc<Daemon>, p: CardIdParams) -> Result<Value> {
 
 fn card_archive(d: &Arc<Daemon>, p: CardArchiveParams) -> Result<Value> {
     let card = {
-        let sched = d.sched.lock().unwrap();
+        let _sched = d.sched.lock().unwrap();
         let db = d.store.lock();
         let card = db
             .get_card(p.id)?
             .ok_or_else(|| Error::NotFound(format!("card {}", p.id)))?;
-        sched.ensure_card_not_finalizing(p.id)?;
         if p.archived {
             validate_card_archive(card.status)?;
             if db.open_run_for_card(p.id)?.is_some() {
@@ -284,12 +336,11 @@ fn card_archive(d: &Arc<Daemon>, p: CardArchiveParams) -> Result<Value> {
 
 fn card_move(d: &Arc<Daemon>, p: CardMoveParams) -> Result<Value> {
     let (card, target) = {
-        let sched = d.sched.lock().unwrap();
+        let _sched = d.sched.lock().unwrap();
         let db = d.store.lock();
         let current = db
             .get_card(p.id)?
             .ok_or_else(|| Error::NotFound(format!("card {}", p.id)))?;
-        sched.ensure_card_not_finalizing(p.id)?;
         if current.archived_at.is_some() {
             return Err(Error::InvalidState(
                 "archived card must be restored before moving".into(),
@@ -360,79 +411,69 @@ fn comment_add(d: &Arc<Daemon>, p: CommentAddParams) -> Result<Value> {
 }
 
 fn run_done(d: &Arc<Daemon>, p: RunDoneParams) -> Result<Value> {
-    let run = {
-        // Keep the scheduler -> store lock order and finalization guard used
-        // by the normal active-run path. A configured runner can call board
-        // done before pane registration, while its run is still queued; only
-        // that exact, sole queued run is eligible for this narrow exception.
-        let sched = d.sched.lock().unwrap();
+    let (run, plan) = {
+        // Keep the scheduler -> store lock order used by the normal active-run
+        // path so eligibility and finalization serialize. The pure engine owns callback
+        // eligibility, including the narrow queued configured-run exception.
+        let _sched = d.sched.lock().unwrap();
         let db = d.store.lock();
-        sched.ensure_card_not_finalizing(p.card_id)?;
-        if let Some(run) = db.active_run_for_card(p.card_id)? {
-            if let Some(run_id) = p.run_id {
-                if run.id != run_id {
-                    return Err(Error::InvalidState(format!(
-                        "run {run_id} does not match active run {} for card {}",
-                        run.id, p.card_id
-                    )));
-                }
-            }
-            run
-        } else {
-            let card = db
-                .get_card(p.card_id)?
-                .ok_or_else(|| Error::NotFound(format!("no active run for card {}", p.card_id)))?;
-            match db.open_run_for_card(p.card_id)? {
-                Some(run)
-                    if card.status == CardStatus::Queued
-                        && run.started_at.is_none()
-                        && !is_builtin_harness(&run.harness)
-                        && p.run_id == Some(run.id) =>
-                {
-                    run
-                }
-                _ => {
-                    return Err(Error::NotFound(format!(
-                        "no active run for card {}",
-                        p.card_id
-                    )))
-                }
-            }
-        }
+        let run = db
+            .open_run_for_card(p.card_id)?
+            .ok_or_else(|| Error::NotFound(format!("no active run for card {}", p.card_id)))?;
+        let card = db
+            .get_card(p.card_id)?
+            .ok_or_else(|| Error::NotFound(format!("card {}", p.card_id)))?;
+        let facts = lifecycle_facts(&run, &card, p.run_id);
+        let decision = decide_lifecycle(&facts, LifecycleAction::Done { outcome: p.outcome });
+        let LifecycleDecision::Finalize(plan) = decision else {
+            let LifecycleDecision::Reject(rejection) = decision else {
+                unreachable!("lifecycle decision matched twice")
+            };
+            return Err(lifecycle_rejection(p.card_id, rejection));
+        };
+        (run, plan)
     };
-    let (run, card) = finalize_run(d, run.id, p.outcome, p.summary, None, false, true)?;
+    let (run, card) = finalize_run(
+        d,
+        run.id,
+        plan.outcome,
+        p.summary,
+        None,
+        plan.kill,
+        plan.transition,
+    )?;
     Ok(json!(RunActionResult { run, card }))
 }
 
 fn run_pane_exited(d: &Arc<Daemon>, p: RunPaneExitedParams) -> Result<Value> {
-    {
-        let sched = d.sched.lock().unwrap();
+    let (run, plan) = {
+        let _sched = d.sched.lock().unwrap();
         let db = d.store.lock();
-        sched.ensure_card_not_finalizing(p.card_id)?;
         let open = db
             .open_run_for_card(p.card_id)?
             .ok_or_else(|| Error::NotFound(format!("no open run for card {}", p.card_id)))?;
-        if open.id != p.run_id {
-            return Err(Error::InvalidState(format!(
-                "open run {} for card {} does not match pane-exited run {}",
-                open.id, p.card_id, p.run_id
-            )));
-        }
-        if is_builtin_harness(&open.harness) {
-            return Err(Error::InvalidState(
-                "pane-exited callback is only valid for configured harnesses".into(),
-            ));
-        }
-    }
+        let card = db
+            .get_card(p.card_id)?
+            .ok_or_else(|| Error::NotFound(format!("card {}", p.card_id)))?;
+        let facts = lifecycle_facts(&open, &card, Some(p.run_id));
+        let decision = decide_lifecycle(&facts, LifecycleAction::PaneExited);
+        let LifecycleDecision::Finalize(plan) = decision else {
+            let LifecycleDecision::Reject(rejection) = decision else {
+                unreachable!("lifecycle decision matched twice")
+            };
+            return Err(lifecycle_rejection(p.card_id, rejection));
+        };
+        (open, plan)
+    };
 
     let (run, card) = finalize_run(
         d,
-        p.run_id,
-        RunOutcome::Fail,
+        run.id,
+        plan.outcome,
         Some("configured harness exited without calling board done".into()),
         Some("pane exited without board done".into()),
-        false,
-        false,
+        plan.kill,
+        plan.transition,
     )?;
     Ok(json!(RunActionResult { run, card }))
 }
@@ -440,9 +481,8 @@ fn run_pane_exited(d: &Arc<Daemon>, p: RunPaneExitedParams) -> Result<Value> {
 fn run_cancel(d: &Arc<Daemon>, p: RunCardParams) -> Result<Value> {
     // Prefer the active run; else cancel the latest queued run for the card.
     let active = {
-        let sched = d.sched.lock().unwrap();
+        let _sched = d.sched.lock().unwrap();
         let db = d.store.lock();
-        sched.ensure_card_not_finalizing(p.card_id)?;
         db.active_run_for_card(p.card_id)?
     };
     if let Some(run) = active {
@@ -460,9 +500,8 @@ fn run_cancel(d: &Arc<Daemon>, p: RunCardParams) -> Result<Value> {
 
     // Queued (never started) run.
     let (run, card) = {
-        let sched = d.sched.lock().unwrap();
+        let _sched = d.sched.lock().unwrap();
         let db = d.store.lock();
-        sched.ensure_card_not_finalizing(p.card_id)?;
         let queued = db
             .open_run_for_card(p.card_id)?
             .filter(|run| run.started_at.is_none())
@@ -544,7 +583,6 @@ fn run_retry(d: &Arc<Daemon>, p: RunCardParams) -> Result<Value> {
         let card = db
             .get_card(p.card_id)?
             .ok_or_else(|| Error::NotFound(format!("card {}", p.card_id)))?;
-        sched.ensure_card_not_finalizing(p.card_id)?;
         if card.archived_at.is_some() {
             return Err(Error::InvalidState(
                 "archived card must be restored before retrying".into(),
@@ -567,15 +605,6 @@ fn run_retry(d: &Arc<Daemon>, p: RunCardParams) -> Result<Value> {
 }
 
 // -- harness / space --------------------------------------------------------
-
-fn validate_harness_permission(harness: &str, permission: Option<&str>) -> Result<()> {
-    if harness == "pi" && permission.is_some() {
-        return Err(Error::BadRequest(
-            "pi does not support permission modes".into(),
-        ));
-    }
-    Ok(())
-}
 
 fn harness_capabilities(d: &Arc<Daemon>, p: HarnessCapabilitiesParams) -> Result<Value> {
     match capabilities_for(&p.harness, &d.config) {
@@ -652,10 +681,11 @@ mod tests {
     use crate::spawner::LocalSpawner;
     use crate::store::Store;
     use board_core::config::{Config, HarnessDef};
-    use board_core::db::Db;
+    use board_core::db::{Db, LifecycleFaultPoint};
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
     use tokio::sync::{broadcast, mpsc, watch};
 
@@ -685,6 +715,141 @@ mod tests {
             dispatch_tx,
             shutdown_tx,
         ))
+    }
+
+    #[test]
+    fn enqueue_fault_reopens_prior_state_without_event_or_dispatch_wake() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("enqueue-fault.db");
+        let armed = Arc::new(AtomicBool::new(false));
+        let fault_armed = armed.clone();
+        let db = Db::open_with_lifecycle_fault_hook(&path, move |point| {
+            if fault_armed.load(Ordering::SeqCst)
+                && point == LifecycleFaultPoint::EnqueueAfterRunInsert
+            {
+                return Err(Error::InvalidState("injected enqueue fault".into()));
+            }
+            Ok(())
+        })
+        .unwrap();
+        let card = db
+            .create_card(&CardCreateParams {
+                title: "enqueue fault".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let card_id = card.id;
+        let (events_tx, mut events_rx) = broadcast::channel(16);
+        let (dispatch_tx, mut dispatch_rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let d = Arc::new(Daemon::new(
+            Store::new(db),
+            Config::default(),
+            DaemonSettings::default(),
+            path.clone(),
+            dir.path().join("board.sock"),
+            Arc::new(LocalSpawner::new()),
+            None,
+            None,
+            events_tx,
+            dispatch_tx,
+            shutdown_tx,
+        ));
+        armed.store(true, Ordering::SeqCst);
+
+        let err = handle_request(&d, "run.retry", json!({"card_id": card_id})).unwrap_err();
+        assert!(err.to_string().contains("injected enqueue fault"));
+        assert!(matches!(
+            events_rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            dispatch_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        drop(d);
+        let reopened = Db::open(&path).unwrap();
+        let card = reopened.get_card(card_id).unwrap().unwrap();
+        assert_eq!(card.status, CardStatus::Idle);
+        assert_eq!(card.session_id, None);
+        assert!(reopened.list_runs(card_id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn merged_invalid_updates_are_atomic_and_emit_no_event() {
+        let d = test_daemon(Config::default());
+        let mut events = d.events_tx.subscribe();
+        let created = handle_request(
+            &d,
+            "card.create",
+            json!({
+                "title": "valid settings",
+                "harness": "claude",
+                "model": "sonnet",
+                "effort": "high",
+                "permission_mode": "manual",
+                "space_kind": "new_workspace",
+                "space_ref": "feature",
+                "space_cwd": "/repo"
+            }),
+        )
+        .unwrap();
+        let card_id = created["id"].as_i64().unwrap();
+        let _ = events.try_recv().expect("create event");
+
+        let err = handle_request(
+            &d,
+            "card.update",
+            json!({
+                "id": card_id,
+                "space_kind": "new_workspace",
+                "space_cwd": null
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), 1);
+        assert!(matches!(
+            events.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        let unchanged = d.store.lock().get_card(card_id).unwrap().unwrap();
+        assert_eq!(unchanged.space_ref.as_deref(), Some("feature"));
+        assert_eq!(unchanged.space_cwd.as_deref(), Some("/repo"));
+    }
+
+    #[test]
+    fn invalid_column_update_keeps_dependents_and_emits_no_event() {
+        let d = test_daemon(Config::default());
+        let mut events = d.events_tx.subscribe();
+        let created = handle_request(
+            &d,
+            "column.create",
+            json!({
+                "name": "validated",
+                "harness_override": "claude",
+                "model_override": "sonnet",
+                "effort_override": "high",
+                "permission_override": "manual"
+            }),
+        )
+        .unwrap();
+        let id = created["id"].as_i64().unwrap();
+        let _ = events.try_recv().expect("create event");
+        let err = handle_request(
+            &d,
+            "column.update",
+            json!({"id": id, "harness_override": null}),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), 1);
+        assert!(matches!(
+            events.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        let unchanged = d.store.lock().get_column(id).unwrap().unwrap();
+        assert_eq!(unchanged.harness_override.as_deref(), Some("claude"));
+        assert_eq!(unchanged.effort_override.as_deref(), Some("high"));
     }
 
     #[test]
@@ -731,6 +896,62 @@ mod tests {
         assert_eq!(omitted["board"]["name"], "Global");
         let list = handle_request(&d, "board.list", json!({})).unwrap();
         assert_eq!(list["boards"][0]["name"], "Global");
+    }
+
+    #[test]
+    fn board_snapshot_active_runs_are_started_open_and_board_scoped() {
+        let d = test_daemon(Config::default());
+        let alpha = handle_request(&d, "board.open", json!({"scope_path":"/alpha"})).unwrap();
+        let beta = handle_request(&d, "board.open", json!({"scope_path":"/beta"})).unwrap();
+        let alpha_id = alpha["board"]["id"].as_i64().unwrap();
+        let beta_id = beta["board"]["id"].as_i64().unwrap();
+        let create = |board_id: i64, title: &str| {
+            handle_request(
+                &d,
+                "card.create",
+                json!({"board_id": board_id, "title": title}),
+            )
+            .unwrap()
+        };
+        let alpha_active = create(alpha_id, "active");
+        let alpha_queued = create(alpha_id, "queued");
+        let alpha_ended = create(alpha_id, "ended");
+        let beta_active = create(beta_id, "other board");
+        let db = d.store.lock();
+        let open = |value: &Value| {
+            let card_id = value["id"].as_i64().unwrap();
+            let card = db.get_card(card_id).unwrap().unwrap();
+            let run = db
+                .create_run(card.id, card.column_id, "fake", "[]", "prompt", None, None)
+                .unwrap();
+            db.start_run(run.id, Some("workspace"), Some("pane"))
+                .unwrap();
+            run
+        };
+        let _active_run = open(&alpha_active);
+        let queued_card = db
+            .get_card(alpha_queued["id"].as_i64().unwrap())
+            .unwrap()
+            .unwrap();
+        db.create_run(
+            queued_card.id,
+            queued_card.column_id,
+            "fake",
+            "[]",
+            "prompt",
+            None,
+            None,
+        )
+        .unwrap();
+        let ended_run = open(&alpha_ended);
+        db.finish_run(ended_run.id, RunOutcome::Ok, None).unwrap();
+        let _other_run = open(&beta_active);
+        drop(db);
+
+        let snapshot = handle_request(&d, "board.get", json!({"board_id": alpha_id})).unwrap();
+        assert_eq!(snapshot["active_runs"].as_array().unwrap().len(), 1);
+        assert_eq!(snapshot["active_runs"][0]["card_id"], alpha_active["id"]);
+        assert!(snapshot["active_runs"][0]["started_at"].is_string());
     }
 
     #[test]
@@ -1225,71 +1446,6 @@ mod tests {
     }
 
     #[test]
-    fn finalizing_card_rejects_retry_and_conflicting_mutations() {
-        let d = test_daemon(Config::default());
-        let (card_id, source_id, target_id) = {
-            let db = d.store.lock();
-            let target_id = db.default_column_id(BOARD_ID).unwrap();
-            let source = db
-                .create_column(&ColumnCreateParams {
-                    name: "Finalizing source".into(),
-                    ..Default::default()
-                })
-                .unwrap();
-            let card = db
-                .create_card(&CardCreateParams {
-                    title: "finalizing".into(),
-                    column_id: Some(source.id),
-                    ..Default::default()
-                })
-                .unwrap();
-            (card.id, source.id, target_id)
-        };
-        d.sched.lock().unwrap().finalizing_cards.insert(card_id, 77);
-
-        for (method, params) in [
-            ("run.done", json!({"card_id": card_id, "outcome": "ok"})),
-            ("run.retry", json!({"card_id": card_id})),
-            ("run.cancel", json!({"card_id": card_id})),
-            ("card.delete", json!({"id": card_id})),
-            ("card.archive", json!({"id": card_id, "archived": true})),
-            (
-                "card.update",
-                json!({"id": card_id, "model": "locked-model"}),
-            ),
-            ("card.move", json!({"id": card_id, "column_id": target_id})),
-            ("column.update", json!({"id": source_id, "trigger": "auto"})),
-            (
-                "column.delete",
-                json!({"id": source_id, "move_cards_to": target_id}),
-            ),
-        ] {
-            let err = handle_request(&d, method, params).unwrap_err();
-            assert_eq!(err.code(), 3, "{method}: {err}");
-            assert!(err.to_string().contains("finalization"), "{method}: {err}");
-        }
-
-        let card = d.store.lock().get_card(card_id).unwrap().unwrap();
-        assert_eq!(card.column_id, source_id);
-        assert!(card.archived_at.is_none());
-        assert_eq!(card.model, None);
-        assert_eq!(
-            d.store
-                .lock()
-                .get_column(source_id)
-                .unwrap()
-                .unwrap()
-                .trigger,
-            Trigger::Manual
-        );
-        assert!(d.store.lock().list_runs(card_id).unwrap().is_empty());
-        assert_eq!(
-            d.sched.lock().unwrap().finalizing_cards.get(&card_id),
-            Some(&77)
-        );
-    }
-
-    #[test]
     fn card_delete_rejects_and_preserves_queued_blocked_and_awaiting_open_runs() {
         for (status, started) in [
             (CardStatus::Queued, false),
@@ -1709,13 +1865,11 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code(), 1);
-        assert!(err
-            .to_string()
-            .contains("pi does not support permission modes"));
+        assert!(err.to_string().contains("permission mode"));
     }
 
     #[test]
-    fn switching_card_to_pi_clears_stored_permission() {
+    fn switching_card_to_pi_rejects_incompatible_permission() {
         let d = test_daemon(Config::default());
         let created = handle_request(
             &d,
@@ -1727,18 +1881,25 @@ mod tests {
             }),
         )
         .unwrap();
-        let updated = handle_request(
+        let err = handle_request(
             &d,
             "card.update",
             json!({ "id": created["id"], "harness": "pi" }),
         )
-        .unwrap();
-        assert_eq!(updated["harness"], "pi");
-        assert!(updated["permission_mode"].is_null());
+        .unwrap_err();
+        assert_eq!(err.code(), 1);
+        let unchanged = d
+            .store
+            .lock()
+            .get_card(created["id"].as_i64().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.harness, "claude");
+        assert_eq!(unchanged.permission_mode.as_deref(), Some("acceptEdits"));
     }
 
     #[test]
-    fn switching_card_from_pi_to_claude_clears_incompatible_effort() {
+    fn switching_card_from_pi_to_claude_rejects_incompatible_effort() {
         let d = test_daemon(Config::default());
         let created = handle_request(
             &d,
@@ -1746,14 +1907,21 @@ mod tests {
             json!({ "title": "switch", "harness": "pi", "effort": "off" }),
         )
         .unwrap();
-        let updated = handle_request(
+        let err = handle_request(
             &d,
             "card.update",
             json!({ "id": created["id"], "harness": "claude" }),
         )
-        .unwrap();
-        assert_eq!(updated["harness"], "claude");
-        assert!(updated["effort"].is_null());
+        .unwrap_err();
+        assert_eq!(err.code(), 1);
+        let unchanged = d
+            .store
+            .lock()
+            .get_card(created["id"].as_i64().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.harness, "pi");
+        assert_eq!(unchanged.effort, Some(Effort::Off));
     }
 
     #[test]

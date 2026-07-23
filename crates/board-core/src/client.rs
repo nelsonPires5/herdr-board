@@ -7,14 +7,16 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
+use crate::capability::HarnessCapabilities;
 use crate::model::{Card, Column, Comment};
 use crate::protocol::{
     BoardGetParams, BoardListResult, BoardOpenParams, BoardSnapshot, CardArchiveParams,
     CardCreateParams, CardDetail, CardListParams, CardMoveParams, CardUpdateParams,
     ColumnCreateParams, ColumnDeleteParams, ColumnReorderParams, ColumnUpdateParams,
-    CommentAddParams, DaemonStatus, DeletedResult, Event, Request, Response, RunActionResult,
-    RunCardParams, RunDoneParams, RunFocusParams, RunFocusResult, RunOutcome, RunPaneExitedParams,
-    StopResult, TemplateApplyParams,
+    CommentAddParams, DaemonStatus, DeletedResult, Event, HarnessCapabilitiesParams,
+    HarnessListResult, Request, Response, RunActionResult, RunCardParams, RunDoneParams,
+    RunFocusParams, RunFocusResult, RunOutcome, RunPaneExitedParams, SessionListResult,
+    SpaceListParams, SpaceListResult, StopResult, TemplateApplyParams,
 };
 
 /// Blocking client to boardd. Object-safe so the TUI can hold `Box<dyn BoardClient>`.
@@ -62,6 +64,33 @@ pub trait BoardClient {
     }
     fn board_list(&mut self) -> anyhow::Result<BoardListResult> {
         Ok(serde_json::from_value(self.call("board.list", json!({}))?)?)
+    }
+
+    fn harness_capabilities(&mut self, harness: &str) -> anyhow::Result<HarnessCapabilities> {
+        let p = HarnessCapabilitiesParams {
+            harness: harness.to_string(),
+        };
+        Ok(serde_json::from_value(
+            self.call("harness.capabilities", serde_json::to_value(p)?)?,
+        )?)
+    }
+    fn harness_list(&mut self) -> anyhow::Result<HarnessListResult> {
+        Ok(serde_json::from_value(
+            self.call("harness.list", json!({}))?,
+        )?)
+    }
+    fn space_list(&mut self, session: Option<&str>) -> anyhow::Result<SpaceListResult> {
+        let p = SpaceListParams {
+            session: session.map(str::to_string),
+        };
+        Ok(serde_json::from_value(
+            self.call("space.list", serde_json::to_value(p)?)?,
+        )?)
+    }
+    fn session_list(&mut self) -> anyhow::Result<SessionListResult> {
+        Ok(serde_json::from_value(
+            self.call("session.list", json!({}))?,
+        )?)
     }
 
     fn column_create(&mut self, p: &ColumnCreateParams) -> anyhow::Result<Column> {
@@ -367,6 +396,7 @@ mod fake {
                         board: db.get_board(board_id)?,
                         columns: db.list_columns(board_id)?,
                         cards: db.list_cards(board_id)?,
+                        active_runs: db.active_run_summaries(board_id)?,
                     };
                     serde_json::to_value(snap)?
                 }
@@ -376,6 +406,7 @@ mod fake {
                     serde_json::to_value(BoardSnapshot {
                         columns: db.list_columns(board.id)?,
                         cards: db.list_cards(board.id)?,
+                        active_runs: db.active_run_summaries(board.id)?,
                         board,
                     })?
                 }

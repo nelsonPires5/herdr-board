@@ -5,7 +5,9 @@
 //! `column`). Every connecting command auto-starts the daemon if it is absent.
 
 use std::fs::OpenOptions;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::CommandExt;
+use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -15,8 +17,7 @@ use board_core::client::{BoardClient, UnixClient};
 use board_core::harness::DEFAULT_HARNESS;
 use board_core::paths;
 use board_core::protocol::{
-    BoardSnapshot, CardCreateParams, CardMoveParams, Effort, RunOutcome, SessionListResult,
-    SpaceKind, SpaceListResult,
+    BoardSnapshot, CardCreateParams, CardMoveParams, Effort, RunOutcome, SpaceKind,
 };
 use board_core::scope::{resolve_scope_path, select_scope_candidate};
 use clap::{Parser, Subcommand};
@@ -289,8 +290,8 @@ fn real_main() -> Result<()> {
             column,
             json,
         } => cmd_move(card_id, column, json),
-        Cmd::Cancel { card_id, json } => cmd_run_action("run.cancel", card_id, json),
-        Cmd::Retry { card_id, json } => cmd_run_action("run.retry", card_id, json),
+        Cmd::Cancel { card_id, json } => cmd_run_action(card_id, json, false),
+        Cmd::Retry { card_id, json } => cmd_run_action(card_id, json, true),
         Cmd::Column { sub } => cmd_column(sub),
         Cmd::Harness { sub } => cmd_harness(sub),
         Cmd::Space { sub } => cmd_space(sub),
@@ -327,66 +328,136 @@ fn spawn_daemon() -> Result<()> {
     if let Some(parent) = log_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    daemon_command(&exe, &log_path)?.spawn()?;
+    Ok(())
+}
+
+/// Build the detached daemon child without a double-fork or a session-wide
+/// `setsid`. The child is its own process-group leader (`setpgid(0, 0)` via
+/// [`CommandExt::process_group`]) and is therefore independent of the CLI's
+/// process group while remaining addressable by its exact PID for diagnostics.
+/// Lifecycle control still goes through `daemon.stop`; the process group is not
+/// used as a broad cleanup authority.
+fn daemon_command(exe: &Path, log_path: &Path) -> Result<Command> {
     let out = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&log_path)?;
+        .open(log_path)?;
     let err = out.try_clone()?;
     let mut cmd = Command::new(exe);
     cmd.arg("daemon")
         .stdin(std::process::Stdio::null())
         .stdout(out)
         .stderr(err);
-    // Detach into a new process group so it outlives this CLI invocation.
+    // One child, one owned process group. Do not replace this with a
+    // double-fork/setsid sequence: it would lose the exact child identity that
+    // callers and the safe harness use for ownership checks.
     cmd.process_group(0);
-    cmd.spawn()?;
-    Ok(())
+    Ok(cmd)
 }
 
-/// `board daemon --stop`: gracefully shut down the running daemon over the
-/// socket, then wait for its listener to vanish. Idempotent — if nothing is
-/// running (or only a stale socket file remains) it cleans up and succeeds.
-/// Used by the plugin build step before a reinstall.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+    file_type: u32,
+}
+
+const SOCKET_FILE_TYPE: u32 = 0o140000;
+
+fn file_identity(path: &Path) -> Option<FileIdentity> {
+    std::fs::symlink_metadata(path)
+        .ok()
+        .map(|metadata| FileIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            file_type: metadata.mode() & 0o170000,
+        })
+}
+
+enum ListenerCheck {
+    Live,
+    Gone,
+    Replaced,
+}
+
+/// Confirm that a failed fresh connect means this exact socket is stale. The
+/// identity is checked again immediately before unlinking; a missing path is
+/// already clean, while a replacement (including a non-socket) fails closed.
+fn check_listener_after_connect_failure(
+    path: &Path,
+    original: Option<FileIdentity>,
+) -> ListenerCheck {
+    if UnixClient::connect(path).is_ok() {
+        return ListenerCheck::Live;
+    }
+
+    let Some(current) = file_identity(path) else {
+        return ListenerCheck::Gone;
+    };
+    if original != Some(current) || current.file_type != SOCKET_FILE_TYPE {
+        return ListenerCheck::Replaced;
+    }
+    if file_identity(path) != Some(current) {
+        return ListenerCheck::Replaced;
+    }
+    if std::fs::remove_file(path).is_ok() && file_identity(path).is_none() {
+        ListenerCheck::Gone
+    } else {
+        ListenerCheck::Replaced
+    }
+}
+
+/// `board daemon --stop`: request a graceful shutdown over the socket, then
+/// wait for its listener to vanish. Cleanup is deliberately fail-closed: RPC
+/// errors, live listeners, and path replacements are never unlinked.
 fn stop_daemon() -> Result<()> {
     let path = paths::socket_path();
+    let original = file_identity(&path);
 
     let mut client = match UnixClient::connect(&path) {
         Ok(c) => c,
-        Err(_) => {
-            // No live listener: clear any stale socket file left by a crash.
-            let _ = std::fs::remove_file(&path);
-            println!("boardd not running");
-            return Ok(());
-        }
+        Err(_) => match check_listener_after_connect_failure(&path, original) {
+            ListenerCheck::Gone => {
+                println!("boardd not running");
+                return Ok(());
+            }
+            ListenerCheck::Live | ListenerCheck::Replaced => {
+                bail!(
+                    "could not connect to boardd at {}; socket preserved",
+                    path.display()
+                );
+            }
+        },
     };
 
-    // Ask the daemon to shut itself down. A daemon older than `daemon.stop`
-    // rejects it; tell the user to stop it manually in that case.
     let stop_result = client.daemon_stop();
     drop(client);
-    if let Err(e) = stop_result {
-        let _ = std::fs::remove_file(&path);
-        bail!(
-            "could not stop boardd gracefully ({e}); it may predate `daemon.stop` — \
-             stop it manually, e.g. `pkill -f 'board daemon'`"
-        );
+    let stop_result = stop_result.context("could not stop boardd gracefully; socket preserved")?;
+    if !stop_result.stopping {
+        bail!("boardd did not acknowledge stopping; socket preserved");
     }
 
-    // Wait for the listener to disappear (the daemon removes the socket on
-    // exit), so the next launch spawns a fresh process rather than racing a
-    // half-dead one still holding the single-instance lock.
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut delay = Duration::from_millis(25);
     while Instant::now() < deadline {
         if UnixClient::connect(&path).is_err() {
-            break;
+            match check_listener_after_connect_failure(&path, original) {
+                ListenerCheck::Gone => {
+                    println!("boardd stopped");
+                    return Ok(());
+                }
+                ListenerCheck::Replaced => {
+                    bail!("boardd socket identity changed; socket preserved");
+                }
+                ListenerCheck::Live => {}
+            }
         }
         std::thread::sleep(delay);
         delay = (delay * 2).min(Duration::from_millis(200));
     }
-    let _ = std::fs::remove_file(&path);
-    println!("boardd stopped");
-    Ok(())
+
+    bail!("boardd acknowledged stop but is still listening; socket preserved")
 }
 
 // -- command bodies ----------------------------------------------------------
@@ -647,17 +718,17 @@ fn cmd_move(card_id: i64, column: String, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_run_action(method: &str, card_id: i64, json: bool) -> Result<()> {
+fn cmd_run_action(card_id: i64, json: bool, retry: bool) -> Result<()> {
     let mut c = connect_or_start()?;
-    let v = c.call(method, json!({ "card_id": card_id }))?;
-    if json {
-        println!("{}", serde_json::to_string_pretty(&v)?);
+    let result = if retry {
+        c.run_retry(card_id)?
     } else {
-        let action = if method == "run.cancel" {
-            "Cancelled"
-        } else {
-            "Retried"
-        };
+        c.run_cancel(card_id)?
+    };
+    if json {
+        print_json(&result)?;
+    } else {
+        let action = if retry { "Retried" } else { "Cancelled" };
         println!("{action} card #{card_id}");
     }
     Ok(())
@@ -687,8 +758,7 @@ fn cmd_harness(sub: HarnessCmd) -> Result<()> {
     let mut c = connect_or_start()?;
     match sub {
         HarnessCmd::List { json } => {
-            let v = c.call("harness.list", json!({}))?;
-            let names: Vec<String> = serde_json::from_value(v["harnesses"].clone())?;
+            let names = c.harness_list()?.harnesses;
             if json {
                 print_json(&names)?;
             } else {
@@ -756,8 +826,7 @@ fn cmd_space(sub: SpaceCmd) -> Result<()> {
     let mut c = connect_or_start()?;
     match sub {
         SpaceCmd::List { session, json } => {
-            let v = c.call("space.list", json!({ "session": session }))?;
-            let res: SpaceListResult = serde_json::from_value(v)?;
+            let res = c.space_list(session.as_deref())?;
             if json {
                 print_json(&res)?;
             } else {
@@ -775,8 +844,7 @@ fn cmd_session(sub: SessionCmd) -> Result<()> {
     let mut c = connect_or_start()?;
     match sub {
         SessionCmd::List { json } => {
-            let v = c.call("session.list", json!({}))?;
-            let res: SessionListResult = serde_json::from_value(v)?;
+            let res = c.session_list()?;
             if json {
                 print_json(&res)?;
             } else {
@@ -806,8 +874,7 @@ fn parse_space_kind(s: &str) -> Result<SpaceKind> {
 
 /// Fetch a harness's capability catalog (`harness.capabilities`).
 fn harness_capabilities(c: &mut UnixClient, harness: &str) -> Result<HarnessCapabilities> {
-    let v = c.call("harness.capabilities", json!({ "harness": harness }))?;
-    Ok(serde_json::from_value(v)?)
+    c.harness_capabilities(harness)
 }
 
 /// Render an effort list space-separated (e.g. `low medium high xhigh max`).
@@ -877,4 +944,60 @@ fn resolve_column_in(snap: &BoardSnapshot, s: &str) -> Result<i64> {
 fn print_json<T: serde::Serialize>(v: &T) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(v)?);
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::daemon_command;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn daemon_child_owns_a_distinct_process_group() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script = dir.path().join("probe-daemon.sh");
+        let evidence = dir.path().join("process-group");
+        fs::write(
+            &script,
+            "#!/bin/sh\nprintf '%s %s %s\\n' \"$$\" \"$(ps -o pgid= -p $$)\" \"$(ps -o pgid= -p $PPID)\" > \"$BOARD_TEST_PROCESS_GROUP\"\nsleep 30\n",
+        )
+        .expect("write probe");
+        let mut permissions = fs::metadata(&script)
+            .expect("script metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&script, permissions).expect("chmod probe");
+
+        let log = dir.path().join("daemon.log");
+        let mut command = daemon_command(Path::new(&script), &log).expect("build command");
+        command.env("BOARD_TEST_PROCESS_GROUP", &evidence);
+        let mut child = command.spawn().expect("spawn probe");
+
+        for _ in 0..100 {
+            if evidence.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let values = fs::read_to_string(&evidence).expect("read process-group evidence");
+        let mut fields = values.split_whitespace();
+        let pid: i32 = fields.next().expect("pid").parse().expect("numeric pid");
+        let pgid: i32 = fields.next().expect("pgid").parse().expect("numeric pgid");
+        let parent_pgid: i32 = fields
+            .next()
+            .expect("parent pgid")
+            .parse()
+            .expect("numeric parent pgid");
+        assert_eq!(pid, pgid, "daemon child must lead its owned process group");
+        assert_ne!(
+            pgid, parent_pgid,
+            "daemon group must be distinct from its parent"
+        );
+
+        child.kill().expect("kill probe");
+        child.wait().expect("reap probe");
+    }
 }

@@ -41,22 +41,22 @@ card_json="$("$BOARD_BIN" card new --title "Timeout Card" -d "overruns" \
 CARD_ID="$(printf '%s' "$card_json" | jget id)" || fail "could not parse card id"
 echo "  card: $CARD_ID"
 mut "board move $CARD_ID Execute -> agent.start in $WS_ID"
-"$BOARD_BIN" move "$CARD_ID" Execute --json >/dev/null
+e2e_board_herdr_mutate -- move "$CARD_ID" Execute --json >/dev/null
 
 step "Wait for the timeout to fire and finalize the run"
-oc="$(wait_runs "$CARD_ID" 1)" || { tail -40 "$E2E_TMP/daemon.log"; fail "run never finalized (timeout did not fire?)"; }
-[ "$oc" = "fail" ] || { "$BOARD_BIN" card show "$CARD_ID" --json; fail "run outcome '$oc', expected 'fail' (timed out)"; }
+oc="$(wait_runs "$CARD_ID" 1)" || { fail "run never finalized (timeout did not fire?)"; }
+[ "$oc" = "fail" ] || { e2e_card_failure_diag "$CARD_ID"; fail "run outcome '$oc', expected 'fail' (timed out)"; }
 ok "run timed out and was finalized as fail"
 
 step "Assert the card followed on_fail into Backlog (timeout DOES transition)"
 col_now="$(card_field "$CARD_ID" card.column_id || true)"
 echo "  card column_id=$col_now (want Backlog $BACKLOG_ID)"
-[ "$col_now" = "$BACKLOG_ID" ] || { "$BOARD_BIN" card show "$CARD_ID" --json; fail "card in column $col_now, expected on_fail Backlog $BACKLOG_ID"; }
+[ "$col_now" = "$BACKLOG_ID" ] || { e2e_card_failure_diag "$CARD_ID"; fail "card in column $col_now, expected on_fail Backlog $BACKLOG_ID"; }
 ok "timed-out run applied on_fail -> Backlog"
 
 step "Assert a system comment mentions the timeout"
 "$BOARD_BIN" card show "$CARD_ID" --json | grep -q "timed out" \
-  || { "$BOARD_BIN" card show "$CARD_ID" --json; fail "no 'timed out' comment recorded"; }
+  || { e2e_card_failure_diag "$CARD_ID"; fail "no 'timed out' comment recorded"; }
 ok "timeout recorded in a system comment"
 
 step "08-column-timeout: ALL CHECKS PASSED"

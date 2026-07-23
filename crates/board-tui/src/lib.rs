@@ -23,10 +23,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use board_core::capability::HarnessCapabilities;
 use board_core::client::BoardClient;
-use board_core::protocol::{
-    BoardSnapshot, Event, HarnessListResult, SessionInfo, SessionListResult, SpaceInfo,
-    SpaceListResult,
-};
+use board_core::protocol::{BoardSnapshot, Event, SessionInfo, SpaceInfo};
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event as CtEvent, KeyEventKind};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -41,6 +38,42 @@ use crate::app::{
 use crate::editor::{EditorLauncher, RealEditor};
 use crate::view::{board_picker_label, pane_title, view};
 
+/// Explicit context supplied by the composition root to the TUI.
+///
+/// Test and embedded drivers use [`Default::default`] so ambient Herdr/plugin
+/// variables cannot affect their state. Only [`Driver::new`] and
+/// [`run_with_board`] construct this from the process environment.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OriginContext {
+    pub origin_socket: Option<String>,
+    pub session: Option<String>,
+    pub plugin_id: Option<String>,
+    pub pane_id: Option<String>,
+    pub herdr_bin_path: Option<String>,
+}
+
+impl OriginContext {
+    /// Read the invoking Herdr/plugin context at the production boundary.
+    pub fn from_environment() -> OriginContext {
+        let origin_socket = std::env::var("HERDR_SOCKET_PATH")
+            .ok()
+            .filter(|socket| !socket.is_empty());
+        OriginContext {
+            session: crate::forms::session_name_from_socket(origin_socket.as_deref()),
+            origin_socket,
+            plugin_id: std::env::var("HERDR_PLUGIN_ID")
+                .ok()
+                .filter(|value| !value.is_empty()),
+            pane_id: std::env::var("HERDR_PANE_ID")
+                .ok()
+                .filter(|value| !value.is_empty()),
+            herdr_bin_path: std::env::var("HERDR_BIN_PATH")
+                .ok()
+                .filter(|value| !value.is_empty()),
+        }
+    }
+}
+
 /// Owns the client + editor and applies [`Effect`]s produced by `update`.
 ///
 /// Kept separate from [`run`] (the terminal loop) so tests can drive it against
@@ -49,21 +82,33 @@ pub struct Driver {
     pub app: App,
     client: Box<dyn BoardClient>,
     editor: Box<dyn EditorLauncher>,
-    origin_socket: Option<String>,
+    origin: OriginContext,
 }
 
 impl Driver {
     /// Build a driver, fetching the initial board.
     pub fn new(client: Box<dyn BoardClient>) -> Result<Driver> {
-        Driver::with_editor(client, Box::new(RealEditor))
+        Driver::with_editor_and_origin(
+            client,
+            Box::new(RealEditor),
+            OriginContext::from_environment(),
+        )
     }
 
     pub fn with_editor(
-        mut client: Box<dyn BoardClient>,
+        client: Box<dyn BoardClient>,
         editor: Box<dyn EditorLauncher>,
     ) -> Result<Driver> {
+        Driver::with_editor_and_origin(client, editor, OriginContext::default())
+    }
+
+    pub fn with_editor_and_origin(
+        mut client: Box<dyn BoardClient>,
+        editor: Box<dyn EditorLauncher>,
+        origin: OriginContext,
+    ) -> Result<Driver> {
         let board = client.board_get()?;
-        Driver::with_editor_and_board(client, editor, board)
+        Driver::with_editor_and_board_and_origin(client, editor, board, origin)
     }
 
     pub fn with_editor_and_board(
@@ -71,13 +116,20 @@ impl Driver {
         editor: Box<dyn EditorLauncher>,
         board: BoardSnapshot,
     ) -> Result<Driver> {
+        Driver::with_editor_and_board_and_origin(client, editor, board, OriginContext::default())
+    }
+
+    pub fn with_editor_and_board_and_origin(
+        client: Box<dyn BoardClient>,
+        editor: Box<dyn EditorLauncher>,
+        board: BoardSnapshot,
+        origin: OriginContext,
+    ) -> Result<Driver> {
         let mut driver = Driver {
-            app: App::new(board),
+            app: App::with_origin_context(board, origin.clone()),
             client,
             editor,
-            origin_socket: std::env::var("HERDR_SOCKET_PATH")
-                .ok()
-                .filter(|socket| !socket.is_empty()),
+            origin,
         };
         driver.set_pane_title(CardFilter::Active);
         Ok(driver)
@@ -85,7 +137,9 @@ impl Driver {
 
     /// Override the invoking Herdr socket (deterministic tests/embedders).
     pub fn set_origin_socket(&mut self, socket: Option<String>) {
-        self.origin_socket = socket;
+        self.origin.origin_socket = socket.clone();
+        self.origin.session = crate::forms::session_name_from_socket(socket.as_deref());
+        self.app.origin_context = self.origin.clone();
     }
 
     /// Feed one synthetic message: run the reducer, then apply its effects.
@@ -274,7 +328,7 @@ impl Driver {
                 }
             }
             Effect::FocusRun(id) => {
-                let Some(origin_socket) = self.origin_socket.clone() else {
+                let Some(origin_socket) = self.origin.origin_socket.clone() else {
                     self.app.set_toast(
                         "jump to pane requires Herdr (HERDR_SOCKET_PATH is unset)",
                         true,
@@ -296,36 +350,40 @@ impl Driver {
     /// Update the label rendered by Herdr in the pane border. Outside a Herdr
     /// plugin pane (tests, examples, standalone TUI) this is deliberately a no-op.
     fn set_pane_title(&mut self, filter: CardFilter) {
-        if std::env::var("HERDR_PLUGIN_ID").as_deref() != Ok("herdr-board") {
+        if self.origin.plugin_id.as_deref() != Some("herdr-board") {
             return;
         }
-        let Ok(pane_id) = std::env::var("HERDR_PANE_ID") else {
+        let Some(pane_id) = self.origin.pane_id.as_deref() else {
             return;
         };
-        let bin = std::env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_string());
+        let bin = self.origin.herdr_bin_path.as_deref().unwrap_or("herdr");
         let title = pane_title(&self.app.board.board, filter);
         let _ = Command::new(bin)
-            .args(["pane", "rename", &pane_id, &title])
+            .args(["pane", "rename", pane_id, &title])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
     }
 
-    /// Fetch the capability catalog + workspace list for the open card form and
-    /// hand them to the form. A failed fetch is non-fatal: the affected
-    /// selectors fall back to free-text and the user gets a status-line warning.
+    /// Fetch form metadata and hand it to the open form. Column forms only
+    /// need capabilities and the harness catalog; card forms additionally load
+    /// sessions and their session-scoped workspaces. A failed fetch is
+    /// non-fatal: affected selectors fall back to free-text and the user gets a
+    /// status-line warning.
     fn load_form_options(&mut self) {
         let Some(form) = self.app.form.as_ref() else {
             return;
         };
         let harness = form.current_harness();
-        // The workspace list is scoped to the currently selected session.
+        let is_card_form = form.is_card_form();
+        // Column forms only need the selected harness metadata. They have no
+        // session or workspace selectors, so avoid unrelated RPCs entirely.
         let session = form.current_session();
         let caps = fetch_capabilities(self.client.as_mut(), &harness);
         let harnesses = fetch_harness_list(self.client.as_mut());
-        let sessions = fetch_sessions(self.client.as_mut());
-        let spaces = fetch_spaces(self.client.as_mut(), session.as_deref());
+        let sessions = is_card_form.then(|| fetch_sessions(self.client.as_mut()));
+        let spaces = is_card_form.then(|| fetch_spaces(self.client.as_mut(), session.as_deref()));
 
         let mut warning: Option<String> = None;
         let caps_opt = match caps {
@@ -338,16 +396,17 @@ impl Driver {
         // harness.list failing is non-fatal: the selectors keep the built-ins.
         let harnesses_opt = harnesses.ok();
         let spaces_opt = match spaces {
-            Ok(s) => Some(s),
-            Err(e) => {
+            Some(Ok(s)) => Some(s),
+            Some(Err(e)) => {
                 if warning.is_none() {
                     warning = Some(format!("spaces unavailable ({e}); free-text"));
                 }
                 None
             }
+            None => None,
         };
         // Sessions failing is non-fatal: keep `(default)` + any preselection.
-        let sessions_opt = sessions.ok();
+        let sessions_opt = sessions.and_then(Result::ok);
         if let Some(form) = self.app.form.as_mut() {
             form.apply_options(caps_opt, harnesses_opt, spaces_opt, sessions_opt);
         }
@@ -371,38 +430,27 @@ impl Driver {
     }
 }
 
-/// Fetch `harness.capabilities` for `harness` via the client's generic `call`
-/// (works over the real socket; the fake testkit client stubs it).
+/// Fetch `harness.capabilities` for `harness` through the typed client API.
 fn fetch_capabilities(client: &mut dyn BoardClient, harness: &str) -> Result<HarnessCapabilities> {
-    let v = client.call(
-        "harness.capabilities",
-        serde_json::json!({ "harness": harness }),
-    )?;
-    Ok(serde_json::from_value(v)?)
+    client.harness_capabilities(harness)
 }
 
-/// Fetch `harness.list` (built-ins + config-defined) via the client's generic
-/// `call`. Drives the harness/harness-override selects so config-defined
+/// Fetch `harness.list` (built-ins + config-defined) through the typed client
+/// API. Drives the harness/harness-override selects so config-defined
 /// harnesses appear without a client-side config read.
 fn fetch_harness_list(client: &mut dyn BoardClient) -> Result<Vec<String>> {
-    let v = client.call("harness.list", serde_json::json!({}))?;
-    let r: HarnessListResult = serde_json::from_value(v)?;
-    Ok(r.harnesses)
+    Ok(client.harness_list()?.harnesses)
 }
 
-/// Fetch `space.list` (scoped to `session`, `None` = default) via the client's
-/// generic `call`.
+/// Fetch `space.list` (scoped to `session`, `None` = default) through the typed
+/// client API.
 fn fetch_spaces(client: &mut dyn BoardClient, session: Option<&str>) -> Result<Vec<SpaceInfo>> {
-    let v = client.call("space.list", serde_json::json!({ "session": session }))?;
-    let r: SpaceListResult = serde_json::from_value(v)?;
-    Ok(r.spaces)
+    Ok(client.space_list(session)?.spaces)
 }
 
-/// Fetch `session.list` via the client's generic `call`.
+/// Fetch `session.list` through the typed client API.
 fn fetch_sessions(client: &mut dyn BoardClient) -> Result<Vec<SessionInfo>> {
-    let v = client.call("session.list", serde_json::json!({}))?;
-    let r: SessionListResult = serde_json::from_value(v)?;
-    Ok(r.sessions)
+    Ok(client.session_list()?.sessions)
 }
 
 fn epoch_secs() -> i64 {
@@ -427,7 +475,12 @@ pub fn run(client: Box<dyn BoardClient>) -> Result<()> {
 }
 
 pub fn run_with_board(client: Box<dyn BoardClient>, board: BoardSnapshot) -> Result<()> {
-    let mut driver = Driver::with_editor_and_board(client, Box::new(RealEditor), board)?;
+    let mut driver = Driver::with_editor_and_board_and_origin(
+        client,
+        Box::new(RealEditor),
+        board,
+        OriginContext::from_environment(),
+    )?;
     run_driver(&mut driver)
 }
 

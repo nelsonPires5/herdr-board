@@ -4,9 +4,73 @@
 //! Unix socket; every request/response/event and every method's params/result is
 //! represented here.
 
-use serde::{Deserialize, Serialize};
+use serde::{
+    de::{self, Visitor},
+    Deserialize, Deserializer, Serialize, Serializer,
+};
 
 use crate::model::{Board, Card, Column, Comment, Run};
+
+/// A nullable field in a partial update.
+///
+/// `Unchanged` is represented by an omitted JSON member, `Clear` by JSON
+/// `null`, and `Set` by the value itself. This keeps protocol v1 compatible
+/// while allowing clients to intentionally clear a stored nullable value.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Patch<T> {
+    #[default]
+    Unchanged,
+    Clear,
+    Set(T),
+}
+
+impl<T> Patch<T> {
+    pub fn is_unchanged(&self) -> bool {
+        matches!(self, Self::Unchanged)
+    }
+}
+
+impl<T: Serialize> Serialize for Patch<T> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            // Update fields use `skip_serializing_if` to omit this variant.
+            // Serializing it directly as null is the least surprising fallback.
+            Self::Unchanged | Self::Clear => serializer.serialize_none(),
+            Self::Set(value) => value.serialize(serializer),
+        }
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Patch<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct PatchVisitor<T>(std::marker::PhantomData<T>);
+
+        impl<'de, T: Deserialize<'de>> Visitor<'de> for PatchVisitor<T> {
+            type Value = Patch<T>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("null or a patch value")
+            }
+
+            fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(Patch::Clear)
+            }
+
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(Patch::Clear)
+            }
+
+            fn visit_some<D: Deserializer<'de>>(
+                self,
+                deserializer: D,
+            ) -> Result<Self::Value, D::Error> {
+                T::deserialize(deserializer).map(Patch::Set)
+            }
+        }
+
+        deserializer.deserialize_option(PatchVisitor(std::marker::PhantomData))
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Shared enums
@@ -27,7 +91,7 @@ pub enum Trigger {
 /// - [`SpaceKind::NewWorkspace`] — the daemon creates a workspace on first
 ///   dispatch (label = `space_ref`, cwd = `space_cwd`), reusing an existing
 ///   workspace with that label if one is already open.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SpaceKind {
     Workspace,
@@ -259,12 +323,26 @@ pub struct BoardListResult {
     pub boards: Vec<Board>,
 }
 
+/// A compact view of a run that is currently started and open on a board.
+///
+/// This is intentionally separate from [`Run`]: board snapshots only need the
+/// card identity and start point required by clients to render live-run state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveRunSummary {
+    pub card_id: i64,
+    pub started_at: String,
+}
+
 /// `board.get` / `board.open` result.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BoardSnapshot {
     pub board: Board,
     pub columns: Vec<Column>,
     pub cards: Vec<Card>,
+    /// Started, open runs for cards belonging to this board. The default keeps
+    /// older v1 clients/snapshots readable when this additive field is absent.
+    #[serde(default)]
+    pub active_runs: Vec<ActiveRunSummary>,
 }
 
 /// `column.create` params.
@@ -305,26 +383,26 @@ pub struct ColumnUpdateParams {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub system_prompt: Patch<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger: Option<Trigger>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub on_success_column_id: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub on_fail_column_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub on_success_column_id: Patch<i64>,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub on_fail_column_id: Patch<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fresh_session: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub harness_override: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_override: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effort_override: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub permission_override: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout_minutes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub harness_override: Patch<String>,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub model_override: Patch<String>,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub effort_override: Patch<String>,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub permission_override: Patch<String>,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub timeout_minutes: Patch<i64>,
 }
 
 /// `column.reorder` params.
@@ -402,22 +480,22 @@ pub struct CardUpdateParams {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effort: Option<Effort>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub permission_mode: Option<String>,
-    /// herdr session name; `None` = the daemon's default session.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session: Option<String>,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub model: Patch<String>,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub effort: Patch<Effort>,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub permission_mode: Patch<String>,
+    /// herdr session name; `null` clears the card's explicit session.
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub session: Patch<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub space_kind: Option<SpaceKind>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub space_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub space_ref: Patch<String>,
     /// Working directory for a `new_workspace` space.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub space_cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub space_cwd: Patch<String>,
 }
 
 /// `card.archive` params — archive (`true`) or restore (`false`) a card.

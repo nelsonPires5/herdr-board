@@ -41,10 +41,10 @@ card_json="$("$BOARD_BIN" card new --title "Retry Card" -d "retry me" \
 CARD_ID="$(printf '%s' "$card_json" | jget id)" || fail "could not parse card id"
 echo "  card: $CARD_ID"
 mut "board move $CARD_ID Execute -> agent.start in $WS_ID"
-"$BOARD_BIN" move "$CARD_ID" Execute --json >/dev/null
+e2e_board_herdr_mutate -- move "$CARD_ID" Execute --json >/dev/null
 
 step "Wait for the FIRST run to finish; assert 1 run, outcome fail, card failed in place"
-oc="$(wait_runs "$CARD_ID" 1)" || { tail -40 "$E2E_TMP/daemon.log"; fail "first run never finished"; }
+oc="$(wait_runs "$CARD_ID" 1)" || { fail "first run never finished"; }
 [ "$oc" = "fail" ] || fail "first run outcome '$oc', expected fail"
 n1="$("$BOARD_BIN" card show "$CARD_ID" --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("runs",[])))')"
 [ "$n1" = "1" ] || fail "expected exactly 1 run before retry, got $n1"
@@ -56,10 +56,10 @@ ok "1 run, outcome fail, card failed and still in Execute"
 
 step "HERDR MUTATION: board retry $CARD_ID -> enqueue a NEW run in the same column"
 mut "board retry $CARD_ID"
-"$BOARD_BIN" retry "$CARD_ID" >/dev/null || fail "board retry failed"
+e2e_board_herdr_mutate -- retry "$CARD_ID" >/dev/null || fail "board retry failed"
 
 step "Wait for the SECOND run; assert run count grew to 2 and the new run finished"
-oc2="$(wait_runs "$CARD_ID" 2)" || { tail -40 "$E2E_TMP/daemon.log"; "$BOARD_BIN" card show "$CARD_ID" --json; fail "retry did not spawn/finish a 2nd run"; }
+oc2="$(wait_runs "$CARD_ID" 2)" || { e2e_card_failure_diag "$CARD_ID"; fail "retry did not spawn/finish a 2nd run"; }
 n2="$("$BOARD_BIN" card show "$CARD_ID" --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("runs",[])))')"
 [ "$n2" = "2" ] || fail "expected 2 run rows after retry, got $n2"
 echo "  run count: $n1 -> $n2 ; new run outcome: $oc2"

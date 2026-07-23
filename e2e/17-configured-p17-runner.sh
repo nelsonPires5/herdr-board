@@ -29,18 +29,23 @@ with open(path, "w", encoding="utf-8") as f:
                "argv": argv}, f, ensure_ascii=False, indent=2)
 PY
 "$BOARD_BIN" comment "p17 runner: exact startup/env evidence recorded"
+# Agent-originated protocol callback, not a scenario-side infrastructure command.
 "$BOARD_BIN" done --outcome ok
 # Keep the pane alive for the structural checks below. This is deliberately
 # bounded; owned-workspace cleanup normally ends it before the timeout.
 sleep "${P17_RUNNER_HOLD:-60}"
 RUNNER
 chmod 700 "$RUNNER"
+e2e_script_resource_register configured-runner p17-configured-runner "$RUNNER" \
+  || fail "cannot record configured runner digest"
+e2e_defer "e2e_script_remove_owned p17-configured-runner '$RUNNER'"
 # JSON quoting preserves each configured argv element, including the newline.
 python3 - "$HERDR_BOARD_CONFIG" "$RUNNER" "$BOARD_BIN" <<'PY'
 import json, sys
 p, runner, board = sys.argv[1:]
 with open(p, "a", encoding="utf-8") as f:
     f.write("\n[harness.p17-runner]\n")
+    f.write('efforts = ["low"]\n')
     f.write("argv = " + json.dumps(["env", "BOARD_BIN=" + board, runner,
         "literal argument with spaces", "line one\nline two", "{effort}"], ensure_ascii=False) + "\n")
 PY
@@ -63,19 +68,13 @@ card_json="$($BOARD_BIN card new --title 'P17 configured' \
   --space-kind workspace --space-ref "$WS_ID" --json)"
 CARD_ID="$(printf '%s' "$card_json" | jget id)"
 mut "board move $CARD_ID 'P17 Runner' -> unmanaged pane run bridge"
-$BOARD_BIN move "$CARD_ID" "P17 Runner" --json >/dev/null
+e2e_board_herdr_mutate -- move "$CARD_ID" "P17 Runner" --json >/dev/null
 outcome="$(wait_ok "$CARD_ID" 100)" || {
   printf '%s\n' '--- configured runner failure diagnostics (disposable session only) ---' >&2
-  "$BOARD_BIN" card show "$CARD_ID" --json >&2 2>/dev/null || true
-  for record in "$E2E_TMP"/p17-runner-*.json; do
-    [ -f "$record" ] || continue
-    printf '%s\n' "record: $record" >&2
-    python3 -m json.tool "$record" >&2 2>/dev/null || true
-  done
+  e2e_card_failure_diag "$CARD_ID"
+  printf 'runner_records=%s\n' "$(find "$E2E_TMP" -maxdepth 1 -type f -name 'p17-runner-*.json' -printf . 2>/dev/null | wc -c)" >&2
   hrpc pane.list "{\"workspace_id\":\"$WS_ID\"}" >&2 2>/dev/null || true
-  HERDR_SOCKET_PATH="$HERDR_SOCKET_PATH" "$HERDR_BIN" agent get "card-$CARD_ID-p17-runner" >&2 2>&1 || true
-  HERDR_SOCKET_PATH="$HERDR_SOCKET_PATH" "$HERDR_BIN" agent explain "card-$CARD_ID-p17-runner" --json >&2 2>&1 || true
-  tail -80 "$E2E_TMP/daemon.log" >&2 2>/dev/null || true
+
   fail "configured runner outcome '$outcome'"
 }
 [ "$outcome" = ok ] || fail "configured runner did not complete ok (got '$outcome')"
@@ -88,14 +87,14 @@ python3 - "$RECORD" "$SHOW" "$CARD_ID" "$RUN_ID" "$BOARD_SOCKET" "$HERDR_SOCKET_
 import json, sys
 x=json.load(open(sys.argv[1])); show=json.load(open(sys.argv[2]))
 card, run, board, herdr, cwd = sys.argv[3:]
-assert x["card_id"] == int(card) and x["run_id"] == int(run), x
-assert x["argv"] == ["literal argument with spaces", "line one\nline two", "low"], x
-assert x["prompt"] == show["runs"][-1]["prompt_snapshot"], (x, show["runs"][-1])
-assert x["prompt"].startswith("configured prompt with spaces\nand a newline\n\n"), x
-assert x["system_prompt"].startswith("## herdr-board protocol\n"), x
-assert "$BOARD_CARD_ID" in x["system_prompt"], x
-assert x["board_socket"] == board and x["herdr_socket"] == herdr, x
-assert x["cwd"] == cwd, x
+assert x["card_id"] == int(card) and x["run_id"] == int(run)
+assert x["argv"] == ["literal argument with spaces", "line one\nline two", "low"]
+assert x["prompt"] == show["runs"][-1]["prompt_snapshot"]
+assert x["prompt"].startswith("configured prompt with spaces\nand a newline\n\n")
+assert x["system_prompt"].startswith("## herdr-board protocol\n")
+assert "$BOARD_CARD_ID" in x["system_prompt"]
+assert x["board_socket"] == board and x["herdr_socket"] == herdr
+assert x["cwd"] == cwd
 print("  configured argv preserved; card/run, BOARD_SYSTEM_PROMPT, sockets, cwd exact")
 PY
 
@@ -106,9 +105,9 @@ python3 - "$tabs_json" "$panes_json" "$CARD_ID" <<'PY'
 import json, re, sys
 tabs=json.loads(sys.argv[1]).get("tabs",[]); panes=json.loads(sys.argv[2]).get("panes",[])
 card=sys.argv[3]; kanban=[t for t in tabs if t.get("label")=="kanban"]
-assert len(kanban)==1, tabs
+assert len(kanban)==1
 kp=[p for p in panes if p.get("tab_id")==kanban[0]["tab_id"]]
-assert any(re.search(rf"card-{card}-p17-runner(?:-r\d+)?$", p.get("label") or "") for p in kp), kp
+assert any(re.search(rf"card-{card}-p17-runner(?:-r\d+)?$", p.get("label") or "") for p in kp)
 print(f"  kanban tab {kanban[0]['tab_id']} has the configured runner pane")
 PY
 LAYOUT_PANE="$(printf '%s' "$panes_json" | python3 -c '
@@ -123,7 +122,7 @@ layout_json="$(hrpc pane.layout "{\"pane_id\":\"$LAYOUT_PANE\"}")"
 python3 - "$layout_json" "$LAYOUT_PANE" <<'PY'
 import json, sys
 pane_ids={p["pane_id"] for p in json.loads(sys.argv[1]).get("layout", {}).get("panes", [])}
-assert sys.argv[2] in pane_ids, (sys.argv[2], pane_ids)
+assert sys.argv[2] in pane_ids
 print("  pane.layout contains the exact configured runner pane")
 PY
 

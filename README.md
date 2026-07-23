@@ -40,7 +40,9 @@ only `Todo`.
 ## Install
 
 Requires exactly **Herdr 0.7.5 (protocol 17)**, Git, and a Rust toolchain with `cargo`. Linux
-and macOS are supported. Ensure `~/.local/bin` is on your `PATH`.
+and macOS are supported. Ensure `~/.local/bin` is on your `PATH`. The board protocol is v1 and the
+current SQLite schema is v11; `schema.sql` defines fresh databases and the daemon applies tested
+upgrades through `board-core::db`.
 
 The daemon checks the selected Herdr socket before workspace discovery and pane launch. It rejects
 any Herdr version other than 0.7.5 and any protocol other than 17; protocol 16 is not supported.
@@ -123,6 +125,14 @@ board permission mode and rejects `--permission`. Claude remains available expli
   its outcome.
 - The daemon applies the column transition. It either dispatches the next automatic stage or stops
   at a manual gate.
+
+The CLI and TUI share typed `board-core::client::BoardClient` wrappers; only boardd owns SQLite.
+`RootConfig` parses the complete TOML document once, including typed `[daemon]` settings, then applies
+process-environment overrides. Runtime launch ownership stays in `board-daemon`: it consumes the
+versioned neutral launch spec, owns Herdr pane placement and process handles, and runs an always-on,
+per-session supervisor that reconnects conservatively after outages. Board snapshots include an
+additive active-run summary, so the TUI timer follows the open run's `started_at` rather than card
+activity timestamps.
 
 All board state lives under `~/.local/share/herdr-board/`; Herdr's own state is never modified.
 
@@ -279,6 +289,9 @@ idle_grace_seconds = 90    # idle without board done before the card is parked i
 
 [daemon]
 spawner = "herdr"          # herdr = agent panes (default); local = child processes
+timeout_unit_secs = 60      # seconds per column timeout_minutes unit
+tick_ms = 1000              # timeout/idle watcher interval
+local_poll_ms = 2000        # local-spawner liveness interval
 
 [harness.myharness]
 argv = ["mytool", "--model", "{model}"]
@@ -286,6 +299,12 @@ argv = ["mytool", "--model", "{model}"]
 
 Custom harness prompts are delivered through `$BOARD_PROMPT`. The placeholders `{model}`, `{effort}`,
 and `{permission_mode}` are available in `argv`.
+
+The daemon parses the complete document once, including `[daemon]`, into typed settings. A missing
+file or omitted section uses the defaults shown above. An existing file with malformed TOML or an
+invalid typed value (including an unknown `spawner`) is an error: the daemon does not silently fall
+back to defaults. Environment overrides are applied after parsing and take precedence; malformed
+override values also prevent daemon startup.
 
 ### Environment variables
 
@@ -314,19 +333,19 @@ existing plugin:
 herdr plugin install nelsonPires5/herdr-board --yes
 ```
 
-The build step stops the running daemon (`board daemon --stop`) before recompiling, so the new
+The build step requests a graceful stop (`board daemon --stop`) before recompiling, so the new
 binary replaces a stopped process instead of overwriting one the old daemon still has mapped in
-memory. The next `board` command auto-starts a fresh daemon from the new binary.
+memory. The command succeeds only after the daemon listener disappears. Stop failures and timeouts
+are non-zero and preserve the socket; stale-socket cleanup is only performed after a fresh failed
+connect and an identity check. The next `board` command auto-starts a fresh daemon from the new
+binary.
 
 Run the install once from each named Herdr session where the plugin is registered.
 
 If you are updating from a version older than the `--stop` flag and a stale daemon is still
-serving the old code, stop it manually first, then reinstall:
-
-```bash
-pkill -f 'board daemon'
-herdr plugin install nelsonPires5/herdr-board --yes
-```
+serving the old code, use your platform's process manager to stop that specific board process
+(after verifying its PID and command) before reinstalling. Do not remove the socket or use a broad
+process-name kill.
 
 </details>
 
@@ -339,7 +358,10 @@ reinstall, serving stale code). Stop it first, then remove the CLI Herdr can't m
 its checksum still matches the managed marker), then unregister the plugin:
 
 ```bash
-board daemon --stop 2>/dev/null || pkill -f 'board daemon'
+if ! board daemon --stop; then
+  echo "board daemon did not stop safely; socket preserved" >&2
+  exit 1
+fi
 (
   if [ "${HERDR_BOARD_CLI_INSTALL_DIR+x}" = x ]; then
     install_dir="$HERDR_BOARD_CLI_INSTALL_DIR"
@@ -418,6 +440,10 @@ Workspace crates:
 - `board-tui`: Ratatui application;
 - `board-cli`: the `board` binary.
 
+The CLI and TUI share `board_core::client::BoardClient`: typed wrappers own method names,
+wire parameters, and response decoding for board, harness, space, session, and run actions.
+The Unix-socket transport retains only the raw request primitive; production clients do not access SQLite.
+
 ### Documentation
 
 - [`docs/README.md`](docs/README.md) — documentation index;
@@ -437,7 +463,9 @@ Workspace crates:
 - `scripts/install.sh` — local-development setup;
 - `scripts/open-board.sh` — open-or-focus plugin action;
 - `scripts/board-rpc.py` — raw daemon protocol client;
-- `e2e/` — live end-to-end suite against disposable Herdr sessions/workspaces.
+- `e2e/` — scenarios 01–21 against disposable Herdr sessions/workspaces; checked-in fake Pi,
+  Claude, and configured harnesses keep the standard suite provider-free. `e2e/test-harness.sh`
+  performs static ownership/safety checks without starting Herdr; the live suite is a separate gate.
 
 ### Test gates
 
@@ -454,9 +482,11 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`AGENTS.md`](AGENTS.md) before con
 
 ## Status
 
-**v1.** Rust with Ratatui, Rusqlite, and Tokio. Pi is the default built-in harness and Claude Code
-remains explicitly selectable; config-defined harnesses are also supported. Execution happens in
-visible Herdr panes, and extension-owned state remains separate from Herdr's state.
+**v1 board protocol / schema v11.** Rust with Ratatui, Rusqlite, and Tokio. Pi is the default
+built-in harness and Claude Code remains explicitly selectable; config-defined harnesses are also
+supported. Execution happens in visible Herdr panes, and extension-owned state remains separate from
+Herdr's state. See [`docs/README.md`](docs/README.md) for version, source-ownership, and test-gate
+links.
 
 ## License
 

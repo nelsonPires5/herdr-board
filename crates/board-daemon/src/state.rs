@@ -5,27 +5,31 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use crate::spawner::{RuntimeHandle, Spawner};
 use board_core::config::Config;
 use board_core::protocol::{BoardChangedReason, Event, RunOutcome};
-use board_core::spawn::{SpawnHandle, Spawner};
 use board_herdr::{HerdrClient, NotificationSound};
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{broadcast, mpsc, watch, Mutex as AsyncMutex};
 
 use crate::session::SessionRegistry;
 use crate::settings::DaemonSettings;
 use crate::store::Store;
 
-/// Max consecutive auto-transitions for one card without a human action before
-/// the daemon stops the chain (cycle protection).
-pub const MAX_AUTO_HOPS: u32 = 8;
+fn system_wall_now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
+}
 
 /// In-memory bookkeeping for a started run.
 pub struct ActiveRun {
     pub card_id: i64,
-    pub handle: SpawnHandle,
+    pub handle: RuntimeHandle,
     pub started: Instant,
     pub timeout_deadline: Option<Instant>,
     /// When the agent last went idle (herdr status), for idle-grace detection.
@@ -42,34 +46,8 @@ pub struct ActiveRun {
 pub struct Sched {
     /// Started runs by run id.
     pub active: HashMap<i64, ActiveRun>,
-    /// Cards whose ended run is still applying its transition. The value is the
-    /// owning run id, so a duplicate finalizer cannot clear another claim.
-    pub finalizing_cards: HashMap<i64, i64>,
     /// Consecutive auto-hops per card (reset on human action / chain end).
     pub chain_hops: HashMap<i64, u32>,
-}
-
-impl Sched {
-    /// Reject a public mutation that could conflict with a pending transition.
-    pub fn ensure_card_not_finalizing(&self, card_id: i64) -> board_core::Result<()> {
-        if self.finalizing_cards.contains_key(&card_id) {
-            return Err(board_core::Error::InvalidState(
-                "card finalization is in progress; retry after it completes".into(),
-            ));
-        }
-        Ok(())
-    }
-
-    /// Reject a column mutation that could invalidate a finalizer's transition
-    /// snapshot, regardless of which card's source or target it touches.
-    pub fn ensure_no_finalizing_cards(&self, action: &str) -> board_core::Result<()> {
-        if !self.finalizing_cards.is_empty() {
-            return Err(board_core::Error::InvalidState(format!(
-                "card finalization is in progress; cannot {action}"
-            )));
-        }
-        Ok(())
-    }
 }
 
 /// The panes the herdr event watcher should subscribe to, grouped by the herdr
@@ -89,6 +67,8 @@ pub struct WatchState {
 /// in-memory scheduler state. Shared as `Arc<Daemon>`.
 pub struct Daemon {
     pub store: Store,
+    /// Injectable wall clock used only for durable timeout timestamps.
+    pub wall_now_ms: fn() -> i64,
     pub config: Config,
     pub settings: DaemonSettings,
     pub db_path: PathBuf,
@@ -102,10 +82,15 @@ pub struct Daemon {
     pub session_registry: Option<SessionRegistry>,
     pub events_tx: broadcast::Sender<Event>,
     pub dispatch_tx: mpsc::UnboundedSender<()>,
+    /// Serializes complete dispatch passes so capacity/space claims remain
+    /// authoritative until their launches have either registered or failed.
+    pub dispatch_pass: AsyncMutex<()>,
     pub sched: Mutex<Sched>,
     pub watch: Mutex<WatchState>,
     shutdown_tx: watch::Sender<bool>,
     stopping: AtomicBool,
+    #[cfg(test)]
+    pub effect_log: Mutex<Option<Arc<Mutex<Vec<&'static str>>>>>,
 }
 
 impl Daemon {
@@ -125,6 +110,7 @@ impl Daemon {
     ) -> Daemon {
         Daemon {
             store,
+            wall_now_ms: system_wall_now_ms,
             config,
             settings,
             db_path,
@@ -134,15 +120,27 @@ impl Daemon {
             session_registry,
             events_tx,
             dispatch_tx,
+            dispatch_pass: AsyncMutex::new(()),
             sched: Mutex::new(Sched::default()),
             watch: Mutex::new(WatchState::default()),
             shutdown_tx,
             stopping: AtomicBool::new(false),
+            #[cfg(test)]
+            effect_log: Mutex::new(None),
         }
+    }
+
+    pub fn wall_now_ms(&self) -> i64 {
+        (self.wall_now_ms)()
     }
 
     /// Broadcast an event to all subscribers (no-op if none).
     pub fn emit(&self, ev: Event) {
+        #[cfg(test)]
+        self.record_effect(match &ev {
+            Event::RunEnded { .. } => "run_ended",
+            Event::BoardChanged { .. } => "board_changed",
+        });
         let _ = self.events_tx.send(ev);
     }
 
@@ -172,11 +170,15 @@ impl Daemon {
 
     /// Wake the dispatcher to (re)evaluate the queue.
     pub fn wake_dispatch(&self) {
+        #[cfg(test)]
+        self.record_effect("dispatch_wake");
         let _ = self.dispatch_tx.send(());
     }
 
     /// Fire a herdr notification (best effort, detached; no-op without herdr).
     pub fn notify(&self, title: String, body: Option<String>, sound: NotificationSound) {
+        #[cfg(test)]
+        self.record_effect("notification");
         if let Some(h) = &self.herdr {
             let mut c = h.clone();
             std::thread::spawn(move || {
@@ -197,6 +199,8 @@ impl Daemon {
     /// Recompute the herdr watch pane-set (grouped by session socket) from
     /// active runs; bump generation on change so the watcher rebuilds.
     pub fn refresh_watch(&self) {
+        #[cfg(test)]
+        self.record_effect("watch");
         let default_sock = self.default_herdr_socket();
         let grouped: HashMap<PathBuf, Vec<String>> = {
             let s = self.sched.lock().unwrap();
@@ -221,6 +225,13 @@ impl Daemon {
         if w.panes_by_socket != grouped {
             w.panes_by_socket = grouped;
             w.generation += 1;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_effect(&self, effect: &'static str) {
+        if let Some(log) = self.effect_log.lock().unwrap().as_ref() {
+            log.lock().unwrap().push(effect);
         }
     }
 

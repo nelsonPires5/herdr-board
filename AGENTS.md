@@ -9,14 +9,17 @@ TUI + daemon + CLI. Rust, cargo workspace, edition 2021, all crates share the wo
 | Crate | Owns | Never leaks into |
 |---|---|---|
 | `board-core` | models, `board-core::protocol` types, SQLite db + migrations, the pure column engine, prompt assembly, harness adapters, config, the blocking boardd client | herdr/tokio/ratatui specifics |
-| `board-herdr` | the herdr unix-socket client (envelope, typed calls, event stream) | board state |
+| `board-herdr` | the Herdr unix-socket client (envelope, typed workspace/tab/agent/pane/notification/session calls, event stream) | board state; no worktree API |
 | `board-tui` | the ratatui app (`run()` entry), forms, snapshot tests | daemon logic |
 | `board-daemon` | boardd server: run queue, dispatch, per-session herdr clients, watchers, spawner | — |
 | `board-cli` | the `board` binary: clap subcommands wiring the above | business logic |
 
 Ownership is strict: edit your crate(s) + append to root `[workspace.dependencies]`. Semantics
 source of truth: `docs/protocol.md` + `docs/design.md`. Docs live in `docs/` (index: `docs/README.md`);
-`schema.sql` at the root is the migration source of truth.
+`schema.sql` is the fresh-schema source of truth and `board-core::db` owns upgrades. Final compatibility
+is board protocol v1, SQLite schema v11, and exactly Herdr 0.7.5 / socket protocol 17. The complete
+live catalog is `e2e/README.md` (scenarios 01–21); `e2e/test-harness.sh` is the provider-free static
+safety gate.
 
 ## Build / test gates (keep green)
 
@@ -29,18 +32,21 @@ cargo fmt --all --check                      # formatted
 - `#[ignore]`'d tests hit a live herdr (run only when `HERDR_SOCK`/`HERDR_SOCKET_PATH` exists).
 - End-to-end: `e2e/run-all.sh` (compat: `scripts/e2e.sh`) drives a REAL Herdr with a scenario
   suite, but checked-in fake Pi/Claude executables keep the standard suite provider-free and
-  zero-cost. It boots its own collision-resistant **ephemeral** Herdr session
-(`hb-e2e-<pid>-<random>-<random>`) per run and never touches
-  your real sessions; each scenario uses an isolated temp DB + socket, creates **disposable**
-  workspaces, prefixes every Herdr mutation `HERDR MUTATION:`, and tears everything down on exit
-  (`--keep` leaves sessions/workspaces for review). The forced-build standard suite passes 01–17
+  zero-cost. Every scenario boots its own collision-resistant **ephemeral** Herdr session
+  (`hb-e2e-<scenario>-<pid>-<random64>`, bounded slug) and never touches or adopts
+  your real sessions; each uses a marker-gated mode-0700 short HOME with explicit AF_UNIX margin,
+  an isolated temp DB + socket, and **disposable**
+  marked workspaces, prefixes every Herdr mutation `HERDR MUTATION:`, and tears everything down on exit
+  (`--keep` leaves sessions/workspaces for review). The forced-build standard suite passes 01–21
   provider-free under a mode-0700 root with controlled HOME/ZDOT/rc/PATH, never sourcing user rc;
   Herdr is resolved absolutely before PATH narrowing. Session mutation, board-daemon signals, workspace close, and session stop/delete are authorized
-  only by a captured Linux `/proc` identity token (start time, executable, complete argv, expected
-  session/name), never PID liveness alone; this applies to the primary and secondary sessions,
-  run-all, standalone, and future real-Claude smoke paths. The real-Claude smoke independently
-  captures/verifies the daemon identity. Cleanup is limited to the owning session root, and cleanup
-  failures propagate so a passing scenario cannot hide failed cleanup. See [`docs/testing.md`](docs/testing.md)
+  only by a captured Linux `/proc` identity token (start time, executable, complete exact
+  `--session <name> server` argv), never PID liveness alone; scenario mutation wrappers freshly verify
+  boardd and each primary/secondary target. Stop and post-stop delete have separate fail-closed
+  authorization, with delete requiring the exact private ownership marker. The real-Claude smoke independently
+  captures/verifies the daemon identity. Cleanup is limited to invocation-emitted exact names/roots/PIDs; marker and script-content digests are reverified immediately before destructive cleanup, and inherited roots always fail closed (reuse is process-local with exact path/mode/header/token/owner validation). A post-spawn server is provisionally ledgered by PID/start/exe/argv/owner token before full capture and is signalled only after a fresh match,
+  and failures propagate so a passing scenario cannot hide failed cleanup. Standard children use an
+  environment allowlist that excludes inherited provider configuration. See [`docs/testing.md`](docs/testing.md)
   for the layers and how to add one.
 
 ## Testing policy (pragmatic)
@@ -65,9 +71,17 @@ Full layering, harness details, and how to add tests live in [`docs/testing.md`]
   (`BOARD_DB`, `BOARD_SOCKET`). No wall-clock flakiness in tests.
 - Commit style: **Conventional Commits** grouped by crate/intent, as in the git log —
   `feat(core): …`, `feat(daemon,cli): …`, `docs: …`.
-- The daemon opens a **fresh herdr connection per operation** (`HerdrClient::connect` in
+- The daemon opens a **fresh Herdr connection per operation** (`HerdrClient::connect` in
   `dispatch.rs`/`ops.rs`/`spawner.rs`); one `HerdrClient` = one request/response connection, event
-  streaming lives on its own connection.
+  streaming lives on its own connection. Runtime launch ownership is daemon-only: `board-core`
+  persists the neutral schema-v11 launch spec, while `board-daemon` owns placement, pane/process
+  handles, liveness, cleanup, and the Herdr supervisor.
+- `RootConfig` is parsed once at daemon startup; typed `[daemon]` settings are resolved before
+  environment overrides, and malformed existing config is fatal. CLI and TUI use typed
+  `board-core::client::BoardClient` wrappers rather than raw method/result handling.
+- Auto-start creates one child process-group leader (no double-fork/`setsid`); stop is an exact
+  socket/identity-gated operation. The active-run summary drives TUI timers, and the always-on
+  per-session supervisor reconnects and reconciles conservatively.
 - Definition of done for a user-facing change: update the docs and `CHANGELOG.md` in the same change.
 - Release/version changes follow [`docs/releasing.md`](docs/releasing.md). Agents must never create,
   push, move, or delete release tags manually: a maintainer starts **Prepare Release**, merges its PR,

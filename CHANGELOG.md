@@ -6,7 +6,43 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+- Schema v11 snapshots each run's neutral launch argv, environment, and managed prompt inputs at enqueue time. Queued runs therefore launch byte-for-byte from the persisted specification even if card, column, or harness configuration changes before dispatch; older database rows retain their versioned compatibility behavior.
+- T20/R11 cleanup removes the unused public Herdr worktree calls and DTOs without changing the pinned schema fixture. Documentation now cross-links the v11/v1/protocol-17 ownership matrix and scenarios 01–21, including typed client/config boundaries, daemon launch ownership, active-run timers, supervisor recovery, and the provider-free safe harness. Auto-start is characterized as one exact child process-group owner rather than an undocumented double-fork/`setsid` lifecycle.
+- Board snapshots now carry an additive v1 `active_runs` summary (`card_id`, `started_at`) scoped to the requested board. The TUI uses the open run start for timers, so comments and other card updates do not reset elapsed time; live scenario 21 verifies the real event-refresh path without a provider.
+- Schema v10 uses partial queued/active indexes and direct scheduler queries, avoiding full run-history scans. Independent spaces can begin launch concurrently while typed per-space FIFO, a serialized dispatch-claim pass, and the global cap prevent duplicate or oversubscribed launches.
+- Daemon restart recovery now performs conservative Herdr reconciliation independent of initial connection success. An always-on per-socket supervisor connects when Herdr appears, isolates subscription changes and reconnect backoff to the affected socket, subscribes before snapshot reconciliation, and periodically repairs missed-event gaps. Only confirmed missing panes fail; unresolved sessions and probe failures remain open.
+- Schema v9 preserves timeout deadlines and awaiting pauses across daemon restarts; pause/resume is atomic and restart never resets a run's budget.
+- Schema v8 enforces one open run per card and makes enqueue, promotion, and finalization durable atomic DB units of work. Daemon board-done, cancel, timeout, and pane-exit paths now execute final comments, card transitions, and auto-hop enqueue in that single finalization transaction; failures leave the exact prior durable state, duplicate or stale losers are idempotent, and post-commit effects run in deterministic order.
+
 ### Changed
+- Runtime launch ownership now resides entirely in `board-daemon`; `board-core` retains only the
+  versioned, runtime-neutral execution specification. Existing argv/environment materialization,
+  placement, liveness, and cleanup behavior is unchanged.
+- Column create/edit forms now load harness metadata immediately when opened, without fetching
+  card-only sessions or workspaces; existing field values and focus survive the refresh.
+- Daemon startup now parses a typed `RootConfig` once; malformed existing TOML or daemon values are fatal instead of silently falling back to defaults, and environment overrides are applied afterward with precedence.
+- CLI and TUI board operations now share typed `BoardClient` wrappers for harness, space, session,
+  and run actions; raw method/result handling remains confined to the transport primitive, with no
+  production client-side SQLite I/O.
+- Card and column settings now use shared merged capability validation before persistence or
+  change events; effective card/column settings are revalidated at enqueue time, including legacy
+  rows. Invalid model/effort/permission combinations are rejected atomically, Pi permission modes
+  remain unsupported, and `bypassPermissions` is limited to explicit Claude card settings rather
+  than column defaults.
+- Live E2E scenario 18 (`18-nullable-clear.sh`) catalogs omitted/null/value persistence, merged
+  validation rejection, and provider-free dispatch after clearing overrides without recording
+  prompt bodies.
+- Nullable `column.update` and `card.update` fields now preserve omitted vs `null` vs value in
+  board protocol v1: omission leaves values unchanged, `null` clears them, and a value replaces
+  them. Database updates and TUI edits honor the same tri-state semantics.
+- Herdr socket requests and subscription acknowledgements now have bounded deadlines, match exact
+  response IDs, preserve events interleaved before acknowledgements, and restore blocking stream
+  reads after bounded polling/handshakes.
+- Board event subscribers now use bounded outbound queues: consecutive coarse refreshes coalesce,
+  responses and terminal events retain order, and subscribers that cannot accept a terminal event
+  are disconnected to reconnect and refetch rather than growing daemon memory without bound.
+- `board daemon --stop` now stops safely: it reports success only after the listener disappears,
+  preserves the socket on RPC errors/timeouts, and removes stale sockets only after identity checks.
 - The opt-in real-Claude Haiku smoke now stages only completed onboarding/theme, exact workspace
   trust, the installed Herdr hook, credentials, and approved `remote-settings.json` bytes. This
   prevents startup dialogs from consuming `agent.prompt` without copying broad personal Claude

@@ -14,7 +14,9 @@ use std::time::{Duration, Instant};
 
 use board_core::engine::{decide_signal, format_duration, AgentSignal};
 use board_core::protocol::{BoardChangedReason, CardStatus, RunOutcome};
-use board_herdr::{watch_subscriptions, Backoff, HerdrEvent, HerdrEvents, NotificationSound};
+use board_herdr::{
+    watch_subscriptions, AgentStatus, HerdrClient, HerdrEvent, HerdrEvents, NotificationSound,
+};
 
 use crate::dispatch::{finalize_run, finalize_run_timeout};
 use crate::state::Daemon;
@@ -179,6 +181,7 @@ fn apply_signal_guarded(
     guard: SignalGuard,
 ) {
     let applied_at = Instant::now();
+    let wall_now_ms = d.wall_now_ms();
     let dec = {
         // Signals and finalizers share one lock order. The exact active run and
         // its open DB row are revalidated while both locks are held, so a run
@@ -219,7 +222,13 @@ fn apply_signal_guarded(
         };
 
         let written = match dec.awaiting_reason {
+            Some(reason) if card.status != CardStatus::Awaiting => {
+                db.pause_run_timeout_uow(card_id, reason, wall_now_ms)
+            }
             Some(reason) => db.set_card_awaiting(card_id, reason),
+            None if card.status == CardStatus::Awaiting => {
+                db.resume_run_timeout_uow(card_id, dec.new_status, wall_now_ms)
+            }
             None => db.set_card_status(card_id, dec.new_status),
         };
         if let Err(e) = written {
@@ -282,7 +291,7 @@ pub async fn local_liveness_poller(d: Arc<Daemon>) {
 }
 
 async fn poll_once(d: &Arc<Daemon>) {
-    let candidates: Vec<(i64, board_core::spawn::SpawnHandle)> = {
+    let candidates: Vec<(i64, crate::spawner::RuntimeHandle)> = {
         let s = d.sched.lock().unwrap();
         s.active
             .iter()
@@ -323,76 +332,224 @@ async fn poll_once(d: &Arc<Daemon>) {
 
 // -- herdr status-event thread ----------------------------------------------
 
-/// Blocking thread multiplexing one event stream **per session socket** that
-/// has active panes (the fix for the multi-session bug: `agent.start`'s
-/// `pane.agent_status_changed` subscription is validated per socket, so each
-/// session needs its own stream). No-op without herdr.
-///
-/// Design (deliberately simple, no per-session thread lifecycle): a single
-/// thread holds a `socket → HerdrEvents` map. Each pass it reads the watch set
-/// (`panes_by_socket` + generation). On a generation change it drops every
-/// connection and rebuilds (subscriptions must reflect the new pane sets);
-/// between changes it (re)connects any watched socket missing a live stream
-/// (covers first-connect and reconnect-after-disconnect) and polls each stream
-/// with a short deadline so shutdown and watch changes are honored promptly.
-pub fn herdr_event_thread(d: Arc<Daemon>) {
-    if d.herdr.is_none() {
-        return;
+trait WatchEventStream: Send {
+    fn poll_event(&mut self, timeout: Duration) -> board_herdr::Result<Option<HerdrEvent>>;
+}
+
+impl WatchEventStream for HerdrEvents {
+    fn poll_event(&mut self, timeout: Duration) -> board_herdr::Result<Option<HerdrEvent>> {
+        HerdrEvents::poll_event(self, timeout)
     }
-    let mut conns: HashMap<PathBuf, HerdrEvents> = HashMap::new();
-    let mut current_gen: Option<u64> = None;
+}
 
-    while !d.is_shutdown() {
-        let (panes_by_socket, generation) = {
-            let w = d.watch.lock().unwrap();
-            (w.panes_by_socket.clone(), w.generation)
-        };
+#[derive(Default)]
+struct WatchSnapshot {
+    panes: HashMap<String, AgentStatus>,
+}
 
-        // Watch set changed → drop all streams so they resubscribe fresh.
-        if current_gen != Some(generation) {
-            current_gen = Some(generation);
-            conns.clear();
+trait WatchConnector: Send + Sync {
+    fn subscribe(
+        &self,
+        socket: &std::path::Path,
+        panes: &[String],
+    ) -> board_herdr::Result<Box<dyn WatchEventStream>>;
+    fn snapshot(&self, socket: &std::path::Path) -> board_herdr::Result<WatchSnapshot>;
+}
+
+struct HerdrWatchConnector;
+
+impl WatchConnector for HerdrWatchConnector {
+    fn subscribe(
+        &self,
+        socket: &std::path::Path,
+        panes: &[String],
+    ) -> board_herdr::Result<Box<dyn WatchEventStream>> {
+        HerdrEvents::connect(socket, &watch_subscriptions(panes))
+            .map(|events| Box::new(events) as Box<dyn WatchEventStream>)
+    }
+
+    fn snapshot(&self, socket: &std::path::Path) -> board_herdr::Result<WatchSnapshot> {
+        let mut client = HerdrClient::connect(socket)?;
+        let snapshot = client.session_snapshot()?;
+        let panes = snapshot
+            .panes
+            .into_iter()
+            .map(|pane| {
+                let status = snapshot
+                    .agents
+                    .iter()
+                    .find(|agent| agent.pane_id == pane.pane_id)
+                    .map(|agent| agent.agent_status)
+                    .unwrap_or(pane.agent_status);
+                (pane.pane_id, status)
+            })
+            .collect();
+        Ok(WatchSnapshot { panes })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct WatchTiming {
+    retry_initial: Duration,
+    retry_max: Duration,
+    reconcile: Duration,
+    poll: Duration,
+}
+
+impl Default for WatchTiming {
+    fn default() -> Self {
+        Self {
+            retry_initial: Duration::from_millis(200),
+            retry_max: Duration::from_secs(5),
+            reconcile: Duration::from_secs(30),
+            poll: Duration::from_millis(100),
         }
-        // Forget streams for sockets no longer watched.
-        conns.retain(|sock, _| panes_by_socket.contains_key(sock));
-        // (Re)connect any watched socket missing a live stream.
-        for (sock, panes) in &panes_by_socket {
-            if conns.contains_key(sock) {
-                continue;
-            }
-            let subs = watch_subscriptions(panes);
-            match HerdrEvents::connect_with_retry(sock, &subs, &Backoff::bounded(4)) {
-                Ok(ev) => {
-                    conns.insert(sock.clone(), ev);
+    }
+}
+
+/// State for one socket. Generation, retry, and snapshot schedules are local:
+/// changing or losing one session never resets a healthy session's stream.
+struct SocketWatch {
+    panes: Vec<String>,
+    generation: u64,
+    events: Option<Box<dyn WatchEventStream>>,
+    retry_at: Instant,
+    retry_delay: Duration,
+    reconcile_at: Instant,
+}
+
+impl SocketWatch {
+    fn new(panes: Vec<String>, generation: u64, now: Instant, timing: WatchTiming) -> Self {
+        Self {
+            panes,
+            generation,
+            events: None,
+            retry_at: now,
+            retry_delay: timing.retry_initial,
+            reconcile_at: now,
+        }
+    }
+
+    fn disconnected(&mut self, now: Instant, timing: WatchTiming) {
+        self.events = None;
+        self.retry_at = now + self.retry_delay;
+        self.retry_delay = (self.retry_delay * 2).min(timing.retry_max);
+    }
+}
+
+struct HerdrSocketSupervisor {
+    sockets: HashMap<PathBuf, SocketWatch>,
+    connector: Arc<dyn WatchConnector>,
+    timing: WatchTiming,
+}
+
+impl HerdrSocketSupervisor {
+    fn new(connector: Arc<dyn WatchConnector>, timing: WatchTiming) -> Self {
+        Self {
+            sockets: HashMap::new(),
+            connector,
+            timing,
+        }
+    }
+
+    fn sync_watches(&mut self, wanted: HashMap<PathBuf, Vec<String>>, now: Instant) {
+        self.sockets.retain(|socket, _| wanted.contains_key(socket));
+        for (socket, panes) in wanted {
+            match self.sockets.get_mut(&socket) {
+                Some(state) if state.panes != panes => {
+                    let generation = state.generation.saturating_add(1);
+                    *state = SocketWatch::new(panes, generation, now, self.timing);
                 }
-                Err(e) => tracing::debug!("herdr events connect {sock:?} failed: {e}"),
-            }
-        }
-
-        if conns.is_empty() {
-            // Nothing to watch yet; wait for the next spawn.
-            std::thread::sleep(Duration::from_millis(500));
-            continue;
-        }
-
-        // Poll each stream once with a short deadline.
-        let mut broken: Vec<PathBuf> = Vec::new();
-        for (sock, ev) in conns.iter_mut() {
-            match ev.poll_event(Duration::from_millis(200)) {
-                Ok(Some(event)) => handle_event_from_socket(&d, sock, event),
-                Ok(None) => {}
-                Err(e) => {
-                    tracing::debug!("herdr events {sock:?} ended: {e}");
-                    broken.push(sock.clone());
+                Some(_) => {}
+                None => {
+                    self.sockets
+                        .insert(socket, SocketWatch::new(panes, 1, now, self.timing));
                 }
             }
+        }
+    }
+
+    fn step(&mut self, d: &Arc<Daemon>, now: Instant) {
+        let wanted = d.watch.lock().unwrap().panes_by_socket.clone();
+        self.sync_watches(wanted, now);
+        for (socket, state) in &mut self.sockets {
             if d.is_shutdown() {
                 return;
             }
+            if state.events.is_none() && now >= state.retry_at {
+                match self.connector.subscribe(socket, &state.panes) {
+                    Ok(events) => {
+                        state.events = Some(events);
+                        state.retry_delay = self.timing.retry_initial;
+                        // The subscription ack has completed before snapshot I/O.
+                        reconcile_socket(d, socket, &state.panes, self.connector.as_ref());
+                        state.reconcile_at = now + self.timing.reconcile;
+                    }
+                    Err(error) => {
+                        tracing::debug!(?socket, "herdr subscribe failed: {error}");
+                        state.disconnected(now, self.timing);
+                    }
+                }
+            }
+            if state.events.is_some() && now >= state.reconcile_at {
+                reconcile_socket(d, socket, &state.panes, self.connector.as_ref());
+                state.reconcile_at = now + self.timing.reconcile;
+            }
+            let polled = state
+                .events
+                .as_mut()
+                .map(|events| events.poll_event(self.timing.poll));
+            match polled {
+                Some(Ok(Some(event))) => handle_event_from_socket(d, socket, event),
+                Some(Ok(None)) | None => {}
+                Some(Err(error)) => {
+                    tracing::debug!(?socket, "herdr event stream ended: {error}");
+                    state.disconnected(now, self.timing);
+                }
+            }
         }
-        for sock in broken {
-            conns.remove(&sock); // reconnected on a later pass if still watched
+    }
+}
+
+/// Always-on, per-socket Herdr supervisor. A successful generation always does
+/// subscribe → snapshot → poll. Periodic snapshots close event-loss gaps, and
+/// uncertain snapshots leave durable runs untouched.
+pub fn herdr_event_thread(d: Arc<Daemon>) {
+    let mut supervisor =
+        HerdrSocketSupervisor::new(Arc::new(HerdrWatchConnector), WatchTiming::default());
+    while !d.is_shutdown() {
+        supervisor.step(&d, Instant::now());
+        if d.is_shutdown() {
+            break;
         }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn reconcile_socket(
+    d: &Arc<Daemon>,
+    socket: &std::path::Path,
+    watched: &[String],
+    connector: &dyn WatchConnector,
+) {
+    // Any transport/decode/deadline failure is Unknown, never Gone.
+    let Ok(snapshot) = connector.snapshot(socket) else {
+        return;
+    };
+    for pane_id in watched {
+        let event = match snapshot.panes.get(pane_id) {
+            Some(status) => HerdrEvent::AgentStatusChanged {
+                pane_id: pane_id.clone(),
+                workspace_id: None,
+                status: *status,
+                agent: None,
+            },
+            None => HerdrEvent::PaneExited {
+                pane_id: pane_id.clone(),
+                workspace_id: None,
+            },
+        };
+        handle_event_from_socket(d, socket, event);
     }
 }
 
@@ -520,16 +677,19 @@ fn handle_event(d: &Arc<Daemon>, ev: HerdrEvent) {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-    use std::sync::Arc;
+    use std::collections::{HashMap, VecDeque};
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     use super::{
         apply_candidate, apply_signal, check_at, classify_candidates, handle_event, AgentSignal,
+        HerdrSocketSupervisor, WatchConnector, WatchEventStream, WatchSnapshot, WatchTiming,
     };
     use crate::dispatch::{finalize_run, finalize_run_timeout};
     use crate::settings::DaemonSettings;
     use crate::spawner::LocalSpawner;
+    use crate::spawner::RuntimeHandle;
     use crate::state::{ActiveRun, Daemon};
     use crate::store::Store;
     use board_core::config::Config;
@@ -537,8 +697,7 @@ mod tests {
     use board_core::protocol::{
         AwaitingReason, BoardChangedReason, CardCreateParams, CardStatus, Event, RunOutcome,
     };
-    use board_core::spawn::SpawnHandle;
-    use board_herdr::{AgentStatus, HerdrEvent};
+    use board_herdr::{AgentStatus, HerdrError, HerdrEvent};
     use tokio::sync::{broadcast, mpsc, watch};
 
     fn active_daemon() -> (Arc<Daemon>, i64, i64, broadcast::Receiver<Event>) {
@@ -587,7 +746,7 @@ mod tests {
             run.id,
             ActiveRun {
                 card_id: card.id,
-                handle: SpawnHandle::default(),
+                handle: RuntimeHandle::default(),
                 started: Instant::now(),
                 timeout_deadline: None,
                 idle_since: None,
@@ -695,7 +854,7 @@ mod tests {
                 run.id,
                 ActiveRun {
                     card_id: card.id,
-                    handle: SpawnHandle {
+                    handle: RuntimeHandle {
                         pane_id: Some("shared-pane".into()),
                         workspace_id: Some(workspace.into()),
                         herdr_socket: Some(socket),
@@ -784,6 +943,302 @@ mod tests {
             status,
             agent: Some("pi".into()),
         }
+    }
+
+    #[derive(Default)]
+    struct FakeSocketState {
+        connect: HashMap<PathBuf, VecDeque<bool>>,
+        snapshots: HashMap<PathBuf, VecDeque<Option<HashMap<String, AgentStatus>>>>,
+        events: HashMap<PathBuf, VecDeque<Result<Option<HerdrEvent>, ()>>>,
+        log: Vec<String>,
+        connects: HashMap<PathBuf, usize>,
+        drops: HashMap<PathBuf, usize>,
+    }
+
+    struct FakeSocketConnector(Arc<Mutex<FakeSocketState>>);
+
+    struct FakeSocketStream {
+        socket: PathBuf,
+        state: Arc<Mutex<FakeSocketState>>,
+    }
+
+    impl Drop for FakeSocketStream {
+        fn drop(&mut self) {
+            *self
+                .state
+                .lock()
+                .unwrap()
+                .drops
+                .entry(self.socket.clone())
+                .or_default() += 1;
+        }
+    }
+
+    impl WatchEventStream for FakeSocketStream {
+        fn poll_event(&mut self, _timeout: Duration) -> board_herdr::Result<Option<HerdrEvent>> {
+            let mut state = self.state.lock().unwrap();
+            state.log.push(format!("poll:{}", self.socket.display()));
+            match state
+                .events
+                .entry(self.socket.clone())
+                .or_default()
+                .pop_front()
+            {
+                Some(Ok(event)) => Ok(event),
+                Some(Err(())) => Err(HerdrError::Disconnected),
+                None => Ok(None),
+            }
+        }
+    }
+
+    impl WatchConnector for FakeSocketConnector {
+        fn subscribe(
+            &self,
+            socket: &Path,
+            _panes: &[String],
+        ) -> board_herdr::Result<Box<dyn WatchEventStream>> {
+            let mut state = self.0.lock().unwrap();
+            state.log.push(format!("subscribe:{}", socket.display()));
+            *state.connects.entry(socket.to_path_buf()).or_default() += 1;
+            let succeeds = state
+                .connect
+                .entry(socket.to_path_buf())
+                .or_default()
+                .pop_front()
+                .unwrap_or(true);
+            if !succeeds {
+                return Err(HerdrError::Disconnected);
+            }
+            Ok(Box::new(FakeSocketStream {
+                socket: socket.to_path_buf(),
+                state: self.0.clone(),
+            }))
+        }
+
+        fn snapshot(&self, socket: &Path) -> board_herdr::Result<WatchSnapshot> {
+            let mut state = self.0.lock().unwrap();
+            state.log.push(format!("snapshot:{}", socket.display()));
+            match state
+                .snapshots
+                .entry(socket.to_path_buf())
+                .or_default()
+                .pop_front()
+            {
+                Some(Some(panes)) => Ok(WatchSnapshot { panes }),
+                Some(None) => Err(HerdrError::Disconnected),
+                None => Ok(WatchSnapshot {
+                    panes: HashMap::from([
+                        ("p1".into(), AgentStatus::Working),
+                        ("shared-pane".into(), AgentStatus::Working),
+                        ("changed-pane".into(), AgentStatus::Working),
+                    ]),
+                }),
+            }
+        }
+    }
+
+    fn fake_supervisor(state: Arc<Mutex<FakeSocketState>>) -> HerdrSocketSupervisor {
+        HerdrSocketSupervisor::new(
+            Arc::new(FakeSocketConnector(state)),
+            WatchTiming {
+                retry_initial: Duration::from_millis(10),
+                retry_max: Duration::from_millis(40),
+                reconcile: Duration::from_millis(20),
+                poll: Duration::ZERO,
+            },
+        )
+    }
+
+    fn watch_on(d: &Arc<Daemon>, run_id: i64, socket: &Path, pane: &str) {
+        let mut sched = d.sched.lock().unwrap();
+        let active = sched.active.get_mut(&run_id).unwrap();
+        active.pane_id = Some(pane.into());
+        active.handle.pane_id = Some(pane.into());
+        active.handle.herdr_socket = Some(socket.to_path_buf());
+        drop(sched);
+        d.refresh_watch();
+    }
+
+    #[test]
+    fn fake_socket_appearing_after_initial_failure_connects_without_restart() {
+        let (d, run_id, _, _) = active_daemon();
+        let socket = PathBuf::from("/late.sock");
+        watch_on(&d, run_id, &socket, "p1");
+        let state = Arc::new(Mutex::new(FakeSocketState::default()));
+        state
+            .lock()
+            .unwrap()
+            .connect
+            .insert(socket.clone(), VecDeque::from([false, true]));
+        let mut supervisor = fake_supervisor(state.clone());
+        let start = Instant::now();
+
+        supervisor.step(&d, start);
+        supervisor.step(&d, start + Duration::from_millis(9));
+        supervisor.step(&d, start + Duration::from_millis(10));
+
+        assert_eq!(state.lock().unwrap().connects.get(&socket), Some(&2));
+        assert!(supervisor.sockets.get(&socket).unwrap().events.is_some());
+    }
+
+    #[test]
+    fn fake_socket_disconnect_reconnects_only_the_affected_socket() {
+        let (d, _, _, _, _, socket_a) = two_socket_daemon();
+        let socket_b = PathBuf::from("/tmp/herdr-b.sock");
+        let state = Arc::new(Mutex::new(FakeSocketState::default()));
+        state
+            .lock()
+            .unwrap()
+            .events
+            .insert(socket_a.clone(), VecDeque::from([Err(()), Ok(None)]));
+        let mut supervisor = fake_supervisor(state.clone());
+        let start = Instant::now();
+
+        supervisor.step(&d, start);
+        supervisor.step(&d, start + Duration::from_millis(10));
+
+        let state = state.lock().unwrap();
+        assert_eq!(state.connects.get(&socket_a), Some(&2));
+        assert_eq!(state.connects.get(&socket_b), Some(&1));
+        assert_eq!(state.drops.get(&socket_b).copied().unwrap_or(0), 0);
+    }
+
+    #[test]
+    fn fake_socket_subscription_change_does_not_reset_other_socket_generation() {
+        let (d, source_run, _, _, _, socket_a) = two_socket_daemon();
+        let socket_b = PathBuf::from("/tmp/herdr-b.sock");
+        let state = Arc::new(Mutex::new(FakeSocketState::default()));
+        let mut supervisor = fake_supervisor(state.clone());
+        let start = Instant::now();
+        supervisor.step(&d, start);
+        let generation_b = supervisor.sockets.get(&socket_b).unwrap().generation;
+
+        watch_on(&d, source_run, &socket_a, "changed-pane");
+        supervisor.step(&d, start + Duration::from_millis(1));
+
+        let state = state.lock().unwrap();
+        assert_eq!(state.connects.get(&socket_a), Some(&2));
+        assert_eq!(state.connects.get(&socket_b), Some(&1));
+        assert_eq!(
+            supervisor.sockets.get(&socket_b).unwrap().generation,
+            generation_b
+        );
+        assert_eq!(state.drops.get(&socket_b).copied().unwrap_or(0), 0);
+    }
+
+    #[test]
+    fn fake_socket_generation_orders_subscribe_then_snapshot_then_poll() {
+        let (d, run_id, _, _) = active_daemon();
+        let socket = PathBuf::from("/ordered.sock");
+        watch_on(&d, run_id, &socket, "p1");
+        let state = Arc::new(Mutex::new(FakeSocketState::default()));
+        fake_supervisor(state.clone()).step(&d, Instant::now());
+
+        assert_eq!(
+            state.lock().unwrap().log,
+            vec![
+                "subscribe:/ordered.sock",
+                "snapshot:/ordered.sock",
+                "poll:/ordered.sock"
+            ]
+        );
+    }
+
+    #[test]
+    fn fake_socket_periodic_snapshot_closes_gap_and_finalizes_only_once() {
+        let (d, run_id, card_id, _) = active_daemon();
+        let socket = PathBuf::from("/gap.sock");
+        watch_on(&d, run_id, &socket, "p1");
+        let state = Arc::new(Mutex::new(FakeSocketState::default()));
+        state.lock().unwrap().snapshots.insert(
+            socket.clone(),
+            VecDeque::from([
+                Some(HashMap::from([("p1".into(), AgentStatus::Working)])),
+                Some(HashMap::new()),
+                Some(HashMap::new()),
+            ]),
+        );
+        let mut supervisor = fake_supervisor(state);
+        let start = Instant::now();
+        supervisor.step(&d, start);
+        supervisor.step(&d, start + Duration::from_millis(20));
+        supervisor.step(&d, start + Duration::from_millis(40));
+
+        let db = d.store.lock();
+        assert_eq!(db.get_run(run_id).unwrap().outcome, Some(RunOutcome::Fail));
+        assert_eq!(
+            db.list_comments(card_id).unwrap().len(),
+            1,
+            "duplicate missing-pane observations must not duplicate finalization"
+        );
+    }
+
+    #[test]
+    fn fake_socket_snapshot_failure_is_unknown_and_never_finalizes() {
+        let (d, run_id, card_id, _) = active_daemon();
+        let socket = PathBuf::from("/unknown.sock");
+        watch_on(&d, run_id, &socket, "p1");
+        let state = Arc::new(Mutex::new(FakeSocketState::default()));
+        state
+            .lock()
+            .unwrap()
+            .snapshots
+            .insert(socket, VecDeque::from([None, None]));
+        let mut supervisor = fake_supervisor(state);
+        let start = Instant::now();
+        supervisor.step(&d, start);
+        supervisor.step(&d, start + Duration::from_millis(20));
+
+        let db = d.store.lock();
+        assert!(db.get_run(run_id).unwrap().ended_at.is_none());
+        assert_eq!(
+            db.get_card(card_id).unwrap().unwrap().status,
+            CardStatus::Running
+        );
+        assert!(db.list_comments(card_id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn fake_socket_shutdown_interrupts_retry_without_another_connect() {
+        let (d, run_id, _, _) = active_daemon();
+        let socket = PathBuf::from("/shutdown.sock");
+        watch_on(&d, run_id, &socket, "p1");
+        let state = Arc::new(Mutex::new(FakeSocketState::default()));
+        state
+            .lock()
+            .unwrap()
+            .connect
+            .insert(socket.clone(), VecDeque::from([false, true]));
+        let mut supervisor = fake_supervisor(state.clone());
+        let start = Instant::now();
+        supervisor.step(&d, start);
+        d.trigger_shutdown();
+        supervisor.step(&d, start + Duration::from_secs(1));
+
+        assert_eq!(state.lock().unwrap().connects.get(&socket), Some(&1));
+    }
+
+    #[test]
+    fn fake_socket_duplicate_pane_ids_are_routed_by_socket() {
+        let (d, source_run, source_card, other_run, other_card, socket_a) = two_socket_daemon();
+        let state = Arc::new(Mutex::new(FakeSocketState::default()));
+        state.lock().unwrap().events.insert(
+            socket_a,
+            VecDeque::from([Ok(Some(shared_status(AgentStatus::Blocked)))]),
+        );
+        fake_supervisor(state).step(&d, Instant::now());
+
+        let db = d.store.lock();
+        assert!(db.get_run(source_run).unwrap().ended_at.is_none());
+        assert!(db.get_run(other_run).unwrap().ended_at.is_none());
+        assert_eq!(
+            db.get_card(source_card).unwrap().unwrap().status,
+            CardStatus::Blocked
+        );
+        assert_eq!(
+            db.get_card(other_card).unwrap().unwrap().status,
+            CardStatus::Running
+        );
     }
 
     #[test]

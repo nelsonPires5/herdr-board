@@ -89,6 +89,9 @@ fn fake_run_focus_uses_latest_recorded_pane() {
     c.db()
         .start_run(older.id, Some("w"), Some("p-old"))
         .unwrap();
+    c.db()
+        .finish_run(older.id, board_core::protocol::RunOutcome::Ok, None)
+        .unwrap();
     let latest = c
         .db()
         .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)

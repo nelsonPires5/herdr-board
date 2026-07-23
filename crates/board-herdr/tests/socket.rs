@@ -11,11 +11,12 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::thread;
+use std::time::Duration;
 
 use board_herdr::{
     AgentPromptParams, AgentStartParams, AgentStatus, AgentWaitParams, HerdrClient, HerdrError,
-    HerdrEvent, HerdrEvents, PaneRenameParams, PaneSplitParams, ReadSource, SplitDirection,
-    Subscription, WorkspaceCreateParams,
+    HerdrEvent, HerdrEvents, PaneRenameParams, PaneSplitParams, ReadSource, SocketDeadlines,
+    SplitDirection, Subscription, WorkspaceCreateParams,
 };
 use serde_json::Value;
 
@@ -485,6 +486,131 @@ fn event_stream_yields_events_then_ends() {
         HerdrEvent::AgentStatusChanged { .. }
     ));
     assert!(matches!(collected[1], HerdrEvent::PaneExited { .. }));
+}
+
+fn short_deadlines() -> SocketDeadlines {
+    SocketDeadlines {
+        connect: Duration::from_millis(50),
+        read: Duration::from_millis(50),
+        write: Duration::from_millis(50),
+        handshake: Duration::from_millis(50),
+        request: Duration::from_millis(50),
+        method_grace: Duration::from_millis(20),
+    }
+}
+
+#[test]
+fn request_deadline_bounds_a_hanging_peer() {
+    let path = serve_calls(|_| {
+        thread::sleep(Duration::from_millis(150));
+        Action::Close
+    });
+    let mut client = HerdrClient::connect_with_deadlines(&path, short_deadlines()).unwrap();
+    assert!(matches!(
+        client.workspace_list(),
+        Err(HerdrError::Deadline {
+            operation: "response"
+        })
+    ));
+}
+
+#[test]
+fn request_ignores_unrelated_ids_and_uses_matching_result() {
+    let path = serve_calls(|req| {
+        let id = req["id"].as_str().unwrap();
+        Action::Reply(format!(
+            "{{\"id\":\"other\",\"result\":{{\"workspaces\":[]}}}}\n{{\"id\":\"{id}\",\"result\":{{\"workspaces\":[{{\"workspace_id\":\"w1\",\"label\":\"main\",\"number\":1,\"focused\":true,\"active_tab_id\":\"w1:t1\",\"agent_status\":\"idle\"}}]}}}}"
+        ))
+    });
+    let mut client = HerdrClient::connect(&path).unwrap();
+    assert_eq!(client.workspace_list().unwrap()[0].workspace_id, "w1");
+}
+
+#[test]
+fn request_surfaces_only_the_matching_error() {
+    let path = serve_calls(|req| {
+        let id = req["id"].as_str().unwrap();
+        Action::Reply(format!(
+            "{{\"id\":\"other\",\"error\":{{\"code\":\"wrong\",\"message\":\"ignore\"}}}}\n{{\"id\":\"{id}\",\"error\":{{\"code\":\"right\",\"message\":\"matched\"}}}}"
+        ))
+    });
+    let mut client = HerdrClient::connect(&path).unwrap();
+    assert!(matches!(
+        client.workspace_list(),
+        Err(HerdrError::Protocol { code, .. }) if code == "right"
+    ));
+}
+
+#[test]
+fn subscribe_buffers_interleaved_event_and_requires_exact_ack_id() {
+    let path = serve_stream(|stream| {
+        let mut writer = stream.try_clone().unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            return;
+        }
+        for line in [
+            r#"{"event":"pane_exited","data":{"type":"pane_exited","pane_id":"p1"}}"#,
+            r#"{"id":"unrelated","result":{"type":"subscription_started"}}"#,
+            r#"{"id":"subscribe","result":{"type":"subscription_started"}}"#,
+        ] {
+            writeln!(writer, "{line}").unwrap();
+        }
+    });
+    let mut events = HerdrEvents::connect(&path, &[Subscription::pane_exited()]).unwrap();
+    assert!(
+        matches!(events.next(), Some(HerdrEvent::PaneExited { pane_id, .. }) if pane_id == "p1")
+    );
+}
+
+#[test]
+fn subscribe_ack_deadline_is_typed() {
+    let path = serve_stream(|stream| {
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) != 0 {
+            thread::sleep(Duration::from_millis(150));
+        }
+    });
+    assert!(matches!(
+        HerdrEvents::connect_with_deadlines(
+            &path,
+            &[Subscription::pane_exited()],
+            short_deadlines()
+        ),
+        Err(HerdrError::Deadline {
+            operation: "subscribe ack"
+        })
+    ));
+}
+
+#[test]
+fn subscribe_handshake_timeout_is_cleared_for_blocking_iteration() {
+    let path = serve_stream(|stream| {
+        let mut writer = stream.try_clone().unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            return;
+        }
+        writeln!(writer, r#"{{"id":"subscribe","result":{{}}}}"#).unwrap();
+        thread::sleep(Duration::from_millis(100));
+        writeln!(
+            writer,
+            r#"{{"event":"pane_exited","data":{{"type":"pane_exited","pane_id":"p2"}}}}"#
+        )
+        .unwrap();
+    });
+    let mut events = HerdrEvents::connect_with_deadlines(
+        &path,
+        &[Subscription::pane_exited()],
+        short_deadlines(),
+    )
+    .unwrap();
+    assert!(
+        matches!(events.next(), Some(HerdrEvent::PaneExited { pane_id, .. }) if pane_id == "p2")
+    );
 }
 
 #[test]

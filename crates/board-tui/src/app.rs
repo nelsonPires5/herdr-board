@@ -11,6 +11,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::layout::Rect;
 
 use crate::forms::{FieldId, FieldKind, Form, Submit};
+use crate::OriginContext;
 
 /// Which modal/screen is active.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -178,6 +179,8 @@ pub struct App {
     pub drag: Option<DragState>,
     pub toast: Option<Toast>,
     pub should_quit: bool,
+    /// Explicit invoking Herdr/plugin context; default in tests.
+    pub origin_context: OriginContext,
     /// Injected clock (epoch seconds) for deterministic timer rendering.
     pub now: i64,
     /// Injected millisecond clock for double-click detection (0 in tests).
@@ -189,6 +192,10 @@ pub struct App {
 
 impl App {
     pub fn new(board: BoardSnapshot) -> App {
+        Self::with_origin_context(board, OriginContext::default())
+    }
+
+    pub fn with_origin_context(board: BoardSnapshot, origin_context: OriginContext) -> App {
         App {
             board,
             screen: Screen::Board,
@@ -207,6 +214,7 @@ impl App {
             drag: None,
             toast: None,
             should_quit: false,
+            origin_context,
             now: 0,
             now_ms: 0,
             last_area: Rect::new(0, 0, 80, 24),
@@ -234,6 +242,17 @@ impl App {
 
     pub fn col_id_at(&self, idx: usize) -> Option<i64> {
         self.board.columns.get(idx).map(|c| c.id)
+    }
+
+    /// Find the live-run summary for a card in the current board snapshot.
+    pub fn active_run_for_card(
+        &self,
+        card_id: i64,
+    ) -> Option<&board_core::protocol::ActiveRunSummary> {
+        self.board
+            .active_runs
+            .iter()
+            .find(|run| run.card_id == card_id)
     }
 
     /// Cards of a column, in board order.
@@ -411,7 +430,10 @@ fn board_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
         KeyCode::Char('n') => {
             if let Some(col_id) = app.col_id_at(app.sel_col) {
                 app.form_from_detail = false;
-                app.form = Some(Form::card_create(col_id));
+                app.form = Some(Form::card_create_with_session(
+                    col_id,
+                    app.origin_context.session.as_deref(),
+                ));
                 app.screen = Screen::CardForm;
                 return vec![Effect::LoadFormOptions];
             }
@@ -420,6 +442,7 @@ fn board_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
             app.form_from_detail = false;
             app.form = Some(Form::column_create(&app.board.columns));
             app.screen = Screen::ColumnForm;
+            return vec![Effect::LoadFormOptions];
         }
         KeyCode::Char('e') => {
             if let Some(card) = app.selected_card().cloned() {
@@ -434,6 +457,7 @@ fn board_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
                 app.form_from_detail = false;
                 app.form = Some(Form::column_edit(&col, &app.board.columns));
                 app.screen = Screen::ColumnForm;
+                return vec![Effect::LoadFormOptions];
             }
         }
         KeyCode::Char('a') => return archive_selected_card(app),

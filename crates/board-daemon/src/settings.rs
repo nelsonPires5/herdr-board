@@ -1,22 +1,45 @@
-//! Daemon-side settings not covered by `board_core::config::Config`.
+//! Runtime daemon settings derived from the typed root configuration.
 //!
-//! Spawner selection and a few test-tuning knobs. Values come from environment
-//! variables first, then a `[daemon]` table in the same `config.toml` that
-//! `board_core::config` reads, then defaults.
+//! The TOML document is parsed by `board_core::config::RootConfig`. This
+//! module only applies the environment overrides, after parsing, so malformed
+//! config cannot be hidden by a second best-effort parse.
 
 use std::path::Path;
 
-/// Which spawner the daemon uses to launch agent processes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SpawnerKind {
-    /// Launch agents as herdr panes (production default).
-    Herdr,
-    /// Launch agents as plain child processes (tests / headless).
-    Local,
+pub use board_core::config::SpawnerKind;
+use board_core::config::{DaemonConfig, RootConfig};
+use board_core::{Error, Result};
+
+/// An environment lookup supplied by the caller.
+///
+/// Keeping lookup injectable makes settings tests hermetic and avoids tests
+/// racing over the process-global environment. The daemon uses [`ProcessEnv`]
+/// at its process boundary.
+pub trait EnvLookup {
+    fn var(&self, key: &str) -> Option<String>;
+}
+
+impl<F> EnvLookup for F
+where
+    F: Fn(&str) -> Option<String>,
+{
+    fn var(&self, key: &str) -> Option<String> {
+        self(key)
+    }
+}
+
+/// Process environment adapter used by the real daemon.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ProcessEnv;
+
+impl EnvLookup for ProcessEnv {
+    fn var(&self, key: &str) -> Option<String> {
+        std::env::var(key).ok()
+    }
 }
 
 /// Resolved daemon settings.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonSettings {
     pub spawner: SpawnerKind,
     /// Seconds per column `timeout_minutes` unit. Default 60 (real minutes);
@@ -40,59 +63,125 @@ impl Default for DaemonSettings {
 }
 
 impl DaemonSettings {
-    /// Load from env + the `[daemon]` table of the config file at `config_path`.
-    pub fn load(config_path: &Path) -> DaemonSettings {
-        let mut s = DaemonSettings::default();
+    /// Resolve runtime settings from typed daemon config and injected env.
+    /// Environment values have precedence over TOML values.
+    pub fn from_config(config: &DaemonConfig, env: &dyn EnvLookup) -> Result<Self> {
+        let mut settings = Self {
+            spawner: config.spawner,
+            timeout_unit_secs: config.timeout_unit_secs.max(1),
+            local_poll_ms: config.local_poll_ms.max(1),
+            tick_ms: config.tick_ms.max(1),
+        };
 
-        // [daemon] table from config.toml (best effort; ignore parse errors).
-        if let Ok(text) = std::fs::read_to_string(config_path) {
-            if let Ok(v) = text.parse::<toml::Value>() {
-                if let Some(d) = v.get("daemon") {
-                    if let Some(sp) = d.get("spawner").and_then(|x| x.as_str()) {
-                        if let Some(k) = parse_spawner(sp) {
-                            s.spawner = k;
-                        }
-                    }
-                    if let Some(n) = d.get("timeout_unit_secs").and_then(|x| x.as_integer()) {
-                        s.timeout_unit_secs = n.max(1) as u64;
-                    }
-                    if let Some(n) = d.get("local_poll_ms").and_then(|x| x.as_integer()) {
-                        s.local_poll_ms = n.max(1) as u64;
-                    }
-                    if let Some(n) = d.get("tick_ms").and_then(|x| x.as_integer()) {
-                        s.tick_ms = n.max(1) as u64;
-                    }
-                }
-            }
+        if let Some(value) = env.var("BOARD_SPAWNER") {
+            settings.spawner = parse_spawner(&value)?;
+        }
+        if let Some(value) = env.var("BOARD_TIMEOUT_UNIT_SECS") {
+            settings.timeout_unit_secs = parse_u64("BOARD_TIMEOUT_UNIT_SECS", &value)?;
+        }
+        if let Some(value) = env.var("BOARD_LOCAL_POLL_MS") {
+            settings.local_poll_ms = parse_u64("BOARD_LOCAL_POLL_MS", &value)?;
+        }
+        if let Some(value) = env.var("BOARD_TICK_MS") {
+            settings.tick_ms = parse_u64("BOARD_TICK_MS", &value)?;
         }
 
-        // Environment overrides win.
-        if let Ok(sp) = std::env::var("BOARD_SPAWNER") {
-            if let Some(k) = parse_spawner(&sp) {
-                s.spawner = k;
-            }
-        }
-        if let Some(n) = env_u64("BOARD_TIMEOUT_UNIT_SECS") {
-            s.timeout_unit_secs = n.max(1);
-        }
-        if let Some(n) = env_u64("BOARD_LOCAL_POLL_MS") {
-            s.local_poll_ms = n.max(1);
-        }
-        if let Some(n) = env_u64("BOARD_TICK_MS") {
-            s.tick_ms = n.max(1);
-        }
-        s
+        Ok(settings)
+    }
+
+    /// Resolve settings from a complete, already-parsed root config.
+    pub fn from_root(root: &RootConfig, env: &dyn EnvLookup) -> Result<Self> {
+        Self::from_config(&root.daemon, env)
+    }
+
+    /// Load and parse a root config once, then apply process environment
+    /// overrides. Prefer [`Self::from_root`] when the board config is also
+    /// needed by the caller.
+    #[allow(dead_code)]
+    pub fn load(config_path: &Path) -> Result<Self> {
+        Self::load_with_env(config_path, &ProcessEnv)
+    }
+
+    /// Testable form of [`Self::load`] with an injected environment lookup.
+    #[allow(dead_code)]
+    pub fn load_with_env(config_path: &Path, env: &dyn EnvLookup) -> Result<Self> {
+        let root = RootConfig::load_from(config_path)?;
+        Self::from_root(&root, env)
     }
 }
 
-fn parse_spawner(s: &str) -> Option<SpawnerKind> {
-    match s.trim().to_ascii_lowercase().as_str() {
-        "local" => Some(SpawnerKind::Local),
-        "herdr" => Some(SpawnerKind::Herdr),
-        _ => None,
+fn parse_spawner(value: &str) -> Result<SpawnerKind> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "local" => Ok(SpawnerKind::Local),
+        "herdr" => Ok(SpawnerKind::Herdr),
+        _ => Err(Error::Config(format!(
+            "invalid BOARD_SPAWNER value {value:?}; expected `herdr` or `local`"
+        ))),
     }
 }
 
-fn env_u64(key: &str) -> Option<u64> {
-    std::env::var(key).ok().and_then(|v| v.parse().ok())
+fn parse_u64(key: &str, value: &str) -> Result<u64> {
+    value.parse::<u64>().map(|n| n.max(1)).map_err(|_| {
+        Error::Config(format!(
+            "invalid {key} value {value:?}; expected a positive integer"
+        ))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use board_core::config::RootConfig;
+
+    fn env<'a>(values: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |key| {
+            values
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| (*value).to_owned())
+        }
+    }
+
+    #[test]
+    fn injected_environment_overrides_typed_config_without_process_env() {
+        let root = RootConfig::from_toml("[daemon]\nspawner = \"herdr\"\ntimeout_unit_secs = 12\n")
+            .unwrap();
+        let settings = DaemonSettings::from_root(
+            &root,
+            &env(&[("BOARD_SPAWNER", "local"), ("BOARD_TICK_MS", "7")]),
+        )
+        .unwrap();
+
+        assert_eq!(settings.spawner, SpawnerKind::Local);
+        assert_eq!(settings.timeout_unit_secs, 12);
+        assert_eq!(settings.local_poll_ms, 2000);
+        assert_eq!(settings.tick_ms, 7);
+    }
+
+    #[test]
+    fn missing_daemon_config_uses_runtime_defaults() {
+        let settings = DaemonSettings::from_root(&RootConfig::default(), &env(&[])).unwrap();
+        assert_eq!(settings, DaemonSettings::default());
+    }
+
+    #[test]
+    fn invalid_injected_environment_is_a_config_error() {
+        let root = RootConfig::default();
+        assert!(matches!(
+            DaemonSettings::from_root(&root, &env(&[("BOARD_SPAWNER", "bogus")])),
+            Err(Error::Config(_))
+        ));
+    }
+
+    #[test]
+    fn malformed_file_is_not_replaced_with_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[daemon\n").unwrap();
+
+        assert!(matches!(
+            DaemonSettings::load_with_env(&path, &env(&[])),
+            Err(Error::Config(_))
+        ));
+    }
 }
