@@ -42,12 +42,20 @@ Separation card ↔ run is deliberate (vibe-kanban converged on task/attempt/exe
   bounded snapshot reconciliation; a disconnected or late Herdr session never blocks another.
 
 The physical modules follow these boundaries. `board-core::db` is split into migrations,
-board/column, card/comment, run-UoW, and row-mapping modules. `board-daemon::dispatch` separates
-enqueue preparation, dispatch passes, finalization, and space resolution; `spawner` separates local
-launch, Herdr launch, and pane placement. `board-herdr` keeps typed request parameters separate from
-its transport module, which owns all unsafe AF_UNIX operations. The CLI keeps clap arguments,
-daemon lifecycle, scope, helpers, and card/run/column/discovery command wiring in separate modules;
-none of these splits changes crate ownership or the public board protocol.
+board/column, card/comment, run-UoW, and row-mapping modules; `board-core::engine/` owns pure
+lifecycle, transition, validation, and signal decisions, while `board-core::client/` owns the
+blocking client traits, Unix transport, and fake client. `board-daemon::dispatch/` separates
+enqueue preparation, dispatch passes, finalization, and space resolution; `board-daemon::ops/`
+organizes request handling by boards, columns, cards, comments, runs, and discovery; and
+`board-daemon::watchers/` separates timeout, local liveness, signals, and Herdr event supervision.
+`board-daemon::spawner/` owns local/Herdr launch and pane placement. Their private invariant tests
+remain in the corresponding `src/**/tests/` modules rather than widening production visibility.
+`board-herdr::events/` owns event parsing, backoff, and streaming, while its transport module owns
+all unsafe AF_UNIX operations. `board-tui::app/`, `forms/`, and `view/` separate interaction state,
+form construction/submission, and rendering. Public API behavior is tested from each crate's
+`tests/` target; these splits do not change crate ownership, wire formats, or the public board
+protocol. The CLI keeps clap arguments, daemon lifecycle, scope, helpers, and
+card/run/column/discovery command wiring in separate modules.
 
 ### Root configuration and startup
 
@@ -481,6 +489,13 @@ Permissions: allowlist `Bash(board *)` (or per-subcommand) so card agents can co
 1. Verify herdr forwards mouse events into panes before promising drag-and-drop (keyboard covers everything regardless).
 
 ## 12. Automated testing
+
+Public API behavior belongs in `crates/<crate>/tests/`, so those tests exercise the crate as an
+external consumer. Private invariants remain adjacent to the implementation under `src/` in
+`#[cfg(test)]` modules; they must not force internal helpers into the public API. The stable module
+boundaries are responsibility-oriented: daemon operations/watchers/dispatch/spawner, TUI
+app/forms/view, core engine/client, and Herdr events each own their corresponding implementation
+and private tests. This is guidance for ownership, not an exhaustive file list.
 
 herdr panes are fully drivable from the CLI (`pane send-keys` with named keys, `pane send-text`, `pane read`, `workspace create/close`), so the board can be tested end-to-end inside a real herdr — in a disposable test workspace or an isolated named session.
 

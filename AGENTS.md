@@ -47,10 +47,22 @@ cargo fmt --all --check                      # formatted
 
 ## Testing policy (pragmatic)
 
-Full layering, harness details, and how to add tests live in [`docs/testing.md`](docs/testing.md).
+Full layering, test placement, harness details, and how to add tests live in
+[`docs/testing.md`](docs/testing.md).
 
-- **Test-first for behavior.** For any behavior change, write the failing unit test first
-  (red→green) in the owning crate's existing test style (`crates/<crate>/tests/`).
+- **Test-first for behavior.** For any behavior change, write the failing test first
+  (red→green) in the owning crate's existing style. Behavior through a public API belongs in
+  `crates/<crate>/tests/`, where it is compiled as an external client. A test that deliberately
+  checks a private invariant stays adjacent to its implementation under `src/` in a
+  `#[cfg(test)]` module; do not make production internals public just to relocate such a test.
+- **Responsibility-oriented modules.** The current stable boundaries are `board-daemon/src/ops/`
+  for request operations, `board-daemon/src/watchers/` for timeout/liveness/Herdr observation,
+  `board-daemon/src/dispatch/` for queue lifecycle, `board-daemon/src/spawner/` for launch and
+  placement, `board-tui/src/app/`, `board-tui/src/forms/`, and `board-tui/src/view/` for TUI
+  behavior, `board-core/src/engine/` and `board-core/src/client/` for pure decisions and
+  board-client transports, and `board-herdr/src/events/` for event parsing and streams. Keep
+  private tests beside those boundaries; describe ownership rather than maintaining a
+  file-by-file test manifest.
 - **New herdr-touching flow ⇒ e2e.** Any new user-visible flow that reaches herdr isn't done until
   it has a use case documented and a live scenario under `e2e/` (per `docs/testing.md` and
   `e2e/README.md`).
@@ -67,9 +79,10 @@ Full layering, harness details, and how to add tests live in [`docs/testing.md`]
   (`BOARD_DB`, `BOARD_SOCKET`). No wall-clock flakiness in tests.
 - Commit style: **Conventional Commits** grouped by crate/intent, as in the git log —
   `feat(core): …`, `feat(daemon,cli): …`, `docs: …`.
-- The daemon opens a **fresh Herdr connection per operation** (`HerdrClient::connect` in
-  `dispatch.rs`/`ops.rs`/`spawner.rs`); one `HerdrClient` = one request/response connection, event
-  streaming lives on its own connection. Runtime launch ownership is daemon-only: `board-core`
+- The daemon opens a **fresh Herdr connection per operation** (`HerdrClient::connect` in the
+  `dispatch/`, `ops/`, and `spawner/` modules); one `HerdrClient` = one request/response
+  connection, event streaming lives on its own connection. Runtime launch ownership is
+  daemon-only: `board-core`
   persists the neutral schema-v11 launch spec, while `board-daemon` owns placement, pane/process
   handles, liveness, cleanup, and the Herdr supervisor.
 - `RootConfig` is parsed once at daemon startup; typed `[daemon]` settings are resolved before

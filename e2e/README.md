@@ -54,7 +54,7 @@ The live scenario reproduces that supported path and asserts Herdr
 `agent_status=done`, board `awaiting_reason=agent_done`, an open run/live pane,
 paused timeout, and explicit confirmation to board `done`.
 
-`crates/board-daemon/src/watchers.rs` additionally covers idle grace →
+`crates/board-daemon/src/watchers/` additionally covers idle grace →
 `awaiting` (`idle_expired`), working/blocked signals, timeout pause, and pane exit
 deterministically through an injected `check_at(now)` seam. One live scenario
 is sufficient to prove the real Herdr event subscription and signal-application
