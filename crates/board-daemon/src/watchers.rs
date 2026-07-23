@@ -693,7 +693,7 @@ mod tests {
     use crate::state::{ActiveRun, Daemon};
     use crate::store::Store;
     use board_core::config::Config;
-    use board_core::db::Db;
+    use board_core::db::{Db, EnqueueRun};
     use board_core::protocol::{
         AwaitingReason, BoardChangedReason, CardCreateParams, CardStatus, Event, RunOutcome,
     };
@@ -713,18 +713,20 @@ mod tests {
             })
             .unwrap();
         let run = db
-            .create_run(
-                card.id,
-                card.column_id,
-                "pi",
-                "[\"pi\"]",
-                "prompt",
-                Some("session"),
-                None,
-            )
+            .enqueue_run_uow(&EnqueueRun {
+                card_id: card.id,
+                column_id: card.column_id,
+                harness: "pi",
+                argv_json: "[\"pi\"]",
+                prompt_snapshot: "prompt",
+                system_prompt_snapshot: None,
+                launch_spec_json: None,
+                session_id: Some("session"),
+                session: None,
+            })
             .unwrap();
-        db.start_run(run.id, Some("w1"), Some("p1")).unwrap();
-        db.set_card_status(card.id, CardStatus::Running).unwrap();
+        db.promote_run_uow(run.id, Some("w1"), Some("p1"), None)
+            .unwrap();
 
         let (events_tx, events_rx) = broadcast::channel(16);
         let (dispatch_tx, _dispatch_rx) = mpsc::unbounded_channel();
@@ -790,34 +792,34 @@ mod tests {
             })
             .unwrap();
         let run_a = db
-            .create_run(
-                card_a.id,
-                card_a.column_id,
-                "pi",
-                "[\"pi\"]",
-                "prompt A",
-                Some("session-a"),
-                None,
-            )
+            .enqueue_run_uow(&EnqueueRun {
+                card_id: card_a.id,
+                column_id: card_a.column_id,
+                harness: "pi",
+                argv_json: "[\"pi\"]",
+                prompt_snapshot: "prompt A",
+                system_prompt_snapshot: None,
+                launch_spec_json: None,
+                session_id: Some("session-a"),
+                session: None,
+            })
             .unwrap();
         let run_b = db
-            .create_run(
-                card_b.id,
-                card_b.column_id,
-                "pi",
-                "[\"pi\"]",
-                "prompt B",
-                Some("session-b"),
-                None,
-            )
+            .enqueue_run_uow(&EnqueueRun {
+                card_id: card_b.id,
+                column_id: card_b.column_id,
+                harness: "pi",
+                argv_json: "[\"pi\"]",
+                prompt_snapshot: "prompt B",
+                system_prompt_snapshot: None,
+                launch_spec_json: None,
+                session_id: Some("session-b"),
+                session: None,
+            })
             .unwrap();
-        for (run, card, workspace) in [
-            (&run_a, &card_a, "workspace-a"),
-            (&run_b, &card_b, "workspace-b"),
-        ] {
-            db.start_run(run.id, Some(workspace), Some("shared-pane"))
+        for (run, workspace) in [(&run_a, "workspace-a"), (&run_b, "workspace-b")] {
+            db.promote_run_uow(run.id, Some(workspace), Some("shared-pane"), None)
                 .unwrap();
-            db.set_card_status(card.id, CardStatus::Running).unwrap();
         }
 
         let (events_tx, _events_rx) = broadcast::channel(16);

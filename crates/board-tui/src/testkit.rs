@@ -3,6 +3,7 @@
 
 use board_core::capability::{claude_capabilities, pi_capabilities};
 use board_core::client::{BoardClient, FakeBoardClient};
+use board_core::db::{EnqueueRun, FinalizeRun};
 use board_core::harness::BUILTIN_HARNESSES;
 use board_core::protocol::{
     AwaitingReason, CardCreateParams, CardStatus, ColumnCreateParams, Effort, Event,
@@ -206,16 +207,19 @@ pub fn demo_client() -> anyhow::Result<DemoClient> {
         })?
         .id;
     c.db().set_card_status(running, CardStatus::Running)?;
-    let run = c.db().create_run(
-        running,
-        plan,
-        "claude",
-        "[\"claude\"]",
-        "prompt",
-        Some("sess-1"),
-        None,
-    )?;
-    c.db().start_run(run.id, Some("w4"), Some("p1"))?;
+    let run = c.db().enqueue_run_uow(&EnqueueRun {
+        card_id: running,
+        column_id: plan,
+        harness: "claude",
+        argv_json: "[\"claude\"]",
+        prompt_snapshot: "prompt",
+        system_prompt_snapshot: None,
+        launch_spec_json: None,
+        session_id: Some("sess-1"),
+        session: None,
+    })?;
+    c.db()
+        .promote_run_uow(run.id, Some("w4"), Some("p1"), None)?;
 
     // Execute — queued and blocked
     let queued = c
@@ -260,30 +264,52 @@ pub fn demo_client() -> anyhow::Result<DemoClient> {
         "Refactor failed in 3m10s -> Execute",
         Some("system"),
     )?;
-    let r1 = c.db().create_run(
-        failed,
-        review,
-        "claude",
-        "[\"claude\"]",
-        "p",
-        Some("sess-2"),
-        None,
-    )?;
-    c.db().start_run(r1.id, Some("w1"), Some("p2"))?;
+    let r1 = c.db().enqueue_run_uow(&EnqueueRun {
+        card_id: failed,
+        column_id: review,
+        harness: "claude",
+        argv_json: "[\"claude\"]",
+        prompt_snapshot: "p",
+        system_prompt_snapshot: None,
+        launch_spec_json: None,
+        session_id: Some("sess-2"),
+        session: None,
+    })?;
     c.db()
-        .finish_run(r1.id, RunOutcome::Ok, Some("plan written"))?;
-    let r2 = c.db().create_run(
-        failed,
-        review,
-        "claude",
-        "[\"claude\"]",
-        "p",
-        Some("sess-2"),
-        None,
-    )?;
-    c.db().start_run(r2.id, Some("w1"), Some("p3"))?;
+        .promote_run_uow(r1.id, Some("w1"), Some("p2"), None)?;
+    c.db().finalize_run_uow(&FinalizeRun {
+        run_id: r1.id,
+        outcome: RunOutcome::Ok,
+        summary: Some("plan written"),
+        comments: &[],
+        target_column_id: None,
+        final_status: CardStatus::Done,
+        final_awaiting_reason: None,
+        next: None,
+    })?;
+    let r2 = c.db().enqueue_run_uow(&EnqueueRun {
+        card_id: failed,
+        column_id: review,
+        harness: "claude",
+        argv_json: "[\"claude\"]",
+        prompt_snapshot: "p",
+        system_prompt_snapshot: None,
+        launch_spec_json: None,
+        session_id: Some("sess-2"),
+        session: None,
+    })?;
     c.db()
-        .finish_run(r2.id, RunOutcome::Fail, Some("tests failed"))?;
+        .promote_run_uow(r2.id, Some("w1"), Some("p3"), None)?;
+    c.db().finalize_run_uow(&FinalizeRun {
+        run_id: r2.id,
+        outcome: RunOutcome::Fail,
+        summary: Some("tests failed"),
+        comments: &[],
+        target_column_id: None,
+        final_status: CardStatus::Failed,
+        final_awaiting_reason: None,
+        next: None,
+    })?;
 
     // Review — awaiting: agent reported done, no `board done` yet (reason
     // visible in the detail view; run stays open).
@@ -294,17 +320,19 @@ pub fn demo_client() -> anyhow::Result<DemoClient> {
             "Tune the backoff constants based on the new metrics.",
         ))?
         .id;
-    let awaiting_run = c.db().create_run(
-        awaiting,
-        review,
-        "claude",
-        "[\"claude\"]",
-        "p",
-        Some("sess-awaiting"),
-        None,
-    )?;
+    let awaiting_run = c.db().enqueue_run_uow(&EnqueueRun {
+        card_id: awaiting,
+        column_id: review,
+        harness: "claude",
+        argv_json: "[\"claude\"]",
+        prompt_snapshot: "p",
+        system_prompt_snapshot: None,
+        launch_spec_json: None,
+        session_id: Some("sess-awaiting"),
+        session: None,
+    })?;
     c.db()
-        .start_run(awaiting_run.id, Some("w1"), Some("p-awaiting"))?;
+        .promote_run_uow(awaiting_run.id, Some("w1"), Some("p-awaiting"), None)?;
     c.db()
         .set_card_awaiting(awaiting, AwaitingReason::AgentDone)?;
 

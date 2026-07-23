@@ -5,6 +5,7 @@ use board_core::capability::{
     claude_capabilities, pi_capabilities, HarnessCapabilities, ModelInfo,
 };
 use board_core::client::BoardClient;
+use board_core::db::{EnqueueRun, FinalizeRun};
 use board_core::protocol::{CardStatus, Effort, Event, Patch, RunOutcome, SpaceInfo};
 use board_tui::app::{update, App, CardFilter, DetailScrollTarget, Effect, Msg, Screen};
 use board_tui::editor::FakeEditor;
@@ -528,12 +529,34 @@ fn card_detail_scrolls_comments_and_runs_independently() {
             .unwrap();
         let run = client
             .db()
-            .create_run(card.id, card.column_id, "claude", "[]", "p", None, None)
+            .enqueue_run_uow(&EnqueueRun {
+                card_id: card.id,
+                column_id: card.column_id,
+                harness: "claude",
+                argv_json: "[]",
+                prompt_snapshot: "p",
+                system_prompt_snapshot: None,
+                launch_spec_json: None,
+                session_id: None,
+                session: None,
+            })
             .unwrap();
-        client.db().start_run(run.id, None, None).unwrap();
         client
             .db()
-            .finish_run(run.id, RunOutcome::Ok, Some("done"))
+            .promote_run_uow(run.id, None, None, None)
+            .unwrap();
+        client
+            .db()
+            .finalize_run_uow(&FinalizeRun {
+                run_id: run.id,
+                outcome: RunOutcome::Ok,
+                summary: Some("done"),
+                comments: &[],
+                target_column_id: None,
+                final_status: CardStatus::Done,
+                final_awaiting_reason: None,
+                next: None,
+            })
             .unwrap();
     }
     let detail = client.card_get(card.id).unwrap();
@@ -569,12 +592,34 @@ fn opening_detail_starts_comments_and_runs_at_latest() {
             .unwrap();
         let run = client
             .db()
-            .create_run(card.id, card.column_id, "claude", "[]", "p", None, None)
+            .enqueue_run_uow(&EnqueueRun {
+                card_id: card.id,
+                column_id: card.column_id,
+                harness: "claude",
+                argv_json: "[]",
+                prompt_snapshot: "p",
+                system_prompt_snapshot: None,
+                launch_spec_json: None,
+                session_id: None,
+                session: None,
+            })
             .unwrap();
-        client.db().start_run(run.id, None, None).unwrap();
         client
             .db()
-            .finish_run(run.id, RunOutcome::Ok, Some("done"))
+            .promote_run_uow(run.id, None, None, None)
+            .unwrap();
+        client
+            .db()
+            .finalize_run_uow(&FinalizeRun {
+                run_id: run.id,
+                outcome: RunOutcome::Ok,
+                summary: Some("done"),
+                comments: &[],
+                target_column_id: None,
+                final_status: CardStatus::Done,
+                final_awaiting_reason: None,
+                next: None,
+            })
             .unwrap();
     }
     let mut driver = driver_of(client);
@@ -618,12 +663,34 @@ fn shrinking_detail_to_popup_reanchors_history_to_latest() {
             .unwrap();
         let run = client
             .db()
-            .create_run(card.id, card.column_id, "claude", "[]", "p", None, None)
+            .enqueue_run_uow(&EnqueueRun {
+                card_id: card.id,
+                column_id: card.column_id,
+                harness: "claude",
+                argv_json: "[]",
+                prompt_snapshot: "p",
+                system_prompt_snapshot: None,
+                launch_spec_json: None,
+                session_id: None,
+                session: None,
+            })
             .unwrap();
-        client.db().start_run(run.id, None, None).unwrap();
         client
             .db()
-            .finish_run(run.id, RunOutcome::Ok, Some("done"))
+            .promote_run_uow(run.id, None, None, None)
+            .unwrap();
+        client
+            .db()
+            .finalize_run_uow(&FinalizeRun {
+                run_id: run.id,
+                outcome: RunOutcome::Ok,
+                summary: Some("done"),
+                comments: &[],
+                target_column_id: None,
+                final_status: CardStatus::Done,
+                final_awaiting_reason: None,
+                next: None,
+            })
             .unwrap();
     }
     let detail = client.card_get(card.id).unwrap();

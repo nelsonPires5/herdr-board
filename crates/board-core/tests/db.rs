@@ -1,6 +1,6 @@
 //! Db migrations, seed, CRUD, and position management.
 
-use board_core::db::{Db, EnqueueRun, BOARD_ID};
+use board_core::db::{Db, EnqueueRun, FinalizeRun, BOARD_ID};
 use board_core::launch::{ExecutionSpec, RunLaunchSpec};
 use board_core::protocol::{
     AwaitingReason, CardCreateParams, CardStatus, ColumnCreateParams, ColumnUpdateParams, Effort,
@@ -171,9 +171,29 @@ fn migration_v2_upgrades_v1_database() {
     assert_eq!(db.list_comments(card.id).unwrap()[0].body, "preserved");
     let preserved = db.list_runs(card.id).unwrap()[0].clone();
     assert_eq!(preserved.prompt_snapshot, "preserved prompt");
-    db.finish_run(preserved.id, RunOutcome::Ok, None).unwrap();
+    db.finalize_run_uow(&FinalizeRun {
+        run_id: preserved.id,
+        outcome: RunOutcome::Ok,
+        summary: None,
+        comments: &[],
+        target_column_id: None,
+        final_status: CardStatus::Done,
+        final_awaiting_reason: None,
+        next: None,
+    })
+    .unwrap();
     let run = db
-        .create_run(card.id, card.column_id, "claude", "[]", "p", None, None)
+        .enqueue_run_uow(&EnqueueRun {
+            card_id: card.id,
+            column_id: card.column_id,
+            harness: "claude",
+            argv_json: "[]",
+            prompt_snapshot: "p",
+            system_prompt_snapshot: None,
+            launch_spec_json: None,
+            session_id: None,
+            session: None,
+        })
         .unwrap();
     assert!(run.session.is_none());
     let card_id = card.id;
@@ -492,18 +512,32 @@ fn migration_v4_preserves_claude_cards_and_accepts_pi_efforts() {
             .unwrap();
         db.add_comment(card.id, "user", "preserved").unwrap();
         let run = db
-            .create_run(
-                card.id,
-                card.column_id,
-                "claude",
-                "[]",
-                "prompt",
-                Some("session"),
-                None,
-            )
+            .enqueue_run_uow(&EnqueueRun {
+                card_id: card.id,
+                column_id: card.column_id,
+                harness: "claude",
+                argv_json: "[]",
+                prompt_snapshot: "prompt",
+                system_prompt_snapshot: None,
+                launch_spec_json: None,
+                session_id: Some("session"),
+                session: None,
+            })
             .unwrap();
-        db.start_run(run.id, None, None).unwrap();
-        db.finish_run(run.id, RunOutcome::Ok, None).unwrap();
+        db.promote_run_uow(run.id, None, None, None).unwrap();
+        // v4 CHECK constraint only allows idle/queued/running/blocked/failed;
+        // 'done' was added later, so finalize with Idle for backward compat.
+        db.finalize_run_uow(&FinalizeRun {
+            run_id: run.id,
+            outcome: RunOutcome::Ok,
+            summary: None,
+            comments: &[],
+            target_column_id: None,
+            final_status: CardStatus::Idle,
+            final_awaiting_reason: None,
+            next: None,
+        })
+        .unwrap();
     }
     {
         let conn = Connection::open(&path).unwrap();
@@ -591,16 +625,17 @@ fn run_system_prompt_snapshot_roundtrips_across_file_reopen() {
             })
             .unwrap();
         let run = db
-            .create_run_with_prompt_snapshots(
-                card.id,
-                card.column_id,
-                "pi",
-                r#"["pi","--model","x"]"#,
-                "Card task:\nwork",
-                Some(exact),
-                None,
-                None,
-            )
+            .enqueue_run_uow(&EnqueueRun {
+                card_id: card.id,
+                column_id: card.column_id,
+                harness: "pi",
+                argv_json: r#"["pi","--model","x"]"#,
+                prompt_snapshot: "Card task:\nwork",
+                system_prompt_snapshot: Some(exact),
+                launch_spec_json: None,
+                session_id: None,
+                session: None,
+            })
             .unwrap();
         (card.id, run.id)
     };
@@ -675,9 +710,19 @@ fn unsupported_persisted_launch_spec_is_rejected_on_read() {
                 ..Default::default()
             })
             .unwrap();
-        db.create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
-            .unwrap()
-            .id
+        db.enqueue_run_uow(&EnqueueRun {
+            card_id: card.id,
+            column_id: card.column_id,
+            harness: "pi",
+            argv_json: "[]",
+            prompt_snapshot: "p",
+            system_prompt_snapshot: None,
+            launch_spec_json: None,
+            session_id: None,
+            session: None,
+        })
+        .unwrap()
+        .id
     };
     Connection::open(&path).unwrap().execute(
         "UPDATE runs SET launch_spec_json='{\"version\":99,\"execution\":{\"argv\":[],\"env\":[],\"agent_kind\":null,\"initial_prompt\":null,\"system_prompt\":null}}' WHERE id=?1",
@@ -704,16 +749,17 @@ fn v10_to_v11_preserves_existing_run_bytes_and_null_across_reopen() {
                 ..Default::default()
             })
             .unwrap();
-        db.create_run_with_prompt_snapshots(
-            card.id,
-            card.column_id,
-            "pi",
-            r#"["pi","exact\\n\u0000  "]"#,
-            "prompt\n\0  ",
-            Some("system\n  "),
-            Some("sid"),
-            Some("herdr-session"),
-        )
+        db.enqueue_run_uow(&EnqueueRun {
+            card_id: card.id,
+            column_id: card.column_id,
+            harness: "pi",
+            argv_json: r#"["pi","exact\\n\u0000  "]"#,
+            prompt_snapshot: "prompt\n\0  ",
+            system_prompt_snapshot: Some("system\n  "),
+            launch_spec_json: None,
+            session_id: Some("sid"),
+            session: Some("herdr-session"),
+        })
         .unwrap()
         .id
     };
@@ -760,8 +806,21 @@ fn v6_to_v7_migration_preserves_legacy_queued_run_byte_for_byte() {
                 ..Default::default()
             })
             .unwrap();
-        db.create_run(card.id, card.column_id, "pi", argv, prompt, None, None)
-            .unwrap();
+        // v6→v7 migration fixture: enqueue at v11, then manually drop
+        // system_prompt_snapshot and downgrade to user_version=6 so the
+        // migration path re-adds the column.
+        db.enqueue_run_uow(&EnqueueRun {
+            card_id: card.id,
+            column_id: card.column_id,
+            harness: "pi",
+            argv_json: argv,
+            prompt_snapshot: prompt,
+            system_prompt_snapshot: None,
+            launch_spec_json: None,
+            session_id: None,
+            session: None,
+        })
+        .unwrap();
         // Make this a genuine v6 shape: the migration must add the nullable
         // column rather than relying on a pre-existing empty value.
         let conn = Connection::open(&path).unwrap();
@@ -793,15 +852,17 @@ fn comments_and_runs_roundtrip() {
     assert_eq!(db.list_comments(card.id).unwrap().len(), 2);
 
     let run = db
-        .create_run(
-            card.id,
-            card.column_id,
-            "claude",
-            "[]",
-            "prompt",
-            Some("sess"),
-            None,
-        )
+        .enqueue_run_uow(&EnqueueRun {
+            card_id: card.id,
+            column_id: card.column_id,
+            harness: "claude",
+            argv_json: "[]",
+            prompt_snapshot: "prompt",
+            system_prompt_snapshot: None,
+            launch_spec_json: None,
+            session_id: Some("sess"),
+            session: None,
+        })
         .unwrap();
     assert!(run.started_at.is_none());
     assert_eq!(db.count_queued_runs().unwrap(), 1);
@@ -809,14 +870,25 @@ fn comments_and_runs_roundtrip() {
     assert_eq!((queued[0].0.id, queued[0].1.id), (run.id, card.id));
     assert!(db.active_runs_with_cards().unwrap().is_empty());
 
-    db.start_run(run.id, Some("w4"), Some("p9")).unwrap();
+    db.promote_run_uow(run.id, Some("w4"), Some("p9"), None)
+        .unwrap();
     assert_eq!(db.count_active_runs().unwrap(), 1);
     assert!(db.queued_runs_with_cards().unwrap().is_empty());
     assert_eq!(db.active_runs_with_cards().unwrap()[0].0.id, run.id);
     let active = db.active_run_for_card(card.id).unwrap().unwrap();
     assert_eq!(active.herdr_pane_id.as_deref(), Some("p9"));
 
-    db.finish_run(run.id, RunOutcome::Ok, Some("done")).unwrap();
+    db.finalize_run_uow(&FinalizeRun {
+        run_id: run.id,
+        outcome: RunOutcome::Ok,
+        summary: Some("done"),
+        comments: &[],
+        target_column_id: None,
+        final_status: CardStatus::Done,
+        final_awaiting_reason: None,
+        next: None,
+    })
+    .unwrap();
     assert_eq!(db.count_active_runs().unwrap(), 0);
     assert!(db.queued_runs_with_cards().unwrap().is_empty());
     assert!(db.active_runs_with_cards().unwrap().is_empty());
@@ -841,51 +913,69 @@ fn direct_scheduler_queries_are_global_fifo_and_exclude_started_and_ended_rows()
     let active_card = make("active");
 
     let queued_one = db
-        .create_run(
-            queued_one_card.id,
-            queued_one_card.column_id,
-            "pi",
-            "[]",
-            "q1",
-            None,
-            None,
-        )
+        .enqueue_run_uow(&EnqueueRun {
+            card_id: queued_one_card.id,
+            column_id: queued_one_card.column_id,
+            harness: "pi",
+            argv_json: "[]",
+            prompt_snapshot: "q1",
+            system_prompt_snapshot: None,
+            launch_spec_json: None,
+            session_id: None,
+            session: None,
+        })
         .unwrap();
     let ended = db
-        .create_run(
-            ended_card.id,
-            ended_card.column_id,
-            "pi",
-            "[]",
-            "ended",
-            None,
-            None,
-        )
+        .enqueue_run_uow(&EnqueueRun {
+            card_id: ended_card.id,
+            column_id: ended_card.column_id,
+            harness: "pi",
+            argv_json: "[]",
+            prompt_snapshot: "ended",
+            system_prompt_snapshot: None,
+            launch_spec_json: None,
+            session_id: None,
+            session: None,
+        })
         .unwrap();
-    db.finish_run(ended.id, RunOutcome::Ok, None).unwrap();
+    db.finalize_run_uow(&FinalizeRun {
+        run_id: ended.id,
+        outcome: RunOutcome::Ok,
+        summary: None,
+        comments: &[],
+        target_column_id: None,
+        final_status: CardStatus::Done,
+        final_awaiting_reason: None,
+        next: None,
+    })
+    .unwrap();
     let queued_two = db
-        .create_run(
-            queued_two_card.id,
-            queued_two_card.column_id,
-            "pi",
-            "[]",
-            "q2",
-            None,
-            None,
-        )
+        .enqueue_run_uow(&EnqueueRun {
+            card_id: queued_two_card.id,
+            column_id: queued_two_card.column_id,
+            harness: "pi",
+            argv_json: "[]",
+            prompt_snapshot: "q2",
+            system_prompt_snapshot: None,
+            launch_spec_json: None,
+            session_id: None,
+            session: None,
+        })
         .unwrap();
     let active = db
-        .create_run(
-            active_card.id,
-            active_card.column_id,
-            "pi",
-            "[]",
-            "active",
-            None,
-            None,
-        )
+        .enqueue_run_uow(&EnqueueRun {
+            card_id: active_card.id,
+            column_id: active_card.column_id,
+            harness: "pi",
+            argv_json: "[]",
+            prompt_snapshot: "active",
+            system_prompt_snapshot: None,
+            launch_spec_json: None,
+            session_id: None,
+            session: None,
+        })
         .unwrap();
-    db.start_run(active.id, Some("workspace"), Some("pane"))
+    db.promote_run_uow(active.id, Some("workspace"), Some("pane"), None)
         .unwrap();
 
     let queued: Vec<_> = db
@@ -933,26 +1023,48 @@ fn active_run_summaries_are_started_open_and_board_scoped() {
 
     let open = |card: &board_core::model::Card| {
         let run = db
-            .create_run(card.id, card.column_id, "pi", "[]", "prompt", None, None)
+            .enqueue_run_uow(&EnqueueRun {
+                card_id: card.id,
+                column_id: card.column_id,
+                harness: "pi",
+                argv_json: "[]",
+                prompt_snapshot: "prompt",
+                system_prompt_snapshot: None,
+                launch_spec_json: None,
+                session_id: None,
+                session: None,
+            })
             .unwrap();
-        db.start_run(run.id, Some("workspace"), Some("pane"))
+        db.promote_run_uow(run.id, Some("workspace"), Some("pane"), None)
             .unwrap();
         run
     };
     let _active_run = open(&active);
     let _queued_run = db
-        .create_run(
-            queued.id,
-            queued.column_id,
-            "pi",
-            "[]",
-            "prompt",
-            None,
-            None,
-        )
+        .enqueue_run_uow(&EnqueueRun {
+            card_id: queued.id,
+            column_id: queued.column_id,
+            harness: "pi",
+            argv_json: "[]",
+            prompt_snapshot: "prompt",
+            system_prompt_snapshot: None,
+            launch_spec_json: None,
+            session_id: None,
+            session: None,
+        })
         .unwrap();
     let ended_run = open(&ended);
-    db.finish_run(ended_run.id, RunOutcome::Ok, None).unwrap();
+    db.finalize_run_uow(&FinalizeRun {
+        run_id: ended_run.id,
+        outcome: RunOutcome::Ok,
+        summary: None,
+        comments: &[],
+        target_column_id: None,
+        final_status: CardStatus::Done,
+        final_awaiting_reason: None,
+        next: None,
+    })
+    .unwrap();
     let _other_run = open(&other_active);
 
     let summaries = db.active_run_summaries(BOARD_ID).unwrap();
@@ -960,6 +1072,66 @@ fn active_run_summaries_are_started_open_and_board_scoped() {
     assert_eq!(summaries[0].card_id, active.id);
     assert!(!summaries[0].started_at.is_empty());
     assert_eq!(db.active_run_summaries(other.id).unwrap().len(), 1);
+}
+
+#[test]
+fn finalize_run_uow_compacts_source_and_target_column_positions() {
+    let db = mem();
+    let source = db.default_column_id(BOARD_ID).unwrap();
+    let target = db
+        .create_column(&ColumnCreateParams {
+            name: "Target".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let cards: Vec<_> = ["A", "B", "C"]
+        .into_iter()
+        .map(|title| {
+            db.create_card(&CardCreateParams {
+                title: title.into(),
+                ..Default::default()
+            })
+            .unwrap()
+        })
+        .collect();
+    let run = db
+        .enqueue_run_uow(&EnqueueRun {
+            card_id: cards[1].id,
+            column_id: source,
+            harness: "pi",
+            argv_json: "[]",
+            prompt_snapshot: "prompt",
+            system_prompt_snapshot: None,
+            launch_spec_json: None,
+            session_id: None,
+            session: None,
+        })
+        .unwrap();
+
+    db.finalize_run_uow(&FinalizeRun {
+        run_id: run.id,
+        outcome: RunOutcome::Ok,
+        summary: None,
+        comments: &[],
+        target_column_id: Some(target.id),
+        final_status: CardStatus::Idle,
+        final_awaiting_reason: None,
+        next: None,
+    })
+    .unwrap();
+
+    let source_cards = db.list_cards_in_column(source).unwrap();
+    assert_eq!(
+        source_cards
+            .iter()
+            .map(|card| (card.title.as_str(), card.position))
+            .collect::<Vec<_>>(),
+        vec![("A", 0), ("C", 1)]
+    );
+    let target_cards = db.list_cards_in_column(target.id).unwrap();
+    assert_eq!(target_cards.len(), 1);
+    assert_eq!(target_cards[0].id, cards[1].id);
+    assert_eq!(target_cards[0].position, 0);
 }
 
 #[test]
@@ -1080,25 +1252,47 @@ fn all_cards_and_latest_run_with_pane_include_scoped_boards() {
             ..Default::default()
         })
         .unwrap();
-    let no_pane = db
-        .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
+    let enqueue = |harness: &str, prompt: &str| {
+        db.enqueue_run_uow(&EnqueueRun {
+            card_id: card.id,
+            column_id: card.column_id,
+            harness,
+            argv_json: "[]",
+            prompt_snapshot: prompt,
+            system_prompt_snapshot: None,
+            launch_spec_json: None,
+            session_id: None,
+            session: None,
+        })
+        .unwrap()
+    };
+    let finish = |run_id: i64| {
+        db.finalize_run_uow(&FinalizeRun {
+            run_id,
+            outcome: RunOutcome::Ok,
+            summary: None,
+            comments: &[],
+            target_column_id: None,
+            final_status: CardStatus::Done,
+            final_awaiting_reason: None,
+            next: None,
+        })
         .unwrap();
-    db.start_run(no_pane.id, Some("w"), None).unwrap();
-    db.finish_run(no_pane.id, RunOutcome::Ok, None).unwrap();
-    let older = db
-        .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
+    };
+    let no_pane = enqueue("pi", "p");
+    db.promote_run_uow(no_pane.id, Some("w"), None, None)
         .unwrap();
-    db.start_run(older.id, Some("w"), Some("p-old")).unwrap();
-    db.finish_run(older.id, RunOutcome::Ok, None).unwrap();
-    let latest = db
-        .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
+    finish(no_pane.id);
+    let older = enqueue("pi", "p");
+    db.promote_run_uow(older.id, Some("w"), Some("p-old"), None)
         .unwrap();
-    db.start_run(latest.id, Some("w"), Some("p-new")).unwrap();
-    db.finish_run(latest.id, RunOutcome::Ok, None).unwrap();
-    let newest_without_pane = db
-        .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
+    finish(older.id);
+    let latest = enqueue("pi", "p");
+    db.promote_run_uow(latest.id, Some("w"), Some("p-new"), None)
         .unwrap();
-    db.start_run(newest_without_pane.id, Some("w"), None)
+    finish(latest.id);
+    let newest_without_pane = enqueue("pi", "p");
+    db.promote_run_uow(newest_without_pane.id, Some("w"), None, None)
         .unwrap();
 
     assert!(db.list_all_cards().unwrap().iter().any(|c| c.id == card.id));
@@ -1396,9 +1590,29 @@ fn delete_column_rolls_back_card_moves_when_delete_fails() {
         })
         .unwrap();
     let run = db
-        .create_run(card.id, source.id, "pi", "[]", "p", None, None)
+        .enqueue_run_uow(&EnqueueRun {
+            card_id: card.id,
+            column_id: source.id,
+            harness: "pi",
+            argv_json: "[]",
+            prompt_snapshot: "p",
+            system_prompt_snapshot: None,
+            launch_spec_json: None,
+            session_id: None,
+            session: None,
+        })
         .unwrap();
-    db.finish_run(run.id, RunOutcome::Fail, None).unwrap();
+    db.finalize_run_uow(&FinalizeRun {
+        run_id: run.id,
+        outcome: RunOutcome::Fail,
+        summary: None,
+        comments: &[],
+        target_column_id: None,
+        final_status: CardStatus::Failed,
+        final_awaiting_reason: None,
+        next: None,
+    })
+    .unwrap();
 
     // The historical run still references the source column, so its delete is
     // rejected by the FK after the card move has begun.
@@ -1444,19 +1658,59 @@ fn v8_to_v9_derives_timeout_state_once_from_durable_history() {
         let unlimited_card = make("unlimited", unlimited.id);
         let ended = make("ended", timed.id);
         running_id = db
-            .create_run(running.id, timed.id, "pi", "[]", "p", None, None)
+            .enqueue_run_uow(&EnqueueRun {
+                card_id: running.id,
+                column_id: timed.id,
+                harness: "pi",
+                argv_json: "[]",
+                prompt_snapshot: "p",
+                system_prompt_snapshot: None,
+                launch_spec_json: None,
+                session_id: None,
+                session: None,
+            })
             .unwrap()
             .id;
         awaiting_id = db
-            .create_run(awaiting.id, timed.id, "pi", "[]", "p", None, None)
+            .enqueue_run_uow(&EnqueueRun {
+                card_id: awaiting.id,
+                column_id: timed.id,
+                harness: "pi",
+                argv_json: "[]",
+                prompt_snapshot: "p",
+                system_prompt_snapshot: None,
+                launch_spec_json: None,
+                session_id: None,
+                session: None,
+            })
             .unwrap()
             .id;
         unlimited_id = db
-            .create_run(unlimited_card.id, unlimited.id, "pi", "[]", "p", None, None)
+            .enqueue_run_uow(&EnqueueRun {
+                card_id: unlimited_card.id,
+                column_id: unlimited.id,
+                harness: "pi",
+                argv_json: "[]",
+                prompt_snapshot: "p",
+                system_prompt_snapshot: None,
+                launch_spec_json: None,
+                session_id: None,
+                session: None,
+            })
             .unwrap()
             .id;
         ended_id = db
-            .create_run(ended.id, timed.id, "pi", "[]", "p", None, None)
+            .enqueue_run_uow(&EnqueueRun {
+                card_id: ended.id,
+                column_id: timed.id,
+                harness: "pi",
+                argv_json: "[]",
+                prompt_snapshot: "p",
+                system_prompt_snapshot: None,
+                launch_spec_json: None,
+                session_id: None,
+                session: None,
+            })
             .unwrap()
             .id;
     }
@@ -1528,7 +1782,17 @@ fn durable_timeout_pause_resume_is_atomic_idempotent_and_saturating() {
         })
         .unwrap();
     let run = db
-        .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
+        .enqueue_run_uow(&EnqueueRun {
+            card_id: card.id,
+            column_id: card.column_id,
+            harness: "pi",
+            argv_json: "[]",
+            prompt_snapshot: "p",
+            system_prompt_snapshot: None,
+            launch_spec_json: None,
+            session_id: None,
+            session: None,
+        })
         .unwrap();
     db.promote_run_uow(run.id, None, None, Some(i64::MAX - 10))
         .unwrap();

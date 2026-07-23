@@ -1159,75 +1159,6 @@ impl Db {
 
     // -- runs ----------------------------------------------------------------
 
-    /// Create a queued legacy-compatible run (`started_at`/`outcome` NULL).
-    ///
-    /// The absent system snapshot intentionally gives direct callers the same
-    /// shape as a pre-v7 row. Production enqueue uses
-    /// [`Db::create_run_with_prompt_snapshots`] instead.
-    #[allow(clippy::too_many_arguments)]
-    pub fn create_run(
-        &self,
-        card_id: i64,
-        column_id: i64,
-        harness: &str,
-        argv_json: &str,
-        prompt_snapshot: &str,
-        session_id: Option<&str>,
-        session: Option<&str>,
-    ) -> Result<Run> {
-        self.create_run_with_prompt_snapshots(
-            card_id,
-            column_id,
-            harness,
-            argv_json,
-            prompt_snapshot,
-            None,
-            session_id,
-            session,
-        )
-    }
-
-    /// Create a queued run with both enqueue-time prompt channels persisted in
-    /// the same row. `system_prompt_snapshot` is already protocol-trailer
-    /// inclusive and is stored byte-for-byte.
-    #[allow(clippy::too_many_arguments)]
-    pub fn create_run_with_prompt_snapshots(
-        &self,
-        card_id: i64,
-        column_id: i64,
-        harness: &str,
-        argv_json: &str,
-        prompt_snapshot: &str,
-        system_prompt_snapshot: Option<&str>,
-        session_id: Option<&str>,
-        session: Option<&str>,
-    ) -> Result<Run> {
-        let card = self.require_card(card_id)?;
-        let column = self.require_column(column_id)?;
-        if column.board_id != card.board_id {
-            return Err(Error::InvalidState(format!(
-                "run column {column_id} belongs to another board than card {card_id}"
-            )));
-        }
-        self.conn.execute(
-            "INSERT INTO runs
-             (card_id,column_id,harness,argv_json,prompt_snapshot,system_prompt_snapshot,
-              session_id,session)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-            params![
-                card_id,
-                column_id,
-                harness,
-                argv_json,
-                prompt_snapshot,
-                system_prompt_snapshot,
-                session_id,
-                session
-            ],
-        )?;
-        self.get_run(self.conn.last_insert_rowid())
-    }
-
     /// Atomically insert a queued run and publish the card's queued state.
     /// No process, socket, notification, or other external I/O occurs here.
     pub fn enqueue_run_uow(&self, p: &EnqueueRun<'_>) -> Result<Run> {
@@ -1350,15 +1281,47 @@ impl Db {
                     "target column belongs to another board".into(),
                 ));
             }
-            let position: i64 = tx.query_row(
-                "SELECT COALESCE(MAX(position)+1,0) FROM cards WHERE column_id=?1",
-                params![column_id],
-                |r| r.get(0),
+            let source_column_id: i64 = tx.query_row(
+                "SELECT column_id FROM cards WHERE id=?1",
+                params![card_id],
+                |row| row.get(0),
             )?;
             tx.execute(
-                "UPDATE cards SET column_id=?1,position=?2 WHERE id=?3",
-                params![column_id, position, card_id],
+                "UPDATE cards SET column_id=?1 WHERE id=?2",
+                params![column_id, card_id],
             )?;
+            let mut target_ids: Vec<i64> = {
+                let mut statement = tx.prepare(
+                    "SELECT id FROM cards WHERE column_id=?1 AND id<>?2 ORDER BY position,id",
+                )?;
+                let ids = statement
+                    .query_map(params![column_id, card_id], |row| row.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                ids
+            };
+            target_ids.push(card_id);
+            for (position, target_card_id) in target_ids.iter().enumerate() {
+                tx.execute(
+                    "UPDATE cards SET position=?1 WHERE id=?2",
+                    params![position as i64, target_card_id],
+                )?;
+            }
+            if source_column_id != column_id {
+                let source_ids: Vec<i64> = {
+                    let mut statement =
+                        tx.prepare("SELECT id FROM cards WHERE column_id=?1 ORDER BY position,id")?;
+                    let ids = statement
+                        .query_map(params![source_column_id], |row| row.get(0))?
+                        .collect::<rusqlite::Result<_>>()?;
+                    ids
+                };
+                for (position, source_card_id) in source_ids.iter().enumerate() {
+                    tx.execute(
+                        "UPDATE cards SET position=?1 WHERE id=?2",
+                        params![position as i64, source_card_id],
+                    )?;
+                }
+            }
         }
         tx.execute(
             "UPDATE cards SET status=?1,awaiting_reason=?2,updated_at=datetime('now') WHERE id=?3",
@@ -1398,35 +1361,6 @@ impl Db {
             finished_run: self.get_run(p.run_id)?,
             next_run: next_id.map(|id| self.get_run(id)).transpose()?,
         })
-    }
-
-    /// Mark a run started, recording herdr ids.
-    pub fn start_run(
-        &self,
-        run_id: i64,
-        workspace_id: Option<&str>,
-        pane_id: Option<&str>,
-    ) -> Result<Run> {
-        self.conn.execute(
-            "UPDATE runs SET started_at=datetime('now'), herdr_workspace_id=?1, herdr_pane_id=?2
-             WHERE id=?3",
-            params![workspace_id, pane_id, run_id],
-        )?;
-        self.get_run(run_id)
-    }
-
-    /// Close a run with an outcome + summary.
-    pub fn finish_run(
-        &self,
-        run_id: i64,
-        outcome: RunOutcome,
-        summary: Option<&str>,
-    ) -> Result<Run> {
-        self.conn.execute(
-            "UPDATE runs SET ended_at=datetime('now'), outcome=?1, result_summary=?2 WHERE id=?3",
-            params![outcome.as_str(), summary, run_id],
-        )?;
-        self.get_run(run_id)
     }
 
     pub fn get_run(&self, id: i64) -> Result<Run> {

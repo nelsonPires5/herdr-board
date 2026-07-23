@@ -4,6 +4,7 @@
 //! summary start time.
 
 use board_core::client::{BoardClient, FakeBoardClient};
+use board_core::db::{EnqueueRun, FinalizeRun};
 use board_core::protocol::{AwaitingReason, CardCreateParams, CardStatus, RunOutcome};
 use board_tui::app::{App, Msg};
 use board_tui::editor::FakeEditor;
@@ -283,14 +284,42 @@ fn card_detail_history_overflow_starts_latest_and_scrolls_sections() {
     for _ in 0..10 {
         let run = client
             .db()
-            .create_run(card.id, card.column_id, "claude", "[]", "p", None, None)
+            .enqueue_run_uow(&EnqueueRun {
+                card_id: card.id,
+                column_id: card.column_id,
+                harness: "claude",
+                argv_json: "[]",
+                prompt_snapshot: "p",
+                system_prompt_snapshot: None,
+                launch_spec_json: None,
+                session_id: None,
+                session: None,
+            })
             .unwrap();
-        client.db().start_run(run.id, None, None).unwrap();
         client
             .db()
-            .finish_run(run.id, RunOutcome::Ok, Some("done"))
+            .promote_run_uow(run.id, None, None, None)
+            .unwrap();
+        client
+            .db()
+            .finalize_run_uow(&FinalizeRun {
+                run_id: run.id,
+                outcome: RunOutcome::Ok,
+                summary: Some("done"),
+                comments: &[],
+                target_column_id: None,
+                final_status: CardStatus::Done,
+                final_awaiting_reason: None,
+                next: None,
+            })
             .unwrap();
     }
+    // The cycle of enqueue→promote→finalize advances the card status;
+    // restore the original Failed status so the snapshot matches.
+    client
+        .db()
+        .set_card_status(card.id, CardStatus::Failed)
+        .unwrap();
 
     let mut d = driver(client);
     d.app.last_area = Rect::new(0, 0, 120, 35);

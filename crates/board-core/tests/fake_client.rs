@@ -2,6 +2,7 @@
 #![cfg(feature = "fake-client")]
 
 use board_core::client::{BoardClient, FakeBoardClient};
+use board_core::db::{EnqueueRun, FinalizeRun};
 use board_core::protocol::{
     AwaitingReason, CardCreateParams, CardMoveParams, CardStatus, ColumnCreateParams, RunOutcome,
     Trigger,
@@ -84,20 +85,49 @@ fn fake_run_focus_uses_latest_recorded_pane() {
         .unwrap();
     let older = c
         .db()
-        .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
+        .enqueue_run_uow(&EnqueueRun {
+            card_id: card.id,
+            column_id: card.column_id,
+            harness: "pi",
+            argv_json: "[]",
+            prompt_snapshot: "p",
+            system_prompt_snapshot: None,
+            launch_spec_json: None,
+            session_id: None,
+            session: None,
+        })
         .unwrap();
     c.db()
-        .start_run(older.id, Some("w"), Some("p-old"))
+        .promote_run_uow(older.id, Some("w"), Some("p-old"), None)
         .unwrap();
     c.db()
-        .finish_run(older.id, board_core::protocol::RunOutcome::Ok, None)
+        .finalize_run_uow(&FinalizeRun {
+            run_id: older.id,
+            outcome: RunOutcome::Ok,
+            summary: None,
+            comments: &[],
+            target_column_id: None,
+            final_status: CardStatus::Done,
+            final_awaiting_reason: None,
+            next: None,
+        })
         .unwrap();
     let latest = c
         .db()
-        .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
+        .enqueue_run_uow(&EnqueueRun {
+            card_id: card.id,
+            column_id: card.column_id,
+            harness: "pi",
+            argv_json: "[]",
+            prompt_snapshot: "p",
+            system_prompt_snapshot: None,
+            launch_spec_json: None,
+            session_id: None,
+            session: None,
+        })
         .unwrap();
     c.db()
-        .start_run(latest.id, Some("w"), Some("p-new"))
+        .promote_run_uow(latest.id, Some("w"), Some("p-new"), None)
         .unwrap();
 
     let focused = c.run_focus(card.id, "/tmp/herdr.sock").unwrap();
@@ -124,9 +154,21 @@ fn fake_run_done_applies_the_real_transition_decision() {
         .unwrap();
     let run = c
         .db()
-        .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
+        .enqueue_run_uow(&EnqueueRun {
+            card_id: card.id,
+            column_id: card.column_id,
+            harness: "pi",
+            argv_json: "[]",
+            prompt_snapshot: "p",
+            system_prompt_snapshot: None,
+            launch_spec_json: None,
+            session_id: None,
+            session: None,
+        })
         .unwrap();
-    c.db().start_run(run.id, Some("w"), Some("p")).unwrap();
+    c.db()
+        .promote_run_uow(run.id, Some("w"), Some("p"), None)
+        .unwrap();
     c.db()
         .set_card_awaiting(card.id, AwaitingReason::AgentDone)
         .unwrap();

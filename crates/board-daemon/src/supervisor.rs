@@ -307,7 +307,7 @@ mod tests {
 
     use crate::spawner::{HerdrLaunchPlan, Spawner};
     use board_core::config::Config;
-    use board_core::db::Db;
+    use board_core::db::{Db, EnqueueRun};
     use board_core::protocol::{AwaitingReason, CardCreateParams, CardStatus};
     use tokio::sync::{broadcast, mpsc, watch};
 
@@ -413,7 +413,17 @@ mod tests {
             })
             .unwrap();
         let run = db
-            .create_run(card.id, card.column_id, "pi", "[]", "p", None, session)
+            .enqueue_run_uow(&EnqueueRun {
+                card_id: card.id,
+                column_id: card.column_id,
+                harness: "pi",
+                argv_json: "[]",
+                prompt_snapshot: "p",
+                system_prompt_snapshot: None,
+                launch_spec_json: None,
+                session_id: session,
+                session,
+            })
             .unwrap();
         db.promote_run_uow(run.id, Some("workspace-1"), pane, Some(12_000))
             .unwrap();
@@ -693,15 +703,17 @@ mod tests {
         let queued =
             f.d.store
                 .lock()
-                .create_run(
-                    queued_card.id,
-                    queued_card.column_id,
-                    "pi",
-                    "[]",
-                    "p",
-                    None,
-                    None,
-                )
+                .enqueue_run_uow(&EnqueueRun {
+                    card_id: queued_card.id,
+                    column_id: queued_card.column_id,
+                    harness: "pi",
+                    argv_json: "[]",
+                    prompt_snapshot: "p",
+                    system_prompt_snapshot: None,
+                    launch_spec_json: None,
+                    session_id: None,
+                    session: None,
+                })
                 .unwrap();
         reconcile_once(
             &f.d,

@@ -372,6 +372,7 @@ mod tests {
     use std::time::Duration;
 
     use crate::spawner::{HerdrLaunchPlan, Spawner};
+    use board_core::db::EnqueueRun;
     use board_core::engine::AgentSignal;
     use board_core::protocol::{
         AwaitingReason, CardCreateParams, CardStatus, ColumnUpdateParams, Patch,
@@ -409,7 +410,17 @@ mod tests {
         })
         .unwrap();
         let run = db
-            .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
+            .enqueue_run_uow(&EnqueueRun {
+                card_id: card.id,
+                column_id: card.column_id,
+                harness: "pi",
+                argv_json: "[]",
+                prompt_snapshot: "p",
+                system_prompt_snapshot: None,
+                launch_spec_json: None,
+                session_id: None,
+                session: None,
+            })
             .unwrap();
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
