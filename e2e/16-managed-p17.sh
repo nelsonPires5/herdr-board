@@ -86,7 +86,8 @@ expected_prompt = show["runs"][-1]["prompt_snapshot"]
 protocol = """## herdr-board protocol
 You are running a herdr-board card ($BOARD_CARD_ID is preset). When this stage's goal is met you MUST finish with exactly two commands: first `board comment \"<your results, files touched, findings>\"`, then `board done --outcome ok`. If the stage goal was NOT met — something failed or you got lost — use `board done --outcome fail --summary \"<why>\"` instead. Always comment before done. Never use `board move`/`cancel`/`retry` on your own card. Finishing or going idle WITHOUT `board done` leaves the card in `awaiting` for human review — a run is never auto-completed."""
 assert str(x["card_id"]) == card and str(x["run_id"]) == run
-assert x["board_socket"] == board and x["herdr_socket"] == herdr and x["cwd"] == cwd
+assert x["board_socket"] == board and x["herdr_socket"] == herdr
+assert os.path.realpath(x["cwd"]) == os.path.realpath(cwd)
 assert x["model"] == "p17/pi-model" and x["thinking"] == "low"
 assert x["argv"][:-2] == ["--model", "p17/pi-model", "--thinking", "low", "--session-id", x["session_id"]]
 assert x["argv"][-2:] == ["--append-system-prompt", x["system_prompt_file"]]
@@ -141,7 +142,8 @@ expected_prompt = show["runs"][-1]["prompt_snapshot"]
 protocol = """## herdr-board protocol
 You are running a herdr-board card ($BOARD_CARD_ID is preset). When this stage's goal is met you MUST finish with exactly two commands: first `board comment \"<your results, files touched, findings>\"`, then `board done --outcome ok`. If the stage goal was NOT met — something failed or you got lost — use `board done --outcome fail --summary \"<why>\"` instead. Always comment before done. Never use `board move`/`cancel`/`retry` on your own card. Finishing or going idle WITHOUT `board done` leaves the card in `awaiting` for human review — a run is never auto-completed."""
 assert str(x["card_id"]) == card and str(x["run_id"]) == run
-assert x["board_socket"] == board and x["herdr_socket"] == herdr and x["cwd"] == cwd
+assert x["board_socket"] == board and x["herdr_socket"] == herdr
+assert os.path.realpath(x["cwd"]) == os.path.realpath(cwd)
 base = ["--model", "p17/claude-model", "--effort", "low", "--permission-mode", "acceptEdits",
         "--allowedTools", "Bash(board:*)", "--session-id", x["session_id"]]
 assert x["argv"][:-2] == base

@@ -2,6 +2,13 @@
 # Deterministic/static safety checks for lib.sh; never starts Herdr or boardd.
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+TRUE_BIN="$(type -P true)"
+[ -x "$TRUE_BIN" ]
+# A macOS caller may enter through Bash 3.2 with a system-only PATH. run-all
+# must re-exec an absolute Bash >=4 before sourcing associative-array helpers.
+legacy_help="$(PATH=/usr/bin:/bin /bin/bash "$E2E_LIB_DIR/run-all.sh" --help 2>&1)"
+[[ "$legacy_help" == *"usage: e2e/run-all.sh"* ]]
+[[ "$legacy_help" != *"invalid option"* ]]
 
 cleanup() {
   [ -z "${child:-}" ] || { kill "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; }
@@ -10,10 +17,19 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Bootstrap key is copied into shell memory and scrubbed before any child can
+# inherit it. The test value is synthetic and never used for live ownership.
+bootstrap_key=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+E2E_LOCAL_IDENTITY_KEY=attacker-controlled E2E_IDENTITY_KEY_BOOTSTRAP="$bootstrap_key" \
+  E2E_LIB_DIR="$E2E_LIB_DIR" \
+  bash -c '. "$E2E_LIB_DIR/lib.sh"; [ "$E2E_LOCAL_IDENTITY_KEY" = "$1" ]; \
+    [ -z "${E2E_IDENTITY_KEY_BOOTSTRAP:-}" ]; \
+    ! env | grep -q "^E2E_LOCAL_IDENTITY_KEY="' _ "$bootstrap_key"
+
 e2e_scenario_root_ensure
 [[ "$E2E_SCENARIO_ROOT" == /tmp/h???????? ]]
 [ "$HOME" = "$E2E_SCENARIO_ROOT" ]
-[ "$(stat -c %a "$E2E_SCENARIO_ROOT")" = 700 ]
+[ "$(e2e_stat_mode "$E2E_SCENARIO_ROOT")" = 700 ]
 [ -f "$E2E_SCENARIO_ROOT/.disposable" ]
 # Even matching-token inherited roots fail: ownership is process-local and the
 # exact path/mode/header/owner/token contract is mandatory.
@@ -28,6 +44,17 @@ chmod 755 "$spoof"
   >/dev/null 2>&1 && { echo 'unsafe-mode inherited root was accepted' >&2; exit 1; }
 rm -rf "$spoof"
 
+# Environment-provided E2E_LOCAL_* values are not process-local evidence. A
+# fresh shell must scrub them before it can consider root/manifest reuse.
+spoof=/tmp/h87654321; rm -rf -- "$spoof"; mkdir -m 700 "$spoof"
+if env E2E_SCENARIO_ROOT="$spoof" E2E_LOCAL_SCENARIO_ROOT="$spoof" \
+  E2E_INVOCATION_TOKEN=matching E2E_LOCAL_INVOCATION_TOKEN=matching E2E_LIB_DIR="$E2E_LIB_DIR" \
+  bash -c '. "$E2E_LIB_DIR/lib.sh"; printf "herdr-board-e2e\\nowner=standalone-%s\\ntoken=matching\\n" "$$" >"$E2E_SCENARIO_ROOT/.disposable"; chmod 600 "$E2E_SCENARIO_ROOT/.disposable"; e2e_scenario_root_ensure' \
+  >/dev/null 2>&1; then
+  rm -rf -- "$spoof"; echo 'exported local root evidence was accepted' >&2; exit 1
+fi
+rm -rf -- "$spoof"
+
 # Injected failure after both early roots are ledgered must leave no root or
 # standalone manifest behind.
 early_log="$(mktemp /tmp/hb-e2e-early-log.XXXXXX)"
@@ -36,7 +63,9 @@ env -u E2E_INVOCATION_TOKEN -u E2E_SCENARIO_ROOT -u E2E_OWNED_RESOURCE_MANIFEST 
   E2E_TEST_EARLY_PATH_LOG="$early_log" \
   bash -c '. "$1/lib.sh"; trap e2e_cleanup EXIT; e2e_enable_fake_pi' _ "$E2E_LIB_DIR" \
   >/dev/null 2>&1 && { echo 'injected early failure unexpectedly passed' >&2; exit 1; }
-mapfile -t early_paths <"$early_log"; rm -f "$early_log"
+early_paths=()
+while IFS= read -r path; do early_paths+=("$path"); done <"$early_log"
+rm -f "$early_log"
 [ "${#early_paths[@]}" -eq 3 ]
 for path in "${early_paths[@]}"; do [ ! -e "$path" ] || { echo "early resource leaked: $path" >&2; exit 1; }; done
 
@@ -69,9 +98,12 @@ secondary="$(e2e_session_name hb-e2e-b-)"
 owner="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
 env E2E_HERDR_OWNER_TOKEN="$owner" /bin/sleep 30 &
 child=$!
-identity="$(e2e_process_identity_capture "$child" /bin/sleep 30 /bin/sleep "$owner")"
+child_provisional="$(e2e_provisional_child_capture "$child" "$owner")"
+identity="$(e2e_process_identity_capture "$child" /bin/sleep 30 /bin/sleep "$owner" \
+  E2E_HERDR_OWNER_TOKEN "$child_provisional")"
 e2e_process_identity_verify "$child" "$identity"
-! e2e_process_identity_capture "$child" /bin/sleep 30 /bin/sleep wrong >/dev/null 2>&1
+! e2e_process_identity_capture "$child" /bin/sleep 30 /bin/sleep wrong \
+  E2E_HERDR_OWNER_TOKEN "$child_provisional" >/dev/null 2>&1
 ! e2e_process_identity_verify "$child" "${identity/\"owner_token\":\"$owner\"/\"owner_token\":\"wrong\"}"
 
 # A provisional post-spawn capability is ledgered with exact child/start/exe/
@@ -83,9 +115,9 @@ e2e_process_resource_register helper provisional-test "$provisional_pid" "$provi
 bad_provisional="${provisional_token/\"owner_token\":\"$provisional_owner\"/\"owner_token\":\"wrong\"}"
 e2e_provisional_child_abort provisional-test "$provisional_pid" "$bad_provisional" >/dev/null 2>&1 \
   && { echo 'provisional owner mismatch authorized signal' >&2; exit 1; }
-[ -e "/proc/$provisional_pid" ]
+e2e_process_exists "$provisional_pid"
 e2e_provisional_child_abort provisional-test "$provisional_pid" "$provisional_token"
-[ ! -e "/proc/$provisional_pid" ]
+! e2e_process_exists "$provisional_pid"
 
 # RED regression for the old daemon pre-capture raw kill: force provisional
 # capture to use a mismatched owner token, capture the refusal log, and prove
@@ -109,10 +141,16 @@ E2E_TEST_DAEMON_PIDFILE="$daemon_red_pidfile" E2E_TEST_DAEMON_SIGNALS="$daemon_r
   bash -c '
     set -euo pipefail
     . "$E2E_LIB_DIR/lib.sh"
+    e2e_identity_key_ensure
     eval "$(declare -f e2e_provisional_child_capture | sed \
       "1s/e2e_provisional_child_capture/e2e_real_provisional_child_capture/")"
     e2e_provisional_child_capture() {
-      e2e_real_provisional_child_capture "$1" definitely-wrong E2E_BOARD_DAEMON_OWNER_TOKEN
+      local token
+      token="$(e2e_real_provisional_child_capture "$1" "$2" E2E_BOARD_DAEMON_OWNER_TOKEN)" || return 1
+      python3 - "$token" <<'PY'
+import json,sys
+t=json.loads(sys.argv[1]); t["owner_token"]="tampered"; print(json.dumps(t,separators=(",",":"),sort_keys=True))
+PY
     }
     BOARD_BIN="$E2E_TEST_DAEMON_RED_DIR/board"
     E2E_TMP="$E2E_TEST_DAEMON_RED_DIR"
@@ -122,11 +160,11 @@ E2E_TEST_DAEMON_PIDFILE="$daemon_red_pidfile" E2E_TEST_DAEMON_SIGNALS="$daemon_r
 for _ in $(seq 1 50); do [ -s "$daemon_red_pidfile" ] && break; sleep .01; done
 [ -s "$daemon_red_pidfile" ]
 daemon_red_pid="$(<"$daemon_red_pidfile")"
-[ -e "/proc/$daemon_red_pid" ] || { echo 'daemon capture failure signaled its unverified PID' >&2; exit 1; }
+e2e_process_exists "$daemon_red_pid" || { echo 'daemon capture failure signaled its unverified PID' >&2; exit 1; }
 [ ! -s "$daemon_red_signals" ] || { echo 'daemon capture failure emitted a raw signal' >&2; exit 1; }
-grep -F 'could not capture provisional exact-child evidence' "$daemon_red_log" >/dev/null
+grep -F 'cannot ledger provisional board-daemon evidence' "$daemon_red_log" >/dev/null
 kill "$daemon_red_pid" 2>/dev/null || true
-for _ in $(seq 1 50); do [ ! -e "/proc/$daemon_red_pid" ] && break; sleep .01; done
+for _ in $(seq 1 50); do ! e2e_process_exists "$daemon_red_pid" && break; sleep .01; done
 rm -rf "$daemon_red_dir"
 
 # T00 regression: exercise the owned-session stop wait with a deterministic
@@ -153,17 +191,17 @@ e2e_session_owner_marker_create "$t00_name"
   e2e_session_identity_verify() {
     local check_pid="$1" expected_name="${3:-}"
     [ "$check_pid" = "$t00_pid" ] && [ "$expected_name" = "$t00_name" ] \
-      && [ -e "/proc/$check_pid" ]
+      && e2e_process_exists "$check_pid"
   }
-  t00_identity="$(python3 - "$t00_pid" "$t00_name" <<'PY'
+  t00_unsigned="$(python3 - "$identity" "$t00_pid" "$t00_name" <<'PY'
 import json,sys
-pid,name=sys.argv[1:]
-print(json.dumps({"pid":pid,"name":name,"session":name,"owner_token":"owned",
-                  "expected_command":"/bin/sleep",
-                  "cmdline":["/bin/sleep","--session",name,"server"]},
-                 separators=(",",":"),sort_keys=True))
+t=json.loads(sys.argv[1]); pid,name=sys.argv[2:]; t.pop('signature')
+t.update(pid=pid,name=name,session=name,owner_token='owned',expected_command='/bin/sleep')
+t['cmdline']=['/bin/sleep','--session',name,'server']
+print(json.dumps(t,separators=(',',':'),sort_keys=True))
 PY
 )"
+  t00_identity="$(e2e_identity_sign_json "$t00_unsigned")"
   mkdir -p "$HOME/.config/herdr/sessions/$t00_name"
   e2e_session_resource_register "$t00_name" "$t00_identity" \
     "$HOME/.config/herdr/sessions/$t00_name" "$E2E_SCENARIO_ROOT/sessions/$t00_name.owner"
@@ -188,11 +226,14 @@ bad_owner=0123456789abcdef0123456789abcdef
 env E2E_HERDR_OWNER_TOKEN="$bad_owner" python3 -c 'import time; time.sleep(30)' \
   --session exact not-server &
 bad_server=$!
+bad_provisional=""
 for _ in $(seq 1 20); do
-  bad_token="$(e2e_process_identity_capture "$bad_server" exact exact python3 "$bad_owner" 2>/dev/null || true)"
-  [ -n "$bad_token" ] && break
+  bad_provisional="$(e2e_provisional_child_capture "$bad_server" "$bad_owner" 2>/dev/null || true)"
+  [ -n "$bad_provisional" ] && break
   sleep .01
 done
+bad_token="$(e2e_process_identity_capture "$bad_server" exact exact python3 "$bad_owner" \
+  E2E_HERDR_OWNER_TOKEN "$bad_provisional" 2>/dev/null || true)"
 kill "$bad_server" 2>/dev/null || true
 wait "$bad_server" 2>/dev/null || true
 [ -z "${bad_token:-}" ] || { echo 'non-server argv accepted as Herdr server identity' >&2; exit 1; }
@@ -244,9 +285,9 @@ PY
 
 # Primary/secondary and daemon/session mismatches fail before fake commands run.
 wrong_identity="${identity/\"owner_token\":\"$owner\"/\"owner_token\":\"wrong\"}"
-( HERDR_BIN=/bin/true; e2e_herdr_mutate "$child" "$wrong_identity" /tmp/no.sock -- pane close p ) \
+( HERDR_BIN="$TRUE_BIN"; e2e_herdr_mutate "$child" "$wrong_identity" /tmp/no.sock -- pane close p ) \
   >/dev/null 2>&1 && { echo 'secondary token mismatch authorized mutation' >&2; exit 1; }
-( E2E_DAEMON_PID="$child" E2E_DAEMON_IDENTITY="$wrong_identity" BOARD_BIN=/bin/true; \
+( E2E_DAEMON_PID="$child" E2E_DAEMON_IDENTITY="$wrong_identity" BOARD_BIN="$TRUE_BIN"; \
   e2e_board_herdr_mutate "$child" "$identity" -- move 1 Execute ) \
   >/dev/null 2>&1 && { echo 'daemon mismatch authorized board mutation' >&2; exit 1; }
 
@@ -254,37 +295,44 @@ wrong_identity="${identity/\"owner_token\":\"$owner\"/\"owner_token\":\"wrong\"}
 # captured server identity plus exact private marker/name.
 e2e_session_owner_marker_create exact-owned
 dead_pid=99999999
-dead_identity="$(python3 - "$identity" "$dead_pid" exact-owned <<'PY'
+dead_unsigned="$(python3 - "$identity" "$dead_pid" exact-owned <<'PY'
 import json,sys
-t=json.loads(sys.argv[1]); pid,name=sys.argv[2:]
+t=json.loads(sys.argv[1]); pid,name=sys.argv[2:]; t.pop('signature')
 t.update(pid=pid, session=name, name=name, expected_command='/fake/herdr', owner_token='owned')
 t['cmdline']=['/fake/herdr','--session',name,'server']
 print(json.dumps(t,separators=(',',':'),sort_keys=True))
 PY
 )"
+dead_identity="$(e2e_identity_sign_json "$dead_unsigned")"
 mkdir -p "$HOME/.config/herdr/sessions/exact-owned"
 e2e_session_resource_register exact-owned "$dead_identity" \
   "$HOME/.config/herdr/sessions/exact-owned" "$E2E_SCENARIO_ROOT/sessions/exact-owned.owner"
-HERDR_BIN=/bin/true e2e_session_delete_authorized exact-owned "$dead_pid" "$dead_identity"
+HERDR_BIN="$TRUE_BIN" e2e_session_delete_authorized exact-owned "$dead_pid" "$dead_identity" \
+  || { echo 'authorized exact-owned delete failed' >&2; exit 1; }
 e2e_session_resource_release exact-owned
 live_identity="$(python3 - "$dead_identity" "$child" <<'PY'
 import json,sys
 t=json.loads(sys.argv[1]); t['pid']=sys.argv[2]; print(json.dumps(t,separators=(',',':'),sort_keys=True))
 PY
 )"
-HERDR_BIN=/bin/true e2e_session_delete_authorized exact-owned "$child" "$live_identity" >/dev/null 2>&1 \
+HERDR_BIN="$TRUE_BIN" e2e_session_delete_authorized exact-owned "$child" "$live_identity" >/dev/null 2>&1 \
   && { echo 'delete was authorized while exact PID remained' >&2; exit 1; }
 e2e_session_owner_marker_create wrong
-sed -i 's/^name=wrong$/name=other/' "$E2E_SCENARIO_ROOT/sessions/wrong.owner"
-wrong_identity="$(python3 - "$dead_identity" <<'PY'
+python3 - "$E2E_SCENARIO_ROOT/sessions/wrong.owner" <<'PY'
+from pathlib import Path
+import sys
+path=Path(sys.argv[1]); path.write_text(path.read_text().replace("name=wrong\n", "name=other\n"))
+PY
+wrong_unsigned="$(python3 - "$dead_identity" <<'PY'
 import json,sys
-t=json.loads(sys.argv[1]); t.update(session='wrong',name='wrong'); t['cmdline']=['/fake/herdr','--session','wrong','server']; print(json.dumps(t,separators=(',',':'),sort_keys=True))
+t=json.loads(sys.argv[1]); t.pop('signature'); t.update(session='wrong',name='wrong'); t['cmdline']=['/fake/herdr','--session','wrong','server']; print(json.dumps(t,separators=(',',':'),sort_keys=True))
 PY
 )"
+wrong_identity="$(e2e_identity_sign_json "$wrong_unsigned")"
 mkdir -p "$HOME/.config/herdr/sessions/wrong"
 e2e_session_resource_register wrong "$wrong_identity" \
   "$HOME/.config/herdr/sessions/wrong" "$E2E_SCENARIO_ROOT/sessions/wrong.owner"
-HERDR_BIN=/bin/true e2e_session_delete_authorized wrong "$dead_pid" "$wrong_identity" >/dev/null 2>&1 \
+HERDR_BIN="$TRUE_BIN" e2e_session_delete_authorized wrong "$dead_pid" "$wrong_identity" >/dev/null 2>&1 \
   && { echo 'mismatched delete marker was accepted' >&2; exit 1; }
 e2e_session_resource_release wrong
 
@@ -320,7 +368,9 @@ for role in board-daemon helper proxy; do
   kill "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; child=""
   e2e_audit_owned_manifest "$audit" 0
   env E2E_HERDR_OWNER_TOKEN="$owner" /bin/sleep 30 & child=$!
-  identity="$(e2e_process_identity_capture "$child" /bin/sleep 30 /bin/sleep "$owner")"
+  child_provisional="$(e2e_provisional_child_capture "$child" "$owner")"
+  identity="$(e2e_process_identity_capture "$child" /bin/sleep 30 /bin/sleep "$owner" \
+    E2E_HERDR_OWNER_TOKEN "$child_provisional")"
 done
 
 # Session records include the exact server identity and exact registry/marker.
@@ -328,15 +378,16 @@ reset_audit
 session_registry="$audit_dir/session-registry"
 session_marker="$audit_dir/session.owner"
 mkdir "$session_registry"; printf 'session-owner\n' >"$session_marker"
-session_identity="$(python3 - "$identity" exact-session <<'PY'
+session_unsigned="$(python3 - "$identity" exact-session <<'PY'
 import json,sys
-t=json.loads(sys.argv[1]); name=sys.argv[2]
-t.update(session=name,name=name,expected_command='/fake/herdr',owner_token='owned')
+t=json.loads(sys.argv[1]); name=sys.argv[2]; t.pop('signature')
+t.update(pid='99999999',session=name,name=name,expected_command='/fake/herdr',owner_token='owned')
 t['cmdline']=['/fake/herdr','--session',name,'server']
 print(json.dumps(t,separators=(',',':'),sort_keys=True))
 PY
 )"
-e2e_session_resource_register exact-session "${session_identity/\"pid\":\"$child\"/\"pid\":\"99999999\"}" \
+session_identity="$(e2e_identity_sign_json "$session_unsigned")"
+e2e_session_resource_register exact-session "$session_identity" \
   "$session_registry" "$session_marker"
 assert_audit_fails 'session registry/marker'
 e2e_session_resource_release exact-session
@@ -390,7 +441,9 @@ done
 # prior generation, and allows a clean replacement plus release.
 reset_audit
 env E2E_HERDR_OWNER_TOKEN="$owner" /bin/sleep 30 & replacement=$!
-replacement_identity="$(e2e_process_identity_capture "$replacement" /bin/sleep 30 /bin/sleep "$owner")"
+replacement_provisional="$(e2e_provisional_child_capture "$replacement" "$owner")"
+replacement_identity="$(e2e_process_identity_capture "$replacement" /bin/sleep 30 /bin/sleep "$owner" \
+  E2E_HERDR_OWNER_TOKEN "$replacement_provisional")"
 e2e_process_resource_register helper restartable "$child" "$identity"
 e2e_process_resource_register helper restartable "$replacement" "$replacement_identity"
 assert_audit_fails 'secondary/restart replacement'

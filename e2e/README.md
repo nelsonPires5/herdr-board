@@ -64,9 +64,7 @@ require the sample because a fast provider response can finish between polls.
 
 ## Prerequisites
 
-- **Exactly Herdr 0.7.5 / socket protocol 17** and `python3`. Every scenario checks
-  both `herdr --version` and the ephemeral server's `ping` before dispatch; protocol
-  16 and unknown/future protocols are rejected. Your real sessions are never
+- **Exactly Herdr 0.7.5 / socket protocol 17**, `python3`, and Bash ≥4. The provider-free standard suite supports Linux and macOS; `run-all.sh` resolves absolute Herdr and Bash paths before applying its controlled `PATH`. Every scenario checks both `herdr --version` and the ephemeral server's `ping` before dispatch; protocol 16 and unknown/future protocols are rejected. Your real sessions are never
   touched — the suite boots its own **ephemeral** Herdr server/session.
 - `cargo` on `PATH` — `run-all.sh` builds the release `board` binary once
   (`scripts/build.sh`); scenarios reuse it.
@@ -83,14 +81,7 @@ verified `herdr --session <name> server` argv. A live Herdr socket with the exac
 enumeration/parse failures fail closed, while stale or non-Herdr sockets are reported as stale.
 The isolated boardd binds to the newly started session
 (`HERDR_SOCKET_PATH`), so that session is the daemon's "default", and every herdr CLI
-call + `hrpc` assert targets it. Boot/readiness, mutation, board-daemon signals, workspace close, and session stop/delete use one
-captured Linux `/proc` identity token containing start time, executable, complete argv,
-and exact `--session <name> server` full argv identity; PID liveness alone never authorizes an operation.
-Immediately after spawn, before full server capture can settle, cleanup is armed and deferred from a
-stable direct-child PID/start/parent/owner-token capability before the race-prone provisional ledger check.
-Its fresh verifier accepts only the captured launcher identity or that same child/owner's exact expected
-Herdr executable and `--session <name> server` argv after exec, so every registration/transition failure
-terminates and reaps only the spawned child.
+call + `hrpc` assert targets it. Boot/readiness, mutation, board-daemon signals, workspace close, and session stop/delete use a versioned signed identity token containing PID, start time, parent, executable, and complete argv; PID liveness alone never authorizes an operation. Linux reads those fields and the owner environment token from `/proc`. macOS uses `proc_pidinfo`, `proc_pidpath`, and `KERN_PROCARGS2`; because Darwin does not expose another process's owner environment, it requires an HMAC-signed exact direct-child capability before adopting the exact server/daemon/helper transition. The random signing key is scrubbed from the scenario environment before any target starts, never written or logged, and reaches the verifier only over an inherited file descriptor. Immediately after spawn, before full server capture can settle, cleanup is armed and deferred from that stable direct-child capability before the race-prone provisional ledger check. Its fresh verifier accepts only the captured launcher identity or that same child's exact expected Herdr executable and `--session <name> server` argv after exec, so every registration/transition failure terminates and reaps only the spawned child.
 Scenario Herdr CLI/RPC mutations use identity-gated wrappers; board commands that can trigger Herdr
 verify boardd and the exact target session immediately before the request. Primary and secondary
 sessions have independent roots, PIDs, sockets, and tokens. `run-all.sh`
@@ -131,6 +122,7 @@ e2e/run-all.sh              # standard suite; fake Pi + Claude, no provider/mode
 e2e/run-all.sh --keep       # keep sessions + each scenario's workspace for review
 e2e/run-all.sh 04 07        # only scenarios whose filename matches a filter
 scripts/e2e.sh              # compat wrapper -> e2e/run-all.sh
+bash e2e/test-harness.sh    # static cross-platform safety gate; starts no Herdr
 bash e2e/04-fail-on-fail.sh # run a single scenario standalone (boots its own session)
 E2E_REAL_PI=1 e2e/real-pi-smoke.sh  # REAL provider, explicit opt-in, may incur cost
 E2E_REAL_CLAUDE_HAIKU=1 e2e/real-claude-haiku-smoke.sh  # one authorized REAL Haiku/low attempt
@@ -149,14 +141,15 @@ of CI (it needs Herdr 0.7.5 to boot a real ephemeral protocol-17 server) — it 
 run by a human/orchestrator. The real-Claude smoke stages only completed onboarding/theme,
 exact workspace trust, the installed Herdr hook, credentials, and approved
 `remote-settings.json`, so startup dialogs cannot consume `agent.prompt`; it copies no broad
-personal Claude state. Its intended contract is one authorized attempt with no retry or fallback.
+personal Claude state. Its intended contract is one authorized attempt with no retry or fallback. The real-Claude smoke retains its independent Linux `/proc` identity implementation and is outside the portable standard-suite guarantee.
 
 ## Files
 
 | File | Role |
 |---|---|
 | `lib.sh` | Shared harness sourced by every scenario: logging, isolated stack, cleanup registry, daemon + workspace helpers, pollers (`wait_ok`/`wait_runs`), JSON/`hrpc`/`brpc`/`col_create` helpers. |
-| `test-harness.sh` | Deterministic shell safety checks for ownership tokens and every exact-resource ledger kind, replacement, malformed record, and standalone parity; starts no Herdr resources. |
+| `test-harness.sh` | Deterministic Linux/macOS shell safety checks for signed ownership tokens, key scrubbing, every exact-resource ledger kind, replacement, malformed record, and standalone parity; starts no Herdr resources. |
+| `process_identity.py` | Standard-library platform backend: Linux `/proc`; Darwin `libproc`/`KERN_PROCARGS2`; exact argv/start/executable capture and HMAC verification. |
 | `fake-agent.sh` | Config-defined fake harness used by scenarios 01–10 and 13–15. |
 | `fake-bin/pi` / `fake-bin/claude` | Executables exposed only inside disposable standard-E2E Herdr servers/workspaces. They emulate interactive readiness/session reports, require the exact `agent.prompt` bytes before completion, record evidence under isolated temp, and never modify installed tools or call a provider. |
 | `16-managed-p17.sh` | Managed pane-first Pi/Claude protocol-17 launch and no-provider boundary. |

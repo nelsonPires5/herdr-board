@@ -119,7 +119,8 @@ case ↔ scenario ↔ status catalog):
 | File | Role |
 |---|---|
 | `lib.sh` | Shared harness sourced by every scenario: logging, isolated stack, cleanup registry, daemon + workspace helpers, pollers, JSON/`hrpc` helpers. |
-| `test-harness.sh` | Deterministic shell checks for ownership tokens and every exact-resource kind, replacement, malformed ledger, and standalone parity; starts no live Herdr resources. |
+| `test-harness.sh` | Deterministic Linux/macOS shell checks for signed ownership tokens, key scrubbing, every exact-resource kind, replacement, malformed ledger, and standalone parity; starts no live Herdr resources. |
+| `process_identity.py` | Standard-library process backend: exact `/proc` identity plus owner environment on Linux; `proc_pidinfo`/`proc_pidpath`/`KERN_PROCARGS2` and signed direct-child transitions on Darwin. |
 | `fake-agent.sh` | The fake harness dispatched instead of a real agent. Mirrors the crate fixture and adds `FAKE_AGENT_HOLD` (keep the pane alive after the run). |
 | `hrpc.py` | One-shot raw herdr socket RPC (honours `HERDR_SOCKET_PATH`) for structural assertions (`tab.list`/`pane.list`/`pane.layout`). |
 | `01-core.sh` | CLI path (dispatch → run → outcome/comment) + TUI path (drive the new-card form via send-keys). |
@@ -176,9 +177,7 @@ Its intended contract is one authorized Haiku/low attempt with no retry or fallb
   exact name in its marker-gated `/tmp/h<random32>` HOME before launching the server, and refuses to launch when a
   live Herdr socket already owns that exact name. Registry enumeration/parse failures fail closed;
   a stale or non-Herdr socket is reported as stale rather than treated as a collision. The boot,
-  readiness, mutation, board-daemon signal, workspace-close, and session stop/delete paths capture
-  and verify one Linux `/proc` identity token containing PID, start time, executable, complete argv,
-  and exact `--session <name> server` full argv identity; PID liveness alone never authorizes an operation. All scenario Herdr mutations use identity-gated CLI/RPC wrappers, and board commands that can trigger Herdr verify both boardd and the exact target session immediately before the request. This token gate is independent for primary and secondary sessions. Each scenario binds its isolated
+  readiness, mutation, board-daemon signal, workspace-close, and session stop/delete paths capture and freshly verify a versioned HMAC-signed token containing PID, start time, parent, executable, and complete argv. Linux preserves the additional `/proc/environ` owner-token check. Darwin obtains process facts through `proc_pidinfo`, `proc_pidpath`, and `KERN_PROCARGS2`; because another process's environment is unavailable, a stable identity can only be minted from the same signed exact direct-child capability. The per-invocation signing key is copied and scrubbed at shell bootstrap, remains non-exported/non-persistent, and is delivered to Python only on fd 3. PID liveness alone never authorizes an operation. All scenario Herdr mutations use identity-gated CLI/RPC wrappers, and board commands that can trigger Herdr verify both boardd and the exact target session immediately before the request. This token gate is independent for primary and secondary sessions. Each scenario binds its isolated
   boardd to its own socket (`HERDR_SOCKET_PATH`). `run-all.sh` never boots or exports a shared
   session: it scrubs inherited session/plugin/provider variables and each child uses the same
   `e2e_init` ownership path as a **standalone** invocation.
@@ -311,7 +310,7 @@ Checklist:
 | **Agent names are exclusive** | While a pane is open its agent name is reserved. A collision (e.g. the session already has a `card-1-execute` pane) makes the daemon retry as `card-1-execute-r<run>`. Assertions must accept the optional `-r<n>` suffix. |
 | **Managed and configured pane identity differ** | Protocol-17 managed Pi/Claude panes expose the managed kind in `pane.agent`; configured panes are renamed to the daemon-assigned `card-<id>-<column>` label and remain unmanaged. Match the appropriate field and still accept the optional `-r<n>` name suffix. |
 | **`pane.layout` nests under `layout`** | `hrpc pane.layout …` returns `{"type":"pane_layout","layout":{…panes,splits…}}`; read `.layout.panes`. |
-| **Never `pkill` by "board daemon"** | That pattern matches your own shell too. Stop only the daemon you started after verifying its captured `/proc` identity token (`e2e_daemon_stop`); PID liveness alone is insufficient. To find leaked daemons from an aborted run: `ps -C board -o pid=,args=`. |
+| **Never `pkill` by "board daemon"** | That pattern matches your own shell too. Stop only the daemon you started after verifying its signed platform identity token (`e2e_daemon_stop`); PID liveness alone is insufficient. Linux uses `/proc`; Darwin uses native process APIs. Inspect only exact PIDs emitted by the invocation. |
 | **Leaked ephemeral session from an aborted run** | If a run is killed before cleanup, an `hb-e2e-*` session may linger. Remove it wholesale: `herdr session stop <name> && herdr session delete <name>` (this closes its workspaces too). List leftovers with `herdr session list`. |
 
 ## Running
@@ -322,12 +321,13 @@ e2e/run-all.sh --keep           # keep each scenario's owned session/workspaces
 e2e/run-all.sh --require-all    # fail if any selected scenario skips
 e2e/run-all.sh 04 07            # only scenarios matching a filename filter
 scripts/e2e.sh                  # compat wrapper -> run-all.sh
+bash e2e/test-harness.sh         # static Linux/macOS safety gate; no Herdr
 bash e2e/01-core.sh             # a single scenario (boots its own ephemeral session)
 E2E_REAL_PI=1 e2e/real-pi-smoke.sh  # explicit real-provider opt-in; may incur cost
 E2E_REAL_CLAUDE_HAIKU=1 e2e/real-claude-haiku-smoke.sh  # one authorized Haiku/low attempt; may incur cost
 ```
 
-- Standard suite requires **exactly Herdr 0.7.5 / socket protocol 17**, `python3`, and `cargo`. Every scenario preflights both `herdr --version` and a socket `ping`; protocol 16 and unknown/future protocols fail before dispatch. The forced-build standard suite scenarios 01–21 pass with no provider calls. The real-Pi smoke additionally verifies Pi's runtime default model, current Herdr integration, and WezTerm. The real-Claude smoke is an intended-contract validation only: it requires a logged-in real Claude CLI plus current Herdr Claude integration v7, stages minimal completed onboarding/theme, exact workspace trust, the installed Herdr hook, credentials, and approved `remote-settings.json` under `/tmp` so startup dialogs cannot consume `agent.prompt`; no broad personal Claude state is copied, and it has no retry or fallback. Both opt-ins compare user/repository state and clean exact resources. `run-all.sh` builds
+- Standard suite requires **exactly Herdr 0.7.5 / socket protocol 17**, `python3`, Bash ≥4, and `cargo`. It supports Linux and macOS; `run-all.sh` resolves Herdr and Bash absolutely before narrowing `PATH`. Every scenario preflights both `herdr --version` and a socket `ping`; protocol 16 and unknown/future protocols fail before dispatch. The forced-build standard suite scenarios 01–21 pass with no provider calls. The real-Pi smoke additionally verifies Pi's runtime default model, current Herdr integration, and WezTerm. The real-Claude smoke is an intended-contract validation only: it requires a logged-in real Claude CLI plus current Herdr Claude integration v7, stages minimal completed onboarding/theme, exact workspace trust, the installed Herdr hook, credentials, and approved `remote-settings.json` under `/tmp` so startup dialogs cannot consume `agent.prompt`; no broad personal Claude state is copied, and it has no retry or fallback. Its independent identity implementation remains Linux-only and is outside the portable provider-free gate. Both opt-ins compare user/repository state and clean exact resources. `run-all.sh` builds
   the release binary once; scenarios reuse it. Every scenario boots and cleans its own ephemeral
   session; scenario 03 additionally owns an independently tokened secondary session.
 - Exit codes: scenario `0` = PASS, `3` = SKIP, other = FAIL; `run-all.sh` exits
