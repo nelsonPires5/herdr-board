@@ -242,7 +242,7 @@ pub const BOARD_ID: i64 = 1;
 /// SQLite-backed board store.
 pub struct Db {
     conn: Connection,
-    lifecycle_fault_hook: Option<Box<dyn Fn(LifecycleFaultPoint) + Send + Sync>>,
+    lifecycle_fault_hook: Option<Box<dyn Fn(LifecycleFaultPoint) -> Result<()> + Send + Sync>>,
 }
 
 fn conv_err(field: &str) -> rusqlite::Error {
@@ -271,11 +271,11 @@ impl Db {
     }
 
     /// Open a file DB with an opt-in lifecycle statement hook. This is exposed
-    /// only for deterministic crash tests; production callers use [`Db::open`].
+    /// only for deterministic fault tests; production callers use [`Db::open`].
     #[doc(hidden)]
     pub fn open_with_lifecycle_fault_hook(
         path: &Path,
-        hook: impl Fn(LifecycleFaultPoint) + Send + Sync + 'static,
+        hook: impl Fn(LifecycleFaultPoint) -> Result<()> + Send + Sync + 'static,
     ) -> Result<Db> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
@@ -294,7 +294,7 @@ impl Db {
 
     fn init(
         conn: Connection,
-        lifecycle_fault_hook: Option<Box<dyn Fn(LifecycleFaultPoint) + Send + Sync>>,
+        lifecycle_fault_hook: Option<Box<dyn Fn(LifecycleFaultPoint) -> Result<()> + Send + Sync>>,
     ) -> Result<Db> {
         conn.pragma_update(None, "foreign_keys", true)?;
         let db = Db {
@@ -305,10 +305,11 @@ impl Db {
         Ok(db)
     }
 
-    fn lifecycle_fault(&self, point: LifecycleFaultPoint) {
+    fn lifecycle_fault(&self, point: LifecycleFaultPoint) -> Result<()> {
         if let Some(hook) = &self.lifecycle_fault_hook {
-            hook(point);
+            hook(point)?;
         }
+        Ok(())
     }
 
     /// Apply migrations gated on `PRAGMA user_version`. Idempotent.
@@ -1115,10 +1116,10 @@ impl Db {
                     p.system_prompt_snapshot,p.session_id,p.session],
         )?;
         let id = tx.last_insert_rowid();
-        self.lifecycle_fault(LifecycleFaultPoint::EnqueueAfterRunInsert);
+        self.lifecycle_fault(LifecycleFaultPoint::EnqueueAfterRunInsert)?;
         let changed = tx.execute(
-            "UPDATE cards SET status='queued',awaiting_reason=NULL,updated_at=datetime('now') WHERE id=?1",
-            params![p.card_id],
+            "UPDATE cards SET status='queued',awaiting_reason=NULL,session_id=COALESCE(?2,session_id),updated_at=datetime('now') WHERE id=?1",
+            params![p.card_id, p.session_id],
         )?;
         if changed != 1 {
             return Err(Error::NotFound(format!("card {}", p.card_id)));
@@ -1151,7 +1152,7 @@ impl Db {
             "UPDATE runs SET started_at=datetime('now'),herdr_workspace_id=?1,herdr_pane_id=?2 WHERE id=?3",
             params![workspace_id,pane_id,run_id],
         )?;
-        self.lifecycle_fault(LifecycleFaultPoint::PromoteAfterRunUpdate);
+        self.lifecycle_fault(LifecycleFaultPoint::PromoteAfterRunUpdate)?;
         tx.execute(
             "UPDATE cards SET status='running',awaiting_reason=NULL,updated_at=datetime('now') WHERE id=?1",
             params![card_id],
@@ -1198,7 +1199,7 @@ impl Db {
             "UPDATE runs SET ended_at=datetime('now'),outcome=?1,result_summary=?2 WHERE id=?3",
             params![p.outcome.as_str(), p.summary, p.run_id],
         )?;
-        self.lifecycle_fault(LifecycleFaultPoint::FinalizeAfterRunUpdate);
+        self.lifecycle_fault(LifecycleFaultPoint::FinalizeAfterRunUpdate)?;
         if let Some((author, body)) = p.comment {
             tx.execute(
                 "INSERT INTO comments(card_id,author,body) VALUES(?1,?2,?3)",

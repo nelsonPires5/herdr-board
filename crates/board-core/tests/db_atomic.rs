@@ -206,6 +206,7 @@ fn crash_fault_hook_child() {
         if point == LifecycleFaultPoint::FinalizeAfterRunUpdate {
             std::process::exit(86);
         }
+        Ok(())
     })
     .unwrap();
     let effects = db

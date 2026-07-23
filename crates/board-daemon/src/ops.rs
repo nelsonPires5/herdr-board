@@ -694,10 +694,11 @@ mod tests {
     use crate::spawner::LocalSpawner;
     use crate::store::Store;
     use board_core::config::{Config, HarnessDef};
-    use board_core::db::Db;
+    use board_core::db::{Db, LifecycleFaultPoint};
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
     use tokio::sync::{broadcast, mpsc, watch};
 
@@ -727,6 +728,65 @@ mod tests {
             dispatch_tx,
             shutdown_tx,
         ))
+    }
+
+    #[test]
+    fn enqueue_fault_reopens_prior_state_without_event_or_dispatch_wake() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("enqueue-fault.db");
+        let armed = Arc::new(AtomicBool::new(false));
+        let fault_armed = armed.clone();
+        let db = Db::open_with_lifecycle_fault_hook(&path, move |point| {
+            if fault_armed.load(Ordering::SeqCst)
+                && point == LifecycleFaultPoint::EnqueueAfterRunInsert
+            {
+                return Err(Error::InvalidState("injected enqueue fault".into()));
+            }
+            Ok(())
+        })
+        .unwrap();
+        let card = db
+            .create_card(&CardCreateParams {
+                title: "enqueue fault".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let card_id = card.id;
+        let (events_tx, mut events_rx) = broadcast::channel(16);
+        let (dispatch_tx, mut dispatch_rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let d = Arc::new(Daemon::new(
+            Store::new(db),
+            Config::default(),
+            DaemonSettings::default(),
+            path.clone(),
+            dir.path().join("board.sock"),
+            Arc::new(LocalSpawner::new()),
+            None,
+            None,
+            events_tx,
+            dispatch_tx,
+            shutdown_tx,
+        ));
+        armed.store(true, Ordering::SeqCst);
+
+        let err = handle_request(&d, "run.retry", json!({"card_id": card_id})).unwrap_err();
+        assert!(err.to_string().contains("injected enqueue fault"));
+        assert!(matches!(
+            events_rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            dispatch_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        drop(d);
+        let reopened = Db::open(&path).unwrap();
+        let card = reopened.get_card(card_id).unwrap().unwrap();
+        assert_eq!(card.status, CardStatus::Idle);
+        assert_eq!(card.session_id, None);
+        assert!(reopened.list_runs(card_id).unwrap().is_empty());
     }
 
     #[test]

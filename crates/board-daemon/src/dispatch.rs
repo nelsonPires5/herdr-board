@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use board_core::capability::{run_pane_name, run_pane_name_unique};
+use board_core::db::EnqueueRun;
 use board_core::engine::{
     decide_auto_hop, decide_resumability, decide_transition, validate_effective_settings,
     AutoHopDecision, ResumabilityDecision, TransitionDecision,
@@ -156,22 +157,16 @@ fn enqueue_run_inner(
         board_core::harness::protocol_system_prompt(settings.system_prompt.as_deref())
     });
 
-    if let Some(session_id) = &session_for_run {
-        if card.session_id.as_deref() != Some(session_id) {
-            db.set_card_session(card_id, session_id)?;
-        }
-    }
-    let run = db.create_run_with_prompt_snapshots(
+    let run = db.enqueue_run_uow(&EnqueueRun {
         card_id,
         column_id,
-        &settings.harness,
-        &argv_json,
-        &prompt,
-        Some(&system_prompt_snapshot),
-        session_for_run.as_deref(),
-        card.session.as_deref(),
-    )?;
-    db.set_card_status(card_id, CardStatus::Queued)?;
+        harness: &settings.harness,
+        argv_json: &argv_json,
+        prompt_snapshot: &prompt,
+        system_prompt_snapshot: Some(&system_prompt_snapshot),
+        session_id: session_for_run.as_deref(),
+        session: card.session.as_deref(),
+    })?;
     Ok(run)
 }
 
@@ -413,12 +408,11 @@ fn register_spawned_run(
         })?;
         let is_local = spawned.pid.is_some();
         let pane_id = spawned.pane_id.clone();
-        db.start_run(
+        db.promote_run_uow(
             run_id,
             spawned.workspace_id.as_deref(),
             spawned.pane_id.as_deref(),
         )?;
-        db.set_card_status(card.id, CardStatus::Running)?;
         let registered_handle = handle.take().ok_or_else(|| {
             Error::InvalidState(format!(
                 "run {run_id} registration lost its spawn handle before bookkeeping"
@@ -930,7 +924,7 @@ mod tests {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Instant;
@@ -943,7 +937,7 @@ mod tests {
     use crate::state::Daemon;
     use crate::store::Store;
     use board_core::config::Config;
-    use board_core::db::Db;
+    use board_core::db::{Db, EnqueueRun, LifecycleFaultPoint};
     use board_core::prompt::{assemble_prompt, effective_settings};
     use board_core::protocol::{
         AwaitingReason, BoardChangedReason, CardCreateParams, CardStatus, CardUpdateParams,
@@ -951,6 +945,7 @@ mod tests {
         Trigger,
     };
     use board_core::spawn::{SpawnHandle, SpawnReq, Spawner};
+    use board_core::Error;
     use board_herdr::{AgentStatus, HerdrClient, WorkspaceInfo};
     use serde_json::Value;
     use tokio::sync::{broadcast, mpsc, watch};
@@ -980,6 +975,31 @@ mod tests {
     #[derive(Default)]
     struct CapturingSpawner {
         requests: std::sync::Mutex<Vec<SpawnReq>>,
+    }
+
+    #[derive(Default)]
+    struct FaultPromotionSpawner {
+        kills: AtomicUsize,
+    }
+
+    impl Spawner for FaultPromotionSpawner {
+        fn spawn(&self, _req: &SpawnReq) -> anyhow::Result<SpawnHandle> {
+            Ok(SpawnHandle {
+                pid: Some(4242),
+                workspace_id: Some("spawned-workspace".into()),
+                pane_id: Some("spawned-pane".into()),
+                ..Default::default()
+            })
+        }
+
+        fn kill(&self, _h: &SpawnHandle) -> anyhow::Result<()> {
+            self.kills.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn is_alive(&self, _h: &SpawnHandle) -> anyhow::Result<bool> {
+            Ok(true)
+        }
     }
 
     impl Spawner for CapturingSpawner {
@@ -1303,6 +1323,87 @@ mod tests {
         assert_eq!(err.code(), 3);
         assert!(err.to_string().contains("finalization"));
         assert!(d.store.lock().list_runs(card_id).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn promotion_fault_reopens_queued_state_without_started_effects_and_kills_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("promotion-fault.db");
+        let armed = Arc::new(AtomicBool::new(false));
+        let fault_armed = armed.clone();
+        let db = Db::open_with_lifecycle_fault_hook(&path, move |point| {
+            if fault_armed.load(Ordering::SeqCst)
+                && point == LifecycleFaultPoint::PromoteAfterRunUpdate
+            {
+                return Err(Error::InvalidState("injected promotion fault".into()));
+            }
+            Ok(())
+        })
+        .unwrap();
+        let card = db
+            .create_card(&CardCreateParams {
+                title: "promotion fault".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let run = db
+            .enqueue_run_uow(&EnqueueRun {
+                card_id: card.id,
+                column_id: card.column_id,
+                harness: "pi",
+                argv_json: "[]",
+                prompt_snapshot: "prompt",
+                system_prompt_snapshot: Some("system"),
+                session_id: None,
+                session: None,
+            })
+            .unwrap();
+        let card_id = card.id;
+        let run_id = run.id;
+        let spawner = Arc::new(FaultPromotionSpawner::default());
+        let (events_tx, mut events_rx) = broadcast::channel(16);
+        let (dispatch_tx, mut dispatch_rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let d = Arc::new(Daemon::new(
+            Store::new(db),
+            Config::default(),
+            DaemonSettings::default(),
+            path.clone(),
+            dir.path().join("board.sock"),
+            spawner.clone(),
+            None,
+            None,
+            events_tx,
+            dispatch_tx,
+            shutdown_tx,
+        ));
+        armed.store(true, Ordering::SeqCst);
+
+        dispatch_pass(&d).await;
+
+        assert_eq!(spawner.kills.load(Ordering::SeqCst), 1);
+        assert!(!d.sched.lock().unwrap().active.contains_key(&run_id));
+        let watch = d.watch.lock().unwrap();
+        assert!(watch.panes_by_socket.is_empty());
+        assert_eq!(watch.generation, 0);
+        drop(watch);
+        assert!(matches!(
+            events_rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            dispatch_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        drop(d);
+        let reopened = Db::open(&path).unwrap();
+        let card = reopened.get_card(card_id).unwrap().unwrap();
+        let run = reopened.get_run(run_id).unwrap();
+        assert_eq!(card.status, CardStatus::Queued);
+        assert!(run.started_at.is_none());
+        assert!(run.herdr_workspace_id.is_none());
+        assert!(run.herdr_pane_id.is_none());
     }
 
     #[test]
