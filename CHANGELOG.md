@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+- Internal Rust refactor organizes production modules and tests by responsibility: public API behavior
+  uses crate integration-test targets, while private invariants remain adjacent to their
+  implementations.
 - Schema v11 snapshots each run's neutral launch argv, environment, and managed prompt inputs at enqueue time. Queued runs therefore launch byte-for-byte from the persisted specification even if card, column, or harness configuration changes before dispatch; older database rows retain their versioned compatibility behavior.
 - T20/R11 cleanup removes the unused public Herdr worktree calls and DTOs without changing the pinned schema fixture. Documentation now cross-links the v11/v1/protocol-17 ownership matrix and scenarios 01–21, including typed client/config boundaries, daemon launch ownership, active-run timers, supervisor recovery, and the provider-free safe harness. Auto-start is characterized as one exact child process-group owner rather than an undocumented double-fork/`setsid` lifecycle.
 - Board snapshots now carry an additive v1 `active_runs` summary (`card_id`, `started_at`) scoped to the requested board. The TUI uses the open run start for timers, so comments and other card updates do not reset elapsed time; live scenario 21 verifies the real event-refresh path without a provider.

@@ -22,17 +22,28 @@ suite does **not** (it needs Herdr 0.7.5 and boots a real ephemeral server) — 
 
 ### 1. Unit / pure tests (per crate)
 
-Each crate's `tests/` holds integration-style tests against its public API. They
-do no I/O beyond in-memory SQLite and never touch herdr.
+Public API behavior belongs in the crate's `tests/` integration target, where the test is compiled
+as an external client. Private invariants stay adjacent to the implementation under `src/` in a
+`#[cfg(test)]` module; moving one of those tests must not require making an internal helper public.
+This distinction is pragmatic rather than a requirement to force every test into one layer.
 
-| File | Covers |
+The stable ownership layout is responsibility-oriented, not a file manifest:
+
+| Area | Boundary and representative coverage |
 |---|---|
-| `crates/board-core/tests/engine.rs` | The **pure column engine** — `decide_transition`, `decide_entry`, `decide_signal` (agent signals → `awaiting`/`running`/`blocked` decisions), Herdr-neutral `decide_lifecycle`/`FinalizePlan` (identity and queued-harness eligibility plus cancel/timeout/pane-exit policy), `decide_auto_hop`, `decide_resumability`, `validate_*`, `format_duration`. No wall clock: elapsed time is passed as an explicit seconds argument (e.g. `decide_transition(.., Some(252))` → `"4m12s"`), so results are deterministic. |
-| `crates/board-core/tests/db_atomic.rs` | File-backed abort-trigger rollback/reopen checks for enqueue (`enqueue_run_uow`), promotion (`promote_run_uow`), and finalization (`finalize_run_uow`) — the canonical three-step lifecycle — covering comments, transitions, and auto-hop; a subprocess hard-exit fault between an internal statement and commit with zero returned effect/event; schema-v8 duplicate rejection and exact partial-index SQL; schema-v9 fresh/v8/legacy timeout derivation-once, unlimited/ended exclusions, and transactional idempotent/saturating pause-resume; schema-v10 fresh and v9-file upgrades with exact queued/active index SQL, unchanged card/run values, query-plan use, `user_version`/reopen checks, and atomic conflicting-index failure with no sibling index. Daemon dispatch tests additionally inject comment and next-enqueue failures, reopen the DB to compare the exact prior run/card/comments, assert no pre-commit kill/event/wake, cover the board-done/cancel/timeout/pane-exit duplicate-and-stale winner matrix, deterministically pause A1/A2/B1 launches to prove pre-launch per-space/global claims and competing-pass serialization, and record the exact post-commit effect order. |
-| `crates/board-core/tests/db.rs` (delegates to `db/crud.rs`, `db/migrations.rs`, `db/runs.rs`) | SQLite upgrade fixtures for every supported source version v1–v7 plus fresh creation (v5 scoped boards + preserved Global; v6 status/`awaiting_reason`; v7 nullable `runs.system_prompt_snapshot`; v8 one-open-run invariant), board-boundary invariants, seed/CRUD, position compaction, typed `SpaceKey` null/session isolation, multi-row direct queued FIFO and active run-card queries with started/ended exclusions, and latest pane lookup. |
-| `crates/board-core/tests/{capability,config,prompt,harness,launch_spec,protocol,protocol17_spawn,client,pi_catalog,scope,space_key,fake_client}.rs` | Harness catalog + pane-name slug rules; typed `RootConfig` board/daemon defaults and fatal parsing; prompt assembly + effective-settings; harness argv/session planning; durable neutral launch-spec versioning/exact serde; protocol serde round-trips (including additive active-run summaries); protocol-17 managed spawn arg/env materialization; typed `BoardClient` wrappers without SQLite I/O; live Pi model catalog filtering/fallback; canonical-path scope resolution and `Global` fallback; typed `SpaceKey` null isolation and per-space serialization; the in-memory `FakeBoardClient`. |
-| `crates/board-herdr/tests/{events,socket}.rs` and `integration_live.rs` (ignored) | herdr event decoding; socket client against an **in-process fake herdr server** on a temp unix socket (`serve_calls`/`serve_stream`), covering one-request-per-connection, bounded hanging peers/subscription acknowledgements, exact response IDs and matching errors, buffered pre-ack events, timeout reset, error mapping, and mid-call disconnect. Param structs serialize to protocol-17 field shapes with exact `skip_serializing_if`. All `unsafe` blocks (`libc` socket, poll, fcntl) live in `board-herdr::transport` behind safe deadline/path-validation wrappers. The ignored `integration_live.rs` gates read-only live socket probes behind an explicit socket guard. |
-| Daemon dispatch, spawner, supervisor, watcher, and ops tests (`crates/board-daemon/src/{dispatch,spawner,supervisor,watchers,ops}/tests.rs`) | Dispatch tests exercise the daemon-side `enqueue_run`→`promote`→`finalize_run` wrappers over the core UoW API, covering spawn-failure atomicity (the failed queued run is finalized through `finalize_run_uow` with zero pre-commit effects), per-space FIFO serialization, concurrent-space global-cap claiming, cancel/timeout/board-done duplicate-and-stale idempotency, and exact post-commit effect order. Spawner characterization preserves exact protocol-17 managed Pi/Claude argv bytes, configured-harness argv identity, pane-first placement grid calculations, and the self-removing configured-runner script. Supervisor and watcher tests enforce conservative restart reconciliation: unresolved sessions and runtime timeout/malformed/panic failures are `Unknown`, only a successful missing-pane snapshot is `Gone`, and `Alive` adoption is revalidated and idempotent. The always-on watcher scopes streams and duplicate pane IDs by socket, subscribes before snapshot reconciliation, and treats duplicate terminal observations idempotently. Ops tests cover the request-handler→lifecycle path including scoped board isolation and legacy `Global` fallback. |
+| `board-core` | Public engine, client, protocol, configuration, prompt, harness, and database behavior lives under `crates/board-core/tests/`. The production responsibilities are separated into `crates/board-core/src/engine/` (pure lifecycle, transitions, validation, and signals) and `crates/board-core/src/client/` (traits, Unix transport, and fake client). |
+| `board-daemon` | Queue lifecycle and launch behavior remain private daemon tests under `crates/board-daemon/src/dispatch/tests/` and `crates/board-daemon/src/spawner/tests/`; request operation tests live under `crates/board-daemon/src/ops/tests/`, and timeout/local/Herdr observation tests under `crates/board-daemon/src/watchers/tests/`. Their production owners are the corresponding responsibility directories. Supervisor, server, session, settings, and snapshot tests remain adjacent to those smaller private modules. |
+| `board-herdr` | Public envelope, event, and socket behavior is tested from `crates/board-herdr/tests/`, including ignored live probes. Event parsing, backoff, and stream handling are owned by `crates/board-herdr/src/events/`; all unsafe board-herdr Unix transport operations remain in `crates/board-herdr/src/transport.rs`. |
+| `board-tui` | Public reducer, form, and rendering behavior is tested from `crates/board-tui/tests/` (including `forms.rs`, `update.rs`, and snapshots). The implementation is organized under `crates/board-tui/src/app/`, `crates/board-tui/src/forms/`, and `crates/board-tui/src/view/`; only view tests that need private rendering helpers remain adjacent in `crates/board-tui/src/view/tests.rs`. |
+
+The public core suites cover deterministic engine decisions, schema-v11 migrations and atomic
+run units of work, protocol-v1 serde, typed client boundaries, configuration, prompt assembly,
+harness planning, and scoped-board behavior. Herdr suites cover protocol-17 event decoding and
+socket behavior against an in-process fake server. Daemon private suites cover queue claims,
+spawn/finalization atomicity, pane placement, configured and managed launch characterization,
+request routing, watcher signals, timeout handling, and per-session recovery. TUI suites cover
+fake-client reducer behavior, forms, and ratatui snapshots. Keep descriptions at this ownership
+level; add a path only when it is a stable boundary or a useful entry point.
 
 Nullable update coverage in `board-core` is table-driven across every column/card nullable:
 protocol tests verify omitted/null/value serde states, database tests verify set → clear and reopen
@@ -65,7 +76,7 @@ and a **fake harness script**.
   `wait_ready`. Timing knobs keep it fast: `BOARD_TICK_MS=150`,
   `BOARD_LOCAL_POLL_MS=150`, `FAKE_AGENT_SLEEP=0.3`.
 - Spawner selection is `BOARD_SPAWNER=local` + `[daemon] spawner = "local"`.
-  `LocalSpawner` (`crates/board-daemon/src/spawner.rs`) launches agents via
+  `LocalSpawner` (`crates/board-daemon/src/spawner/`) launches agents via
   `std::process::Command` and tracks each `Child` for precise liveness/kill —
   no herdr, no Claude cost. Its sibling `HerdrSpawner` launches herdr panes.
 - The fake harness is `crates/board-cli/tests/fixtures/fake-agent.sh`, wired via
