@@ -408,10 +408,14 @@ async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result<bool> {
     };
 
     let started = Instant::now();
-    let deadline = column
-        .timeout_minutes
-        .map(|m| started + Duration::from_secs(m.max(0) as u64 * d.settings.timeout_unit_secs));
-    if !register_spawned_run(d, run.id, handle, started, deadline)? {
+    let timeout_ms = column.timeout_minutes.map(|m| {
+        m.max(0)
+            .saturating_mul(d.settings.timeout_unit_secs as i64)
+            .saturating_mul(1000)
+    });
+    let deadline = timeout_ms.and_then(|ms| started.checked_add(Duration::from_millis(ms as u64)));
+    let deadline_at_ms = timeout_ms.map(|ms| d.wall_now_ms().saturating_add(ms));
+    if !register_spawned_run(d, run.id, handle, started, deadline, deadline_at_ms)? {
         return Ok(false);
     }
 
@@ -433,6 +437,7 @@ fn register_spawned_run(
     handle: board_core::spawn::SpawnHandle,
     started: Instant,
     timeout_deadline: Option<Instant>,
+    timeout_deadline_at_ms: Option<i64>,
 ) -> Result<bool> {
     let mut handle = Some(handle);
     let registration = (|| {
@@ -455,6 +460,7 @@ fn register_spawned_run(
             run_id,
             spawned.workspace_id.as_deref(),
             spawned.pane_id.as_deref(),
+            timeout_deadline_at_ms,
         )?;
         let registered_handle = handle.take().ok_or_else(|| {
             Error::InvalidState(format!(
@@ -1342,6 +1348,7 @@ mod tests {
             },
             started,
             None,
+            None,
         )
         .unwrap());
 
@@ -1385,6 +1392,7 @@ mod tests {
                 ..Default::default()
             },
             Instant::now(),
+            None,
             None,
         )
         .unwrap());

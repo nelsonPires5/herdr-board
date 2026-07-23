@@ -85,7 +85,7 @@ fn promotion_rolls_back_when_card_running_update_fails() {
         .unwrap();
 
     assert!(db
-        .promote_run_uow(run.id, Some("workspace"), Some("pane"))
+        .promote_run_uow(run.id, Some("workspace"), Some("pane"), None)
         .is_err());
     drop(db);
 
@@ -342,7 +342,7 @@ fn v8_upgrade_retains_a_single_open_run_byte_for_byte() {
         .unwrap();
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 8);
+    assert_eq!(db.user_version().unwrap(), 9);
     assert_eq!(db.get_run(before.id).unwrap(), before);
 }
 
@@ -360,7 +360,7 @@ fn fresh_and_v7_upgrade_install_exact_partial_unique_index_sql() {
                 .unwrap();
         }
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.user_version().unwrap(), 8);
+        assert_eq!(db.user_version().unwrap(), 9);
         drop(db);
         let sql: String = Connection::open(&path)
             .unwrap()
@@ -389,4 +389,63 @@ fn unique_open_run_index_rejects_second_open_run_and_allows_history() {
         .unwrap();
     drop(db);
     assert_eq!(reopened_state(&path, card.id).1.len(), 2);
+}
+
+#[test]
+fn timeout_pause_rolls_back_card_when_run_write_fails() {
+    let (_dir, path, card) = create_file_db("pause rollback");
+    let db = Db::open(&path).unwrap();
+    let run = db
+        .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
+        .unwrap();
+    db.promote_run_uow(run.id, None, None, Some(1_000)).unwrap();
+    drop(db);
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER reject_timeout_pause BEFORE UPDATE OF timeout_paused_at_ms ON runs
+         BEGIN SELECT RAISE(ABORT, 'reject pause'); END;",
+        )
+        .unwrap();
+    let db = Db::open(&path).unwrap();
+    assert!(db
+        .pause_run_timeout_uow(card.id, AwaitingReason::AgentDone, 100)
+        .is_err());
+    assert_eq!(
+        db.get_card(card.id).unwrap().unwrap().status,
+        CardStatus::Running
+    );
+    assert_eq!(db.get_run(run.id).unwrap().timeout_paused_at_ms, None);
+}
+
+#[test]
+fn timeout_resume_rolls_back_run_when_card_write_fails() {
+    let (_dir, path, card) = create_file_db("resume rollback");
+    let db = Db::open(&path).unwrap();
+    let run = db
+        .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
+        .unwrap();
+    db.promote_run_uow(run.id, None, None, Some(1_000)).unwrap();
+    db.pause_run_timeout_uow(card.id, AwaitingReason::AgentDone, 100)
+        .unwrap();
+    drop(db);
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER reject_timeout_resume BEFORE UPDATE OF status ON cards
+         WHEN OLD.status='awaiting' AND NEW.status='running'
+         BEGIN SELECT RAISE(ABORT, 'reject resume'); END;",
+        )
+        .unwrap();
+    let db = Db::open(&path).unwrap();
+    assert!(db
+        .resume_run_timeout_uow(card.id, CardStatus::Running, 500)
+        .is_err());
+    assert_eq!(
+        db.get_card(card.id).unwrap().unwrap().status,
+        CardStatus::Awaiting
+    );
+    let persisted = db.get_run(run.id).unwrap();
+    assert_eq!(persisted.timeout_deadline_at_ms, Some(1_000));
+    assert_eq!(persisted.timeout_paused_at_ms, Some(100));
 }

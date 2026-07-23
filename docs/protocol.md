@@ -216,7 +216,7 @@ decider, and the daemon applies its decision in one place.
 | herdr `unknown`, or any signal on a non-live card | ignored. |
 | Herdr `pane_exited` without `board done` | run `fail`, card `failed`, **no** transition (unchanged); watcher identity is `(session socket, pane id)`. |
 | configured child returns while its exact run is open (`queued` or `started`) | internal run-id guard records `fail`, card `failed`, **no** transition; callback-before-registration is accepted, while stale/completed and built-in runs are rejected. `board done` likewise requires the exact `BOARD_RUN_ID` during the queued exception, preventing a stale child from completing a replacement. |
-| column `timeout_minutes` exceeded | **paused while `awaiting`** (the deadline shifts forward by the review span on exit); otherwise run `fail` + `on_fail`. |
+| column `timeout_minutes` exceeded | **paused while `awaiting`** (the durable deadline shifts forward by the review span on exit); otherwise run `fail` + `on_fail`. The original deadline survives daemon restart, including already-overdue runs; `NULL` remains unlimited. |
 | `run.done ok` | `on_success` target → move; no target → `done`. |
 | `run.done fail` | `on_fail` target → move; no target → `failed`. |
 | `run.cancel` | outcome `cancelled`, card `failed`, no transition. |

@@ -1,6 +1,6 @@
 -- herdr-board SQLite schema (WAL mode; boardd is the only writer).
--- This file is the CURRENT (schema v8) shape: a fresh DB is created directly
--- from it and stamped `PRAGMA user_version = 8`. Existing databases are upgraded
+-- This file is the CURRENT (schema v9) shape: a fresh DB is created directly
+-- from it and stamped `PRAGMA user_version = 9`. Existing databases are upgraded
 -- by migrations in board-core/src/db.rs (kept in sync with this file).
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -89,6 +89,8 @@ CREATE TABLE runs (
   session_id         TEXT,                     -- harness conversation id (--resume)
   session            TEXT,                     -- herdr session name; NULL = default session
   started_at         TEXT,
+  timeout_deadline_at_ms INTEGER,             -- durable wall-clock deadline; NULL = unlimited
+  timeout_paused_at_ms INTEGER,               -- awaiting began; NULL while timeout is running
   ended_at           TEXT,
   outcome            TEXT CHECK (outcome IN (NULL,'ok','fail','cancelled','lost')),
   result_summary     TEXT,

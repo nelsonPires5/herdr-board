@@ -636,6 +636,8 @@ fn run_with_session(id: i64, started: bool, session_id: Option<&str>) -> Run {
         session_id: session_id.map(str::to_owned),
         session: None,
         started_at: started.then(|| "started".into()),
+        timeout_deadline_at_ms: None,
+        timeout_paused_at_ms: None,
         ended_at: None,
         outcome: None,
         result_summary: None,

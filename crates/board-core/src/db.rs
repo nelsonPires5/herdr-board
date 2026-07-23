@@ -18,7 +18,7 @@ use crate::{Error, Result};
 const SCHEMA_SQL: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../schema.sql"));
 
 /// The latest schema version embedded in [`SCHEMA_SQL`].
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 /// v1 → v2 migration. SQLite cannot alter a CHECK constraint or drop a column
 /// in place, so `cards` is rebuilt. Legacy `space_kind` values `cwd`/`worktree`
@@ -191,6 +191,22 @@ const V7_MIGRATION_SQL: &str = "ALTER TABLE runs ADD COLUMN system_prompt_snapsh
 /// away by migration.
 const V8_MIGRATION_SQL: &str =
     "CREATE UNIQUE INDEX idx_runs_one_open_per_card ON runs(card_id) WHERE ended_at IS NULL";
+
+/// v8 → v9: persist timeout accounting. Legacy running runs derive their
+/// deadline once from their original start; awaiting runs are paused at the
+/// card's last durable transition time.
+const V9_MIGRATION_SQL: &str = "
+UPDATE runs
+SET timeout_deadline_at_ms = CAST(unixepoch(started_at) * 1000 AS INTEGER)
+    + (SELECT MAX(columns.timeout_minutes, 0) * 60000 FROM columns WHERE columns.id=runs.column_id)
+WHERE started_at IS NOT NULL AND ended_at IS NULL
+  AND (SELECT timeout_minutes FROM columns WHERE columns.id=runs.column_id) IS NOT NULL;
+UPDATE runs
+SET timeout_paused_at_ms = (SELECT CAST(unixepoch(cards.updated_at) * 1000 AS INTEGER)
+                            FROM cards WHERE cards.id=runs.card_id)
+WHERE ended_at IS NULL AND EXISTS
+  (SELECT 1 FROM cards WHERE cards.id=runs.card_id AND cards.status='awaiting');
+";
 
 /// Deterministic statement boundaries used by crash-atomicity tests. Hooks are
 /// opt-in per [`Db`] instance and receive no row or effect DTO.
@@ -412,6 +428,23 @@ impl Db {
                         )));
                     }
                 }
+            }
+            if version < 9 {
+                let has_deadline: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('runs') WHERE name='timeout_deadline_at_ms')",
+                    [], |r| r.get(0),
+                )?;
+                if !has_deadline {
+                    tx.execute_batch("ALTER TABLE runs ADD COLUMN timeout_deadline_at_ms INTEGER")?;
+                }
+                let has_paused: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('runs') WHERE name='timeout_paused_at_ms')",
+                    [], |r| r.get(0),
+                )?;
+                if !has_paused {
+                    tx.execute_batch("ALTER TABLE runs ADD COLUMN timeout_paused_at_ms INTEGER")?;
+                }
+                tx.execute_batch(V9_MIGRATION_SQL)?;
             }
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             tx.commit()?;
@@ -987,6 +1020,64 @@ impl Db {
         self.require_card(id)
     }
 
+    /// Atomically enter awaiting and pause the open run's durable timeout.
+    /// Repeated calls preserve the original pause instant.
+    pub fn pause_run_timeout_uow(
+        &self,
+        card_id: i64,
+        reason: AwaitingReason,
+        now_ms: i64,
+    ) -> Result<Card> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE cards SET status='awaiting',awaiting_reason=?1,updated_at=datetime('now') WHERE id=?2",
+            params![reason.as_str(), card_id],
+        )?;
+        tx.execute(
+            "UPDATE runs SET timeout_paused_at_ms=COALESCE(timeout_paused_at_ms,?1)
+             WHERE card_id=?2 AND ended_at IS NULL AND started_at IS NOT NULL",
+            params![now_ms, card_id],
+        )?;
+        tx.commit()?;
+        self.require_card(card_id)
+    }
+
+    /// Atomically leave awaiting and shift the deadline by the paused span.
+    /// Clearing the pause marker makes retries idempotent.
+    pub fn resume_run_timeout_uow(
+        &self,
+        card_id: i64,
+        status: CardStatus,
+        now_ms: i64,
+    ) -> Result<Card> {
+        if status == CardStatus::Awaiting {
+            return Err(Error::InvalidState("cannot resume into awaiting".into()));
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let timing: Option<(Option<i64>, Option<i64>)> = tx
+            .query_row(
+                "SELECT timeout_deadline_at_ms,timeout_paused_at_ms FROM runs
+             WHERE card_id=?1 AND ended_at IS NULL AND started_at IS NOT NULL",
+                params![card_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if let Some((deadline, Some(paused))) = timing {
+            let shifted = deadline.map(|d| d.saturating_add(now_ms.saturating_sub(paused).max(0)));
+            tx.execute(
+                "UPDATE runs SET timeout_deadline_at_ms=?1,timeout_paused_at_ms=NULL
+                 WHERE card_id=?2 AND ended_at IS NULL",
+                params![shifted, card_id],
+            )?;
+        }
+        tx.execute(
+            "UPDATE cards SET status=?1,awaiting_reason=NULL,updated_at=datetime('now') WHERE id=?2",
+            params![status.as_str(), card_id],
+        )?;
+        tx.commit()?;
+        self.require_card(card_id)
+    }
+
     pub fn set_card_column(&self, id: i64, column_id: i64) -> Result<Card> {
         self.move_card(id, column_id, None)
     }
@@ -1134,6 +1225,7 @@ impl Db {
         run_id: i64,
         workspace_id: Option<&str>,
         pane_id: Option<&str>,
+        timeout_deadline_at_ms: Option<i64>,
     ) -> Result<Run> {
         let tx = self.conn.unchecked_transaction()?;
         let card_id: i64 = tx
@@ -1149,8 +1241,8 @@ impl Db {
                 other => Error::Sqlite(other),
             })?;
         tx.execute(
-            "UPDATE runs SET started_at=datetime('now'),herdr_workspace_id=?1,herdr_pane_id=?2 WHERE id=?3",
-            params![workspace_id,pane_id,run_id],
+            "UPDATE runs SET started_at=datetime('now'),herdr_workspace_id=?1,herdr_pane_id=?2,timeout_deadline_at_ms=?4,timeout_paused_at_ms=NULL WHERE id=?3",
+            params![workspace_id,pane_id,run_id,timeout_deadline_at_ms],
         )?;
         self.lifecycle_fault(LifecycleFaultPoint::PromoteAfterRunUpdate)?;
         tx.execute(
@@ -1505,6 +1597,8 @@ fn row_to_run(row: &Row) -> rusqlite::Result<Run> {
         session_id: row.get("session_id")?,
         session: row.get("session")?,
         started_at: row.get("started_at")?,
+        timeout_deadline_at_ms: row.get("timeout_deadline_at_ms")?,
+        timeout_paused_at_ms: row.get("timeout_paused_at_ms")?,
         ended_at: row.get("ended_at")?,
         outcome,
         result_summary: row.get("result_summary")?,

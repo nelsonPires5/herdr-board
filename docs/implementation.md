@@ -57,9 +57,12 @@ pub trait Spawner: Send + Sync {
 ## Semantics source of truth
 
 `docs/protocol.md` + `docs/design.md` §5–§8. `schema.sql` at repo root is the current fresh schema
-(embedded and versioned with `PRAGMA user_version`). Schema v8 is current: it adds the partial
+(embedded and versioned with `PRAGMA user_version`). Schema v9 is current. v8 adds the partial
 unique index `idx_runs_one_open_per_card` and transactional enqueue/promotion/finalization units of
-work. Upgrade retains a single open run unchanged and rejects ambiguous duplicates with every card
+work. v9 adds nullable durable timeout deadline/pause timestamps. Promotion writes the deadline in
+its transaction; awaiting pause/resume updates the card and timeout atomically and idempotently,
+using saturating shifts. Upgrade derives legacy open-run values once from `runs.started_at`, the
+column timeout, and (for awaiting) `cards.updated_at`; restart consumes the persisted budget. Upgrade retains a single open run unchanged and rejects ambiguous duplicates with every card
 and run ID; no duplicate is normalized or selected as a winner. It retains v5's preserved board id=1
 as `Global` (`scope_path=NULL`) and scoped-board rows, v6's `awaiting`/`done` status invariants, and
 v7's nullable `runs.system_prompt_snapshot`. New v7 queued runs store the exact

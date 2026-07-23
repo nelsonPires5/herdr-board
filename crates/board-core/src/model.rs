@@ -92,6 +92,12 @@ pub struct Run {
     /// herdr session name this run spawned into; `None` = default session.
     pub session: Option<String>,
     pub started_at: Option<String>,
+    /// Durable Unix-epoch millisecond deadline. `None` means unlimited.
+    #[serde(default)]
+    pub timeout_deadline_at_ms: Option<i64>,
+    /// Unix-epoch milliseconds at which timeout accounting was paused.
+    #[serde(default)]
+    pub timeout_paused_at_ms: Option<i64>,
     pub ended_at: Option<String>,
     pub outcome: Option<RunOutcome>,
     pub result_summary: Option<String>,

@@ -179,6 +179,7 @@ fn apply_signal_guarded(
     guard: SignalGuard,
 ) {
     let applied_at = Instant::now();
+    let wall_now_ms = d.wall_now_ms();
     let dec = {
         // Signals and finalizers share one lock order. The exact active run and
         // its open DB row are revalidated while both locks are held, so a run
@@ -219,7 +220,13 @@ fn apply_signal_guarded(
         };
 
         let written = match dec.awaiting_reason {
+            Some(reason) if card.status != CardStatus::Awaiting => {
+                db.pause_run_timeout_uow(card_id, reason, wall_now_ms)
+            }
             Some(reason) => db.set_card_awaiting(card_id, reason),
+            None if card.status == CardStatus::Awaiting => {
+                db.resume_run_timeout_uow(card_id, dec.new_status, wall_now_ms)
+            }
             None => db.set_card_status(card_id, dec.new_status),
         };
         if let Err(e) = written {

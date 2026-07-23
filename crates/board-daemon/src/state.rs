@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use board_core::config::Config;
 use board_core::protocol::{BoardChangedReason, Event, RunOutcome};
@@ -17,6 +17,14 @@ use tokio::sync::{broadcast, mpsc, watch};
 use crate::session::SessionRegistry;
 use crate::settings::DaemonSettings;
 use crate::store::Store;
+
+fn system_wall_now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
+}
 
 /// In-memory bookkeeping for a started run.
 pub struct ActiveRun {
@@ -59,6 +67,8 @@ pub struct WatchState {
 /// in-memory scheduler state. Shared as `Arc<Daemon>`.
 pub struct Daemon {
     pub store: Store,
+    /// Injectable wall clock used only for durable timeout timestamps.
+    pub wall_now_ms: fn() -> i64,
     pub config: Config,
     pub settings: DaemonSettings,
     pub db_path: PathBuf,
@@ -97,6 +107,7 @@ impl Daemon {
     ) -> Daemon {
         Daemon {
             store,
+            wall_now_ms: system_wall_now_ms,
             config,
             settings,
             db_path,
@@ -113,6 +124,10 @@ impl Daemon {
             #[cfg(test)]
             effect_log: Mutex::new(None),
         }
+    }
+
+    pub fn wall_now_ms(&self) -> i64 {
+        (self.wall_now_ms)()
     }
 
     /// Broadcast an event to all subscribers (no-op if none).

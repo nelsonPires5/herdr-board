@@ -14,7 +14,7 @@ fn mem() -> Db {
 #[test]
 fn migration_seeds_board_and_todo_column() {
     let db = mem();
-    assert_eq!(db.user_version().unwrap(), 8);
+    assert_eq!(db.user_version().unwrap(), 9);
     let board = db.get_board(BOARD_ID).unwrap();
     assert_eq!(board.name, "Global");
     assert_eq!(board.scope_path, None);
@@ -36,7 +36,7 @@ fn migration_idempotent_on_reopen() {
     // Reopen: must not re-seed (still exactly one board, one column).
     {
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.user_version().unwrap(), 8);
+        assert_eq!(db.user_version().unwrap(), 9);
         assert_eq!(db.list_columns(BOARD_ID).unwrap().len(), 1);
         assert_eq!(db.get_board(BOARD_ID).unwrap().name, "Global");
     }
@@ -126,7 +126,7 @@ fn migration_v2_upgrades_v1_database() {
     }
     // Open via Db → runs the v2 through v7 migrations.
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 8);
+    assert_eq!(db.user_version().unwrap(), 9);
     let cards = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(cards.len(), 2);
     for c in &cards {
@@ -492,7 +492,7 @@ fn migration_v4_preserves_claude_cards_and_accepts_pi_efforts() {
     }
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 8);
+    assert_eq!(db.user_version().unwrap(), 9);
     let existing = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(existing[0].harness, "claude");
     assert_eq!(db.list_comments(existing[0].id).unwrap().len(), 1);
@@ -514,14 +514,14 @@ fn migration_does_not_downgrade_future_schema_version() {
     let path = tmp.path().to_path_buf();
     {
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.user_version().unwrap(), 8);
+        assert_eq!(db.user_version().unwrap(), 9);
     }
     {
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch("PRAGMA user_version = 8;").unwrap();
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 8);
+    assert_eq!(db.user_version().unwrap(), 9);
 }
 
 #[test]
@@ -546,7 +546,7 @@ fn migration_v3_adds_archived_at_to_v2_database() {
         .unwrap();
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 8);
+    assert_eq!(db.user_version().unwrap(), 9);
     let cards = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(cards.len(), 1);
     assert!(cards[0].archived_at.is_none());
@@ -612,7 +612,7 @@ fn v6_to_v7_migration_preserves_legacy_queued_run_byte_for_byte() {
         .unwrap();
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 8);
+    assert_eq!(db.user_version().unwrap(), 9);
     let run = &db.list_runs(1).unwrap()[0];
     assert_eq!(run.argv_json, argv);
     assert_eq!(run.prompt_snapshot, prompt);
@@ -899,7 +899,7 @@ fn migration_v5_preserves_global_data_and_renames_it() {
 
     let db = Db::open(&path).unwrap();
     let global = db.get_board(BOARD_ID).unwrap();
-    assert_eq!(db.user_version().unwrap(), 8);
+    assert_eq!(db.user_version().unwrap(), 9);
     assert_eq!(global.name, "Global");
     assert!(global.scope_path.is_none());
     let cards = db.list_cards(BOARD_ID).unwrap();
@@ -1041,7 +1041,7 @@ fn migration_v6_rebuilds_cards_check_and_preserves_data() {
     }
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 8);
+    assert_eq!(db.user_version().unwrap(), 9);
     let cards = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(cards.len(), 2);
     let kept = &cards[0];
@@ -1150,4 +1150,150 @@ fn delete_column_rolls_back_card_moves_when_delete_fails() {
         "the preceding move must roll back with the failed delete"
     );
     assert!(db.get_column(source.id).unwrap().is_some());
+}
+
+#[test]
+fn v8_to_v9_derives_timeout_state_once_from_durable_history() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    let (running_id, awaiting_id, unlimited_id, ended_id);
+    {
+        let db = Db::open(&path).unwrap();
+        let timed = db
+            .create_column(&ColumnCreateParams {
+                name: "timed".into(),
+                timeout_minutes: Some(7),
+                ..Default::default()
+            })
+            .unwrap();
+        let unlimited = db
+            .create_column(&ColumnCreateParams {
+                name: "unlimited".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let make = |title: &str, column_id: i64| {
+            db.create_card(&CardCreateParams {
+                title: title.into(),
+                column_id: Some(column_id),
+                ..Default::default()
+            })
+            .unwrap()
+        };
+        let running = make("running", timed.id);
+        let awaiting = make("awaiting", timed.id);
+        let unlimited_card = make("unlimited", unlimited.id);
+        let ended = make("ended", timed.id);
+        running_id = db
+            .create_run(running.id, timed.id, "pi", "[]", "p", None, None)
+            .unwrap()
+            .id;
+        awaiting_id = db
+            .create_run(awaiting.id, timed.id, "pi", "[]", "p", None, None)
+            .unwrap()
+            .id;
+        unlimited_id = db
+            .create_run(unlimited_card.id, unlimited.id, "pi", "[]", "p", None, None)
+            .unwrap()
+            .id;
+        ended_id = db
+            .create_run(ended.id, timed.id, "pi", "[]", "p", None, None)
+            .unwrap()
+            .id;
+    }
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(&format!(
+            "UPDATE runs SET started_at='2026-01-02 03:04:05', timeout_deadline_at_ms=NULL, timeout_paused_at_ms=NULL;
+             UPDATE runs SET ended_at='2026-01-02 03:05:05', outcome='ok' WHERE id={ended_id};
+             UPDATE cards SET status='running' WHERE id=(SELECT card_id FROM runs WHERE id={running_id});
+             UPDATE cards SET status='awaiting', awaiting_reason='agent_done', updated_at='2026-01-02 03:06:07' WHERE id=(SELECT card_id FROM runs WHERE id={awaiting_id});
+             UPDATE cards SET status='running' WHERE id=(SELECT card_id FROM runs WHERE id={unlimited_id});
+             PRAGMA user_version=8;"
+        )).unwrap();
+    }
+    let expected_start_ms: i64 = Connection::open_in_memory()
+        .unwrap()
+        .query_row("SELECT unixepoch('2026-01-02 03:04:05') * 1000", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let expected_pause_ms: i64 = Connection::open_in_memory()
+        .unwrap()
+        .query_row("SELECT unixepoch('2026-01-02 03:06:07') * 1000", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    {
+        let db = Db::open(&path).unwrap();
+        assert_eq!(
+            db.get_run(running_id).unwrap().timeout_deadline_at_ms,
+            Some(expected_start_ms + 420_000)
+        );
+        let awaiting = db.get_run(awaiting_id).unwrap();
+        assert_eq!(
+            awaiting.timeout_deadline_at_ms,
+            Some(expected_start_ms + 420_000)
+        );
+        assert_eq!(awaiting.timeout_paused_at_ms, Some(expected_pause_ms));
+        assert_eq!(
+            db.get_run(unlimited_id).unwrap().timeout_deadline_at_ms,
+            None
+        );
+        assert_eq!(db.get_run(ended_id).unwrap().timeout_deadline_at_ms, None);
+    }
+    let conn = Connection::open(&path).unwrap();
+    conn.execute(
+        "UPDATE runs SET timeout_deadline_at_ms=123 WHERE id=?1",
+        [running_id],
+    )
+    .unwrap();
+    drop(conn);
+    assert_eq!(
+        Db::open(&path)
+            .unwrap()
+            .get_run(running_id)
+            .unwrap()
+            .timeout_deadline_at_ms,
+        Some(123)
+    );
+}
+
+#[test]
+fn durable_timeout_pause_resume_is_atomic_idempotent_and_saturating() {
+    let db = mem();
+    let card = db
+        .create_card(&CardCreateParams {
+            title: "timed".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let run = db
+        .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
+        .unwrap();
+    db.promote_run_uow(run.id, None, None, Some(i64::MAX - 10))
+        .unwrap();
+
+    db.pause_run_timeout_uow(card.id, AwaitingReason::IdleExpired, 100)
+        .unwrap();
+    db.pause_run_timeout_uow(card.id, AwaitingReason::AgentDone, 200)
+        .unwrap();
+    let paused = db.get_run(run.id).unwrap();
+    assert_eq!(paused.timeout_paused_at_ms, Some(100));
+    assert_eq!(
+        db.get_card(card.id).unwrap().unwrap().awaiting_reason,
+        Some(AwaitingReason::AgentDone)
+    );
+
+    db.resume_run_timeout_uow(card.id, CardStatus::Running, 500)
+        .unwrap();
+    let resumed = db.get_run(run.id).unwrap();
+    assert_eq!(resumed.timeout_deadline_at_ms, Some(i64::MAX));
+    assert_eq!(resumed.timeout_paused_at_ms, None);
+    db.resume_run_timeout_uow(card.id, CardStatus::Running, 900)
+        .unwrap();
+    assert_eq!(
+        db.get_run(run.id).unwrap().timeout_deadline_at_ms,
+        Some(i64::MAX)
+    );
 }

@@ -231,15 +231,13 @@ async fn adopt_runs(d: &Arc<Daemon>) {
         if alive {
             tracing::info!("adopting live run {} (card {})", run.id, card.id);
             let adopted_at = std::time::Instant::now();
-            let deadline = {
-                let col = d.store.lock().get_column(run.column_id).ok().flatten();
-                col.and_then(|c| c.timeout_minutes).map(|m| {
-                    adopted_at
-                        + std::time::Duration::from_secs(
-                            m.max(0) as u64 * d.settings.timeout_unit_secs,
-                        )
-                })
-            };
+            let wall_now_ms = d.wall_now_ms();
+            // v9 deadlines are authoritative: restart never grants a fresh budget.
+            let deadline = run.timeout_deadline_at_ms.and_then(|ms| {
+                adopted_at.checked_add(std::time::Duration::from_millis(
+                    ms.saturating_sub(wall_now_ms).max(0) as u64,
+                ))
+            });
             let mut sched = d.sched.lock().unwrap();
             sched.active.insert(
                 run.id,
@@ -249,8 +247,13 @@ async fn adopt_runs(d: &Arc<Daemon>) {
                     started: adopted_at,
                     timeout_deadline: deadline,
                     idle_since: None,
-                    awaiting_since: (card.status == board_core::protocol::CardStatus::Awaiting)
-                        .then_some(adopted_at),
+                    awaiting_since: run.timeout_paused_at_ms.map(|paused| {
+                        adopted_at
+                            .checked_sub(std::time::Duration::from_millis(
+                                wall_now_ms.saturating_sub(paused).max(0) as u64,
+                            ))
+                            .unwrap_or(adopted_at)
+                    }),
                     is_local: false,
                     pane_id: run.herdr_pane_id.clone(),
                 },
@@ -343,8 +346,13 @@ mod tests {
         let run = db
             .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
             .unwrap();
-        db.start_run(run.id, Some("w1"), Some("p1")).unwrap();
-        db.set_card_awaiting(card.id, AwaitingReason::AgentDone)
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        db.promote_run_uow(run.id, Some("w1"), Some("p1"), Some(now_ms + 60_000))
+            .unwrap();
+        db.pause_run_timeout_uow(card.id, AwaitingReason::AgentDone, now_ms)
             .unwrap();
 
         let (events_tx, _events_rx) = broadcast::channel(16);
