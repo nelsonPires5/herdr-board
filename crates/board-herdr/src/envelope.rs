@@ -50,6 +50,3 @@ impl Response {
         serde_json::from_str(line.trim())
     }
 }
-
-#[cfg(test)]
-mod tests;

@@ -1339,6 +1339,3 @@ fn column_fields_from_values(
         ),
     ]
 }
-
-#[cfg(test)]
-mod tests;

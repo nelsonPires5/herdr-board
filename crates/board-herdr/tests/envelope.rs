@@ -1,5 +1,5 @@
-use super::*;
-use serde_json::json;
+use board_herdr::{Request, Response};
+use serde_json::{json, Value};
 
 #[test]
 fn request_round_trips_to_line() {

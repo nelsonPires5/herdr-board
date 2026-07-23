@@ -1,8 +1,8 @@
-use super::*;
 use board_core::capability::{
     claude_capabilities, pi_capabilities, HarnessCapabilities, ModelInfo,
 };
 use board_core::protocol::Effort;
+use board_tui::forms::{session_name_from_socket, Field, FieldId, FieldKind, Form, Submit};
 
 /// Find a field by id.
 fn field(form: &Form, id: FieldId) -> &Field {
