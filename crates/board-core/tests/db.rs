@@ -14,7 +14,7 @@ fn mem() -> Db {
 #[test]
 fn migration_seeds_board_and_todo_column() {
     let db = mem();
-    assert_eq!(db.user_version().unwrap(), 7);
+    assert_eq!(db.user_version().unwrap(), 8);
     let board = db.get_board(BOARD_ID).unwrap();
     assert_eq!(board.name, "Global");
     assert_eq!(board.scope_path, None);
@@ -36,7 +36,7 @@ fn migration_idempotent_on_reopen() {
     // Reopen: must not re-seed (still exactly one board, one column).
     {
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.user_version().unwrap(), 7);
+        assert_eq!(db.user_version().unwrap(), 8);
         assert_eq!(db.list_columns(BOARD_ID).unwrap().len(), 1);
         assert_eq!(db.get_board(BOARD_ID).unwrap().name, "Global");
     }
@@ -126,7 +126,7 @@ fn migration_v2_upgrades_v1_database() {
     }
     // Open via Db → runs the v2 through v7 migrations.
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 7);
+    assert_eq!(db.user_version().unwrap(), 8);
     let cards = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(cards.len(), 2);
     for c in &cards {
@@ -144,10 +144,9 @@ fn migration_v2_upgrades_v1_database() {
     // Related rows survive both cards rebuilds, and runs.session defaults NULL.
     let card = cards.iter().find(|c| c.title == "wt").unwrap();
     assert_eq!(db.list_comments(card.id).unwrap()[0].body, "preserved");
-    assert_eq!(
-        db.list_runs(card.id).unwrap()[0].prompt_snapshot,
-        "preserved prompt"
-    );
+    let preserved = db.list_runs(card.id).unwrap()[0].clone();
+    assert_eq!(preserved.prompt_snapshot, "preserved prompt");
+    db.finish_run(preserved.id, RunOutcome::Ok, None).unwrap();
     let run = db
         .create_run(card.id, card.column_id, "claude", "[]", "p", None, None)
         .unwrap();
@@ -493,7 +492,7 @@ fn migration_v4_preserves_claude_cards_and_accepts_pi_efforts() {
     }
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 7);
+    assert_eq!(db.user_version().unwrap(), 8);
     let existing = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(existing[0].harness, "claude");
     assert_eq!(db.list_comments(existing[0].id).unwrap().len(), 1);
@@ -515,7 +514,7 @@ fn migration_does_not_downgrade_future_schema_version() {
     let path = tmp.path().to_path_buf();
     {
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.user_version().unwrap(), 7);
+        assert_eq!(db.user_version().unwrap(), 8);
     }
     {
         let conn = Connection::open(&path).unwrap();
@@ -547,7 +546,7 @@ fn migration_v3_adds_archived_at_to_v2_database() {
         .unwrap();
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 7);
+    assert_eq!(db.user_version().unwrap(), 8);
     let cards = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(cards.len(), 1);
     assert!(cards[0].archived_at.is_none());
@@ -613,7 +612,7 @@ fn v6_to_v7_migration_preserves_legacy_queued_run_byte_for_byte() {
         .unwrap();
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 7);
+    assert_eq!(db.user_version().unwrap(), 8);
     let run = &db.list_runs(1).unwrap()[0];
     assert_eq!(run.argv_json, argv);
     assert_eq!(run.prompt_snapshot, prompt);
@@ -826,14 +825,17 @@ fn all_cards_and_latest_run_with_pane_include_scoped_boards() {
         .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
         .unwrap();
     db.start_run(no_pane.id, Some("w"), None).unwrap();
+    db.finish_run(no_pane.id, RunOutcome::Ok, None).unwrap();
     let older = db
         .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
         .unwrap();
     db.start_run(older.id, Some("w"), Some("p-old")).unwrap();
+    db.finish_run(older.id, RunOutcome::Ok, None).unwrap();
     let latest = db
         .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
         .unwrap();
     db.start_run(latest.id, Some("w"), Some("p-new")).unwrap();
+    db.finish_run(latest.id, RunOutcome::Ok, None).unwrap();
     let newest_without_pane = db
         .create_run(card.id, card.column_id, "pi", "[]", "p", None, None)
         .unwrap();
@@ -897,7 +899,7 @@ fn migration_v5_preserves_global_data_and_renames_it() {
 
     let db = Db::open(&path).unwrap();
     let global = db.get_board(BOARD_ID).unwrap();
-    assert_eq!(db.user_version().unwrap(), 7);
+    assert_eq!(db.user_version().unwrap(), 8);
     assert_eq!(global.name, "Global");
     assert!(global.scope_path.is_none());
     let cards = db.list_cards(BOARD_ID).unwrap();
@@ -1039,7 +1041,7 @@ fn migration_v6_rebuilds_cards_check_and_preserves_data() {
     }
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 7);
+    assert_eq!(db.user_version().unwrap(), 8);
     let cards = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(cards.len(), 2);
     let kept = &cards[0];

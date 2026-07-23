@@ -50,9 +50,12 @@ pub trait Spawner: Send + Sync {
 ## Semantics source of truth
 
 `docs/protocol.md` + `docs/design.md` §5–§8. `schema.sql` at repo root is the current fresh schema
-(embedded and versioned with `PRAGMA user_version`). Schema v7 is current: it retains v5's preserved
-board id=1 as `Global` (`scope_path=NULL`) and scoped-board rows, v6's `awaiting`/`done` status
-invariants, and adds nullable `runs.system_prompt_snapshot`. New v7 queued runs store the exact
+(embedded and versioned with `PRAGMA user_version`). Schema v8 is current: it adds the partial
+unique index `idx_runs_one_open_per_card` and transactional enqueue/promotion/finalization units of
+work. Upgrade retains a single open run unchanged and rejects ambiguous duplicates with every card
+and run ID; no duplicate is normalized or selected as a winner. It retains v5's preserved board id=1
+as `Global` (`scope_path=NULL`) and scoped-board rows, v6's `awaiting`/`done` status invariants, and
+v7's nullable `runs.system_prompt_snapshot`. New v7 queued runs store the exact
 resolved, trailer-inclusive system prompt; pre-v7 rows remain `NULL` with no backfill. That legacy
 `NULL` is intentional: built-ins keep their persisted all-in-one argv, while configured rows keep
 their historical spawn-time reconstruction. The internal snapshot is omitted from boardd wire

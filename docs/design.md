@@ -77,12 +77,16 @@ runs(id, card_id, column_id, harness, argv_json, prompt_snapshot,
      result_summary, log_path)
 ```
 
-Schema is versioned via `PRAGMA user_version` (current = **v7**). A fresh DB is built straight from
-`schema.sql` and stamped v7. Existing v1→v4 migrations retain their space/session, archive, and Pi
+Schema is versioned via `PRAGMA user_version` (current = **v8**). A fresh DB is built straight from
+`schema.sql` and stamped v8. Existing v1→v4 migrations retain their space/session, archive, and Pi
 effort behavior. v5 adds unique non-null `boards.scope_path`, preserves board `id=1` plus every
 related row as `Global`, and leaves existing card harnesses unchanged. v6 rebuilds `cards` to admit
 the `awaiting`/`done` statuses and adds `cards.awaiting_reason` (NULL outside `awaiting`). v7 adds
-nullable `runs.system_prompt_snapshot` without backfilling old rows. New runs atomically preserve the
+nullable `runs.system_prompt_snapshot` without backfilling old rows. v8 adds the exact partial unique
+index `idx_runs_one_open_per_card` on `runs(card_id) WHERE ended_at IS NULL`. There is no safe
+residue normalization: one existing open run is retained byte-for-byte, while two or more are
+ambiguous, so upgrade reports every duplicate card/run ID and changes neither schema nor
+`user_version`. New runs atomically preserve the
 fully resolved, board-protocol-trailer-inclusive system prompt at enqueue time, so a queued run is
 not changed by later column edits. A legacy NULL remains a launch-version marker: pre-v7 built-ins
 execute their persisted all-in-one argv unchanged, while pre-v7 configured rows retain their
@@ -108,7 +112,10 @@ nullable edit rather than accidentally preserving the old value.
 ### Authoritative validation
 
 The daemon merges an update with the stored card or column, validates the complete result, and
-only then writes SQLite and emits its coarse change event. A rejected merged state therefore
+only then writes SQLite and emits its coarse change event. Schema v8 additionally enforces one open
+run per card. Enqueue, promotion, and finalization—including a final comment, card transition, and
+optional auto-hop enqueue—are core transaction-scoped units of work. Their return DTOs are not
+available until commit; process/socket/event/notification effects occur only afterward. A rejected merged state therefore
 cannot leave a partial row or event. Card capability policy covers harness, model, effort,
 permission, and space combinations; column permission overrides use `PermissionContext::ColumnOverride`
 and never allow `bypassPermissions`, while an explicit Claude card value remains valid. Overrides

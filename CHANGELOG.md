@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+- Schema v8 enforces one open run per card and makes enqueue, promotion, and finalization durable atomic DB units of work.
+
 ### Changed
 - Card and column settings now use shared merged capability validation before persistence or
   change events; effective card/column settings are revalidated at enqueue time, including legacy

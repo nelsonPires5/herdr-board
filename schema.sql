@@ -1,6 +1,6 @@
 -- herdr-board SQLite schema (WAL mode; boardd is the only writer).
--- This file is the CURRENT (schema v7) shape: a fresh DB is created directly
--- from it and stamped `PRAGMA user_version = 7`. Existing databases are upgraded
+-- This file is the CURRENT (schema v8) shape: a fresh DB is created directly
+-- from it and stamped `PRAGMA user_version = 8`. Existing databases are upgraded
 -- by migrations in board-core/src/db.rs (kept in sync with this file).
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -98,3 +98,5 @@ CREATE TABLE runs (
 CREATE INDEX idx_cards_column   ON cards(column_id, position);
 CREATE INDEX idx_comments_card  ON comments(card_id, created_at);
 CREATE INDEX idx_runs_card      ON runs(card_id, started_at);
+-- A card has at most one queued/running/awaiting lifecycle at a time.
+CREATE UNIQUE INDEX idx_runs_one_open_per_card ON runs(card_id) WHERE ended_at IS NULL;
