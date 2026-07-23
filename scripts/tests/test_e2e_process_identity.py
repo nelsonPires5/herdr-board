@@ -71,6 +71,17 @@ class PortableProcessIdentityTests(unittest.TestCase):
         self.assertTrue(current.start_time)
         self.assertTrue(Path(current.exe).is_absolute())
 
+    def test_linux_cmdline_parser_preserves_trailing_empty_argument(self):
+        raw = b"/usr/bin/example\0ordinary\0spaced argument\0\0"
+        self.assertEqual(
+            identity._parse_linux_cmdline(raw),
+            ["/usr/bin/example", "ordinary", "spaced argument", ""],
+        )
+        for malformed in (b"", b"/usr/bin/example\0ordinary"):
+            with self.subTest(raw=malformed):
+                with self.assertRaises(identity.IdentityError):
+                    identity._parse_linux_cmdline(malformed)
+
     def test_snapshot_preserves_empty_and_spaced_arguments(self):
         child = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(30)", "odd value", ""]

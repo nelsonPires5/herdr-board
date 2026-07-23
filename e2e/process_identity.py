@@ -112,15 +112,24 @@ def validate_token(token: object, key: bytes) -> dict[str, Any]:
     return token
 
 
+def _parse_linux_cmdline(raw: bytes) -> list[str]:
+    if not raw or not raw.endswith(b"\0"):
+        raise IdentityError("invalid Linux cmdline")
+    parts = raw.split(b"\0")
+    parts.pop()  # /proc appends one synthetic terminal NUL field.
+    if not parts or not parts[0]:
+        raise IdentityError("empty Linux cmdline")
+    try:
+        return [value.decode("utf-8", "surrogateescape") for value in parts]
+    except UnicodeError as exc:
+        raise IdentityError("invalid Linux cmdline") from exc
+
+
 def _linux_snapshot(pid: int) -> Snapshot:
     try:
         raw_stat = open(f"/proc/{pid}/stat", encoding="utf-8").read()
         fields = raw_stat[raw_stat.rfind(")") + 2 :].split()
-        cmdline = [
-            value.decode("utf-8", "surrogateescape")
-            for value in open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")
-            if value
-        ]
+        cmdline = _parse_linux_cmdline(open(f"/proc/{pid}/cmdline", "rb").read())
         environ = frozenset(open(f"/proc/{pid}/environ", "rb").read().split(b"\0"))
         exe = os.readlink(f"/proc/{pid}/exe")
         return Snapshot(
