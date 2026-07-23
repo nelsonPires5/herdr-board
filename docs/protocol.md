@@ -18,7 +18,12 @@ protocol version.
 - A connection may send `{"id":"...","method":"events.subscribe"}`; boardd replies
   `{"id":"...","result":{"subscribed":true}}` and then streams event objects
   (no `id` field) on that connection until it closes. A subscribed connection can still
-  send further requests.
+  send further requests. Each connection has a bounded outbound queue: consecutive
+  `board_changed` events may coalesce to the latest coarse refresh while preserving response and
+  terminal-event order. Responses are never silently dropped. If a slow subscriber cannot accept
+  a non-coalescible event (including a terminal `run_ended`), boardd disconnects it; clients must
+  reconnect, resubscribe, and refetch board state. Broadcast lag likewise becomes a coarse
+  `board_changed` refresh rather than silently losing the refresh signal.
 
 ## Herdr compatibility gate
 
