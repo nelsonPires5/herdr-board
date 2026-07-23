@@ -11,6 +11,9 @@ use crate::config::{Config, HarnessDef};
 use crate::harness::BUILTIN_HARNESSES;
 use crate::protocol::Effort;
 
+/// Shared permission policy context used by the authoritative validators.
+pub use crate::engine::PermissionContext;
+
 // ---------------------------------------------------------------------------
 // HarnessMeta trait — the uniform adapter interface
 // ---------------------------------------------------------------------------
@@ -81,6 +84,39 @@ impl HarnessCapabilities {
             permission_modes: m.permissions(),
         }
     }
+}
+
+/// Return the authoritative effort set for a selected model. Known models use
+/// their declared set; omitted/unknown/free-form models use the capability
+/// default. Older capability payloads may omit that field; in that case the
+/// model union preserves their pre-default behavior. The result is in stable
+/// ascending order and contains no duplicates.
+pub fn efforts_for(caps: &HarnessCapabilities, model: Option<&str>) -> Vec<Effort> {
+    let known = model.and_then(|id| caps.models.iter().find(|known| known.id == id));
+    const ORDER: [Effort; 7] = [
+        Effort::Off,
+        Effort::Minimal,
+        Effort::Low,
+        Effort::Medium,
+        Effort::High,
+        Effort::Xhigh,
+        Effort::Max,
+    ];
+    ORDER
+        .into_iter()
+        .filter(|effort| {
+            known
+                .map(|model| model.efforts.contains(effort))
+                .unwrap_or_else(|| {
+                    caps.default_efforts.contains(effort)
+                        || (caps.default_efforts.is_empty()
+                            && caps
+                                .models
+                                .iter()
+                                .any(|model| model.efforts.contains(effort)))
+                })
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

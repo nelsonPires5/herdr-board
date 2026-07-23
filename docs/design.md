@@ -105,6 +105,16 @@ settings (`system_prompt`, transition targets, overrides, and timeout) and card 
 non-null partial-update fields remain unchanged. The TUI sends `null` for an intentionally empty
 nullable edit rather than accidentally preserving the old value.
 
+### Authoritative validation
+
+The daemon merges an update with the stored card or column, validates the complete result, and
+only then writes SQLite and emits its coarse change event. A rejected merged state therefore
+cannot leave a partial row or event. Card capability policy covers harness, model, effort,
+permission, and space combinations; column permission overrides use `PermissionContext::ColumnOverride`
+and never allow `bypassPermissions`, while an explicit Claude card value remains valid. Overrides
+without a harness are resolved against the entering card at enqueue time, where effective settings
+are validated again for legacy rows and concurrent changes.
+
 ### Session model
 
 Cards target a **herdr session** plus a space in it. Because two sessions can each show their own workspaces, the daemon must talk to the right socket per card — the old single-socket model showed the wrong session's workspaces.
@@ -220,7 +230,7 @@ toast.
   title (`Board [<scope> · ACTIVE|ALL|ARCHIVED]`) while the footer contains only `? help`. Archived cards are
   inert until restored and render dimmed with `▣ ARCHIVED` when visible.
 - **Content-sized overlays:** card/column forms, move pickers, and help panels shrink to their content on large terminals and clamp to the available viewport on small terminals.
-- **Guided card & column forms** share one metadata source: both fetch `harness.capabilities` (models/efforts/permissions via the daemon-side `HarnessMeta` adapter trait) and `harness.list` (built-ins + config-defined harnesses). For cards: Pi is selected for new cards; Claude remains selectable. On open/harness change the form also fetches `space.list`. Model starts at `(default)` (unset), then catalog aliases and `(custom)` when free-form is supported. Effort follows the selected/default model. Permission is hidden and submits `None` for Pi; Claude shows its modes. Switching harness resets only incompatible values. Workspace labels are shown but ids are persisted. Fetch failures degrade to free text with a warning. For column config the same source drives the override fields: `harness_override` is a **select** over the available harnesses (`(none)` = no override), `effort_override` follows the override harness's catalog, and `permission_override` is **hidden** when the driving harness has no permission modes (e.g. Pi); changing the override harness refetches capabilities and resets only overrides that became invalid.
+- **Guided card & column forms** share one metadata source: both fetch `harness.capabilities` (models/efforts/permissions via the daemon-side `HarnessMeta` adapter trait) and `harness.list` (built-ins + config-defined harnesses). For cards: Pi is selected for new cards; Claude remains selectable. On open/harness change the form also fetches `space.list`. Model starts at `(default)` (unset), then catalog aliases and `(custom)` when free-form is supported. Effort follows the selected model's declared set, or the catalog default for omitted/free-form models. Permission is hidden and submits `None` for Pi; Claude shows its modes. Switching harness resets only incompatible values. Workspace labels are shown but ids are persisted. Fetch failures degrade to free text with a warning. For column config the same source drives the override fields: `harness_override` is a **select** over the available harnesses (`(none)` = no override), `effort_override` follows the override harness's catalog, and `permission_override` is **hidden** when the driving harness has no permission modes (e.g. Pi); changing the override harness refetches capabilities and resets only overrides that became invalid.
 - Long text (card description, column system prompt): modal textarea, `Ctrl+E` suspends the TUI into `$EDITOR`.
 - Deleting a column with cards asks where to move them; a running card's column can't be deleted.
 - Optional: apply a board template (e.g. the example pipeline above) onto an empty board.

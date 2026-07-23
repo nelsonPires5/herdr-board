@@ -7,6 +7,14 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Changed
+- Card and column settings now use shared merged capability validation before persistence or
+  change events; effective card/column settings are revalidated at enqueue time, including legacy
+  rows. Invalid model/effort/permission combinations are rejected atomically, Pi permission modes
+  remain unsupported, and `bypassPermissions` is limited to explicit Claude card settings rather
+  than column defaults.
+- Live E2E scenario 18 (`18-nullable-clear.sh`) catalogs omitted/null/value persistence, merged
+  validation rejection, and provider-free dispatch after clearing overrides without recording
+  prompt bodies.
 - Nullable `column.update` and `card.update` fields now preserve omitted vs `null` vs value in
   board protocol v1: omission leaves values unchanged, `null` clears them, and a value replaces
   them. Database updates and TUI edits honor the same tri-state semantics.

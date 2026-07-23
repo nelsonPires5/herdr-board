@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use board_core::capability::{run_pane_name, run_pane_name_unique};
-use board_core::engine::{decide_transition, TransitionDecision};
+use board_core::engine::{decide_transition, validate_effective_settings, TransitionDecision};
 use board_core::harness::{
     build_invocation, is_builtin_harness, plan_session, HarnessError, SessionPlan,
 };
@@ -117,6 +117,10 @@ fn enqueue_run_inner(
         }),
         None => false,
     };
+    // Revalidate the merged effective state at the enqueue boundary. This
+    // protects dispatch from legacy rows and from a column/card changing after
+    // an earlier client-side capability lookup.
+    validate_effective_settings(&card, &column, &d.config)?;
     let settings = effective_settings(&card, &column)?;
     let prompt = assemble_prompt(&card.description, &comments);
     let existing_session = card.session_id.as_deref().filter(|_| session_used);

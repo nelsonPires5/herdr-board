@@ -83,6 +83,22 @@ For columns this applies to `system_prompt`, `on_success_column_id`, `on_fail_co
 non-null/optional semantics; create DTOs are unchanged. A TUI edit submits the current value
 or an explicit `null` when the user clears a nullable field.
 
+### Validation and effective settings
+
+Card and column mutations are validated against the complete merged row before
+SQLite is updated or a `BoardChanged` event is emitted. Omitted update members
+remain unchanged while `null` clears them, so validation applies to the
+post-merge state (including `new_workspace` requiring both a non-empty
+`space_ref` and `space_cwd`). Unknown harnesses and unsupported model, effort,
+or permission combinations return error 1 without a partial update or event.
+
+A column may provide model/effort/permission values without a harness override;
+they are checked against the entering card at enqueue time. A column
+`bypassPermissions` override is always refused, while an explicit card
+`bypassPermissions` value is allowed for Claude. Pi has no permission modes.
+The daemon repeats validation against the effective card+column settings at the
+enqueue boundary, including for legacy rows.
+
 ### cards
 A card selects a **herdr session** (`session`, `null` = the daemon's default session) AND a **space** within it.
 - `card.create {title, board_id?, description?, column_id?(default Todo), harness?(default "pi"), model?, effort?, permission_mode?, session?, space_kind?("workspace"|"new_workspace"), space_ref?, space_cwd?, position?}` → `Card`; omitted `board_id` means `Global`, and an explicit column must belong to that board.
@@ -144,7 +160,7 @@ it, a residual configured-script orphan is an explicitly documented limitation.
 - `harness.capabilities {harness}` → `{harness, models:[{id, efforts:[…]}], model_freeform: bool, default_efforts:[…], permission_modes:[…]}`. `default_efforts` is serde-defaulted for backward-compatible clients and applies when model is omitted/free-form; a known model's own efforts remain authoritative.
   - Built-in `pi`: static `models:[]`, `model_freeform:true`, `default_efforts:["off","minimal","low","medium","high","xhigh","max"]`, `permission_modes:[]`. Pi's catalog is user/provider-specific, so the daemon overlays a **live** catalog when it can resolve the pi agent dir (`$PI_CODING_AGENT_DIR`, else `~/.pi/agent`): it reads `auth.json` for the authenticated providers, then `models-store.json` and keeps only those providers' models as `provider/model` ids with per-model efforts from each model's `thinkingLevelMap` (the full thinking ladder when a model has none). This reproduces `pi --list-models` (provider-auth scoped) with richer per-model effort data. If the files are missing/unreadable it falls back to shelling out to `pi --list-models`, and finally to the static free-form catalog. `model_freeform` stays `true`, so arbitrary model strings remain valid. Tests leave the agent dir unset, so the catalog stays the static `models:[]`.
   - Built-in `claude` (CLI 2.1.209): models `fable`/`opus`/`sonnet`/`haiku`, each with `low|medium|high|xhigh|max`; the same levels are `default_efforts`; `model_freeform:true`; permissions are `["acceptEdits","auto","bypassPermissions","manual","dontAsk","plan"]`.
-  - config-defined harnesses report `model_freeform:true` and the declared `models`/`efforts`/`permission_modes`; declared efforts also populate `default_efforts`.
+  - config-defined harnesses report `model_freeform:true` and the declared `models`/`efforts`/`permission_modes`; declared efforts also populate `default_efforts`. Known model aliases use their declared effort set; omitted or free-form models use `default_efforts` (with a model-union fallback for older payloads that omitted `default_efforts`).
   - error 2 (not found) for an unknown harness, listing the known harnesses.
 - `harness.list` (no params) → `{harnesses:[…]}` — every harness the daemon knows about: the built-ins `pi`/`claude` in their default order (pi first), then every config-defined `[harness.NAME]` sorted, de-duplicated. This is the single source for BOTH the card `harness` and column `harness_override` selects in the TUI, so every harness menu shares one list in one (default-first) order.
 - `space.list {session?}` → `{spaces:[{id, label}]}` — workspaces in the given session (`null` = default), filled from that session's herdr `workspace.list`. Unknown/not-running session → error 4 listing the known sessions.

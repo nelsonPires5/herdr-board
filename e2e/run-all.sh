@@ -45,7 +45,7 @@ SCENARIOS=(
   05-retry.sh 06-silent-exit.sh 07-cancel.sh 08-column-timeout.sh
   09-comment-context.sh 10-archive-filter-title.sh 11-pi-harness.sh
   12-cwd-boards.sh 13-jump-to-pane.sh 14-column-config.sh 15-awaiting.sh
-  16-managed-p17.sh 17-configured-p17-runner.sh
+  16-managed-p17.sh 17-configured-p17-runner.sh 18-nullable-clear.sh
 )
 run_this() {
   [ "${#FILTERS[@]}" -eq 0 ] && return 0

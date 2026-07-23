@@ -1,11 +1,41 @@
 //! Harness capability catalog + run-pane naming.
 
 use board_core::capability::{
-    available_harnesses, capabilities_for, claude_capabilities, meta_for, pi_capabilities,
-    run_pane_name, run_pane_name_unique,
+    available_harnesses, capabilities_for, claude_capabilities, efforts_for, meta_for,
+    pi_capabilities, run_pane_name, run_pane_name_unique, HarnessCapabilities,
 };
 use board_core::config::Config;
 use board_core::protocol::Effort;
+
+#[test]
+fn efforts_for_uses_model_policy_and_freeform_defaults() {
+    let caps = HarnessCapabilities {
+        harness: "test".into(),
+        models: vec![board_core::capability::ModelInfo {
+            id: "known".into(),
+            efforts: vec![Effort::High],
+        }],
+        model_freeform: true,
+        default_efforts: vec![Effort::Low],
+        permission_modes: vec![],
+    };
+    assert_eq!(efforts_for(&caps, Some("known")), vec![Effort::High]);
+    assert_eq!(
+        efforts_for(&caps, Some("provider/custom")),
+        vec![Effort::Low]
+    );
+    assert_eq!(efforts_for(&caps, None), vec![Effort::Low]);
+
+    let mut legacy = caps.clone();
+    legacy.default_efforts.clear();
+    assert_eq!(
+        efforts_for(&legacy, Some("provider/custom")),
+        vec![Effort::High]
+    );
+
+    let pi = pi_capabilities();
+    assert!(efforts_for(&pi, None).contains(&Effort::Minimal));
+}
 
 #[test]
 fn claude_catalog_shape() {

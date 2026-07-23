@@ -6,7 +6,7 @@
 //! owns construction, focus movement, field cycling, and turning a submitted form
 //! into a protocol params struct.
 
-use board_core::capability::HarnessCapabilities;
+use board_core::capability::{efforts_for, HarnessCapabilities};
 use board_core::harness::{BUILTIN_HARNESSES, DEFAULT_HARNESS};
 use board_core::model::{Card, Column};
 use board_core::protocol::{
@@ -933,24 +933,6 @@ impl CardValues {
     }
 }
 
-/// The reasoning efforts to offer for a catalog + selected model.
-///
-/// A known model contributes its own efforts; a custom/unknown model gets the
-/// union of every catalog model's efforts (canonical order).
-fn union_efforts(caps: &HarnessCapabilities) -> Vec<Effort> {
-    EFFORT_ORDER
-        .iter()
-        .copied()
-        .filter(|effort| {
-            caps.default_efforts.contains(effort)
-                || caps
-                    .models
-                    .iter()
-                    .any(|model| model.efforts.contains(effort))
-        })
-        .collect()
-}
-
 /// Build the guided card fields from the current values and (optional) live
 /// catalog / workspace / session lists. The field list is a fixed set in a
 /// stable order — `(custom)` companions and `cwd` are hidden via
@@ -1022,15 +1004,7 @@ fn build_card_fields(
             } else {
                 None
             };
-            match selected_id {
-                Some(id) => caps
-                    .models
-                    .iter()
-                    .find(|m| m.id == id)
-                    .map(|m| m.efforts.clone())
-                    .unwrap_or_else(|| union_efforts(caps)),
-                None => union_efforts(caps),
-            }
+            efforts_for(caps, selected_id.as_deref())
         }
         None if v.harness == "pi" => EFFORT_ORDER.to_vec(),
         None => EFFORT_ORDER[2..].to_vec(),
@@ -1293,7 +1267,7 @@ fn column_fields_from_values(
     // Efforts for the override harness (its default/free-form set); fallback
     // to the canonical ladder when caps aren't loaded yet.
     let efforts: Vec<Effort> = match caps {
-        Some(c) => union_efforts(c),
+        Some(c) => efforts_for(c, None),
         None => EFFORT_ORDER.to_vec(),
     };
     let (eff_opts, eff_idx) = effort_choice_opts(&efforts, v.effort_override.as_deref());

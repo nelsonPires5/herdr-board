@@ -34,8 +34,10 @@ do no I/O beyond in-memory SQLite and never touch herdr.
 Nullable update coverage in `board-core` is table-driven across every column/card nullable:
 protocol tests verify omitted/null/value serde states, database tests verify set → clear and reopen
 durability, and TUI reducer tests verify an emptied edit emits an explicit clear. The public board
-protocol remains v1; no create DTO or non-null partial-update field uses `Patch<T>`. The planned live
-nullable-clear scenario 18 is deferred to T03/T19; this slice does not claim that scenario exists.
+protocol remains v1; no create DTO or non-null partial-update field uses `Patch<T>`. Shared core
+validators merge the full row before mutation, apply capability/permission policy, and recheck
+effective settings at enqueue time; daemon rejection tests assert no partial row or event. Live
+scenario 18 covers the nullable and merged-validation wiring.
 
 Inject clocks and paths; never sleep or read the wall clock in a unit test.
 
@@ -119,6 +121,7 @@ case ↔ scenario ↔ status catalog):
 | `15-awaiting.sh` | Integration-style reports on a live managed pane: blocked → working → end-of-turn idle (Herdr derives `done`) → `awaiting` (`agent_done`, run/pane stay open, timeout paused); `board done ok` confirms → `done`, no column move. |
 | `16-managed-p17.sh` | Pane-first protocol-17 Pi + Claude launch through checked-in no-provider fixtures: exact 0600 system files, readiness, session/idle reports, `agent.prompt`, and held layout. |
 | `17-configured-p17-runner.sh` | Unmanaged protocol-17 configured-harness bridge: exact argv/multiline env/cwd/socket values, `pane run`, held layout, and explicit `board done`. |
+| `18-nullable-clear.sh` | Omitted/null/value persistence, merged validation with atomic rejection, and provider-free dispatch after clearing overrides. |
 | `real-pi-smoke.sh` | Separate opt-in (`E2E_REAL_PI=1`) real-provider poem smoke; never included by `run-all.sh`. |
 | `real-claude-haiku-smoke.sh` | Opt-in intended-contract smoke (`E2E_REAL_CLAUDE_HAIKU=1`): exactly one authorized Claude Haiku/low attempt, stages only completed onboarding/theme, exact workspace trust, the installed Herdr hook, credentials, and approved remote-settings bytes, preventing startup dialogs from consuming `agent.prompt`; no broad personal Claude state, retry/fallback, or standard-suite inclusion. |
 | `run-all.sh` | Builds once, runs every standard no-cost scenario, prints a PASS/FAIL/SKIP summary. |

@@ -8,8 +8,9 @@ use std::sync::Arc;
 use board_core::capability::{available_harnesses, capabilities_for};
 use board_core::db::BOARD_ID;
 use board_core::engine::{
-    decide_entry, validate_card_archive, validate_card_edit, validate_card_space,
-    validate_column_delete, validate_column_permission_override,
+    decide_entry, merge_card_update, merge_column_update, validate_card_archive,
+    validate_card_edit, validate_card_settings, validate_card_values, validate_column_delete,
+    validate_column_update, validate_column_values, PermissionContext,
 };
 use board_core::harness::{is_builtin_harness, DEFAULT_HARNESS};
 use board_core::pi_catalog;
@@ -134,22 +135,30 @@ fn board_get(d: &Arc<Daemon>, p: BoardGetParams) -> Result<Value> {
 // -- columns ----------------------------------------------------------------
 
 fn column_create(d: &Arc<Daemon>, p: ColumnCreateParams) -> Result<Value> {
-    validate_column_permission_override(p.permission_override.as_deref())?;
+    validate_column_values(
+        p.harness_override.as_deref(),
+        p.model_override.as_deref(),
+        p.effort_override.as_deref(),
+        p.permission_override.as_deref(),
+        &d.config,
+        PermissionContext::ColumnOverride,
+    )?;
     let col = d.store.lock().create_column(&p)?;
     d.emit_changed(BoardChangedReason::ColumnChanged, None, Some(col.id));
     Ok(json!(col))
 }
 
 fn column_update(d: &Arc<Daemon>, p: ColumnUpdateParams) -> Result<Value> {
-    let permission_override = match &p.permission_override {
-        Patch::Set(value) => Some(value.as_str()),
-        Patch::Unchanged | Patch::Clear => None,
-    };
-    validate_column_permission_override(permission_override)?;
     let col = {
         let sched = d.sched.lock().unwrap();
         sched.ensure_no_finalizing_cards("update a column")?;
-        d.store.lock().update_column(&p)?
+        let db = d.store.lock();
+        let current = db
+            .get_column(p.id)?
+            .ok_or_else(|| Error::NotFound(format!("column {}", p.id)))?;
+        let merged = merge_column_update(&current, &p);
+        validate_column_update(&current, &merged, &p, &d.config)?;
+        db.update_column(&p)?
     };
     d.emit_changed(BoardChangedReason::ColumnChanged, None, Some(col.id));
     Ok(json!(col))
@@ -180,14 +189,15 @@ fn column_delete(d: &Arc<Daemon>, p: ColumnDeleteParams) -> Result<Value> {
 // -- cards ------------------------------------------------------------------
 
 fn card_create(d: &Arc<Daemon>, p: CardCreateParams) -> Result<Value> {
-    validate_harness_permission(
+    validate_card_values(
         p.harness.as_deref().unwrap_or(DEFAULT_HARNESS),
+        p.model.as_deref(),
+        p.effort,
         p.permission_mode.as_deref(),
-    )?;
-    validate_card_space(
         p.space_kind.unwrap_or(SpaceKind::Workspace),
         p.space_ref.as_deref(),
         p.space_cwd.as_deref(),
+        &d.config,
     )?;
     let card = d.store.lock().create_card(&p)?;
     let column = require_column(d, card.column_id)?;
@@ -236,14 +246,8 @@ fn card_update(d: &Arc<Daemon>, p: CardUpdateParams) -> Result<Value> {
                 "card has an open run; cannot edit harness/space fields".into(),
             ));
         }
-        let permission_mode = match &p.permission_mode {
-            Patch::Set(value) => Some(value.as_str()),
-            Patch::Unchanged | Patch::Clear => None,
-        };
-        validate_harness_permission(
-            p.harness.as_deref().unwrap_or(&card.harness),
-            permission_mode,
-        )?;
+        let merged = merge_card_update(&card, &p);
+        validate_card_settings(&merged, &d.config)?;
         db.update_card(&p)?
     };
     d.emit_changed(BoardChangedReason::CardUpdated, Some(card.id), None);
@@ -576,15 +580,6 @@ fn run_retry(d: &Arc<Daemon>, p: RunCardParams) -> Result<Value> {
 
 // -- harness / space --------------------------------------------------------
 
-fn validate_harness_permission(harness: &str, permission: Option<&str>) -> Result<()> {
-    if harness == "pi" && permission.is_some() {
-        return Err(Error::BadRequest(
-            "pi does not support permission modes".into(),
-        ));
-    }
-    Ok(())
-}
-
 fn harness_capabilities(d: &Arc<Daemon>, p: HarnessCapabilitiesParams) -> Result<Value> {
     match capabilities_for(&p.harness, &d.config) {
         Some(mut caps) => {
@@ -693,6 +688,82 @@ mod tests {
             dispatch_tx,
             shutdown_tx,
         ))
+    }
+
+    #[test]
+    fn merged_invalid_updates_are_atomic_and_emit_no_event() {
+        let d = test_daemon(Config::default());
+        let mut events = d.events_tx.subscribe();
+        let created = handle_request(
+            &d,
+            "card.create",
+            json!({
+                "title": "valid settings",
+                "harness": "claude",
+                "model": "sonnet",
+                "effort": "high",
+                "permission_mode": "manual",
+                "space_kind": "new_workspace",
+                "space_ref": "feature",
+                "space_cwd": "/repo"
+            }),
+        )
+        .unwrap();
+        let card_id = created["id"].as_i64().unwrap();
+        let _ = events.try_recv().expect("create event");
+
+        let err = handle_request(
+            &d,
+            "card.update",
+            json!({
+                "id": card_id,
+                "space_kind": "new_workspace",
+                "space_cwd": null
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), 1);
+        assert!(matches!(
+            events.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        let unchanged = d.store.lock().get_card(card_id).unwrap().unwrap();
+        assert_eq!(unchanged.space_ref.as_deref(), Some("feature"));
+        assert_eq!(unchanged.space_cwd.as_deref(), Some("/repo"));
+    }
+
+    #[test]
+    fn invalid_column_update_keeps_dependents_and_emits_no_event() {
+        let d = test_daemon(Config::default());
+        let mut events = d.events_tx.subscribe();
+        let created = handle_request(
+            &d,
+            "column.create",
+            json!({
+                "name": "validated",
+                "harness_override": "claude",
+                "model_override": "sonnet",
+                "effort_override": "high",
+                "permission_override": "manual"
+            }),
+        )
+        .unwrap();
+        let id = created["id"].as_i64().unwrap();
+        let _ = events.try_recv().expect("create event");
+        let err = handle_request(
+            &d,
+            "column.update",
+            json!({"id": id, "harness_override": null}),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), 1);
+        assert!(matches!(
+            events.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        let unchanged = d.store.lock().get_column(id).unwrap().unwrap();
+        assert_eq!(unchanged.harness_override.as_deref(), Some("claude"));
+        assert_eq!(unchanged.effort_override.as_deref(), Some("high"));
     }
 
     #[test]
@@ -1717,13 +1788,11 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code(), 1);
-        assert!(err
-            .to_string()
-            .contains("pi does not support permission modes"));
+        assert!(err.to_string().contains("permission mode"));
     }
 
     #[test]
-    fn switching_card_to_pi_clears_stored_permission() {
+    fn switching_card_to_pi_rejects_incompatible_permission() {
         let d = test_daemon(Config::default());
         let created = handle_request(
             &d,
@@ -1735,18 +1804,25 @@ mod tests {
             }),
         )
         .unwrap();
-        let updated = handle_request(
+        let err = handle_request(
             &d,
             "card.update",
             json!({ "id": created["id"], "harness": "pi" }),
         )
-        .unwrap();
-        assert_eq!(updated["harness"], "pi");
-        assert!(updated["permission_mode"].is_null());
+        .unwrap_err();
+        assert_eq!(err.code(), 1);
+        let unchanged = d
+            .store
+            .lock()
+            .get_card(created["id"].as_i64().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.harness, "claude");
+        assert_eq!(unchanged.permission_mode.as_deref(), Some("acceptEdits"));
     }
 
     #[test]
-    fn switching_card_from_pi_to_claude_clears_incompatible_effort() {
+    fn switching_card_from_pi_to_claude_rejects_incompatible_effort() {
         let d = test_daemon(Config::default());
         let created = handle_request(
             &d,
@@ -1754,14 +1830,21 @@ mod tests {
             json!({ "title": "switch", "harness": "pi", "effort": "off" }),
         )
         .unwrap();
-        let updated = handle_request(
+        let err = handle_request(
             &d,
             "card.update",
             json!({ "id": created["id"], "harness": "claude" }),
         )
-        .unwrap();
-        assert_eq!(updated["harness"], "claude");
-        assert!(updated["effort"].is_null());
+        .unwrap_err();
+        assert_eq!(err.code(), 1);
+        let unchanged = d
+            .store
+            .lock()
+            .get_card(created["id"].as_i64().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.harness, "pi");
+        assert_eq!(unchanged.effort, Some(Effort::Off));
     }
 
     #[test]
