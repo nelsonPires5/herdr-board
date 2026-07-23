@@ -90,6 +90,21 @@ historical spawn-time current-column reconstruction. `Run` deserialization defau
 to NULL, but serialization always omits `system_prompt_snapshot` and its contents from boardd wire
 responses.
 
+### Partial updates
+
+The board protocol stays v1 while nullable partial-update fields use an explicit tri-state:
+
+- omitted means unchanged;
+- JSON `null` means clear the stored nullable value;
+- a JSON value means set/replace it.
+
+`board-core::protocol::Patch<T>` owns this serde mapping, and the database applies it field by
+field after merging with the current row. It is used only by update DTOs for nullable column
+settings (`system_prompt`, transition targets, overrides, and timeout) and card settings
+(`model`, `effort`, `permission_mode`, `session`, `space_ref`, and `space_cwd`). Create DTOs and
+non-null partial-update fields remain unchanged. The TUI sends `null` for an intentionally empty
+nullable edit rather than accidentally preserving the old value.
+
 ### Session model
 
 Cards target a **herdr session** plus a space in it. Because two sessions can each show their own workspaces, the daemon must talk to the right socket per card — the old single-socket model showed the wrong session's workspaces.

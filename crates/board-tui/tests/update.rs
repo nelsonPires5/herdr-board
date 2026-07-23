@@ -5,7 +5,7 @@ use board_core::capability::{
     claude_capabilities, pi_capabilities, HarnessCapabilities, ModelInfo,
 };
 use board_core::client::BoardClient;
-use board_core::protocol::{CardStatus, Effort, RunOutcome, SpaceInfo};
+use board_core::protocol::{CardStatus, Effort, Patch, RunOutcome, SpaceInfo};
 use board_tui::app::{update, App, CardFilter, DetailScrollTarget, Effect, Msg, Screen};
 use board_tui::editor::FakeEditor;
 use board_tui::forms::{ChoiceVal, FieldId, FieldKind, Form, FormKind, Submit};
@@ -70,6 +70,92 @@ fn is_choice(form: &Form, id: FieldId) -> bool {
         form.fields.iter().find(|f| f.id == id).unwrap().kind,
         FieldKind::Choice { .. }
     )
+}
+
+#[test]
+fn editing_nullable_fields_emits_explicit_clears() {
+    let mut client = demo_client().unwrap();
+    let board = client.board_get().unwrap();
+    let mut card = board
+        .cards
+        .iter()
+        .find(|card| card.model.is_some())
+        .unwrap()
+        .clone();
+    // Include values that the demo card does not need for rendering, so this
+    // test proves that clearing populated fields is intentional.
+    card.session = Some("feature".into());
+    card.space_cwd = Some("/repo".into());
+    let mut card_form = Form::card_edit(&card);
+    card_form
+        .fields
+        .iter_mut()
+        .find(|field| field.id == FieldId::Model)
+        .unwrap()
+        .set_text("");
+    set_choice(&mut card_form, FieldId::Effort, "(default)");
+    set_choice(&mut card_form, FieldId::Permission, "(default)");
+    set_choice(&mut card_form, FieldId::Session, "(default)");
+    for id in [FieldId::SpaceRef, FieldId::SpaceCwd] {
+        card_form
+            .fields
+            .iter_mut()
+            .find(|field| field.id == id)
+            .unwrap()
+            .set_text("");
+    }
+    match card_form.submit().unwrap() {
+        Submit::CardUpdate(params) => {
+            assert!(matches!(params.model, Patch::Clear));
+            assert!(matches!(params.effort, Patch::Clear));
+            assert!(matches!(params.permission_mode, Patch::Clear));
+            assert!(matches!(params.session, Patch::Clear));
+            assert!(matches!(params.space_ref, Patch::Clear));
+            assert!(matches!(params.space_cwd, Patch::Clear));
+        }
+        _ => panic!("expected card update"),
+    }
+
+    let mut column = board.columns.first().unwrap().clone();
+    column.system_prompt = Some("instructions".into());
+    column.on_success_column_id = Some(column.id);
+    column.on_fail_column_id = Some(column.id);
+    column.harness_override = Some("claude".into());
+    column.model_override = Some("model".into());
+    column.effort_override = Some("high".into());
+    column.permission_override = Some("manual".into());
+    column.timeout_minutes = Some(15);
+    let mut column_form = Form::column_edit(&column, &[column.clone()]);
+    for id in [
+        FieldId::SystemPrompt,
+        FieldId::ModelOverride,
+        FieldId::Timeout,
+    ] {
+        column_form
+            .fields
+            .iter_mut()
+            .find(|field| field.id == id)
+            .unwrap()
+            .set_text("");
+    }
+    set_choice(&mut column_form, FieldId::OnSuccess, "none");
+    set_choice(&mut column_form, FieldId::OnFail, "none");
+    set_choice(&mut column_form, FieldId::HarnessOverride, "none");
+    set_choice(&mut column_form, FieldId::EffortOverride, "(default)");
+    set_choice(&mut column_form, FieldId::PermissionOverride, "(default)");
+    match column_form.submit().unwrap() {
+        Submit::ColumnUpdate(params) => {
+            assert!(matches!(params.system_prompt, Patch::Clear));
+            assert!(matches!(params.on_success_column_id, Patch::Clear));
+            assert!(matches!(params.on_fail_column_id, Patch::Clear));
+            assert!(matches!(params.harness_override, Patch::Clear));
+            assert!(matches!(params.model_override, Patch::Clear));
+            assert!(matches!(params.effort_override, Patch::Clear));
+            assert!(matches!(params.permission_override, Patch::Clear));
+            assert!(matches!(params.timeout_minutes, Patch::Clear));
+        }
+        _ => panic!("expected column update"),
+    }
 }
 
 #[test]

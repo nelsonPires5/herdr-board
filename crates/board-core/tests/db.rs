@@ -3,7 +3,7 @@
 use board_core::db::{Db, BOARD_ID};
 use board_core::protocol::{
     AwaitingReason, CardCreateParams, CardStatus, ColumnCreateParams, ColumnUpdateParams, Effort,
-    RunOutcome, SpaceKind, Trigger,
+    Patch, RunOutcome, SpaceKind, Trigger,
 };
 use rusqlite::Connection;
 
@@ -193,6 +193,130 @@ fn migration_v2_upgrades_v1_database() {
         )
         .unwrap();
     assert_eq!((comments, runs), (0, 0));
+}
+
+#[test]
+fn nullable_updates_set_then_clear_and_survive_reopen() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    let (column_id, card_id) = {
+        let db = Db::open(&path).unwrap();
+        let column = db
+            .create_column(&ColumnCreateParams {
+                name: "Configured".into(),
+                system_prompt: Some("instructions".into()),
+                on_success_column_id: Some(db.default_column_id(BOARD_ID).unwrap()),
+                on_fail_column_id: Some(db.default_column_id(BOARD_ID).unwrap()),
+                harness_override: Some("pi".into()),
+                model_override: Some("model".into()),
+                effort_override: Some("high".into()),
+                permission_override: Some("manual".into()),
+                timeout_minutes: Some(15),
+                ..Default::default()
+            })
+            .unwrap();
+        let card = db
+            .create_card(&CardCreateParams {
+                title: "Patch me".into(),
+                model: Some("model".into()),
+                effort: Some(Effort::High),
+                permission_mode: Some("manual".into()),
+                session: Some("session".into()),
+                space_ref: Some("workspace".into()),
+                space_cwd: Some("/repo".into()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        db.update_column(&ColumnUpdateParams {
+            id: column.id,
+            system_prompt: Patch::Set("updated instructions".into()),
+            on_success_column_id: Patch::Set(column.id),
+            on_fail_column_id: Patch::Set(column.id),
+            harness_override: Patch::Set("claude".into()),
+            model_override: Patch::Set("updated-model".into()),
+            effort_override: Patch::Set("medium".into()),
+            permission_override: Patch::Set("auto".into()),
+            timeout_minutes: Patch::Set(30),
+            ..Default::default()
+        })
+        .unwrap();
+        db.update_card(&board_core::protocol::CardUpdateParams {
+            id: card.id,
+            model: Patch::Set("updated-model".into()),
+            effort: Patch::Set(Effort::Medium),
+            permission_mode: Patch::Set("auto".into()),
+            session: Patch::Set("updated-session".into()),
+            space_ref: Patch::Set("updated-workspace".into()),
+            space_cwd: Patch::Set("/updated-repo".into()),
+            ..Default::default()
+        })
+        .unwrap();
+
+        // An omitted nullable member is an explicit Unchanged patch, not a
+        // request to clear the value that was just stored.
+        let unchanged_column = db
+            .update_column(&ColumnUpdateParams {
+                id: column.id,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            unchanged_column.system_prompt.as_deref(),
+            Some("updated instructions")
+        );
+        let unchanged_card = db
+            .update_card(&board_core::protocol::CardUpdateParams {
+                id: card.id,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(unchanged_card.model.as_deref(), Some("updated-model"));
+
+        db.update_column(&ColumnUpdateParams {
+            id: column.id,
+            system_prompt: Patch::Clear,
+            on_success_column_id: Patch::Clear,
+            on_fail_column_id: Patch::Clear,
+            harness_override: Patch::Clear,
+            model_override: Patch::Clear,
+            effort_override: Patch::Clear,
+            permission_override: Patch::Clear,
+            timeout_minutes: Patch::Clear,
+            ..Default::default()
+        })
+        .unwrap();
+        db.update_card(&board_core::protocol::CardUpdateParams {
+            id: card.id,
+            model: Patch::Clear,
+            effort: Patch::Clear,
+            permission_mode: Patch::Clear,
+            session: Patch::Clear,
+            space_ref: Patch::Clear,
+            space_cwd: Patch::Clear,
+            ..Default::default()
+        })
+        .unwrap();
+        (column.id, card.id)
+    };
+
+    let db = Db::open(&path).unwrap();
+    let column = db.get_column(column_id).unwrap().unwrap();
+    assert!(column.system_prompt.is_none());
+    assert!(column.on_success_column_id.is_none());
+    assert!(column.on_fail_column_id.is_none());
+    assert!(column.harness_override.is_none());
+    assert!(column.model_override.is_none());
+    assert!(column.effort_override.is_none());
+    assert!(column.permission_override.is_none());
+    assert!(column.timeout_minutes.is_none());
+    let card = db.get_card(card_id).unwrap().unwrap();
+    assert!(card.model.is_none());
+    assert!(card.effort.is_none());
+    assert!(card.permission_mode.is_none());
+    assert!(card.session.is_none());
+    assert!(card.space_ref.is_none());
+    assert!(card.space_cwd.is_none());
 }
 
 #[test]
@@ -677,7 +801,7 @@ fn scoped_crud_rejects_cross_board_references() {
     assert!(db
         .update_column(&ColumnUpdateParams {
             id: alpha_done.id,
-            on_success_column_id: Some(beta_todo),
+            on_success_column_id: Patch::Set(beta_todo),
             ..Default::default()
         })
         .is_err());

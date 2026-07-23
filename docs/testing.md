@@ -31,6 +31,12 @@ do no I/O beyond in-memory SQLite and never touch herdr.
 | `crates/board-core/tests/{capability,config,prompt,harness,protocol,fake_client}.rs` | Harness catalog + pane-name slug rules; config defaults/parsing; prompt assembly + effective-settings; harness argv/session planning; protocol serde round-trips; the in-memory `FakeBoardClient`. |
 | `crates/board-herdr/tests/{events,socket}.rs` | herdr event decoding; socket client against an **in-process fake herdr server** on a temp unix socket (`serve_calls`/`serve_stream`), covering one-request-per-connection, bounded hanging peers/subscription acknowledgements, exact response IDs and matching errors, buffered pre-ack events, timeout reset, error mapping, and mid-call disconnect. |
 
+Nullable update coverage in `board-core` is table-driven across every column/card nullable:
+protocol tests verify omitted/null/value serde states, database tests verify set → clear and reopen
+durability, and TUI reducer tests verify an emptied edit emits an explicit clear. The public board
+protocol remains v1; no create DTO or non-null partial-update field uses `Patch<T>`. The planned live
+nullable-clear scenario 18 is deferred to T03/T19; this slice does not claim that scenario exists.
+
 Inject clocks and paths; never sleep or read the wall clock in a unit test.
 
 ### 2. Daemon + CLI integration (real boardd socket, no herdr)

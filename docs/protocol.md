@@ -52,7 +52,7 @@ Boards are independent pipelines keyed by canonical path. `Global` is board `id=
 - `board.get {board_id?}` → `{board:{id,name,scope_path}, columns:[Column…ordered], cards:[Card…]}`.
   Omitted `board_id` means `Global`. Cards include active and archived rows for local filtering.
 - `column.create {name, board_id?, position?, system_prompt?, trigger?, on_success_column_id?, on_fail_column_id?, fresh_session?, harness_override?, model_override?, effort_override?, permission_override?, timeout_minutes?}` → `Column`; omitted `board_id` means `Global`.
-- `column.update {id, …any subset of the above}` → `Column` (name/trigger/etc.; unset a nullable by passing `null`)
+- `column.update {id, …any subset of the above}` → `Column` (name/trigger/etc.; nullable update fields use the tri-state encoding below)
 - `column.reorder {id, position}` → `[Column…]`
 - `column.delete {id, move_cards_to?}` → `{deleted:true}`; destination must belong to the same board; error 3 if cards lack a destination or any card has an open run (`queued|running|blocked|awaiting`; `done` is not open).
 - `template.apply {name:"pipeline", board_id?}` → the requested board's full column set (omitted = `Global`; error 3 unless it has only seed `Todo` and no cards).
@@ -60,6 +60,23 @@ Boards are independent pipelines keyed by canonical path. `Global` is board `id=
 The store enforces board boundaries: card create/move, column-delete destinations,
 `on_success`/`on_fail`, templates, and automatic transitions cannot reference another board.
 Scheduler adoption and watchers still scan runs across every board.
+
+### Partial update fields (v1)
+
+Nullable fields in `column.update` and `card.update` distinguish three wire states:
+
+| JSON member | Meaning |
+|---|---|
+| omitted | leave the stored value unchanged |
+| present with `null` | clear the stored value |
+| present with a value | replace the stored value |
+
+For columns this applies to `system_prompt`, `on_success_column_id`, `on_fail_column_id`,
+`harness_override`, `model_override`, `effort_override`, `permission_override`, and
+`timeout_minutes`. For cards it applies to `model`, `effort`, `permission_mode`, `session`,
+`space_ref`, and `space_cwd`. The remaining partial-update fields retain their existing
+non-null/optional semantics; create DTOs are unchanged. A TUI edit submits the current value
+or an explicit `null` when the user clears a nullable field.
 
 ### cards
 A card selects a **herdr session** (`session`, `null` = the daemon's default session) AND a **space** within it.
@@ -70,7 +87,7 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
     - `new_workspace` — the daemon creates the workspace on first dispatch (label = `space_ref`, cwd = `space_cwd`), reusing an open workspace with that label if one exists. **Requires** non-empty `space_ref` and `space_cwd` on create (else error 1).
   - creating directly into an `auto` column dispatches immediately (same as move)
   - (v2 schema) the legacy `cwd`/`worktree` kinds and `worktree_base` are removed; worktree isolation is now the agent's job via prompt instructions, not a board concept. Existing DBs migrate `cwd`/`worktree` cards to `workspace` (best effort, `space_ref` kept).
-- `card.update {id, …subset}` → `Card`; harness/model/effort/permission/session/space fields are refused while the card has an open run (`queued|running|blocked|awaiting`). Title/description remain editable; `done` is not open.
+- `card.update {id, …subset}` → `Card`; nullable update fields use the tri-state encoding below. Harness/model/effort/permission/session/space fields are refused while the card has an open run (`queued|running|blocked|awaiting`). Title/description remain editable; `done` is not open.
 - `card.delete {id}` → `{deleted:true}`; refused while the card has an open run (`queued|running|blocked|awaiting`; cancel first). `done` is not open.
 - `card.archive {id, archived:true|false}` → `Card` — archives or restores without deleting
   comments/runs. Archiving is refused while the card has an open run (`queued|running|blocked|awaiting`); `done` cards can be archived. Archived cards must be restored before move/retry.

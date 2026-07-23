@@ -141,7 +141,11 @@ fn column_create(d: &Arc<Daemon>, p: ColumnCreateParams) -> Result<Value> {
 }
 
 fn column_update(d: &Arc<Daemon>, p: ColumnUpdateParams) -> Result<Value> {
-    validate_column_permission_override(p.permission_override.as_deref())?;
+    let permission_override = match &p.permission_override {
+        Patch::Set(value) => Some(value.as_str()),
+        Patch::Unchanged | Patch::Clear => None,
+    };
+    validate_column_permission_override(permission_override)?;
     let col = {
         let sched = d.sched.lock().unwrap();
         sched.ensure_no_finalizing_cards("update a column")?;
@@ -207,13 +211,13 @@ fn card_create(d: &Arc<Daemon>, p: CardCreateParams) -> Result<Value> {
 
 fn card_update(d: &Arc<Daemon>, p: CardUpdateParams) -> Result<Value> {
     let edits_locked = p.harness.is_some()
-        || p.model.is_some()
-        || p.effort.is_some()
-        || p.permission_mode.is_some()
-        || p.session.is_some()
+        || !p.model.is_unchanged()
+        || !p.effort.is_unchanged()
+        || !p.permission_mode.is_unchanged()
+        || !p.session.is_unchanged()
         || p.space_kind.is_some()
-        || p.space_ref.is_some()
-        || p.space_cwd.is_some();
+        || !p.space_ref.is_unchanged()
+        || !p.space_cwd.is_unchanged();
     let card = {
         let sched = d.sched.lock().unwrap();
         let db = d.store.lock();
@@ -232,9 +236,13 @@ fn card_update(d: &Arc<Daemon>, p: CardUpdateParams) -> Result<Value> {
                 "card has an open run; cannot edit harness/space fields".into(),
             ));
         }
+        let permission_mode = match &p.permission_mode {
+            Patch::Set(value) => Some(value.as_str()),
+            Patch::Unchanged | Patch::Clear => None,
+        };
         validate_harness_permission(
             p.harness.as_deref().unwrap_or(&card.harness),
-            p.permission_mode.as_deref(),
+            permission_mode,
         )?;
         db.update_card(&p)?
     };

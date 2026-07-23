@@ -942,7 +942,8 @@ mod tests {
     use board_core::prompt::{assemble_prompt, effective_settings};
     use board_core::protocol::{
         AwaitingReason, BoardChangedReason, CardCreateParams, CardStatus, CardUpdateParams,
-        ColumnCreateParams, ColumnUpdateParams, Effort, Event, RunOutcome, SpaceKind, Trigger,
+        ColumnCreateParams, ColumnUpdateParams, Effort, Event, Patch, RunOutcome, SpaceKind,
+        Trigger,
     };
     use board_core::spawn::{SpawnHandle, SpawnReq, Spawner};
     use board_herdr::{AgentStatus, HerdrClient, WorkspaceInfo};
@@ -1409,7 +1410,7 @@ mod tests {
                 .unwrap();
             db.update_column(&ColumnUpdateParams {
                 id: source.id,
-                on_success_column_id: Some(target.id),
+                on_success_column_id: Patch::Set(target.id),
                 ..Default::default()
             })
             .unwrap();
@@ -1463,7 +1464,7 @@ mod tests {
                 .unwrap();
             db.update_column(&ColumnUpdateParams {
                 id: source.id,
-                on_success_column_id: Some(target.id),
+                on_success_column_id: Patch::Set(target.id),
                 ..Default::default()
             })
             .unwrap();
@@ -1644,15 +1645,15 @@ mod tests {
             db.update_card(&CardUpdateParams {
                 id: card_id,
                 description: Some("new prompt".into()),
-                model: Some("new-model".into()),
-                session: Some("new-herdr-session".into()),
+                model: Patch::Set("new-model".into()),
+                session: Patch::Set("new-herdr-session".into()),
                 ..Default::default()
             })
             .unwrap();
             db.update_column(&ColumnUpdateParams {
                 id: column_id,
-                system_prompt: Some("new settings".into()),
-                model_override: Some("new-column-model".into()),
+                system_prompt: Patch::Set("new settings".into()),
+                model_override: Patch::Set("new-column-model".into()),
                 ..Default::default()
             })
             .unwrap();
@@ -1711,7 +1712,7 @@ mod tests {
             .lock()
             .update_column(&ColumnUpdateParams {
                 id: column_id,
-                system_prompt: Some("new column instructions".into()),
+                system_prompt: Patch::Set("new column instructions".into()),
                 ..Default::default()
             })
             .unwrap();
@@ -1769,7 +1770,7 @@ mod tests {
             .lock()
             .update_column(&ColumnUpdateParams {
                 id: column_id,
-                system_prompt: Some("configured new".into()),
+                system_prompt: Patch::Set("configured new".into()),
                 ..Default::default()
             })
             .unwrap();
@@ -1850,7 +1851,7 @@ mod tests {
                 .unwrap();
             db.update_column(&ColumnUpdateParams {
                 id: auto.id,
-                on_success_column_id: Some(done.id),
+                on_success_column_id: Patch::Set(done.id),
                 ..Default::default()
             })
             .unwrap();

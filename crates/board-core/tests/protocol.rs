@@ -3,10 +3,10 @@
 use board_core::model::Run;
 use board_core::protocol::{
     AwaitingReason, BoardChangedReason, BoardGetParams, BoardListResult, BoardOpenParams,
-    CardArchiveParams, CardCreateParams, CardListParams, CardStatus, ColumnCreateParams, Effort,
-    Event, HarnessCapabilitiesParams, Request, Response, RpcError, RunDoneParams, RunFocusParams,
-    RunFocusResult, RunOutcome, RunPaneExitedParams, SpaceInfo, SpaceKind, SpaceListResult,
-    TemplateApplyParams, Trigger,
+    CardArchiveParams, CardCreateParams, CardListParams, CardStatus, CardUpdateParams,
+    ColumnCreateParams, ColumnUpdateParams, Effort, Event, HarnessCapabilitiesParams, Patch,
+    Request, Response, RpcError, RunDoneParams, RunFocusParams, RunFocusResult, RunOutcome,
+    RunPaneExitedParams, SpaceInfo, SpaceKind, SpaceListResult, TemplateApplyParams, Trigger,
 };
 use serde_json::json;
 
@@ -167,6 +167,70 @@ fn enums_serialize_lowercase() {
         serde_json::to_string(&RunOutcome::Cancelled).unwrap(),
         "\"cancelled\""
     );
+}
+
+#[test]
+fn nullable_update_patches_distinguish_omitted_null_and_value() {
+    macro_rules! column_field {
+        ($field:ident, $wire:expr, $value:expr) => {{
+            let omitted: ColumnUpdateParams = serde_json::from_value(json!({"id": 1})).unwrap();
+            assert!(matches!(omitted.$field, Patch::Unchanged));
+            assert_eq!(serde_json::to_value(&omitted).unwrap(), json!({"id": 1}));
+
+            let cleared: ColumnUpdateParams =
+                serde_json::from_value(json!({"id": 1, stringify!($field): null})).unwrap();
+            assert!(matches!(cleared.$field, Patch::Clear));
+            assert_eq!(
+                serde_json::to_value(&cleared).unwrap(),
+                json!({"id": 1, stringify!($field): null})
+            );
+
+            let set: ColumnUpdateParams =
+                serde_json::from_value(json!({"id": 1, stringify!($field): $wire})).unwrap();
+            assert!(matches!(set.$field, Patch::Set(v) if v == $value));
+        }};
+    }
+    column_field!(system_prompt, "instructions", "instructions".to_string());
+    column_field!(on_success_column_id, 2, 2_i64);
+    column_field!(on_fail_column_id, 3, 3_i64);
+    column_field!(harness_override, "pi", "pi".to_string());
+    column_field!(model_override, "model", "model".to_string());
+    column_field!(effort_override, "high", "high".to_string());
+    column_field!(permission_override, "manual", "manual".to_string());
+    column_field!(timeout_minutes, 15, 15_i64);
+
+    macro_rules! card_field {
+        ($field:ident, $wire:expr, $value:expr) => {{
+            let omitted: CardUpdateParams = serde_json::from_value(json!({"id": 1})).unwrap();
+            assert!(matches!(omitted.$field, Patch::Unchanged));
+            assert_eq!(serde_json::to_value(&omitted).unwrap(), json!({"id": 1}));
+
+            let cleared: CardUpdateParams =
+                serde_json::from_value(json!({"id": 1, stringify!($field): null})).unwrap();
+            assert!(matches!(cleared.$field, Patch::Clear));
+            assert_eq!(
+                serde_json::to_value(&cleared).unwrap(),
+                json!({"id": 1, stringify!($field): null})
+            );
+
+            let set: CardUpdateParams =
+                serde_json::from_value(json!({"id": 1, stringify!($field): $wire})).unwrap();
+            assert!(matches!(set.$field, Patch::Set(v) if v == $value));
+        }};
+    }
+    card_field!(model, "model", "model".to_string());
+    card_field!(effort, "high", Effort::High);
+    card_field!(permission_mode, "manual", "manual".to_string());
+    card_field!(session, "session", "session".to_string());
+    card_field!(space_ref, "workspace", "workspace".to_string());
+    card_field!(space_cwd, "/repo", "/repo".to_string());
+}
+
+#[test]
+fn patch_default_and_is_unchanged_are_explicit() {
+    assert!(Patch::<String>::default().is_unchanged());
+    assert!(!Patch::<String>::Clear.is_unchanged());
+    assert!(!Patch::Set("x".to_string()).is_unchanged());
 }
 
 #[test]

@@ -304,7 +304,9 @@ mod tests {
     use std::time::Duration;
 
     use board_core::engine::AgentSignal;
-    use board_core::protocol::{AwaitingReason, CardCreateParams, CardStatus, ColumnUpdateParams};
+    use board_core::protocol::{
+        AwaitingReason, CardCreateParams, CardStatus, ColumnUpdateParams, Patch,
+    };
     use board_core::spawn::{SpawnReq, Spawner};
 
     struct AliveSpawner;
@@ -334,7 +336,7 @@ mod tests {
             .unwrap();
         db.update_column(&ColumnUpdateParams {
             id: card.column_id,
-            timeout_minutes: Some(1),
+            timeout_minutes: Patch::Set(1),
             ..Default::default()
         })
         .unwrap();

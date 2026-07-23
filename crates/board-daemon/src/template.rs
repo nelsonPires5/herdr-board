@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use board_core::db::BOARD_ID;
-use board_core::protocol::{ColumnCreateParams, ColumnUpdateParams, Trigger};
+use board_core::protocol::{ColumnCreateParams, ColumnUpdateParams, Patch, Trigger};
 use board_core::{Error, Result};
 use serde_json::{json, Value};
 
@@ -92,8 +92,8 @@ pub fn apply(d: &Arc<Daemon>, p: board_core::protocol::TemplateApplyParams) -> R
         if let Some(id) = id {
             d.store.lock().update_column(&ColumnUpdateParams {
                 id,
-                on_success_column_id: on_success,
-                on_fail_column_id: on_fail,
+                on_success_column_id: on_success.map(Patch::Set).unwrap_or_default(),
+                on_fail_column_id: on_fail.map(Patch::Set).unwrap_or_default(),
                 ..Default::default()
             })?;
         }

@@ -10,7 +10,7 @@ use board_core::capability::HarnessCapabilities;
 use board_core::harness::{BUILTIN_HARNESSES, DEFAULT_HARNESS};
 use board_core::model::{Card, Column};
 use board_core::protocol::{
-    CardCreateParams, CardUpdateParams, ColumnCreateParams, ColumnUpdateParams, Effort,
+    CardCreateParams, CardUpdateParams, ColumnCreateParams, ColumnUpdateParams, Effort, Patch,
     SessionInfo, SpaceInfo, SpaceKind, Trigger,
 };
 use tui_textarea::TextArea;
@@ -662,15 +662,17 @@ impl Form {
                     title: Some(title),
                     description: Some(self.trim(FieldId::Description)),
                     harness: self.opt_choice_str(FieldId::Harness),
-                    model: self.card_model(),
-                    effort: self.opt_effort(FieldId::Effort),
-                    permission_mode: (self.current_harness() != "pi")
-                        .then(|| self.opt_choice_str(FieldId::Permission))
-                        .flatten(),
-                    session: self.current_session(),
+                    model: patch(self.card_model()),
+                    effort: patch(self.opt_effort(FieldId::Effort)),
+                    permission_mode: patch(
+                        (self.current_harness() != "pi")
+                            .then(|| self.opt_choice_str(FieldId::Permission))
+                            .flatten(),
+                    ),
+                    session: patch(self.current_session()),
                     space_kind: self.opt_space_kind(),
-                    space_ref: self.card_space_ref(),
-                    space_cwd: self.new_workspace_cwd(),
+                    space_ref: patch(self.card_space_ref()),
+                    space_cwd: patch(self.new_workspace_cwd()),
                 }))
             }
             FormKind::ColumnCreate => {
@@ -703,16 +705,16 @@ impl Form {
                     id: column_id,
                     name: Some(name),
                     position: None,
-                    system_prompt: Some(self.trim(FieldId::SystemPrompt)),
+                    system_prompt: patch(self.opt_text(FieldId::SystemPrompt)),
                     trigger: self.opt_trigger(),
-                    on_success_column_id: self.opt_col(FieldId::OnSuccess),
-                    on_fail_column_id: self.opt_col(FieldId::OnFail),
+                    on_success_column_id: patch(self.opt_col(FieldId::OnSuccess)),
+                    on_fail_column_id: patch(self.opt_col(FieldId::OnFail)),
                     fresh_session: self.opt_bool(FieldId::FreshSession),
-                    harness_override: self.opt_str_field(FieldId::HarnessOverride),
-                    model_override: self.opt_text(FieldId::ModelOverride),
-                    effort_override: self.opt_str_field(FieldId::EffortOverride),
-                    permission_override: self.opt_str_field(FieldId::PermissionOverride),
-                    timeout_minutes: self.opt_int(FieldId::Timeout),
+                    harness_override: patch(self.opt_str_field(FieldId::HarnessOverride)),
+                    model_override: patch(self.opt_text(FieldId::ModelOverride)),
+                    effort_override: patch(self.opt_str_field(FieldId::EffortOverride)),
+                    permission_override: patch(self.opt_str_field(FieldId::PermissionOverride)),
+                    timeout_minutes: patch(self.opt_int(FieldId::Timeout)),
                 }))
             }
             FormKind::Comment { card_id } => {
@@ -791,6 +793,10 @@ impl Form {
     fn opt_int(&self, id: FieldId) -> Option<i64> {
         self.opt_text(id).and_then(|s| s.parse().ok())
     }
+}
+
+fn patch<T>(value: Option<T>) -> Patch<T> {
+    value.map(Patch::Set).unwrap_or(Patch::Clear)
 }
 
 /// Parse a herdr session name from a `HERDR_SOCKET_PATH` value.

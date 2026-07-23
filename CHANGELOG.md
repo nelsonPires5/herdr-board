@@ -7,6 +7,9 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Changed
+- Nullable `column.update` and `card.update` fields now preserve omitted vs `null` vs value in
+  board protocol v1: omission leaves values unchanged, `null` clears them, and a value replaces
+  them. Database updates and TUI edits honor the same tri-state semantics.
 - Herdr socket requests and subscription acknowledgements now have bounded deadlines, match exact
   response IDs, preserve events interleaved before acknowledgements, and restore blocking stream
   reads after bounded polling/handshakes.

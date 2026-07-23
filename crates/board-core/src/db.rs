@@ -9,7 +9,7 @@ use rusqlite::{params, Connection, Row};
 use crate::model::{Board, Card, Column, Comment, Run};
 use crate::protocol::{
     AwaitingReason, CardCreateParams, CardStatus, CardUpdateParams, ColumnCreateParams,
-    ColumnUpdateParams, Effort, RunOutcome, SpaceKind, Trigger,
+    ColumnUpdateParams, Effort, Patch, RunOutcome, SpaceKind, Trigger,
 };
 use crate::{Error, Result};
 
@@ -436,35 +436,51 @@ impl Db {
         if let Some(v) = &p.name {
             c.name = v.clone();
         }
-        if let Some(v) = &p.system_prompt {
-            c.system_prompt = Some(v.clone());
+        match &p.system_prompt {
+            Patch::Unchanged => {}
+            Patch::Clear => c.system_prompt = None,
+            Patch::Set(v) => c.system_prompt = Some(v.clone()),
         }
         if let Some(v) = p.trigger {
             c.trigger = v;
         }
-        if let Some(v) = p.on_success_column_id {
-            c.on_success_column_id = Some(v);
+        match p.on_success_column_id {
+            Patch::Unchanged => {}
+            Patch::Clear => c.on_success_column_id = None,
+            Patch::Set(v) => c.on_success_column_id = Some(v),
         }
-        if let Some(v) = p.on_fail_column_id {
-            c.on_fail_column_id = Some(v);
+        match p.on_fail_column_id {
+            Patch::Unchanged => {}
+            Patch::Clear => c.on_fail_column_id = None,
+            Patch::Set(v) => c.on_fail_column_id = Some(v),
         }
         if let Some(v) = p.fresh_session {
             c.fresh_session = v;
         }
-        if let Some(v) = &p.harness_override {
-            c.harness_override = Some(v.clone());
+        match &p.harness_override {
+            Patch::Unchanged => {}
+            Patch::Clear => c.harness_override = None,
+            Patch::Set(v) => c.harness_override = Some(v.clone()),
         }
-        if let Some(v) = &p.model_override {
-            c.model_override = Some(v.clone());
+        match &p.model_override {
+            Patch::Unchanged => {}
+            Patch::Clear => c.model_override = None,
+            Patch::Set(v) => c.model_override = Some(v.clone()),
         }
-        if let Some(v) = &p.effort_override {
-            c.effort_override = Some(v.clone());
+        match &p.effort_override {
+            Patch::Unchanged => {}
+            Patch::Clear => c.effort_override = None,
+            Patch::Set(v) => c.effort_override = Some(v.clone()),
         }
-        if let Some(v) = &p.permission_override {
-            c.permission_override = Some(v.clone());
+        match &p.permission_override {
+            Patch::Unchanged => {}
+            Patch::Clear => c.permission_override = None,
+            Patch::Set(v) => c.permission_override = Some(v.clone()),
         }
-        if let Some(v) = p.timeout_minutes {
-            c.timeout_minutes = Some(v);
+        match p.timeout_minutes {
+            Patch::Unchanged => {}
+            Patch::Clear => c.timeout_minutes = None,
+            Patch::Set(v) => c.timeout_minutes = Some(v),
         }
         self.validate_column_targets(c.board_id, c.on_success_column_id, c.on_fail_column_id)?;
         self.conn.execute(
@@ -686,26 +702,38 @@ impl Db {
                 c.effort = None;
             }
         }
-        if let Some(v) = &p.model {
-            c.model = Some(v.clone());
+        match &p.model {
+            Patch::Unchanged => {}
+            Patch::Clear => c.model = None,
+            Patch::Set(v) => c.model = Some(v.clone()),
         }
-        if let Some(v) = p.effort {
-            c.effort = Some(v);
+        match p.effort {
+            Patch::Unchanged => {}
+            Patch::Clear => c.effort = None,
+            Patch::Set(v) => c.effort = Some(v),
         }
-        if let Some(v) = &p.permission_mode {
-            c.permission_mode = Some(v.clone());
+        match &p.permission_mode {
+            Patch::Unchanged => {}
+            Patch::Clear => c.permission_mode = None,
+            Patch::Set(v) => c.permission_mode = Some(v.clone()),
         }
-        if let Some(v) = &p.session {
-            c.session = Some(v.clone());
+        match &p.session {
+            Patch::Unchanged => {}
+            Patch::Clear => c.session = None,
+            Patch::Set(v) => c.session = Some(v.clone()),
         }
         if let Some(v) = p.space_kind {
             c.space_kind = v;
         }
-        if let Some(v) = &p.space_ref {
-            c.space_ref = Some(v.clone());
+        match &p.space_ref {
+            Patch::Unchanged => {}
+            Patch::Clear => c.space_ref = None,
+            Patch::Set(v) => c.space_ref = Some(v.clone()),
         }
-        if let Some(v) = &p.space_cwd {
-            c.space_cwd = Some(v.clone());
+        match &p.space_cwd {
+            Patch::Unchanged => {}
+            Patch::Clear => c.space_cwd = None,
+            Patch::Set(v) => c.space_cwd = Some(v.clone()),
         }
         self.conn.execute(
             "UPDATE cards SET title=?1,description=?2,harness=?3,model=?4,effort=?5,
