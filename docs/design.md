@@ -41,6 +41,14 @@ Separation card ↔ run is deliberate (vibe-kanban converged on task/attempt/exe
   session socket. Each socket has independent subscription generation, reconnect backoff, and
   bounded snapshot reconciliation; a disconnected or late Herdr session never blocks another.
 
+The physical modules follow these boundaries. `board-core::db` is split into migrations,
+board/column, card/comment, run-UoW, and row-mapping modules. `board-daemon::dispatch` separates
+enqueue preparation, dispatch passes, finalization, and space resolution; `spawner` separates local
+launch, Herdr launch, and pane placement. `board-herdr` keeps typed request parameters separate from
+its transport module, which owns all unsafe AF_UNIX operations. The CLI keeps clap arguments,
+daemon lifecycle, scope, helpers, and card/run/column/discovery command wiring in separate modules;
+none of these splits changes crate ownership or the public board protocol.
+
 ### Root configuration and startup
 
 `board-core::config::RootConfig` is the typed representation of the complete
@@ -406,21 +414,26 @@ executes the returned plan; it performs no Herdr or SQLite I/O in the pure decis
 
 ## 7. Queueing & concurrency
 
-- **Atomic enqueue snapshot**: scheduler→store locking builds the card/column/comments/settings/task,
-  system, and session snapshot together; the queued run is never assembled from stale reads and
-  `run.session` matches the launch target.
+- **Canonical run lifecycle API**: every run passes through exactly three core DB units of work —
+  `enqueue_run_uow` (insert a queued run, set card `queued`) → optional
+  `promote_run_uow` (set `started_at`/workspace/pane/deadline, set card `running`) →
+  `finalize_run_uow` (close the run, write terminal comments, transition the card, optionally
+  insert an auto-hop enqueue). There are no legacy methods. The daemon-side wrappers
+  (`enqueue_run`, `finalize_run`, `finalize_run_timeout`) prepare inputs under scheduler→store
+  locking and call only these three UoWs; queued cancel and spawn failure are themselves finalized
+  through `finalize_run_uow`.
 - **Lifecycle and launch ownership**: `board-core::engine` owns Herdr-neutral
   `LifecycleDecision` / `FinalizePlan`, auto-hop limits, and resumability evidence (a started run
   plus its `agent:<run_id>` comment). `board-core::launch` contains only the durable neutral
   `ExecutionSpec` / `RunLaunchSpec`. `board-daemon` owns `Spawner`, `HerdrLaunchPlan`,
   `RuntimeHandle`, placement, liveness, and process effects while preserving the scheduler→store
   lock order; this boundary does not change transaction execution or launch bytes.
-- **Atomic card finalization**: under scheduler→store locking, one core transaction closes the run,
-  writes all terminal comments, moves/statuses the card, and inserts any auto-hop run. Failed
-  planning or SQL restores the exact prior durable state. Only after commit does the daemon update
+- **Effects only post-commit**: no socket, process, notification, or other external I/O occurs
+  inside any UoW transaction. The daemon executes post-commit effects in a fixed order: update
   scheduler bookkeeping, refresh watches, kill a pane, schedule notification, emit terminal events,
-  and wake dispatch, in that order. The shared scheduler→store lock order supplies only transient
-  mutual exclusion; no separate finalizing-card state participates in durable decisions.
+  then wake dispatch. The shared scheduler→store lock order supplies only transient mutual
+  exclusion; no separate finalizing-card state participates in durable decisions. A rejected merged
+  state or failed transaction therefore cannot leave a partial row, event, or process effect.
 - **Per-space FIFO**: two agents mutating one working tree collide; cards sharing the typed
   `SpaceKey(session, space_kind, space_ref)` run serially. Null/default values remain typed and are
   never separator-encoded.
