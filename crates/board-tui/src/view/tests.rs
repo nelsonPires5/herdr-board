@@ -1,7 +1,5 @@
-use super::{
-    board_picker_label, detail_section_title, pane_title, HELP_GUTTER_WIDTH, HELP_KEYS,
-    HELP_KEY_WIDTH,
-};
+use super::detail::detail_section_title;
+use super::{board_picker_label, pane_title, HELP_GUTTER_WIDTH, HELP_KEYS, HELP_KEY_WIDTH};
 use crate::app::CardFilter;
 use board_core::model::Board;
 
