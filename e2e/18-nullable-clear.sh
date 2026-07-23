@@ -83,7 +83,7 @@ v=json.loads(sys.argv[1])
 for key in ("system_prompt", "on_success_column_id", "on_fail_column_id",
             "harness_override", "model_override", "effort_override",
             "permission_override", "timeout_minutes"):
-    assert v[key] is None, (key, v)
+    assert v[key] is None
 print("  column nulls persisted as clears")
 PY
 
