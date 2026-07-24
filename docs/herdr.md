@@ -79,7 +79,13 @@ workspace/tab/split/env placement fields are not part of `agent.start`.
 After start, `agent.get <target>` exposes `interactive_ready` and
 `launch_pending`. herdr-board waits for `interactive_ready=true` and
 `launch_pending=false`, then submits the exact card task with `agent.prompt`
-instead of startup argv or synthetic keystrokes. `agent.read` remains a terminal
+instead of startup argv or synthetic keystrokes. A newly allocated pane can
+briefly retain prior agent state and return typed `agent_pane_busy`; the board
+retries the exact `agent.start` request on that same board-owned pane at most
+twice, with bounded 100ms/200ms backoff. It never allocates a second pane for
+that response. Persistent busy is a launch failure whose cleanup closes only
+the owned child pane; `pane_not_found` is handled separately as a placement
+race that restarts discovery from `tab.list` and retries complete placement once. `agent.read` remains a terminal
 screen/scrollback read, not a semantic result channel.
 
 Configured harnesses are intentionally unmanaged. Protocol 17 has a
