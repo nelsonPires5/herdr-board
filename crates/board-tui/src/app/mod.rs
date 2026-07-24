@@ -319,9 +319,11 @@ impl App {
     /// their bottom so the most recent item is always the last visible row.
     pub fn scroll_detail_to_latest(&mut self) {
         let Some(detail) = &self.detail else { return };
-        let comments_total = detail.comments.len();
-        let runs_total = detail.runs.len();
         let layout = crate::view::detail_layout(self, self.last_area);
+        // Comments word-wrap, so their scroll is row-based against the summed
+        // wrapped height; runs stay one row each.
+        let comments_total = crate::view::comment_wrapped_rows(detail, layout.comments.width);
+        let runs_total = detail.runs.len();
         let comments_visible = layout.comments.height.saturating_sub(1) as usize;
         let runs_visible = layout.runs.height.saturating_sub(1) as usize;
         self.detail_comments_scroll = comments_total.saturating_sub(comments_visible.max(1));
@@ -337,11 +339,14 @@ impl App {
         let Some(detail) = &self.detail else { return };
         let layout = crate::view::detail_layout(self, self.last_area);
         let (offset, total, visible) = match self.detail_scroll_target {
-            DetailScrollTarget::Comments => (
-                &mut self.detail_comments_scroll,
-                detail.comments.len(),
-                layout.comments.height.saturating_sub(1) as usize,
-            ),
+            DetailScrollTarget::Comments => {
+                // Row-based: comments wrap, so total/visible are wrapped rows.
+                (
+                    &mut self.detail_comments_scroll,
+                    crate::view::comment_wrapped_rows(detail, layout.comments.width),
+                    layout.comments.height.saturating_sub(1) as usize,
+                )
+            }
             DetailScrollTarget::Runs => (
                 &mut self.detail_runs_scroll,
                 detail.runs.len(),

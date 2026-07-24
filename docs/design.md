@@ -272,7 +272,9 @@ toast.
 - **Responsive board view:** visible columns divide the entire viewport while preserving a readable minimum width; when not all columns fit, the selected column drives a full-width sliding window. Cards use a status-colored marker, readable selected background, harness/model metadata, status glyphs (▶ running, ⏸ blocked, ✗ failed, ⧗ queued, ? awaiting — yellow, ✓ done — green), and a live run timer.
 - **Card detail:** opens as a contextual popup and toggles fullscreen with `f` or its clickable title
   action. Status fields use blue labels and white values. Description, comments, and runs size to
-  their content; comments and runs scroll independently (`Tab` selects, arrows/`k`/`j` or mouse
+  their content; the description and each comment body word-wrap (`Wrap { trim: false }`) at the
+  panel border instead of being truncated, and comments scroll by wrapped row. Runs stay one line.
+  Comments and runs scroll independently (`Tab` selects, arrows/`k`/`j` or mouse
   wheel scroll), with a blue divider for the focused history. Histories open at the latest item and
   show only directional arrows (no counts) when content is hidden. `e` edits the card and returns to
   detail after save/cancel. `Enter` on an `awaiting` card confirms completion (the same `run.done

@@ -109,7 +109,7 @@ pub const HELP_KEYS: &[(&str, &str)] = &[
 mod layout;
 mod overlays;
 
-pub use detail::{detail_layout, detail_toggle_rect, DetailLayout};
+pub use detail::{comment_wrapped_rows, detail_layout, detail_toggle_rect, DetailLayout};
 pub use layout::{board_layout, BoardLayout, ColLayout};
 
 // -- glyphs ------------------------------------------------------------------

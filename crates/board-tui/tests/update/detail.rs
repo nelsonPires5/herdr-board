@@ -10,6 +10,58 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEven
 use ratatui::layout::Rect;
 
 #[test]
+fn detail_comment_scroll_clamps_to_wrapped_rows() {
+    let mut client = super::helpers::demo_client().unwrap();
+    let board = client.board_get().unwrap();
+    let card = board
+        .cards
+        .iter()
+        .find(|card| card.status == CardStatus::Failed)
+        .unwrap()
+        .clone();
+    // Several long comments that each word-wrap across multiple rows at the
+    // popup width, so the comments section scrolls by row, not by comment.
+    for i in 0..6 {
+        client
+            .comment_add(
+                card.id,
+                &format!(
+                    "Long comment number {i} with enough words to force wrapping \
+                     across at least a couple of rendered rows inside the comments \
+                     section at the popup width."
+                ),
+                Some("reviewer"),
+            )
+            .unwrap();
+    }
+    let detail = client.card_get(card.id).unwrap();
+    let mut app = board_tui::app::App::new(board);
+    app.last_area = Rect::new(0, 0, 80, 24);
+    app.detail = Some(detail);
+    app.screen = Screen::CardDetail;
+    app.scroll_detail_to_latest();
+
+    let d = app.detail.as_ref().unwrap();
+    let layout = board_tui::view::detail_layout(&app, app.last_area);
+    let total = board_tui::view::comment_wrapped_rows(d, layout.comments.width);
+    let visible = layout.comments.height.saturating_sub(1) as usize;
+    assert!(
+        app.detail_comments_scroll + visible <= total,
+        "scroll {} + visible {} must not exceed wrapped rows {} (no blank overflow)",
+        app.detail_comments_scroll,
+        visible,
+        total
+    );
+
+    // Driving scroll far past the end clamps at the latest anchor.
+    let latest = app.detail_comments_scroll;
+    for _ in 0..50 {
+        update(&mut app, key(KeyCode::Down));
+    }
+    assert_eq!(app.detail_comments_scroll, latest);
+}
+
+#[test]
 fn card_detail_o_emits_focus_and_driver_quits_only_on_success() {
     let mut client = super::helpers::demo_client().unwrap();
     let board = client.board_get().unwrap();

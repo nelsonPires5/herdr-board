@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+- [#33](https://github.com/nelsonPires5/herdr-board/pull/33) feat(tui): card detail word-wraps the description and each comment body at the panel border (popup and fullscreen) instead of truncating to one line; comments now scroll by wrapped row.
+
 - [#31](https://github.com/nelsonPires5/herdr-board/pull/31) Pin Herdr plugin installs to the latest released tag (`--ref v0.8.0`) and require one-line, PR-linked `CHANGELOG.md` entries.
 - [#32](https://github.com/nelsonPires5/herdr-board/pull/32) feat(tui): `M` (Shift+m) mini-mode to move the focused column (`←`/`→` stage, `Enter` commits one `column.reorder`, `Esc` cancels).
 

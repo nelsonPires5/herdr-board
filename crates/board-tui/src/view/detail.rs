@@ -2,7 +2,7 @@ use board_core::engine::format_duration;
 use board_core::protocol::CardDetail;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
@@ -44,13 +44,63 @@ fn wrapped_line_count(text: &str, width: u16) -> u16 {
         .max(1)
 }
 
+/// Greedy word-wrap row count for a single comment string `"[author] body"`,
+/// approximating ratatui `Wrap { trim: false }`: each rendered line holds as
+/// many space-separated words as fit in `width` (by `chars().count()`), an
+/// over-long word is hard-broken, and a blank source line still occupies one
+/// row. Used for scroll clamping and section sizing so the scroll offset never
+/// runs past the real rendered content.
+fn wrapped_row_count(text: &str, width: u16) -> usize {
+    let width = (width as usize).max(1);
+    text.lines()
+        .map(|line| {
+            if line.is_empty() {
+                return 1;
+            }
+            let mut rows = 1;
+            let mut col = 0usize;
+            let mut start_of_line = true;
+            for word in line.split(' ') {
+                let wl = word.chars().count();
+                let sep = if start_of_line { 0 } else { 1 };
+                if col + sep + wl <= width {
+                    col += sep + wl;
+                } else {
+                    rows += 1;
+                    col = wl.min(width);
+                    if wl > width {
+                        // Hard-break an over-long word across further rows.
+                        rows += (wl - width) / width;
+                        col = wl % width;
+                    }
+                }
+                start_of_line = false;
+            }
+            rows
+        })
+        .sum::<usize>()
+        .max(1)
+}
+
+/// Total wrapped rows the comment bodies occupy at `width`, one block per
+/// comment (`"[author] body"`). Exposed so the app layer can clamp comment
+/// scrolling (row-based) to the real rendered height.
+pub fn comment_wrapped_rows(detail: &CardDetail, width: u16) -> usize {
+    detail
+        .comments
+        .iter()
+        .map(|c| wrapped_row_count(&format!("[{}] {}", c.author, c.body), width))
+        .sum::<usize>()
+        .max(1)
+}
+
 /// Size sections by content. Surplus height stays outside their borders; when
 /// content exceeds the viewport, rows go to the greatest unmet demand first.
 fn detail_section_heights(detail: &CardDetail, width: u16, available: u16) -> ([u16; 3], u16) {
     let desc_lines = wrapped_line_count(&detail.card.description, width);
-    // Comments currently render as one truncated row each; size the section by
-    // visible list rows so long bodies do not create blank phantom height.
-    let comment_lines = (detail.comments.len() as u16).max(1);
+    // Comments word-wrap across multiple rows; size the section by the summed
+    // wrapped height so long bodies get the rows they need instead of clipping.
+    let comment_lines = comment_wrapped_rows(detail, width) as u16;
     let run_lines = (detail.runs.len() as u16).max(1);
     // One additional row for each section's titled divider.
     let needs = [desc_lines + 1, comment_lines + 1, run_lines + 1];
@@ -269,42 +319,15 @@ pub(super) fn draw_detail(app: &App, f: &mut Frame, area: Rect) {
         );
     f.render_widget(desc, layout.description);
 
-    let comments: Vec<ListItem> = detail
-        .comments
-        .iter()
-        .skip(app.detail_comments_scroll)
-        .map(|c| {
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!("[{}] ", c.author),
-                    Style::default().fg(Color::LightCyan),
-                ),
-                Span::raw(truncate(
-                    &c.body,
-                    layout.comments.width.saturating_sub(2) as usize,
-                )),
-            ]))
-        })
-        .collect();
-    let comments = if detail.comments.is_empty() {
-        vec![ListItem::new(Span::styled(
+    let comments_active = app.detail_scroll_target == DetailScrollTarget::Comments;
+    let comments_content_w = layout.comments.width;
+    let comments_visible = layout.comments.height.saturating_sub(1) as usize;
+    let comments_widget = if detail.comments.is_empty() {
+        Paragraph::new(Text::from(Line::from(Span::styled(
             "(no comments)",
             Style::default().fg(Color::Gray),
-        ))]
-    } else {
-        comments
-    };
-    let comments_active = app.detail_scroll_target == DetailScrollTarget::Comments;
-    let comments_total = detail.comments.len();
-    let comments_visible = layout.comments.height.saturating_sub(1) as usize;
-    let comments_title = detail_section_title(
-        "comments",
-        comments_total,
-        app.detail_comments_scroll,
-        comments_visible,
-    );
-    f.render_widget(
-        List::new(comments).block(
+        ))))
+        .block(
             Block::default()
                 .borders(Borders::TOP)
                 .border_style(Style::default().fg(if comments_active {
@@ -312,10 +335,49 @@ pub(super) fn draw_detail(app: &App, f: &mut Frame, area: Rect) {
                 } else {
                     Color::Gray
                 }))
-                .title(comments_title),
-        ),
-        layout.comments,
-    );
+                .title("comments"),
+        )
+    } else {
+        // Render every comment as one `Line` carrying a styled `[author] `
+        // prefix + the raw body, then let the wrapped `Paragraph` word-break
+        // the combined line at the panel border. ratatui keeps the author
+        // prefix on the first rendered row and wraps the body onto later
+        // rows, so each comment reads as one styled block.
+        let lines: Vec<Line> = detail
+            .comments
+            .iter()
+            .map(|c| {
+                Line::from(vec![
+                    Span::styled(
+                        format!("[{}] ", c.author),
+                        Style::default().fg(Color::LightCyan),
+                    ),
+                    Span::raw(c.body.clone()),
+                ])
+            })
+            .collect();
+        let comments_total = comment_wrapped_rows(detail, comments_content_w);
+        let comments_title = detail_section_title(
+            "comments",
+            comments_total,
+            app.detail_comments_scroll,
+            comments_visible,
+        );
+        Paragraph::new(Text::from(lines))
+            .wrap(Wrap { trim: false })
+            .scroll((app.detail_comments_scroll as u16, 0))
+            .block(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .border_style(Style::default().fg(if comments_active {
+                        Color::Blue
+                    } else {
+                        Color::Gray
+                    }))
+                    .title(comments_title),
+            )
+    };
+    f.render_widget(comments_widget, layout.comments);
 
     let runs: Vec<ListItem> = detail
         .runs

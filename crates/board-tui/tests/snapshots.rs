@@ -243,6 +243,54 @@ fn column_form_hostile_origin_is_metadata_only() {
 }
 
 #[test]
+fn card_detail_wraps_long_description_and_comment_popup_and_fullscreen() {
+    let mut client = demo_client().unwrap();
+    let board = client.board_get().unwrap();
+    let todo = board
+        .columns
+        .iter()
+        .find(|column| column.name == "Todo")
+        .unwrap()
+        .id;
+    let id = client
+        .card_create(&CardCreateParams {
+            title: "Wrap demo".into(),
+            description: Some(
+                "This description is intentionally long so it must word-wrap across \
+                 several rendered rows at the panel borders instead of being cut off, \
+                 both inside the centered popup and inside the fullscreen detail view."
+                    .into(),
+            ),
+            column_id: Some(todo),
+            harness: Some("claude".into()),
+            ..Default::default()
+        })
+        .unwrap()
+        .id;
+    client
+        .comment_add(
+            id,
+            "Likewise this comment body is long enough to wrap across multiple rows \
+             instead of being truncated to a single ellipsized line, demonstrating \
+             per-comment word wrap at the section border.",
+            Some("reviewer"),
+        )
+        .unwrap();
+
+    let mut d = driver(client);
+    // The newly created card is the second card in Todo (after "Update docs").
+    key(&mut d, KeyCode::Down);
+    key(&mut d, KeyCode::Enter);
+    insta::assert_snapshot!("card_detail_wrap_popup_80x24", render(&mut d, 80, 24));
+    insta::assert_snapshot!("card_detail_wrap_popup_120x35", render(&mut d, 120, 35));
+    key(&mut d, KeyCode::Char('f'));
+    insta::assert_snapshot!(
+        "card_detail_wrap_fullscreen_120x35",
+        render(&mut d, 120, 35)
+    );
+}
+
+#[test]
 fn card_detail_with_comments_and_runs() {
     let mut d = driver(demo_client().unwrap());
     // Navigate to the failed card in Review (column index 3).
