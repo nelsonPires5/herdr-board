@@ -91,7 +91,7 @@ Full layering, test placement, harness details, and how to add tests live in
 - Auto-start creates one child process-group leader (no double-fork/`setsid`); stop is an exact
   socket/identity-gated operation. The active-run summary drives TUI timers, and the always-on
   per-session supervisor reconnects and reconciles conservatively.
-- Definition of done for a user-facing change: update the docs and `CHANGELOG.md` in the same change.
+- Definition of done for a user-facing change: update the docs and `CHANGELOG.md` in the same change. Keep each `CHANGELOG.md` entry to one line prefixed by a clickable link to its PR, e.g. `- [#31](https://github.com/nelsonPires5/herdr-board/pull/31) Pin Herdr plugin installs to a released tag.` (GitHub does not auto-link bare `#NN` inside rendered markdown files, so use the full link) so the changelog links the PR rather than reproducing it — long rationale lives in the PR body. Write the one-line description first, then fill in the PR link once the PR is open.
 - Release/version changes follow [`docs/releasing.md`](docs/releasing.md). Agents must never create,
   push, move, or delete release tags manually: a maintainer starts **Prepare Release**, merges its PR,
   and the **Release** workflow creates the tag only after `main` CI is green. No tag ruleset currently

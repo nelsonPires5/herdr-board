@@ -48,7 +48,7 @@ The daemon checks the selected Herdr socket before workspace discovery and pane 
 any Herdr version other than 0.7.5 and any protocol other than 17; protocol 16 is not supported.
 
 ```bash
-herdr plugin install nelsonPires5/herdr-board
+herdr plugin install nelsonPires5/herdr-board --ref v0.8.0
 ```
 
 Precise live lifecycle status also requires Herdr's integration for the harness you dispatch (for
@@ -76,7 +76,7 @@ checks out the source, builds the release binary, registers the plugin, and copi
 noninteractive install is available:
 
 ```bash
-herdr plugin install nelsonPires5/herdr-board --yes
+herdr plugin install nelsonPires5/herdr-board --ref v0.8.0 --yes
 ```
 
 Set `HERDR_BOARD_CLI_INSTALL_DIR` to an absolute user bin directory before installing to override
@@ -330,7 +330,7 @@ Re-run the install command to update — Herdr has no separate update command, s
 existing plugin:
 
 ```bash
-herdr plugin install nelsonPires5/herdr-board --yes
+herdr plugin install nelsonPires5/herdr-board --ref v0.8.0 --yes
 ```
 
 The build step requests a graceful stop (`board daemon --stop`) before recompiling, so the new
