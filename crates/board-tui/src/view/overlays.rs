@@ -46,6 +46,32 @@ pub(super) fn draw_picker(app: &App, f: &mut Frame, area: Rect) {
     f.render_widget(list, box_area);
 }
 
+pub(super) fn draw_move_column(app: &App, f: &mut Frame, area: Rect) {
+    let Some(state) = &app.move_column else {
+        return;
+    };
+    let name = app
+        .board
+        .columns
+        .iter()
+        .find(|c| c.id == state.column_id)
+        .map(|c| c.name.as_str())
+        .unwrap_or("column");
+    let box_area = centered_rect_abs(58, 3, area);
+    f.render_widget(Clear, box_area);
+    let p = Paragraph::new(Line::from(format!(
+        " ←/→ reorder {name} · Enter confirm · Esc cancel "
+    )))
+    .alignment(Alignment::Center)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Magenta))
+            .title(" Move column "),
+    );
+    f.render_widget(p, box_area);
+}
+
 pub(super) fn draw_confirm(app: &App, f: &mut Frame, area: Rect) {
     let Some(confirm) = &app.confirm else { return };
     let box_area = centered_rect_abs(50, 5, area);

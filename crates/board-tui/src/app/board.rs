@@ -4,7 +4,8 @@ use crossterm::event::{KeyCode, KeyEvent};
 use crate::forms::Form;
 
 use super::{
-    App, Confirm, ConfirmPurpose, DetailScrollTarget, Effect, Picker, PickerPurpose, Screen,
+    App, Confirm, ConfirmPurpose, DetailScrollTarget, Effect, MoveColumnState, Picker,
+    PickerPurpose, Screen,
 };
 
 pub(super) fn board_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
@@ -65,6 +66,7 @@ pub(super) fn board_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
         }
         KeyCode::Char('D') => return delete_column(app),
         KeyCode::Char('m') => return open_move_picker(app),
+        KeyCode::Char('M') => return open_move_column_mode(app),
         KeyCode::Char('H') => return shove_card(app, -1),
         KeyCode::Char('L') => return shove_card(app, 1),
         KeyCode::Enter => {
@@ -177,6 +179,18 @@ fn open_move_picker(app: &mut App) -> Vec<Effect> {
         purpose: PickerPurpose::MoveCard { card_id },
     });
     app.screen = Screen::Picker;
+    vec![]
+}
+
+fn open_move_column_mode(app: &mut App) -> Vec<Effect> {
+    let Some(col_id) = app.col_id_at(app.sel_col) else {
+        return vec![];
+    };
+    app.move_column = Some(MoveColumnState {
+        column_id: col_id,
+        original_index: app.sel_col,
+    });
+    app.screen = Screen::MoveColumn;
     vec![]
 }
 

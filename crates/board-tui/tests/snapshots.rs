@@ -6,7 +6,7 @@
 use board_core::client::{BoardClient, FakeBoardClient};
 use board_core::db::{EnqueueRun, FinalizeRun};
 use board_core::protocol::{AwaitingReason, CardCreateParams, CardStatus, RunOutcome};
-use board_tui::app::{App, Msg};
+use board_tui::app::{App, Msg, Screen};
 use board_tui::editor::FakeEditor;
 use board_tui::forms::{FieldId, FieldKind};
 use board_tui::testkit::demo_client;
@@ -381,6 +381,44 @@ fn move_card_flow() {
     key(&mut d, KeyCode::Char('m'));
     key(&mut d, KeyCode::Enter);
     insta::assert_snapshot!("move_after", render(&mut d, 80, 24));
+}
+
+#[test]
+fn move_column_mini_mode_then_enter() {
+    let mut d = driver(demo_client().unwrap());
+    key(&mut d, KeyCode::Right); // focus Plan
+    key(&mut d, KeyCode::Char('M')); // enter move-column mini-mode
+    key(&mut d, KeyCode::Right); // Plan -> index 2
+    let in_mode = render(&mut d, 120, 35);
+    assert_eq!(d.app.screen, Screen::MoveColumn);
+    assert!(in_mode.contains("Move column"), "banner visible: {in_mode}");
+    insta::assert_snapshot!("move_column_mini_mode", in_mode);
+
+    key(&mut d, KeyCode::Enter); // commit one column.reorder
+    assert_eq!(d.app.screen, Screen::Board);
+    // Plan committed at index 2 after the refetch.
+    assert_eq!(
+        d.app.board.columns.iter().position(|c| c.name == "Plan"),
+        Some(2)
+    );
+    insta::assert_snapshot!("move_column_committed", render(&mut d, 120, 35));
+}
+
+#[test]
+fn move_column_mini_mode_esc_cancels() {
+    let mut d = driver(demo_client().unwrap());
+    key(&mut d, KeyCode::Right); // focus Plan
+    let original: Vec<String> = d.app.board.columns.iter().map(|c| c.name.clone()).collect();
+    key(&mut d, KeyCode::Char('M'));
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Esc);
+    assert_eq!(d.app.screen, Screen::Board);
+    let after: Vec<String> = d.app.board.columns.iter().map(|c| c.name.clone()).collect();
+    assert_eq!(
+        after, original,
+        "Esc must restore the original column order"
+    );
 }
 
 #[test]

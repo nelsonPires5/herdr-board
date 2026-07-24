@@ -74,6 +74,7 @@ pub const HELP_KEYS: &[(&str, &str)] = &[
     ("d", "delete card"),
     ("D", "delete/move column cards"),
     ("m", "move card (column picker)"),
+    ("M", "move focused column"),
     ("H / L", "shove card left / right"),
     ("Enter", "card detail"),
     ("T", "apply template (empty)"),
@@ -155,6 +156,7 @@ pub fn view(app: &App, f: &mut Frame) {
             }
         }
         Screen::Picker => overlays::draw_picker(app, f, area),
+        Screen::MoveColumn => overlays::draw_move_column(app, f, area),
         Screen::Confirm => overlays::draw_confirm(app, f, area),
         Screen::Help => overlays::draw_help(f, area),
     }

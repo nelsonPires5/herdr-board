@@ -283,7 +283,11 @@ toast.
   cycles `ACTIVE` / `ALL` / `ARCHIVED`; `c` comment; `Enter` card detail; `o` focuses the latest
   recorded run pane when it belongs to the current Herdr session; `r` refreshes the selected board
   on demand); `?` help overlay listing **all** keybinds; column config form (rename, system prompt,
-  trigger, on_success/on_fail, overrides, reorder, delete). The filter is rendered in the Herdr pane
+  trigger, on_success/on_fail, overrides, reorder, delete). **Column reorder** is reachable by mouse
+  drag or the `M` (Shift+m) mini-mode: it mirrors the move-card picker's stage→commit→cancel shape —
+  `←`/`→` (or `h`/`l`) slide the focused column locally, `Enter` commits a single `column.reorder`,
+  and `Esc` restores the original order with no effect (`m` still moves a card, `H`/`L` shove a card).
+  The filter is rendered in the Herdr pane
   title (`Board [<scope> · ACTIVE|ALL|ARCHIVED]`) while the footer contains only `? help`. Archived cards are
   inert until restored and render dimmed with `▣ ARCHIVED` when visible.
 - **Content-sized overlays:** card/column forms, move pickers, and help panels shrink to their content on large terminals and clamp to the available viewport on small terminals.

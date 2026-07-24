@@ -18,6 +18,7 @@ mod confirm;
 mod detail;
 mod forms;
 mod mouse;
+mod move_column;
 mod picker;
 
 /// Which modal/screen is active.
@@ -28,6 +29,8 @@ pub enum Screen {
     CardForm,
     ColumnForm,
     Picker,
+    /// `M` mini-mode: ←/→ reorder the focused column, Enter commits, Esc cancels.
+    MoveColumn,
     Confirm,
     Help,
 }
@@ -152,6 +155,12 @@ pub enum ConfirmPurpose {
     CancelRun(i64),
 }
 
+/// In-progress "move column" mini-mode state (entered with `M`).
+pub struct MoveColumnState {
+    pub column_id: i64,
+    pub original_index: usize,
+}
+
 /// Mouse drag in progress.
 pub struct DragState {
     pub kind: DragKind,
@@ -183,6 +192,7 @@ pub struct App {
     pub form_from_detail: bool,
     pub picker: Option<Picker>,
     pub confirm: Option<Confirm>,
+    pub move_column: Option<MoveColumnState>,
     pub drag: Option<DragState>,
     pub toast: Option<Toast>,
     pub should_quit: bool,
@@ -218,6 +228,7 @@ impl App {
             form_from_detail: false,
             picker: None,
             confirm: None,
+            move_column: None,
             drag: None,
             toast: None,
             should_quit: false,
@@ -242,6 +253,7 @@ impl App {
         self.form_from_detail = false;
         self.picker = None;
         self.confirm = None;
+        self.move_column = None;
         self.drag = None;
     }
 
@@ -438,6 +450,7 @@ fn on_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
         Screen::CardDetail => detail::detail_key(app, k),
         Screen::CardForm | Screen::ColumnForm => forms::form_key(app, k),
         Screen::Picker => picker::picker_key(app, k),
+        Screen::MoveColumn => move_column::move_column_key(app, k),
         Screen::Confirm => confirm::confirm_key(app, k),
         Screen::Help => {
             app.screen = Screen::Board;
