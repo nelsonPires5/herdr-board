@@ -195,6 +195,95 @@ fn failed_managed_start_in_existing_tab_closes_only_new_split_pane() {
 }
 
 #[test]
+fn persistent_busy_closes_only_new_split_child_not_anchor() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let starts = Arc::new(AtomicUsize::new(0));
+    let starts2 = Arc::clone(&starts);
+    let prompt_path = Arc::new(Mutex::new(None::<PathBuf>));
+    let prompt_path2 = Arc::clone(&prompt_path);
+    let fake = serve_recording_herdr(move |req, _| match req["method"].as_str().unwrap() {
+        "tab.list" => existing_tab_list(req),
+        "pane.list" => reply(
+            req,
+            serde_json::json!({"type": "pane_list", "panes": [pane_info("w1:p1")]}),
+        ),
+        "pane.layout" => reply(
+            req,
+            serde_json::json!({"type": "pane_layout", "layout": {
+                "workspace_id": "w1", "tab_id": "w1:t1", "zoomed": false,
+                "area": {"x": 0, "y": 0, "width": 200, "height": 40},
+                "focused_pane_id": "w1:p1",
+                "panes": [{"pane_id": "w1:p1", "focused": true,
+                    "rect": {"x": 0, "y": 0, "width": 200, "height": 40}}],
+                "splits": []
+            }}),
+        ),
+        "pane.split" => pane_result(req, "w1:p3"),
+        "agent.start" => {
+            let path = assert_startup_prompt_file(
+                req,
+                &[
+                    "--model",
+                    "provider/model with space",
+                    "--session-id",
+                    "session-42",
+                ],
+                "--append-system-prompt",
+                "system instructions\nwith an exact second line",
+            );
+            *prompt_path2.lock().unwrap() = Some(path);
+            starts2.fetch_add(1, Ordering::SeqCst);
+            error(req, "agent_pane_busy", "pane remains busy")
+        }
+        "pane.close" => {
+            assert_eq!(req["params"]["pane_id"], "w1:p3");
+            pane_result(req, "w1:p3")
+        }
+        method => panic!("unexpected persistent-busy method {method}"),
+    });
+    let delays = Arc::new(Mutex::new(Vec::new()));
+    let delays2 = Arc::clone(&delays);
+    let spawner = HerdrSpawner::with_pane_runner_and_delay(
+        fake.socket.clone(),
+        Arc::new(RecordingPaneRunner {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            behavior: Box::new(|_, _| unreachable!("managed launch must not use pane runner")),
+        }),
+        Arc::new(move |delay| delays2.lock().unwrap().push(delay)),
+    );
+
+    let err = spawner.spawn(&pi_req(None)).unwrap_err();
+    assert!(err.to_string().contains("pane remains busy"));
+    assert_eq!(
+        starts.load(Ordering::SeqCst),
+        super::super::AGENT_START_BUSY_RETRIES + 1
+    );
+    assert_eq!(
+        delays.lock().unwrap().len(),
+        super::super::AGENT_START_BUSY_RETRIES
+    );
+    assert!(!prompt_path.lock().unwrap().as_ref().unwrap().exists());
+
+    let requests = fake.requests.lock().unwrap();
+    let closes: Vec<_> = requests
+        .iter()
+        .filter(|request| request["method"] == "pane.close")
+        .map(|request| request["params"]["pane_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(closes, ["w1:p3"]);
+    assert!(!closes.contains(&"w1:p1"));
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request["method"] == "pane.split")
+            .count(),
+        1,
+        "persistent busy must not allocate another pane",
+    );
+}
+
+#[test]
 fn configured_pane_run_failure_removes_script_and_closes_owned_pane() {
     use std::os::unix::fs::PermissionsExt;
 

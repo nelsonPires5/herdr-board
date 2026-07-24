@@ -68,6 +68,8 @@ pub trait Spawner: Send + Sync {
 }
 
 pub(crate) const AGENT_START_TIMEOUT_MS: u64 = 30_000;
+pub(crate) const AGENT_START_BUSY_RETRIES: usize = 2;
+pub(crate) const AGENT_START_BUSY_BACKOFF: Duration = Duration::from_millis(100);
 pub(crate) const READINESS_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const READINESS_BACKOFF: Duration = Duration::from_millis(100);
 pub(crate) const IMMEDIATE_READINESS_PROBES: usize = 3;

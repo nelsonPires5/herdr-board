@@ -155,13 +155,17 @@ case ↔ scenario ↔ status catalog):
 | `19-daemon-before-herdr.sh` | Boardd starts before Herdr, then the always-on supervisor late-connects and observes an exact owned pane exit. |
 | `20-herdr-recovery.sh` | An owned transparent proxy proves outage/restart remains `Unknown`, durable timeout budget survives, and reconnect snapshot closes a dropped-event gap once. |
 | `21-active-run-timer.sh` | A real TUI refresh after card activity proves the active-run start summary drives the timer while the run remains open. |
+| `22-move-column-tui.sh` | TUI column reorder mini-mode commits one `column.reorder` and cancels without mutation; provider-free. |
+| `23-agent-pane-busy-retry.sh` | Typed `agent_pane_busy` retries the exact request twice on one owned child with 100ms/200ms backoff; persistent failure cleans that child and preserves the anchor. |
 | `real-pi-smoke.sh` | Separate opt-in (`E2E_REAL_PI=1`) real-provider poem smoke; never included by `run-all.sh`. |
 | `real-claude-haiku-smoke.sh` | Opt-in intended-contract smoke (`E2E_REAL_CLAUDE_HAIKU=1`): exactly one authorized Claude Haiku/low attempt, stages only completed onboarding/theme, exact workspace trust, the installed Herdr hook, credentials, and approved remote-settings bytes, preventing startup dialogs from consuming `agent.prompt`; no broad personal Claude state, retry/fallback, or standard-suite inclusion. |
 | `run-all.sh` | Builds once, runs every standard no-cost scenario, prints a PASS/FAIL/SKIP summary. |
 
 Deterministic daemon tests cover working→running, blocked, Herdr's output-only `done` event →
 `awaiting` (`agent_done`), idle grace→`awaiting` (`idle_expired`; never `lost`), timeout paused
-while `awaiting`, and pane exit without sleeps. Herdr 0.7.5 / protocol 17 does not accept `done`
+while `awaiting`, pane exit without sleeps, and managed `agent_pane_busy` retry/cleanup without
+allocating a second pane. The busy tests assert exact request preservation, bounded backoff, and
+that persistent failure closes only the owned child rather than its pre-existing anchor. Herdr 0.7.5 / protocol 17 does not accept `done`
 as a `pane.report_agent` input (`idle|working|blocked|unknown` only), so the live
 `15-awaiting.sh` scenario uses Pi integration v6's supported report shape; on a managed
 `agent.start` pane Herdr derives output `done` from the end-of-turn idle report. The scenario covers
@@ -319,6 +323,7 @@ Checklist:
 | **herdr closes the socket per request** | herdr serves one request per connection. `hrpc.py` (and `board-herdr`'s client) open a fresh connection every call — don't try to reuse one. |
 | **Tab labels are not unique** | Resolve the `kanban` tab by find-or-create, and filter panes by its `tab_id`; don't assume one tab per label globally. |
 | **Agent names are exclusive** | While a pane is open its agent name is reserved. A collision (e.g. the session already has a `card-1-execute` pane) makes the daemon retry as `card-1-execute-r<run>`. Assertions must accept the optional `-r<n>` suffix. |
+| **A newly split pane can be busy** | Herdr may return typed `agent_pane_busy` while the child still drains prior state. The daemon retries the exact managed `agent.start` request twice on that same owned child with 100ms/200ms backoff; persistent busy closes only that child. Do not treat it as `pane_not_found`: that error triggers one bounded full placement rediscovery from `tab.list`. |
 | **Managed and configured pane identity differ** | Protocol-17 managed Pi/Claude panes expose the managed kind in `pane.agent`; configured panes are renamed to the daemon-assigned `card-<id>-<column>` label and remain unmanaged. Match the appropriate field and still accept the optional `-r<n>` name suffix. |
 | **`pane.layout` nests under `layout`** | `hrpc pane.layout …` returns `{"type":"pane_layout","layout":{…panes,splits…}}`; read `.layout.panes`. |
 | **Never `pkill` by "board daemon"** | That pattern matches your own shell too. Stop only the daemon you started after verifying its signed platform identity token (`e2e_daemon_stop`); PID liveness alone is insufficient. Linux uses `/proc`; Darwin uses native process APIs. Inspect only exact PIDs emitted by the invocation. |
@@ -338,7 +343,7 @@ E2E_REAL_PI=1 e2e/real-pi-smoke.sh  # explicit real-provider opt-in; may incur c
 E2E_REAL_CLAUDE_HAIKU=1 e2e/real-claude-haiku-smoke.sh  # one authorized Haiku/low attempt; may incur cost
 ```
 
-- Standard suite requires **exactly Herdr 0.7.5 / socket protocol 17**, `python3`, Bash ≥4, and `cargo`. It supports Linux and macOS; `run-all.sh` resolves Herdr and Bash absolutely before narrowing `PATH`. Every scenario preflights both `herdr --version` and a socket `ping`; protocol 16 and unknown/future protocols fail before dispatch. The forced-build standard suite scenarios 01–22 pass with no provider calls. The real-Pi smoke additionally verifies Pi's runtime default model, current Herdr integration, and WezTerm. The real-Claude smoke is an intended-contract validation only: it requires a logged-in real Claude CLI plus current Herdr Claude integration v7, stages minimal completed onboarding/theme, exact workspace trust, the installed Herdr hook, credentials, and approved `remote-settings.json` under `/tmp` so startup dialogs cannot consume `agent.prompt`; no broad personal Claude state is copied, and it has no retry or fallback. Its independent identity implementation remains Linux-only and is outside the portable provider-free gate. Both opt-ins compare user/repository state and clean exact resources. `run-all.sh` builds
+- Standard suite requires **exactly Herdr 0.7.5 / socket protocol 17**, `python3`, Bash ≥4, and `cargo`. It supports Linux and macOS; `run-all.sh` resolves Herdr and Bash absolutely before narrowing `PATH`. Every scenario preflights both `herdr --version` and a socket `ping`; protocol 16 and unknown/future protocols fail before dispatch. The forced-build standard suite scenarios 01–23 pass with no provider calls. The real-Pi smoke additionally verifies Pi's runtime default model, current Herdr integration, and WezTerm. The real-Claude smoke is an intended-contract validation only: it requires a logged-in real Claude CLI plus current Herdr Claude integration v7, stages minimal completed onboarding/theme, exact workspace trust, the installed Herdr hook, credentials, and approved `remote-settings.json` under `/tmp` so startup dialogs cannot consume `agent.prompt`; no broad personal Claude state is copied, and it has no retry or fallback. Its independent identity implementation remains Linux-only and is outside the portable provider-free gate. Both opt-ins compare user/repository state and clean exact resources. `run-all.sh` builds
   the release binary once; scenarios reuse it. Every scenario boots and cleans its own ephemeral
   session; scenario 03 additionally owns an independently tokened secondary session.
 - Exit codes: scenario `0` = PASS, `3` = SKIP, other = FAIL; `run-all.sh` exits

@@ -85,7 +85,12 @@ A mismatch fails the queued run without mutating the workspace.
 Protocol 17 is pane-first. boardd creates the `kanban` tab with `cwd` and `env`, using its root pane,
 or splits a selected pane in an existing tab with the same `cwd` and `env`. Only then does it start
 a managed agent in that exact pane or run a configured harness there. Placement, cwd, and env are
-never passed to `agent.start`.
+never passed to `agent.start`. A newly allocated child can briefly retain Herdr's previous agent
+state, so a typed `agent_pane_busy` response gets at most two retries of the exact same
+`agent.start` request on that same board-owned pane, with 100ms then 200ms backoff. It never
+allocates another pane for this transient. Persistent busy is terminal and closes only that owned
+child; `pane_not_found` is a separate placement race that closes the child when present, restarts
+from `tab.list`, and retries complete placement once.
 
 ## 3. Data model
 
@@ -338,9 +343,15 @@ agent.get {target:pane_id}       # bounded polling until interactive_ready && !l
 agent.prompt {target:pane_id, text:task_prompt}
 ```
 
-The temporary file is removed before spawn returns, on success or failure. The card prompt is never
-part of `agent.start`; it is submitted only after readiness. An `agent_name_taken` response retries
-once on the same owned pane with `card-<id>-<column-slug>-r<run>`.
+If Herdr returns typed `agent_pane_busy`, boardd retries the exact `agent.start` parameters—including
+pane, name, args, timeout, and the same system-prompt file—on that same owned pane at most twice,
+backing off 100ms then 200ms. This bounded transient retry never allocates another pane. A
+persistent busy response is terminal: the ordinary error path closes the board-owned child and
+leaves the pre-existing split anchor intact. This is not the `pane_not_found` placement race;
+that error closes the owned child when present, rediscovers from `tab.list`, and retries complete
+placement once. The temporary file is removed before spawn returns, on success or failure. The card
+prompt is never part of `agent.start`; it is submitted only after readiness. An `agent_name_taken`
+response retries once on the same owned pane with `card-<id>-<column-slug>-r<run>`.
 
 Configured harnesses use the same pane-first cwd/env placement, then `pane.rename`. Because direct
 `herdr pane run` does not preserve complex argv boundaries, boardd writes one mode-`0700`,
@@ -371,9 +382,9 @@ opens the script, the residual configured-script orphan is an accepted asynchron
 4. Dispatcher (respecting per-space serial queue + global cap):
    a. Resolve the card's session socket and `ping` it. Anything except exact Herdr 0.7.5/protocol 17 fails before workspace discovery/creation. Then reuse workspace `w4`, or create/reuse the card's labeled `new_workspace`; repository worktree isolation remains an agent prompt responsibility.
    b. Preflight the selected socket again at the spawner boundary. In the workspace's **`kanban` tab**, `tab.create {workspace_id,cwd,env,…}` supplies a new root pane, or an existing tab's largest pane is selected and `pane.split {target_pane_id,cwd,env,…}` creates the owned pane (`Right` when the target is ≥ 2× as wide as tall in cells, else `Down`). There is no protocol-16 placement inside `agent.start` and no leftover root shell to close.
-   c. For Pi/Claude, write the snapshotted system prompt to a mode-`0600` temporary file; issue `agent.start {name,kind,pane_id,args}` with prompt-free startup args; poll `agent.get` for readiness; then send only the task snapshot through `agent.prompt`. Remove the file. Card status → `running`; record the exact pane/workspace ids. The pane is **visible** — you can watch or type into it anytime.
+   c. For Pi/Claude, write the snapshotted system prompt to a mode-`0600` temporary file; issue `agent.start {name,kind,pane_id,args}` with prompt-free startup args; a typed `agent_pane_busy` retries the exact request on that same owned pane with bounded 100ms/200ms backoff (never another split); poll `agent.get` for readiness; then send only the task snapshot through `agent.prompt`. Remove the file. Card status → `running`; record the exact pane/workspace ids. The pane is **visible** — you can watch or type into it anytime.
 
-   **Pane naming and ownership**: the managed agent name is `card-<id>-<column-slug>` (e.g. `card-42-plan`, `card-42-execute`). Herdr names are exclusive while a pane is open, so `agent_name_taken` retries once on the same pane with `card-<id>-<column-slug>-r<run>`. If a placement target disappears, boardd closes only the pane it created (a missing pane is already clean), restarts discovery from `tab.list`, and retries the complete placement once. A terminal launch error also closes only that board-owned pane; pre-existing user panes are never cleanup targets.
+   **Pane naming and ownership**: the managed agent name is `card-<id>-<column-slug>` (e.g. `card-42-plan`, `card-42-execute`). Herdr names are exclusive while a pane is open, so `agent_name_taken` retries once on the same pane with `card-<id>-<column-slug>-r<run>`. A persistent `agent_pane_busy` closes only the board-owned child and leaves the pre-existing anchor. If a placement target disappears, boardd closes only the pane it created (a missing pane is already clean), restarts discovery from `tab.list`, and retries the complete placement once. A terminal launch error also closes only that board-owned pane; pre-existing user panes are never cleanup targets.
 5. Agent plans, writes `docs/plans/meli-retry.md`, then calls `board comment 42 "Plan ready at docs/plans/meli-retry.md …"` and `board done 42 --outcome ok`. From a run, the CLI forwards `BOARD_RUN_ID`; manual/TUI completion omits it and remains compatible.
 6. boardd receives `done` → closes the run (`outcome=ok`), posts a `system` comment ("Plan finished in 4m12s, $0.38"), applies `on_success` → **card auto-moves to Execute** → step 3 repeats with the Execute column prompt, `--resume <session>`.
 7. Execute finishes → comment → auto-move to *Review* → Review run (fresh session, model override) → verdict comment.
@@ -463,6 +474,7 @@ executes the returned plan; it performs no Herdr or SQLite I/O in the pure decis
 ## 8. Failure & safety rails
 
 - Per-run timeout (column-configurable) → kill pane, run `fail`, card to `on_fail`.
+- Managed `agent_pane_busy` is retried only on the same newly owned child (two retries, 100ms/200ms backoff); persistent failure closes that child but never the pre-existing anchor. `pane_not_found` instead triggers the separate one-time full placement rediscovery path.
 - `--max-budget-usd` per run (Claude supports it in print mode; interactive panes rely on timeout + human visibility).
 - Pi has no board tool-permission mode; no permission/approval flag is added and explicit Pi permission is rejected. Claude `bypassPermissions` requires explicit per-card opt-in, never a column default.
 - Cards never auto-move into *Done*; last auto hop is always a human-gated column.

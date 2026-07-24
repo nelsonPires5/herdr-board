@@ -13,6 +13,14 @@ class Proxy:
         self.target = target
         self.offline = False
         self.reject_events = False
+        # Fault injection is deliberately request-scoped: agent.start is a
+        # one-shot Herdr RPC, so returning a typed error here exercises the
+        # daemon's retry/cleanup boundary without touching the real server.
+        self.agent_pane_busy_mode = "none"
+        self.agent_start_panes: list[str] = []
+        self.busy_injections = 0
+        self.pane_splits: list[str] = []
+        self.pane_closes: list[str] = []
         self.connections: set[tuple[asyncio.StreamWriter, asyncio.StreamWriter, bool]] = set()
         self.subscriptions = 0
 
@@ -35,11 +43,33 @@ class Proxy:
                 request = json.loads(first)
             except (UnicodeDecodeError, json.JSONDecodeError):
                 return
-            is_events = request.get("method") == "events.subscribe"
+            method = request.get("method")
+            params = request.get("params") or {}
+            is_events = method == "events.subscribe"
             if is_events:
                 self.subscriptions += 1
                 if self.reject_events:
                     return
+            if method == "agent.start":
+                pane_id = str(params.get("pane_id", ""))
+                self.agent_start_panes.append(pane_id)
+                if self.agent_pane_busy_mode != "none":
+                    self.busy_injections += 1
+                    if self.agent_pane_busy_mode == "once":
+                        self.agent_pane_busy_mode = "none"
+                    writer.write(json.dumps({
+                        "id": request.get("id"),
+                        "error": {
+                            "code": "agent_pane_busy",
+                            "message": "agent pane is still busy (deterministic e2e fault)",
+                        },
+                    }, separators=(",", ":")).encode() + b"\n")
+                    await writer.drain()
+                    return
+            elif method == "pane.split":
+                self.pane_splits.append(str(params.get("target_pane_id", "")))
+            elif method == "pane.close":
+                self.pane_closes.append(str(params.get("pane_id", "")))
             upstream_reader, upstream_writer = await asyncio.open_unix_connection(self.target)
             record = (writer, upstream_writer, is_events)
             self.connections.add(record)
@@ -83,10 +113,21 @@ class Proxy:
                 await self.close_matching(events=True)
             elif command == "allow_events":
                 self.reject_events = False
+            elif command in ("agent_pane_busy_transient", "busy_once"):
+                self.agent_pane_busy_mode = "once"
+            elif command in ("agent_pane_busy_persistent", "busy_always"):
+                self.agent_pane_busy_mode = "persistent"
+            elif command in ("agent_pane_busy_clear", "busy_clear"):
+                self.agent_pane_busy_mode = "none"
             elif command != "status":
                 raise ValueError("unknown command")
             response = {"ok": True, "offline": self.offline,
                         "reject_events": self.reject_events,
+                        "agent_pane_busy_mode": self.agent_pane_busy_mode,
+                        "busy_injections": self.busy_injections,
+                        "agent_start_panes": self.agent_start_panes,
+                        "pane_splits": self.pane_splits,
+                        "pane_closes": self.pane_closes,
                         "subscriptions": self.subscriptions,
                         "connections": len(self.connections)}
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as error:

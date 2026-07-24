@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+- [#35](https://github.com/nelsonPires5/herdr-board/pull/35) Retry transient `agent_pane_busy` on the same owned pane with bounded backoff and safe cleanup.
 - [#34](https://github.com/nelsonPires5/herdr-board/pull/34) Separate the operational board skill from isolated visual-development validation and avoid duplicate implementation worktrees.
 - [#33](https://github.com/nelsonPires5/herdr-board/pull/33) feat(tui): card detail word-wraps the description and each comment body at the panel border (popup and fullscreen) instead of truncating to one line; comments now scroll by wrapped row.
 

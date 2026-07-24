@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context};
 use board_herdr::{
@@ -20,8 +20,8 @@ use super::placement::{
     RetryablePlacementRace, ERR_PANE_NOT_FOUND,
 };
 use super::{
-    HerdrLaunchPlan, RuntimeHandle, Spawner, AGENT_START_TIMEOUT_MS, IMMEDIATE_READINESS_PROBES,
-    READINESS_BACKOFF, READINESS_TIMEOUT,
+    HerdrLaunchPlan, RuntimeHandle, Spawner, AGENT_START_BUSY_BACKOFF, AGENT_START_BUSY_RETRIES,
+    AGENT_START_TIMEOUT_MS, IMMEDIATE_READINESS_PROBES, READINESS_BACKOFF, READINESS_TIMEOUT,
 };
 use crate::HERDR_PROTOCOL;
 
@@ -69,6 +69,7 @@ impl PaneRunner for HerdrCliPaneRunner {
 pub struct HerdrSpawner {
     socket: PathBuf,
     pane_runner: Arc<dyn PaneRunner>,
+    agent_start_delay: Arc<DelayFn>,
 }
 
 impl HerdrSpawner {
@@ -76,6 +77,7 @@ impl HerdrSpawner {
         HerdrSpawner {
             socket,
             pane_runner: Arc::new(HerdrCliPaneRunner),
+            agent_start_delay: Arc::new(thread::sleep),
         }
     }
 
@@ -84,9 +86,19 @@ impl HerdrSpawner {
         socket: PathBuf,
         pane_runner: Arc<dyn PaneRunner>,
     ) -> HerdrSpawner {
+        Self::with_pane_runner_and_delay(socket, pane_runner, Arc::new(thread::sleep))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_pane_runner_and_delay(
+        socket: PathBuf,
+        pane_runner: Arc<dyn PaneRunner>,
+        agent_start_delay: Arc<DelayFn>,
+    ) -> HerdrSpawner {
         HerdrSpawner {
             socket,
             pane_runner,
+            agent_start_delay,
         }
     }
 
@@ -146,7 +158,13 @@ impl Spawner for HerdrSpawner {
             };
 
             let launch_result = match req.agent_kind.as_deref() {
-                Some(kind) => launch_managed(&mut client, req, kind, &owned.pane_id),
+                Some(kind) => launch_managed(
+                    &mut client,
+                    req,
+                    kind,
+                    &owned.pane_id,
+                    self.agent_start_delay.as_ref(),
+                ),
                 None => launch_configured(
                     &mut client,
                     self.pane_runner.as_ref(),
@@ -211,12 +229,16 @@ impl Spawner for HerdrSpawner {
 // ---------------------------------------------------------------------------
 
 const ERR_AGENT_NAME_TAKEN: &str = "agent_name_taken";
+const ERR_AGENT_PANE_BUSY: &str = "agent_pane_busy";
+
+type DelayFn = dyn Fn(Duration) + Send + Sync;
 
 fn launch_managed(
     client: &mut HerdrClient,
     req: &HerdrLaunchPlan,
     kind: &str,
     pane_id: &str,
+    delay: &DelayFn,
 ) -> anyhow::Result<()> {
     let flag = match kind {
         "pi" => "--append-system-prompt",
@@ -261,7 +283,7 @@ fn launch_managed(
     };
 
     let operation = (|| -> anyhow::Result<()> {
-        let started = agent_start_retry_name(client, &params, req.name_fallback.as_deref())
+        let started = agent_start_retry_name(client, &params, req.name_fallback.as_deref(), delay)
             .map_err(|error| {
                 let message = error.to_string();
                 let typed = if matches!(
@@ -304,18 +326,74 @@ fn agent_start_retry_name(
     client: &mut HerdrClient,
     params: &AgentStartParams,
     fallback: Option<&str>,
+    delay: &DelayFn,
 ) -> Result<AgentStarted, HerdrError> {
-    match client.agent_start(params) {
+    // The fallback is part of the same interaction: busy retries already
+    // spent on the primary name must not be available again for the fallback.
+    let mut busy_budget = AgentStartBusyRetryBudget::new();
+    match agent_start_retry_busy(client, params, delay, &mut busy_budget) {
         Err(HerdrError::Protocol { code, message }) if code == ERR_AGENT_NAME_TAKEN => {
             if let Some(name) = fallback {
                 let mut retry = params.clone();
                 retry.name = name.to_string();
-                client.agent_start(&retry)
+                agent_start_retry_busy(client, &retry, delay, &mut busy_budget)
             } else {
                 Err(HerdrError::Protocol { code, message })
             }
         }
         result => result,
+    }
+}
+
+struct AgentStartBusyRetryBudget {
+    retries_remaining: usize,
+    backoff: Duration,
+}
+
+impl AgentStartBusyRetryBudget {
+    fn new() -> Self {
+        Self {
+            retries_remaining: AGENT_START_BUSY_RETRIES,
+            backoff: AGENT_START_BUSY_BACKOFF,
+        }
+    }
+
+    fn take_retry(&mut self) -> Option<Duration> {
+        let delay = self
+            .retries_remaining
+            .checked_sub(1)
+            .map(|_| self.backoff)?;
+        self.retries_remaining -= 1;
+        self.backoff = self.backoff.saturating_mul(2);
+        Some(delay)
+    }
+}
+
+/// A newly allocated board-owned pane can briefly retain Herdr's previous
+/// agent state. Retry the exact start request on that same pane before giving
+/// up; the caller's owned-pane cleanup handles a persistent busy response.
+fn agent_start_retry_busy(
+    client: &mut HerdrClient,
+    params: &AgentStartParams,
+    delay: &DelayFn,
+    busy_budget: &mut AgentStartBusyRetryBudget,
+) -> Result<AgentStarted, HerdrError> {
+    loop {
+        match client.agent_start(params) {
+            Err(error)
+                if matches!(
+                    &error,
+                    HerdrError::Protocol { code, .. } if code == ERR_AGENT_PANE_BUSY
+                ) =>
+            {
+                if let Some(backoff) = busy_budget.take_retry() {
+                    delay(backoff);
+                } else {
+                    return Err(error);
+                }
+            }
+            result => return result,
+        }
     }
 }
 

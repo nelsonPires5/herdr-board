@@ -75,7 +75,7 @@ SCENARIOS=(
   12-cwd-boards.sh 13-jump-to-pane.sh 14-column-config.sh 15-awaiting.sh
   16-managed-p17.sh 17-configured-p17-runner.sh 18-nullable-clear.sh
   19-daemon-before-herdr.sh 20-herdr-recovery.sh 21-active-run-timer.sh
-  22-move-column-tui.sh
+  22-move-column-tui.sh 23-agent-pane-busy-retry.sh
 )
 run_this() {
   [ "${#FILTERS[@]}" -eq 0 ] && return 0
