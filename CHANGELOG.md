@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+- #31 Pin Herdr plugin installs to the latest released tag (`--ref v0.8.0`) and require one-line, PR-linked `CHANGELOG.md` entries.
+
 ## [0.8.0] - 2026-07-23
 
 - Internal Rust refactor organizes production modules and tests by responsibility: public API behavior
