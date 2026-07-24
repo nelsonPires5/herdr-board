@@ -3,7 +3,7 @@
 ## Contents
 
 1. Preflight
-2. Isolated worktree and build
+2. Isolated validation source and build
 3. Disposable Herdr/board stack
 4. Temporary WezTerm client
 5. Fixtures and captures
@@ -39,9 +39,12 @@ herdr api snapshot | jq '.result.snapshot | {version,protocol,workspaces,tabs,la
 
 The snapshot command is read-only against the current session. Do not mutate that session.
 
-## 2. Isolated worktree and build
+## 2. Isolated validation source and build
+
+Choose one mode. Prototype mode creates a disposable detached worktree. Execution-validation mode reads changes from the user's existing execution worktree and mirrors them into a disposable non-Git plugin/build directory; fixes remain in the execution worktree, and no second implementation worktree is created.
 
 ```bash
+VALIDATION_MODE="${VALIDATION_MODE:-prototype}" # prototype | execution
 RUN_ID="$$"
 HERDR_BIN="$(command -v herdr)"
 # Reuse the standard E2E identity/name helpers without starting its stack.
@@ -54,7 +57,19 @@ WT="/tmp/herdr-board-visual-$RUN_ID"
 TARGET="/tmp/herdr-board-target-$RUN_ID"
 STATE="/tmp/hb-visual-$RUN_ID.env"
 
-git worktree add --detach "$WT" HEAD
+case "$VALIDATION_MODE" in
+  prototype)
+    git worktree add --detach "$WT" HEAD
+    ;;
+  execution)
+    : "${EXECUTION_WORKTREE:?set EXECUTION_WORKTREE to the existing implementation worktree}"
+    mkdir -p "$WT"
+    rsync -a --delete --exclude .git --exclude target \
+      "$EXECUTION_WORKTREE/" "$WT/"
+    ;;
+  *) echo "unknown VALIDATION_MODE: $VALIDATION_MODE" >&2; exit 2 ;;
+esac
+
 CARGO_TARGET_DIR="$TARGET" ~/.cargo/bin/cargo build \
   --manifest-path "$WT/Cargo.toml" --release -p board-cli
 ln -s "$TARGET" "$WT/target"
@@ -66,12 +81,14 @@ SESSION=$SESSION
 TMP=$TMP
 WT=$WT
 TARGET=$TARGET
+VALIDATION_MODE=$VALIDATION_MODE
+EXECUTION_WORKTREE=${EXECUTION_WORKTREE:-}
 EOF
 ```
 
-The symlink satisfies `herdr-plugin.toml`'s relative `./target/release/board` without overwriting the main checkout's binary.
+The symlink satisfies `herdr-plugin.toml`'s relative `./target/release/board` without overwriting the original or execution checkout's binary.
 
-For a baseline/proposal comparison, capture the baseline before editing this worktree. Then edit the same worktree and capture the proposal with identical fixture data and dimensions.
+For a baseline/proposal comparison, capture the baseline before editing. In prototype mode, edit the disposable worktree. In execution-validation mode, edit only `$EXECUTION_WORKTREE`, refresh the disposable mirror with the same `rsync` command, then rebuild and recapture with identical fixtures and dimensions.
 
 ## 3. Disposable Herdr/board stack
 
@@ -236,7 +253,7 @@ Review `.snap.new` before accepting with `INSTA_UPDATE=always`.
 
 ## 6. Rebuild/restart loop
 
-After prototype edits:
+After prototype edits, or after refreshing the execution-validation mirror from its implementation worktree:
 
 ```bash
 (cd "$WT" && ~/.cargo/bin/cargo fmt --all)
@@ -264,11 +281,13 @@ herdr --session "$SESSION" plugin action invoke open-board --plugin herdr-board
 
 ## 7. Promotion
 
-After explicit approval:
+After explicit approval in prototype mode:
 
-1. Save the worktree diff.
-2. Apply behavior tests to main first; run and record red.
-3. Apply source changes; run focused green tests.
+1. Save the disposable worktree diff.
+2. Apply behavior tests to the designated implementation checkout/worktree first; run and record red.
+3. Apply source changes there; run focused green tests.
+
+Execution-validation mode requires no promotion: its source changes already live in `$EXECUTION_WORKTREE`.
 4. Add layout/reducer tests plus narrow/wide/overflow snapshots.
 5. Update README, `docs/design.md`, and `CHANGELOG.md`.
 6. Run:
@@ -317,7 +336,11 @@ printf 'HERDR MUTATION: stop/delete disposable session %s\n' "$SESSION"
 "$HERDR_BIN" session stop "$SESSION"
 "$HERDR_BIN" session delete "$SESSION"
 
-git worktree remove --force "$WT"
+if [ "$VALIDATION_MODE" = prototype ]; then
+  git worktree remove --force "$WT"
+else
+  rm -rf "$WT"
+fi
 rm -rf "$TARGET" "$TMP"
 rm -f "$STATE"
 

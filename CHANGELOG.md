@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+- [#34](https://github.com/nelsonPires5/herdr-board/pull/34) Separate the operational board skill from isolated visual-development validation and avoid duplicate implementation worktrees.
 - [#33](https://github.com/nelsonPires5/herdr-board/pull/33) feat(tui): card detail word-wraps the description and each comment body at the panel border (popup and fullscreen) instead of truncating to one line; comments now scroll by wrapped row.
 
 - [#31](https://github.com/nelsonPires5/herdr-board/pull/31) Pin Herdr plugin installs to the latest released tag (`--ref v0.8.0`) and require one-line, PR-linked `CHANGELOG.md` entries.

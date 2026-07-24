@@ -11,11 +11,13 @@ Read [`references/playbook.md`](references/playbook.md) before executing live He
 
 ## Non-negotiable safety
 
-1. Read repository `AGENTS.md`, `docs/herdr.md`, and `docs/testing.md` completely.
+1. Read repository `AGENTS.md`, `skill/SKILL.md`, `docs/herdr.md`, and `docs/testing.md` completely. Treat `skill/SKILL.md` as the source of truth for operating the board; do not duplicate its general CLI/TUI reference here.
 2. Verify the installed Herdr with `herdr --version`, `herdr status`, `herdr api schema --json`, and relevant `--help`; never guess command shapes.
 3. Mutate only an ephemeral named Herdr session and workspaces created inside it. Prefix every mutation log with `HERDR MUTATION:`.
 4. Isolate board state under a short `/tmp` directory via `BOARD_DB`, `BOARD_SOCKET`, and `HERDR_BOARD_CONFIG`.
-5. Prototype in a detached temporary worktree. Keep the main checkout unchanged until the user approves the comparison.
+5. Choose the validation mode before changing files:
+   - **Prototype mode:** prototype in a detached temporary worktree under `/tmp`; keep the implementation checkout unchanged until approval.
+   - **Execution-validation mode:** validate an existing implementation worktree; do not create a second implementation worktree or copy production changes into another branch.
 6. Never dispatch a paid/real agent for visual fixtures. Use `FakeBoardClient`, the fake harness, CLI-created manual cards, or direct writes only to the isolated fixture database.
 7. Capture every PID/resource needed for cleanup. Never use broad `pkill` patterns.
 
@@ -30,12 +32,23 @@ Read [`references/playbook.md`](references/playbook.md) before executing live He
 - Capture baseline states at the same terminal dimensions planned for the prototype.
 - Record Herdr version/protocol, terminal dimensions, theme, and fixture data.
 
-### 2. Create an isolated prototype
+### 2. Prepare the isolated validation source
+
+In **prototype mode**:
 
 - Create a detached worktree under `/tmp` from the current commit.
-- Build into a separate `CARGO_TARGET_DIR`; make the worktree manifest resolve that binary without replacing the main build.
+- Make only disposable prototype changes there; do not create a prototype under the repository's `worktree/` directory.
+
+In **execution-validation mode**:
+
+- Use the existing execution worktree as the source and implementation target.
+- Do not create another Git worktree for the implementation. Temporary build, board, Herdr, and capture artifacts still belong under `/tmp`.
+
+In either mode:
+
+- Build into a separate `CARGO_TARGET_DIR`; make the selected source manifest resolve that binary without replacing the main build.
 - Start an ephemeral named Herdr server with isolated board env.
-- Link the worktree plugin only inside that session.
+- Link the selected source plugin only inside that session.
 - Create a disposable workspace and open the plugin through its real action/placement.
 - Attach the disposable session in a temporary WezTerm tab after unsetting nested-Herdr environment variables.
 
@@ -71,7 +84,8 @@ Do not infer contrast from text snapshots alone; inspect attributed ANSI or a re
 
 ### 5. Iterate without promoting
 
-- Apply feedback only in the prototype worktree.
+- In prototype mode, apply feedback only in the disposable prototype worktree.
+- In execution-validation mode, apply fixes directly to the existing execution worktree and repeat isolated validation; never create a second implementation worktree.
 - Add reducer/layout tests for behavior, not only screenshots.
 - Run focused tests and clippy after each interaction change.
 - Rebuild and restart the disposable plugin pane so screenshots use the new binary.
@@ -79,8 +93,10 @@ Do not infer contrast from text snapshots alone; inspect attributed ANSI or a re
 
 ### 6. Promote after explicit approval
 
-1. Add/apply behavior tests to the main checkout first and run them red.
-2. Port the approved source changes.
+Promotion applies only to **prototype mode**. The target is the designated implementation checkout or execution worktree, not necessarily the main checkout. Execution-validation mode already validates its implementation target and must not create or port into another worktree.
+
+1. Add/apply behavior tests to the implementation target first and run them red.
+2. Port the approved source changes from the disposable prototype.
 3. Update/add deterministic snapshots, including wide/narrow and overflow states.
 4. Update README, design docs, and `CHANGELOG.md` in the same change.
 5. Run all repository gates and live e2e.
@@ -104,8 +120,8 @@ Use `~/.cargo/bin/cargo` or prepend it to `PATH` if non-login shells cannot find
 - Stop the isolated board daemon by its captured PID/socket owner.
 - Stop and delete the named Herdr session.
 - Verify no `hb-visual-*`, `hb-prototype-*`, or `hb-e2e-*` session remains.
-- Remove the linked worktree with `git worktree remove --force` only after its approved diff is promoted or intentionally discarded.
-- Recheck main `git status`.
+- In prototype mode, remove the disposable linked worktree with `git worktree remove --force` only after its approved diff is promoted or intentionally discarded. Never remove the user's execution worktree during validation cleanup.
+- Recheck the original checkout and implementation-target `git status`.
 
 ## Handoff/report format
 
