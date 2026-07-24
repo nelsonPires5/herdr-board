@@ -1,6 +1,8 @@
 //! Scope tests: archive, card move, drag, column reorder, shove.
 
-use super::helpers::{demo_app, demo_app_with_detail, key};
+use super::helpers::{
+    demo_app, demo_app_with_detail, demo_client, driver_of, key, RecordingClient,
+};
 use board_core::client::BoardClient;
 use board_core::protocol::CardStatus;
 use board_tui::app::{update, CardFilter, Effect, Screen};
@@ -141,6 +143,93 @@ fn column_drag_produces_reorder() {
         }
         _ => panic!("expected ColumnReorder"),
     }
+}
+
+#[test]
+fn move_column_m_opens_mode_and_enter_emits_single_reorder() {
+    let mut app = demo_app();
+    let plan_id = app.col_id_at(1).unwrap();
+    update(&mut app, key(KeyCode::Right)); // focus Plan
+                                           // Opening the mode is local-only (no effect, like open_move_picker).
+    assert!(update(&mut app, key(KeyCode::Char('M'))).is_empty());
+    assert_eq!(app.screen, Screen::MoveColumn);
+    assert!(app.move_column.is_some());
+
+    // ←/→ reorder locally without emitting anything.
+    update(&mut app, key(KeyCode::Right));
+    update(&mut app, key(KeyCode::Right)); // Plan now at index 3
+
+    // Enter commits exactly one reorder at the column's current index.
+    let effects = update(&mut app, key(KeyCode::Enter));
+    match effects.as_slice() {
+        [Effect::ColumnReorder { id, position }] => {
+            assert_eq!(*id, plan_id);
+            assert_eq!(*position, 3);
+        }
+        other => panic!("expected one ColumnReorder, got {} effects", other.len()),
+    }
+    assert_eq!(app.screen, Screen::Board);
+    assert!(app.move_column.is_none());
+}
+
+#[test]
+fn move_column_esc_restores_order_and_emits_nothing() {
+    let mut app = demo_app();
+    let original: Vec<i64> = app.board.columns.iter().map(|c| c.id).collect();
+    update(&mut app, key(KeyCode::Right)); // focus Plan
+    update(&mut app, key(KeyCode::Char('M')));
+    update(&mut app, key(KeyCode::Right));
+    update(&mut app, key(KeyCode::Right));
+    let effects = update(&mut app, key(KeyCode::Esc));
+    assert!(effects.is_empty(), "Esc must not persist anything");
+    assert_eq!(app.screen, Screen::Board);
+    let now: Vec<i64> = app.board.columns.iter().map(|c| c.id).collect();
+    assert_eq!(now, original, "Esc must restore the original column order");
+}
+
+#[test]
+fn move_column_clamps_at_edges_without_wrapping() {
+    let mut app = demo_app();
+    let first_id = app.col_id_at(0).unwrap();
+    update(&mut app, key(KeyCode::Char('M'))); // focus first column (Todo)
+                                               // Moving left at the left edge is a no-op (no wraparound).
+    assert!(update(&mut app, key(KeyCode::Left)).is_empty());
+    assert!(update(&mut app, key(KeyCode::Char('h'))).is_empty());
+    assert_eq!(app.col_id_at(0), Some(first_id));
+    update(&mut app, key(KeyCode::Esc));
+}
+
+#[test]
+fn move_column_mode_drives_a_single_column_reorder_rpc() {
+    use std::sync::{Arc, Mutex};
+    let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let client = RecordingClient {
+        inner: demo_client().unwrap(),
+        calls: calls.clone(),
+    };
+    let mut d = driver_of(client);
+    let plan_id = d.app.board.columns[1].id;
+    d.handle(key(KeyCode::Right)); // focus Plan
+    d.handle(key(KeyCode::Char('M')));
+    d.handle(key(KeyCode::Right));
+    d.handle(key(KeyCode::Left)); // net-zero wander
+    d.handle(key(KeyCode::Right));
+    d.handle(key(KeyCode::Enter)); // commit
+    let recorded = calls.lock().unwrap();
+    let reorders = recorded
+        .iter()
+        .filter(|method| method.as_str() == "column.reorder")
+        .count();
+    assert_eq!(
+        reorders, 1,
+        "exactly one column.reorder on Enter: {recorded:?}"
+    );
+    drop(recorded);
+    // The refetch after reorder reflects the persisted position.
+    assert_eq!(
+        d.app.board.columns.iter().position(|c| c.id == plan_id),
+        Some(2)
+    );
 }
 
 #[test]
