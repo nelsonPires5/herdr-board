@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-23
+
 - Internal Rust refactor organizes production modules and tests by responsibility: public API behavior
   uses crate integration-test targets, while private invariants remain adjacent to their
   implementations.
@@ -281,7 +283,8 @@ a visible herdr pane. Ships as a single `board` binary (TUI + daemon + CLI) and 
 - **Packaging.** `herdr-plugin.toml` manifest, and `scripts/` for build, install (guarded behind
   `--yes`), the open-or-focus launcher, a raw protocol client, and a live-herdr e2e smoke test.
 
-[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.8.0
 [0.7.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.7.0
 [0.6.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.6.0
 [0.5.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.5.0
