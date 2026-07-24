@@ -10,6 +10,8 @@ description: >-
 
 # herdr-board
 
+This is the operational skill for people and dispatched agents using herdr-board. It covers the TUI, CLI, cards, runs, and Herdr-backed spaces; it does not prescribe how to develop, prototype, test, or release herdr-board itself.
+
 herdr-board is a kanban board for AI coding agents. A **card** is a prompt (title +
 description) plus harness/model/effort, an optional harness-specific permission, and a target herdr space. New cards default to Pi; runs remain harness-neutral. **Columns**
 are pipeline stages; a column can be `manual` or `auto`. Each canonical Git root (or exact
@@ -40,6 +42,12 @@ board done --outcome ok --summary "feature X shipped, tests green"
 # stage goal not met:
 board done --outcome fail --summary "2 integration tests still failing; needs a schema change"
 ```
+
+## Using the TUI
+
+Run `board tui` or invoke the `open-board` Herdr plugin action. Use arrows or `h/j/k/l` to navigate, `n` to create a card, `N` to create a column, `m` to move a card, `Enter` for card detail, `e`/`E` to edit a card/column, `a` to archive or restore, `v` to change the archive filter, and `?` for the complete in-app reference. Moving a card into an automatic column dispatches its run into the workspace's `kanban` tab.
+
+Use the CLI below for scripted operations and for progress reporting from a dispatched run.
 
 ## CLI reference
 
