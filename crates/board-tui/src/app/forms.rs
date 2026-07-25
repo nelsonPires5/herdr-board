@@ -50,6 +50,7 @@ pub(super) fn form_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
                         }
                         FieldId::Model => form.on_model_changed(),
                         FieldId::SpaceKind => form.on_space_kind_changed(),
+                        FieldId::Trigger => form.on_trigger_changed(),
                         _ => {}
                     }
                 }
