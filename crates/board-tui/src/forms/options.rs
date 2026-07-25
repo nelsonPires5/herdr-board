@@ -83,6 +83,19 @@ impl Form {
         self.rebuild_card_fields();
     }
 
+    /// React to a column trigger change: the `system_prompt` field is shown for
+    /// `auto` (a run is launched) and hidden for `manual` (no run). Visibility
+    /// is dynamic, so this only reconciles focus — a `SystemPrompt` that was
+    /// focused when the user switched to `manual` must move to the next visible
+    /// field. The field is **hidden, not omitted**: it stays in the field list
+    /// carrying its value, so submit still sends a `system_prompt` Patch that
+    /// preserves the DB value (manual columns keep their prompt).
+    pub fn on_trigger_changed(&mut self) {
+        if !self.field_visible(self.focus) {
+            self.focus_step(1);
+        }
+    }
+
     fn rebuild_fields(&mut self) {
         if self.is_card_form() {
             self.rebuild_card_fields();
@@ -221,15 +234,30 @@ impl Form {
     /// Whether a field is currently shown. The `(custom)` free-text companion
     /// appears only when the `SpaceRef` selector is on `(custom)`; `cwd` only for
     /// the `new_workspace` space kind; both `permission` selectors disappear
-    /// when the driving harness has no permission modes (e.g. Pi).
+    /// when the driving harness has no permission modes (e.g. Pi); the column
+    /// `system prompt` is hidden for `manual` triggers (no run → no prompt) but
+    /// stays in the field list so its value is preserved and submitted.
     pub fn field_visible(&self, idx: usize) -> bool {
         match self.fields[idx].id {
             FieldId::SpaceCwd => self.space_kind_is_new_workspace(),
             FieldId::ModelCustom => self.model_is_custom(),
             FieldId::Permission | FieldId::PermissionOverride => self.permission_is_applicable(),
             FieldId::SpaceRefCustom => self.space_ref_is_custom(),
+            FieldId::SystemPrompt => self.trigger_is_auto(),
             _ => true,
         }
+    }
+
+    /// Whether the column trigger is `auto` (a run launches on card entry).
+    /// `manual` (and the unset create-form default) hides the `system_prompt`
+    /// field — manual columns never launch a run, so the prompt is unused.
+    pub(super) fn trigger_is_auto(&self) -> bool {
+        self.fields
+            .iter()
+            .find(|f| f.id == FieldId::Trigger)
+            .and_then(|f| f.choice_val())
+            .map(|v| matches!(v, ChoiceVal::Str(s) if s == "auto"))
+            .unwrap_or(false)
     }
 
     /// Whether any permission selector applies for the form's driving harness.

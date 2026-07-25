@@ -25,6 +25,21 @@ fn idx_of(form: &Form, id: FieldId) -> usize {
     form.fields.iter().position(|f| f.id == id).unwrap()
 }
 
+/// Set a choice field to the option whose label matches.
+fn set_choice(form: &mut Form, id: FieldId, label: &str) {
+    let f = form
+        .fields
+        .iter_mut()
+        .find(|f| f.id == id)
+        .unwrap_or_else(|| panic!("field {id:?} present"));
+    if let FieldKind::Choice { opts, idx } = &mut f.kind {
+        *idx = opts
+            .iter()
+            .position(|o| o.label == label)
+            .unwrap_or_else(|| panic!("option {label:?} in {id:?}"));
+    }
+}
+
 #[test]
 fn card_harness_select_consumes_harness_list() {
     // The card Harness selector draws from the shared `harness.list` source
@@ -210,4 +225,112 @@ fn session_name_unset_or_unrelated_is_none() {
         session_name_from_socket(Some("/x/sessions//herdr.sock")),
         None
     );
+}
+
+// -- column system_prompt conditional on trigger ---------------------------
+
+#[test]
+fn column_system_prompt_hidden_for_manual_default() {
+    // New column form defaults to trigger=manual → SystemPrompt is hidden, but
+    // still present in the field list (so its value survives a submit).
+    let form = Form::column_create(&[]);
+    assert_eq!(field(&form, FieldId::Trigger).display(), "manual");
+    assert!(!form.field_visible(idx_of(&form, FieldId::SystemPrompt)));
+    assert!(form.fields.iter().any(|f| f.id == FieldId::SystemPrompt));
+}
+
+#[test]
+fn column_system_prompt_shown_when_trigger_auto() {
+    let mut form = Form::column_create(&[]);
+    set_choice(&mut form, FieldId::Trigger, "auto");
+    form.on_trigger_changed();
+    assert!(form.field_visible(idx_of(&form, FieldId::SystemPrompt)));
+}
+
+#[test]
+fn column_system_prompt_reappears_when_trigger_toggles() {
+    let mut form = Form::column_create(&[]);
+    assert!(!form.field_visible(idx_of(&form, FieldId::SystemPrompt)));
+
+    set_choice(&mut form, FieldId::Trigger, "auto");
+    form.on_trigger_changed();
+    assert!(form.field_visible(idx_of(&form, FieldId::SystemPrompt)));
+
+    set_choice(&mut form, FieldId::Trigger, "manual");
+    form.on_trigger_changed();
+    assert!(!form.field_visible(idx_of(&form, FieldId::SystemPrompt)));
+
+    set_choice(&mut form, FieldId::Trigger, "auto");
+    form.on_trigger_changed();
+    assert!(form.field_visible(idx_of(&form, FieldId::SystemPrompt)));
+}
+
+#[test]
+fn column_system_prompt_focus_moves_off_hidden_field() {
+    // Focus the (visible) SystemPrompt under auto, then flip to manual: focus
+    // must reconcile off the now-hidden field onto a still-visible one.
+    let mut form = Form::column_create(&[]);
+    set_choice(&mut form, FieldId::Trigger, "auto");
+    form.on_trigger_changed();
+    form.focus = idx_of(&form, FieldId::SystemPrompt);
+    assert_eq!(form.focused().id, FieldId::SystemPrompt);
+
+    set_choice(&mut form, FieldId::Trigger, "manual");
+    form.on_trigger_changed();
+    assert_ne!(form.focused().id, FieldId::SystemPrompt);
+    assert!(form.field_visible(form.focus));
+}
+
+#[test]
+fn column_submit_preserves_system_prompt_value_when_trigger_manual() {
+    // Crux of "hide UI, preserve DB": a manual column carrying a prompt must
+    // still submit Patch::Set(prompt) — NOT Patch::Clear — because the field is
+    // hidden (value retained) rather than omitted from the form.
+    use board_core::model::Column;
+    use board_core::protocol::{Patch, Trigger};
+    let col = Column {
+        id: 7,
+        board_id: 1,
+        name: "Human Review".into(),
+        position: 3,
+        system_prompt: Some("queue for human".into()),
+        trigger: Trigger::Manual,
+        on_success_column_id: None,
+        on_fail_column_id: None,
+        fresh_session: false,
+        harness_override: None,
+        model_override: None,
+        effort_override: None,
+        permission_override: None,
+        timeout_minutes: None,
+    };
+    let form = Form::column_edit(&col, &[]);
+    assert!(!form.field_visible(idx_of(&form, FieldId::SystemPrompt)));
+    assert_eq!(
+        field(&form, FieldId::SystemPrompt).get_text(),
+        "queue for human"
+    );
+    match form.submit().unwrap() {
+        Submit::ColumnUpdate(p) => {
+            assert_eq!(p.system_prompt, Patch::Set("queue for human".into()));
+            assert_eq!(p.trigger, Some(Trigger::Manual));
+        }
+        _ => panic!("expected ColumnUpdate"),
+    }
+}
+
+#[test]
+fn column_submit_clears_system_prompt_only_when_emptied_under_auto() {
+    // Sanity: an intentionally empty prompt under auto still clears on create,
+    // so the preserve path can't silently swallow an explicit clear.
+    let mut form = Form::column_create(&[]);
+    set_choice(&mut form, FieldId::Trigger, "auto");
+    form.on_trigger_changed();
+    if let Some(f) = form.fields.iter_mut().find(|f| f.id == FieldId::Name) {
+        f.set_text("Col");
+    }
+    match form.submit().unwrap() {
+        Submit::ColumnCreate(p) => assert_eq!(p.system_prompt, None),
+        _ => panic!("expected ColumnCreate"),
+    }
 }

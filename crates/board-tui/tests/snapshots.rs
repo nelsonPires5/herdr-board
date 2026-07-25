@@ -219,6 +219,28 @@ fn column_form() {
 }
 
 #[test]
+fn column_form_trigger_auto_shows_system_prompt() {
+    // Manual (default) hides the system prompt field; switching the trigger to
+    // auto reveals it. See snapshots__column_form.snap for the hidden baseline.
+    let mut d = driver(demo_client().unwrap());
+    key(&mut d, KeyCode::Char('N'));
+    {
+        let form = d.app.form.as_mut().expect("column form");
+        if let FieldKind::Choice { opts, idx } = &mut form
+            .fields
+            .iter_mut()
+            .find(|f| f.id == FieldId::Trigger)
+            .expect("trigger field")
+            .kind
+        {
+            *idx = opts.iter().position(|o| o.label == "auto").expect("auto");
+        }
+        form.on_trigger_changed();
+    }
+    insta::assert_snapshot!("column_form_trigger_auto", render(&mut d, 80, 24));
+}
+
+#[test]
 fn column_form_hostile_origin_is_metadata_only() {
     let mut baseline = driver(demo_client().unwrap());
     key(&mut baseline, KeyCode::Char('N'));
