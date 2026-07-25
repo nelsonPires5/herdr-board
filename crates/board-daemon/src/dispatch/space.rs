@@ -124,3 +124,47 @@ pub(crate) fn find_workspace_by_label(workspaces: &[WorkspaceInfo], label: &str)
         .find(|w| w.label.eq_ignore_ascii_case(label))
         .map(|w| w.workspace_id.clone())
 }
+
+/// Read-only preflight counterpart of [`resolve_space`]: confirm the card's
+/// space *can* be resolved without creating anything. Used as a blocking
+/// sanity check before a cross-board move into an auto column, so a card whose
+/// workspace does not resolve is rejected up front rather than moving and then
+/// failing at dispatch.
+///
+/// - [`SpaceKind::Workspace`]: `space_ref` must resolve to an open workspace
+///   by id or label (read-only `workspace.list`).
+/// - [`SpaceKind::NewWorkspace`]: only the structural label/cwd requirement is
+///   checked — the workspace is created at run time, so absence is not an error.
+///
+/// It deliberately does NOT call `workspace.create` and does NOT require a live
+/// pane cwd (that is a dispatch-time concern and would over-block a move).
+pub(crate) fn validate_space_resolvable(
+    client: &mut HerdrClient,
+    kind: SpaceKind,
+    space_ref: Option<&str>,
+    space_cwd: Option<&str>,
+) -> anyhow::Result<()> {
+    client.require_protocol(HERDR_PROTOCOL).map_err(|error| {
+        let message = error.to_string();
+        anyhow::Error::new(error).context(format!(
+            "checking Herdr protocol before workspace pre-check: {message}"
+        ))
+    })?;
+    match kind {
+        SpaceKind::Workspace => {
+            let ws_ref =
+                space_ref.ok_or_else(|| anyhow::anyhow!("workspace space requires a space_ref"))?;
+            let workspaces = client.workspace_list()?;
+            resolve_workspace_ref(&workspaces, ws_ref)
+                .map(|_| ())
+                .map_err(|m| anyhow::anyhow!(m))
+        }
+        SpaceKind::NewWorkspace => {
+            let _ = space_cwd;
+            space_ref
+                .filter(|s| !s.trim().is_empty())
+                .map(|_| ())
+                .ok_or_else(|| anyhow::anyhow!("new_workspace space requires a label (space_ref)"))
+        }
+    }
+}

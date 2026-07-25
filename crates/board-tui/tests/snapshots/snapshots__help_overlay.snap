@@ -14,7 +14,7 @@ expression: output
 "│  v          cycle active/all/archived    r          retry run                │"
 "│  d          delete card                 forms                                │"
 "│  D          delete/move column cards     Tab        next field               │"
-"│  m          move card (column picker)    Shift+Tab  previous field           │"
+"│  m          move card (board→column)     Shift+Tab  previous field           │"
 "│  M          move focused column          ←/→ Space  cycle a picker field     │"
 "│  H / L      shove card left / right      Ctrl+E     edit textarea in $EDITOR │"
 "│  Enter      card detail                  Enter      submit                   │"

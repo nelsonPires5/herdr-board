@@ -82,8 +82,9 @@ Boards are independent pipelines keyed by canonical path. `Global` is board `id=
 - `column.delete {id, move_cards_to?}` → `{deleted:true}`; destination must belong to the same board; error 3 if cards lack a destination or any card has an open run (`queued|running|blocked|awaiting`; `done` is not open).
 - `template.apply {name:"pipeline", board_id?}` → the requested board's full column set (omitted = `Global`; error 3 unless it has only seed `Todo` and no cards).
 
-The store enforces board boundaries: card create/move, column-delete destinations,
-`on_success`/`on_fail`, templates, and automatic transitions cannot reference another board.
+The store enforces board boundaries: card create, column-delete destinations,
+`on_success`/`on_fail`, templates, and automatic transitions cannot reference another board;
+`card.move` with `board_id` is the single intentional exception (a validated transfer).
 Scheduler adoption and watchers still scan runs across every board.
 
 ### Partial update fields (v1)
@@ -135,9 +136,14 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
 - `card.delete {id}` → `{deleted:true}`; refused while the card has an open run (`queued|running|blocked|awaiting`; cancel first). `done` is not open.
 - `card.archive {id, archived:true|false}` → `Card` — archives or restores without deleting
   comments/runs. Archiving is refused while the card has an open run (`queued|running|blocked|awaiting`); `done` cards can be archived. Archived cards must be restored before move/retry.
-- `card.move {id, column_id, position?}` → `Card` — THE trigger: target must belong to the
+- `card.move {id, column_id, board_id?, position?}` → `Card` — THE trigger: target must belong to the
   card's board; if it is `auto` and the card is `idle`, `failed`, or `done`, a run is enqueued.
-  `awaiting` is not re-dispatched because its run remains open.
+  `awaiting` is not re-dispatched because its run remains open. An optional `board_id` declares a
+  **cross-board transfer**: when present and different from the card's board, the card's
+  `board_id`/`column_id` are moved atomically (both columns recompacted) after a blocking sanity
+  check (merged effective capabilities + session resolve) — incompatible settings/sessions abort
+  the move with an explicit error. Omitted (or equal to the card's board) keeps the historical
+  intra-board move.
 - `card.get {id}` → `{card, comments:[…], runs:[…]}`. Run objects deliberately omit the internal
   `system_prompt_snapshot` field and its contents; missing snapshot input deserializes as legacy
   `null`, but the field is never serialized onto the board wire. Schema v7 writes this nullable
@@ -244,7 +250,7 @@ parks the card in `awaiting` instead of failing the run.
 
 Coarse by design — the TUI refetches only its selected `board.get {board_id}` on any event; payload is for logs/toasts.
 
-- `{"event":"board_changed","reason":"card_moved|card_created|card_updated|card_deleted|card_archived|column_changed|comment_added|run_started|run_ended|run_blocked","card_id"?:N,"column_id"?:N}`
+- `{"event":"board_changed","reason":"card_moved|card_created|card_updated|card_deleted|card_archived|column_changed|comment_added|run_started|run_ended|run_blocked","board_id"?:N,"card_id"?:N,"column_id"?:N}` — `board_id` scopes the change to a specific board; a cross-board card transfer emits one event per affected board (source + destination). Omitted `board_id` means a coarse, board-agnostic refresh.
 - `{"event":"run_ended","card_id":N,"run_id":N,"outcome":"ok|fail|cancelled|lost"}` (also emitted as board_changed; `lost` is legacy — no longer produced, see Card statuses)
 
 ## Dispatch semantics (column engine — lives in board-core, pure; daemon executes effects)

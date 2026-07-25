@@ -200,7 +200,7 @@ impl Daemon {
         let _ = self.events_tx.send(ev);
     }
 
-    /// Convenience: emit a coarse `board_changed` event.
+    /// Convenience: emit a coarse `board_changed` event (board-agnostic).
     pub fn emit_changed(
         &self,
         reason: BoardChangedReason,
@@ -209,6 +209,25 @@ impl Daemon {
     ) {
         self.emit(Event::BoardChanged {
             reason,
+            board_id: None,
+            card_id,
+            column_id,
+        });
+    }
+
+    /// Convenience: emit a `board_changed` event scoped to a specific board.
+    /// Use this (one event per affected board) instead of two coarse emits
+    /// when a single op touches multiple boards (e.g. a cross-board transfer).
+    pub fn emit_changed_board(
+        &self,
+        reason: BoardChangedReason,
+        board_id: i64,
+        card_id: Option<i64>,
+        column_id: Option<i64>,
+    ) {
+        self.emit(Event::BoardChanged {
+            reason,
+            board_id: Some(board_id),
             card_id,
             column_id,
         });

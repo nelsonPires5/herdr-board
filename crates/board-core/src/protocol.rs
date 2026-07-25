@@ -265,6 +265,11 @@ pub enum BoardChangedReason {
 pub enum Event {
     BoardChanged {
         reason: BoardChangedReason,
+        /// The board the change happened on. `None` = a coarse, board-agnostic
+        /// refresh signal (subscribers refetch whatever boards they hold).
+        /// A cross-board card transfer emits one event per affected board.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        board_id: Option<i64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         card_id: Option<i64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -506,10 +511,18 @@ pub struct CardArchiveParams {
 }
 
 /// `card.move` params — the dispatch trigger.
+///
+/// `board_id` declares the destination board for a cross-board transfer:
+/// when present and different from the card's current board, the card is
+/// transferred (its `cards.board_id`/`column_id` are moved atomically).
+/// Omitted (or equal to the current board) keeps the historical intra-board
+/// move.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CardMoveParams {
     pub id: i64,
     pub column_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<i64>,
 }

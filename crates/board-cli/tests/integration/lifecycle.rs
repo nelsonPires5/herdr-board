@@ -22,6 +22,7 @@ fn happy_pipeline() {
     c.card_move(&CardMoveParams {
         id: card.id,
         column_id: work.id,
+        board_id: None,
         position: None,
     })
     .unwrap();
@@ -64,6 +65,7 @@ fn fail_path_applies_on_fail() {
     c.card_move(&CardMoveParams {
         id: card.id,
         column_id: work.id,
+        board_id: None,
         position: None,
     })
     .unwrap();
@@ -96,6 +98,7 @@ fn process_exit_without_done() {
     c.card_move(&CardMoveParams {
         id: card.id,
         column_id: work.id,
+        board_id: None,
         position: None,
     })
     .unwrap();
@@ -131,6 +134,7 @@ fn timeout_kills_and_applies_on_fail() {
     c.card_move(&CardMoveParams {
         id: card.id,
         column_id: work.id,
+        board_id: None,
         position: None,
     })
     .unwrap();
@@ -166,12 +170,14 @@ fn queue_serialization_same_space() {
     c.card_move(&CardMoveParams {
         id: a.id,
         column_id: work.id,
+        board_id: None,
         position: None,
     })
     .unwrap();
     c.card_move(&CardMoveParams {
         id: b.id,
         column_id: work.id,
+        board_id: None,
         position: None,
     })
     .unwrap();
@@ -210,6 +216,7 @@ fn cancel_running_card() {
     c.card_move(&CardMoveParams {
         id: card.id,
         column_id: work.id,
+        board_id: None,
         position: None,
     })
     .unwrap();
@@ -236,6 +243,7 @@ fn retry_creates_new_forked_run() {
     c.card_move(&CardMoveParams {
         id: card.id,
         column_id: work.id,
+        board_id: None,
         position: None,
     })
     .unwrap();
@@ -329,6 +337,7 @@ fn scoped_template_dispatches_and_transitions_with_local_spawner() {
         .card_move(&CardMoveParams {
             id: card.id,
             column_id: execute,
+            board_id: None,
             position: None,
         })
         .unwrap();

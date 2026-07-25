@@ -4,6 +4,7 @@ use board_core::protocol::RunOutcome;
 fn changed(card_id: i64) -> Event {
     Event::BoardChanged {
         reason: BoardChangedReason::CardUpdated,
+        board_id: None,
         card_id: Some(card_id),
         column_id: None,
     }

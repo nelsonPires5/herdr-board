@@ -76,6 +76,7 @@ pub(crate) fn cmd_move(card_id: i64, column: String, json: bool) -> Result<()> {
     let card = c.card_move(&CardMoveParams {
         id: card_id,
         column_id,
+        board_id: None,
         position: None,
     })?;
     if json {

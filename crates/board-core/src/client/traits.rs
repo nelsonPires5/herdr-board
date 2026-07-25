@@ -157,6 +157,24 @@ pub trait BoardClient {
             self.call("card.move", serde_json::to_value(p)?)?,
         )?)
     }
+    /// Cross-board variant of [`BoardClient::card_move`]: build `card.move`
+    /// params that declare `board_id` as the destination board. Equivalent on
+    /// the wire to `card_move` with `board_id` set.
+    fn card_transfer(
+        &mut self,
+        id: i64,
+        board_id: i64,
+        column_id: i64,
+        position: Option<i64>,
+    ) -> anyhow::Result<Card> {
+        let p = CardMoveParams {
+            id,
+            column_id,
+            board_id: Some(board_id),
+            position,
+        };
+        self.card_move(&p)
+    }
     fn card_get(&mut self, id: i64) -> anyhow::Result<CardDetail> {
         Ok(serde_json::from_value(
             self.call("card.get", json!({ "id": id }))?,

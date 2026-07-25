@@ -174,6 +174,7 @@ fn response_ok_and_error_shapes() {
 fn event_tagging() {
     let ev = Event::BoardChanged {
         reason: BoardChangedReason::CardMoved,
+        board_id: None,
         card_id: Some(42),
         column_id: None,
     };

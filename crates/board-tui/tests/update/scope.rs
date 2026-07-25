@@ -5,7 +5,7 @@ use super::helpers::{
 };
 use board_core::client::BoardClient;
 use board_core::protocol::CardStatus;
-use board_tui::app::{update, CardFilter, Effect, Screen};
+use board_tui::app::{update, CardFilter, Effect, PickerPurpose, Screen};
 use crossterm::event::KeyCode;
 
 #[test]
@@ -277,5 +277,22 @@ fn done_card_is_final_and_can_be_archived() {
     assert!(matches!(
         effects.as_slice(),
         [Effect::CardArchive { archived: true, .. }]
+    ));
+}
+
+#[test]
+fn move_shortcut_opens_active_board_column_picker() {
+    let mut app = demo_app();
+    let card_id = app.selected_card_id().unwrap();
+    let active_board = app.board.board.id;
+    let effects = update(&mut app, key(KeyCode::Char('m')));
+    // `m` is the fast same-board path: it opens the active board's column
+    // picker directly (no I/O effect). `b` inside it switches to cross-board.
+    assert!(effects.is_empty(), "opening the picker is local-only");
+    assert_eq!(app.screen, Screen::Picker);
+    assert!(matches!(
+        app.picker.as_ref().unwrap().purpose,
+        PickerPurpose::MoveCardPickColumn { card_id: id, board_id }
+        if id == card_id && board_id == active_board
     ));
 }

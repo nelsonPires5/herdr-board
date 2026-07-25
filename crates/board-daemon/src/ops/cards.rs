@@ -3,7 +3,7 @@ use crate::dispatch::enqueue_run;
 use board_core::db::BOARD_ID;
 use board_core::engine::{
     decide_entry, merge_card_update, validate_card_archive, validate_card_edit,
-    validate_card_settings, validate_card_values,
+    validate_card_settings, validate_card_values, validate_effective_settings,
 };
 use board_core::harness::DEFAULT_HARNESS;
 pub(super) fn card_create(d: &Arc<Daemon>, p: CardCreateParams) -> Result<Value> {
@@ -107,7 +107,7 @@ pub(super) fn card_archive(d: &Arc<Daemon>, p: CardArchiveParams) -> Result<Valu
 }
 
 pub(super) fn card_move(d: &Arc<Daemon>, p: CardMoveParams) -> Result<Value> {
-    let (card, target) = {
+    let (card, target, source_board_id, source_column_id) = {
         let _sched = d.sched.lock().unwrap();
         let db = d.store.lock();
         let current = db
@@ -121,11 +121,74 @@ pub(super) fn card_move(d: &Arc<Daemon>, p: CardMoveParams) -> Result<Value> {
         let target = db
             .get_column(p.column_id)?
             .ok_or_else(|| Error::NotFound(format!("column {}", p.column_id)))?;
-        let card = db.move_card(p.id, p.column_id, p.position)?;
-        (card, target)
+        let cross = p.board_id.is_some_and(|bid| bid != current.board_id);
+        if cross {
+            // The destination board must actually exist; the declared board
+            // must match the target column's board.
+            let declared = p.board_id.unwrap();
+            db.get_board(declared)?;
+            if target.board_id != declared {
+                return Err(Error::InvalidState(format!(
+                    "column {} belongs to board {}, declared destination board is {}",
+                    p.column_id, target.board_id, declared
+                )));
+            }
+            // Blocking sanity check, scoped to the cross-board transfer:
+            // validate the merged effective harness/model/effort/permission
+            // for the target column (reused from enqueue), confirm the card's
+            // herdr session resolves, and — only when the destination is an
+            // auto column that would run — confirm the card's workspace is
+            // resolvable (read-only preflight). An incompatible setting or an
+            // unresolvable session/workspace aborts the move; nothing is
+            // written.
+            validate_effective_settings(&current, &target, &d.config)?;
+            if let Some(reg) = &d.session_registry {
+                let socket = match reg.resolve(current.session.as_deref()) {
+                    Ok(r) => r.socket,
+                    Err(e) => {
+                        return Err(Error::InvalidState(format!(
+                            "cannot move: session does not resolve: {e:#}"
+                        )));
+                    }
+                };
+                if decide_entry(&target, current.status, false).enqueue {
+                    if let Err(e) = (|| -> anyhow::Result<()> {
+                        let mut client = board_herdr::HerdrClient::connect(&socket)
+                            .map_err(|e| anyhow::anyhow!("herdr unavailable: {e}"))?;
+                        crate::dispatch::validate_space_resolvable(
+                            &mut client,
+                            current.space_kind,
+                            current.space_ref.as_deref(),
+                            current.space_cwd.as_deref(),
+                        )
+                    })() {
+                        return Err(Error::InvalidState(format!(
+                            "cannot move: workspace does not resolve: {e:#}"
+                        )));
+                    }
+                }
+            }
+        }
+        let card = if cross {
+            db.transfer_card(p.id, p.board_id.unwrap(), p.column_id, p.position)?
+        } else {
+            db.move_card(p.id, p.column_id, p.position)?
+        };
+        (card, target, current.board_id, current.column_id)
     };
-    d.emit_changed(
+    // One precise CardMoved per affected board (the event now carries
+    // board_id), replacing the old double coarse emit.
+    if source_board_id != target.board_id {
+        d.emit_changed_board(
+            BoardChangedReason::CardMoved,
+            source_board_id,
+            Some(card.id),
+            Some(source_column_id),
+        );
+    }
+    d.emit_changed_board(
         BoardChangedReason::CardMoved,
+        target.board_id,
         Some(card.id),
         Some(p.column_id),
     );

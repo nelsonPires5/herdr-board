@@ -198,6 +198,52 @@ impl Driver {
         }
     }
 
+    /// Cross-board move, stage 1: open the destination-board picker. Reuses the
+    /// same board list as `b`, but with a move purpose so `Enter` advances to
+    /// stage 2 instead of switching the active board.
+    fn load_boards_for_move(&mut self, card_id: i64) {
+        let r = self.client.board_list();
+        if let Some(result) = self.guard(r) {
+            let options = result
+                .boards
+                .iter()
+                .map(|board| (board_picker_label(board), board.id))
+                .collect();
+            let sel = result
+                .boards
+                .iter()
+                .position(|board| board.id == self.app.board.board.id)
+                .unwrap_or(0);
+            self.app.picker = Some(Picker {
+                title: "Move card to which board?".into(),
+                options,
+                sel,
+                purpose: PickerPurpose::MoveCardPickBoard { card_id },
+            });
+            self.app.screen = Screen::Picker;
+        }
+    }
+
+    /// Cross-board move, stage 2: load the selected destination board's columns
+    /// into the picker. Does not change the active board.
+    fn load_columns_for_move(&mut self, card_id: i64, board_id: i64) {
+        let r = self.client.board_get_by_id(board_id);
+        if let Some(snap) = self.guard(r) {
+            let options = snap
+                .columns
+                .iter()
+                .map(|c| (c.name.clone(), c.id))
+                .collect();
+            self.app.picker = Some(Picker {
+                title: format!("Move card to which column? ({})", snap.board.name),
+                options,
+                sel: 0,
+                purpose: PickerPurpose::MoveCardPickColumn { card_id, board_id },
+            });
+            self.app.screen = Screen::Picker;
+        }
+    }
+
     fn load_detail(&mut self, id: i64) {
         let r = self.client.card_get(id);
         if let Some(detail) = self.guard(r) {
@@ -226,6 +272,10 @@ impl Driver {
             Effect::Refetch => self.refetch(),
             Effect::LoadBoards => self.load_boards(),
             Effect::SwitchBoard(id) => self.switch_board(id),
+            Effect::LoadBoardsForMove { card_id } => self.load_boards_for_move(card_id),
+            Effect::LoadColumnsForMove { card_id, board_id } => {
+                self.load_columns_for_move(card_id, board_id)
+            }
             Effect::LoadDetail(id) => self.load_detail(id),
             Effect::CardCreate(p) => {
                 let r = self.client.card_create(&p);
