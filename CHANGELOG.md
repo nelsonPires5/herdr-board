@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
-- [#TBD](https://github.com/nelsonPires5/herdr-board/pull/TBD) feat(core,daemon,tui): move a card to a column of another board — `card.move` gains optional `board_id`, an atomic `transfer_card` recompacts both columns, `board_changed` carries `board_id` (one event per affected board), a cross-board blocking sanity check (merged capabilities + session resolve + read-only workspace preflight for auto columns) aborts incompatible moves, and `m` is a hybrid picker (`m` = active-board columns, `b` = other board).
+- [#37](https://github.com/nelsonPires5/herdr-board/pull/37) feat(core,daemon,tui): move a card to a column of another board — `card.move` gains optional `board_id`, an atomic `transfer_card` recompacts both columns, `board_changed` carries `board_id` (one event per affected board), a cross-board blocking sanity check (merged capabilities + session resolve + read-only workspace preflight for auto columns) aborts incompatible moves, and `m` is a hybrid picker (`m` = active-board columns, `b` = other board).
 - [#36](https://github.com/nelsonPires5/herdr-board/pull/36) feat(tui): column form hides the `system_prompt` field when the trigger is `manual` (no run launched) and reveals it for `auto`; the field is hidden, not omitted, so submit still sends a `Patch` that preserves the stored value.
 - [#35](https://github.com/nelsonPires5/herdr-board/pull/35) Retry transient `agent_pane_busy` on the same owned pane with bounded backoff and safe cleanup.
 - [#34](https://github.com/nelsonPires5/herdr-board/pull/34) Separate the operational board skill from isolated visual-development validation and avoid duplicate implementation worktrees.
