@@ -23,8 +23,8 @@ only `Todo`.
 
 ## Why herdr-board?
 
-- **Agents stay visible.** Runs open in the workspace's `kanban` tab, tiled into Herdr panes you can
-  inspect while they work.
+- **Agents stay visible.** New runs open in a stable per-card `card-<id>` Herdr tab, so each card's
+  panes stay together while they work; legacy runs retain the historical `kanban` tab.
 - **Pipelines, not just a queue.** Each column can prepend a system prompt and route successful or
   failed runs to another stage.
 - **Human gates where they matter.** Automatic stages keep moving; manual columns stop the pipeline
@@ -95,8 +95,8 @@ regular, non-symlink `board` whose contents still match that marker.
    configured default, choose thinking effort if needed, then select the session and workspace.
    Permission appears only for harnesses that support it (Pi does not).
 4. Move the card into an automatic column with `m`, `H` / `L`, or drag-and-drop.
-5. Watch the agent appear in the workspace's `kanban` tab. Follow progress with `Enter` for card
-   detail; the agent comments and calls `board done` when its stage finishes.
+5. Watch the agent appear in its stable `card-<id>` workspace tab. Follow progress with `Enter`
+   for card detail; the agent comments and calls `board done` when its stage finishes.
 
 The same flow from the shell:
 
@@ -144,11 +144,11 @@ All board state lives under `~/.local/share/herdr-board/`; Herdr's own state is 
 
 ### Agents run in visible Herdr panes
 
-The daemon creates or reuses the workspace's `kanban` tab and tiles agent panes into a readable
-grid.
+The daemon creates one stable `card-<id>` tab per new card and places that card's agent panes
+there. It never adopts a user tab solely because its label matches; legacy runs retain `kanban`.
 
 <p align="center">
-  <img src="docs/assets/readme/agent-panes.png" alt="Herdr workspace with three board agents tiled in the kanban tab" width="100%">
+  <img src="docs/assets/readme/agent-panes.png" alt="Herdr workspace with board agents in separate per-card tabs" width="100%">
 </p>
 
 ## Everyday controls
@@ -463,7 +463,7 @@ The Unix-socket transport retains only the raw request primitive; production cli
 - `scripts/install.sh` — local-development setup;
 - `scripts/open-board.sh` — open-or-focus plugin action;
 - `scripts/board-rpc.py` — raw daemon protocol client;
-- `e2e/` — scenarios 01–24 against disposable Herdr sessions/workspaces; checked-in fake Pi,
+- `e2e/` — scenarios 01–25 against disposable Herdr sessions/workspaces; checked-in fake Pi,
   Claude, and configured harnesses keep the standard suite provider-free. `e2e/test-harness.sh`
   performs static ownership/safety checks without starting Herdr; the live suite is a separate gate.
 

@@ -45,7 +45,7 @@ board done --outcome fail --summary "2 integration tests still failing; needs a 
 
 ## Using the TUI
 
-Run `board tui` or invoke the `open-board` Herdr plugin action. Use arrows or `h/j/k/l` to navigate, `n` to create a card, `N` to create a column, `m` to move a card, `Enter` for card detail, `e`/`E` to edit a card/column, `a` to archive or restore, `v` to change the archive filter, and `?` for the complete in-app reference. Moving a card into an automatic column dispatches its run into the workspace's `kanban` tab.
+Run `board tui` or invoke the `open-board` Herdr plugin action. Use arrows or `h/j/k/l` to navigate, `n` to create a card, `N` to create a column, `m` to move a card, `Enter` for card detail, `e`/`E` to edit a card/column, `a` to archive or restore, `v` to change the archive filter, and `?` for the complete in-app reference. Moving a card into an automatic column dispatches its run into a board-owned tab with a stable `card-<id>` label. Durable runs reuse only an exact board-owned `tab_id` reconstructed from durable pane identity; labels are never ownership. Legacy `kanban` tabs remain untouched and legacy-only.
 
 Use the CLI below for scripted operations and for progress reporting from a dispatched run.
 

@@ -286,6 +286,10 @@ async fn queued_managed_pi_uses_enqueue_time_system_snapshot() {
     assert_eq!(req.system_prompt, exact.system_prompt);
     assert_eq!(req.agent_kind.as_deref(), Some("pi"));
     assert_eq!(
+        req.tab_label.as_deref(),
+        Some(format!("card-{card_id}").as_str())
+    );
+    assert_eq!(
         req.initial_prompt.as_deref(),
         Some(run.prompt_snapshot.as_str())
     );

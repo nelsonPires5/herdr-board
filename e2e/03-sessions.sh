@@ -7,7 +7,7 @@
 # (`hb-e2e-<scenario-b>-<pid>-<random64>`) and exercises the
 # session/space-scoped paths against it:
 #   - space list scoped per session (A/default vs B differ),
-#   - a `workspace` card dispatched into B (pane lands in B's kanban tab),
+#   - a `workspace` card dispatched into B (pane lands in its card tab),
 #   - a `new-workspace` card (label + cwd) the daemon creates in B,
 #   - validation error when --space-cwd is missing for new-workspace,
 #   - unknown-session error.
@@ -36,21 +36,21 @@ echo "  session B: $SESS"
 echo "  session B socket: $SESS_SOCK (server pid ${SESS_B_PID:-?})"
 hrpc_sess() { HERDR_SOCKET_PATH="$SESS_SOCK" python3 "$HRPC" "$@"; }
 
-# assert_kanban_pane <ws_id> <card_id> — the workspace in SESS has a single
-# `kanban` tab holding an agent pane named card-<card_id>-execute.
-assert_kanban_pane() {
+# assert_card_tab_pane <ws_id> <card_id> — the workspace in SESS has the
+# stable `card-<card_id>` tab holding its agent pane.
+assert_card_tab_pane() {
   local ws="$1" card="$2" tabs panes
   tabs="$(hrpc_sess tab.list "{\"workspace_id\":\"$ws\"}")"
   panes="$(hrpc_sess pane.list "{\"workspace_id\":\"$ws\"}")"
-  python3 - "$tabs" "$panes" "$card" <<'PY' || fail "kanban pane assertion failed (ws $ws, card $card)"
+  python3 - "$tabs" "$panes" "$card" <<'PY' || fail "card-tab pane assertion failed (ws $ws, card $card)"
 import json, re, sys
 tabs = json.loads(sys.argv[1]).get("tabs", [])
 panes = json.loads(sys.argv[2]).get("panes", [])
 card = sys.argv[3]
-kanban = [t for t in tabs if t.get("label") == "kanban"]
-if len(kanban) != 1:
-    sys.exit(f"expected one kanban tab, got {[t.get('label') for t in tabs]}")
-ktab = kanban[0]["tab_id"]
+card_tab = [t for t in tabs if t.get("label") == f"card-{card}"]
+if len(card_tab) != 1:
+    sys.exit(f"expected one card tab, got {[t.get('label') for t in tabs]}")
+ktab = card_tab[0]["tab_id"]
 # the daemon names the agent pane via its herdr label; on an agent_name_taken
 # collision (the session may already hold a card-<id>-execute pane) it retries
 # with a -r<run> fallback, so accept that suffix (see AGENTS.md).
@@ -58,8 +58,8 @@ want = re.compile(rf"^card-{re.escape(card)}-execute(-r\d+)?$")
 labels = [p.get("label") for p in panes if p.get("tab_id") == ktab]
 match = next((l for l in labels if l and want.match(l)), None)
 if not match:
-    sys.exit(f"no pane matching card-{card}-execute[-r<n>] in kanban tab labels {labels}")
-print(f"  [ok] kanban tab {ktab} holds agent pane {match}", file=sys.stderr)
+    sys.exit(f"no pane matching card-{card}-execute[-r<n>] in card tab labels {labels}")
+print(f"  [ok] card tab {ktab} holds agent pane {match}", file=sys.stderr)
 PY
 }
 
@@ -89,8 +89,8 @@ mut "board move $CARD_WS Execute -> agent.start in session $SESS / ws $WS_SESS"
 e2e_board_herdr_mutate "$SESS_B_PID" "$SESS_B_IDENTITY" -- move "$CARD_WS" Execute --json >/dev/null
 oc="$(wait_ok "$CARD_WS")" || { fail "card $CARD_WS outcome '$oc'"; }
 echo "  outcome: $oc"
-assert_kanban_pane "$WS_SESS" "$CARD_WS"
-ok "workspace card ran in session '$SESS' and landed a pane in its kanban tab"
+assert_card_tab_pane "$WS_SESS" "$CARD_WS"
+ok "workspace card ran in session '$SESS' and landed a pane in its card tab"
 
 # --- new-workspace card (daemon creates the workspace) ----------------------
 step "Dispatch a 'new-workspace' card (label+cwd) into session '$SESS'"
@@ -112,8 +112,8 @@ print(next((w["workspace_id"] for w in ws if w.get("label") == "bsess-new"), "")
 [ -n "$NEW_WS" ] || fail "daemon did not create the bsess-new workspace in session '$SESS'"
 e2e_ws_defer_close "$NEW_WS" "$SESS_SOCK" "$SESS_B_PID" "$SESS_B_IDENTITY"
 echo "  daemon-created workspace: $NEW_WS"
-assert_kanban_pane "$NEW_WS" "$CARD_NEW"
-ok "new-workspace card created a workspace in '$SESS' with a kanban pane"
+assert_card_tab_pane "$NEW_WS" "$CARD_NEW"
+ok "new-workspace card created a workspace in '$SESS' with a card tab pane"
 
 # --- validation & error paths -----------------------------------------------
 step "Validation: new-workspace WITHOUT --space-cwd must error"

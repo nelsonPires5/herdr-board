@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+- Per-card Herdr tabs use stable `card-<id>` labels, exact board-owned tab IDs, safe restart reconstruction, serialized first allocation, and closed-tab recreation; legacy `kanban` rows remain unchanged.
 - [#38](https://github.com/nelsonPires5/herdr-board/pull/38) docs(visual-validation): require ALWAYS-isolated board state — DB, socket, AND daemon — under a short `/tmp` dir (no exceptions for trivial or "quick peek" runs; `board tui` auto-starts its own isolated daemon) and open runnable prototypes in a visible wezterm tab for interactive validation, matching the Prototyping-column prompt.
 - [#37](https://github.com/nelsonPires5/herdr-board/pull/37) feat(core,daemon,tui): move a card to a column of another board — `card.move` gains optional `board_id`, an atomic `transfer_card` recompacts both columns, `board_changed` carries `board_id` (one event per affected board), a cross-board blocking sanity check (merged capabilities + session resolve + read-only workspace preflight for auto columns) aborts incompatible moves, and `m` is a hybrid picker (`m` = active-board columns, `b` = other board).
 - [#36](https://github.com/nelsonPires5/herdr-board/pull/36) feat(tui): column form hides the `system_prompt` field when the trigger is `manual` (no run launched) and reveals it for `auto`; the field is hidden, not omitted, so submit still sends a `Patch` that preserves the stored value.

@@ -27,7 +27,7 @@ Herdr **0.7.5 / socket protocol 17**. The versioned source of truth is `schema.s
 SQLite databases and `board-core::db` migrations for upgrades; `board-core::protocol` owns the
 board wire DTOs; `board-herdr` owns only the verified Herdr socket surface; and `docs/design.md`
 and `docs/protocol.md` explain behavior rather than defining duplicate serde shapes. The complete
-live use-case catalog is [`../e2e/README.md`](../e2e/README.md), scenarios **01–24**; the safe
+live use-case catalog is [`../e2e/README.md`](../e2e/README.md), scenarios **01–25**; the safe
 static harness is `e2e/test-harness.sh`, while `e2e/run-all.sh` is the opt-in live gate.
 
 ## Configuration boundary

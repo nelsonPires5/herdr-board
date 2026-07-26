@@ -1,6 +1,276 @@
 use super::*;
 
 #[test]
+fn renamed_owned_card_tab_is_replaced_without_label_adoption() {
+    let fake = serve_recording_herdr(|req, _| match req["method"].as_str().unwrap() {
+        "tab.list" => reply(
+            req,
+            serde_json::json!({"type":"tab_list", "tabs":[
+                {"tab_id":"w1:t-owned","workspace_id":"w1","number":1,
+                    "label":"renamed-by-user","pane_count":1},
+                {"tab_id":"w1:t-user","workspace_id":"w1","number":2,
+                    "label":"card-42","pane_count":1}
+            ]}),
+        ),
+        "tab.create" => reply(
+            req,
+            serde_json::json!({
+                "type":"tab_created",
+                "tab": {"tab_id":"w1:t-replacement","workspace_id":"w1","number":3,
+                    "label":"card-42","focused":false,"pane_count":1},
+                "root_pane": {"pane_id":"w1:p-replacement","terminal_id":"term-root",
+                    "workspace_id":"w1","tab_id":"w1:t-replacement","focused":false,"revision":0}
+            }),
+        ),
+        "agent.start" => agent_started(req, "w1:p-replacement", false, true),
+        method => panic!("unexpected renamed card-tab method {method}"),
+    });
+    let spawner = HerdrSpawner::new(fake.socket.clone());
+    let mut request = pi_req(None);
+    request.tab_label = Some("card-42".into());
+    request.owned_tab_id = Some("w1:t-owned".into());
+
+    let handle = spawner.spawn(&request).unwrap();
+    assert_eq!(handle.pane_id.as_deref(), Some("w1:p-replacement"));
+    let requests = fake.requests.lock().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request["method"] == "tab.create")
+            .count(),
+        1
+    );
+    assert!(requests
+        .iter()
+        .all(|request| request["method"] != "pane.list" && request["method"] != "pane.split"));
+}
+
+#[test]
+fn card_tab_with_no_panes_is_replaced_without_label_adoption() {
+    let fake = serve_recording_herdr(|req, _| match req["method"].as_str().unwrap() {
+        "tab.list" => reply(
+            req,
+            serde_json::json!({"type":"tab_list", "tabs":[{
+                "tab_id":"w1:t-owned","workspace_id":"w1","number":1,
+                "label":"card-42","focused":false,"pane_count":0
+            }]}),
+        ),
+        "pane.list" => reply(req, serde_json::json!({"type":"pane_list", "panes":[]})),
+        "tab.create" => reply(
+            req,
+            serde_json::json!({
+                "type":"tab_created",
+                "tab": {"tab_id":"w1:t-replacement","workspace_id":"w1","number":2,
+                    "label":"card-42","focused":false,"pane_count":1},
+                "root_pane": {"pane_id":"w1:p-replacement","terminal_id":"term-root",
+                    "workspace_id":"w1","tab_id":"w1:t-replacement","focused":false,"revision":0}
+            }),
+        ),
+        "agent.start" => agent_started(req, "w1:p-replacement", false, true),
+        method => panic!("unexpected empty card-tab method {method}"),
+    });
+    let spawner = HerdrSpawner::new(fake.socket.clone());
+    let mut request = pi_req(None);
+    request.tab_label = Some("card-42".into());
+    request.owned_tab_id = Some("w1:t-owned".into());
+
+    let handle = spawner.spawn(&request).unwrap();
+    assert_eq!(handle.pane_id.as_deref(), Some("w1:p-replacement"));
+    let requests = fake.requests.lock().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request["method"] == "tab.create")
+            .count(),
+        1
+    );
+    assert!(requests
+        .iter()
+        .all(|request| request["method"] != "pane.split"));
+}
+
+#[test]
+fn concurrent_first_card_allocations_create_one_owned_tab() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    let created = Arc::new(AtomicBool::new(false));
+    let created2 = Arc::clone(&created);
+    let tab_creates = Arc::new(AtomicUsize::new(0));
+    let tab_creates2 = Arc::clone(&tab_creates);
+    let fake = serve_recording_herdr(move |req, _| match req["method"].as_str().unwrap() {
+        "tab.list" => {
+            let tabs = if created2.load(Ordering::SeqCst) {
+                serde_json::json!([{
+                    "tab_id":"w1:t-owned","workspace_id":"w1","number":1,
+                    "label":"card-42","focused":false,"pane_count":1
+                }])
+            } else {
+                serde_json::json!([])
+            };
+            reply(req, serde_json::json!({"type":"tab_list", "tabs":tabs}))
+        }
+        "tab.create" => {
+            assert!(!created2.swap(true, Ordering::SeqCst));
+            tab_creates2.fetch_add(1, Ordering::SeqCst);
+            reply(
+                req,
+                serde_json::json!({
+                    "type":"tab_created",
+                    "tab": {"tab_id":"w1:t-owned","workspace_id":"w1","number":1,
+                        "label":"card-42","focused":false,"pane_count":1},
+                    "root_pane": {"pane_id":"w1:p-root","terminal_id":"term-root",
+                        "workspace_id":"w1","tab_id":"w1:t-owned","focused":false,"revision":0}
+                }),
+            )
+        }
+        "pane.list" => reply(
+            req,
+            serde_json::json!({"type":"pane_list", "panes":[{
+                "pane_id":"w1:p-root","terminal_id":"term-root","workspace_id":"w1",
+                "tab_id":"w1:t-owned","focused":false,"revision":0
+            }]}),
+        ),
+        "pane.layout" => reply(
+            req,
+            serde_json::json!({"type":"pane_layout", "layout":{
+                "workspace_id":"w1","tab_id":"w1:t-owned","zoomed":false,
+                "area":{"x":0,"y":0,"width":100,"height":40},"focused_pane_id":"w1:p-root",
+                "panes":[{"pane_id":"w1:p-root","focused":true,
+                    "rect":{"x":0,"y":0,"width":100,"height":40}}],"splits":[]
+            }}),
+        ),
+        "pane.split" => pane_result(req, "w1:p-split"),
+        "agent.start" => {
+            agent_started(req, req["params"]["pane_id"].as_str().unwrap(), false, true)
+        }
+        method => panic!("unexpected concurrent card-tab method {method}"),
+    });
+    let spawner = Arc::new(HerdrSpawner::new(fake.socket.clone()));
+    let mut request = pi_req(None);
+    request.tab_label = Some("card-42".into());
+    let first_request = request.clone();
+    let second_request = request;
+    let first_spawner = Arc::clone(&spawner);
+    let second_spawner = Arc::clone(&spawner);
+    let first = std::thread::spawn(move || first_spawner.spawn(&first_request).unwrap());
+    let second = std::thread::spawn(move || second_spawner.spawn(&second_request).unwrap());
+
+    let first_handle = first.join().unwrap();
+    let second_handle = second.join().unwrap();
+    assert!(first_handle.pane_id.is_some());
+    assert!(second_handle.pane_id.is_some());
+    assert_eq!(tab_creates.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn card_tabs_reuse_exact_owned_id_and_ignore_duplicate_and_legacy_labels() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let list_calls = Arc::new(AtomicUsize::new(0));
+    let list_calls2 = Arc::clone(&list_calls);
+    let create_calls = Arc::new(AtomicUsize::new(0));
+    let create_calls2 = Arc::clone(&create_calls);
+    let fake = serve_recording_herdr(move |req, _| match req["method"].as_str().unwrap() {
+        "tab.list" => {
+            let call = list_calls2.fetch_add(1, Ordering::SeqCst);
+            let tabs = match call {
+                0 => serde_json::json!([
+                    {"tab_id":"w1:t-kanban","workspace_id":"w1","number":1,"label":"kanban"},
+                    {"tab_id":"w1:t-user-z","workspace_id":"w1","number":2,"label":"card-42"},
+                    {"tab_id":"w1:t-user-a","workspace_id":"w1","number":3,"label":"card-42"}
+                ]),
+                1 => serde_json::json!([
+                    {"tab_id":"w1:t-user-a","workspace_id":"w1","number":3,"label":"card-42"},
+                    {"tab_id":"w1:t-owned-42","workspace_id":"w1","number":9,"label":"card-42"},
+                    {"tab_id":"w1:t-user-z","workspace_id":"w1","number":2,"label":"card-42"}
+                ]),
+                2 => serde_json::json!([
+                    {"tab_id":"w1:t-owned-42","workspace_id":"w1","number":9,"label":"card-42"},
+                    {"tab_id":"w1:t-user-43","workspace_id":"w1","number":4,"label":"card-43"}
+                ]),
+                3 => serde_json::json!([
+                    {"tab_id":"w1:t-kanban","workspace_id":"w1","number":1,"label":"kanban"},
+                    {"tab_id":"w1:t-user-a","workspace_id":"w1","number":3,"label":"card-42"}
+                ]),
+                other => panic!("unexpected tab.list call {other}"),
+            };
+            reply(req, serde_json::json!({"type":"tab_list", "tabs": tabs}))
+        }
+        "tab.create" => {
+            let tab_id = match create_calls2.fetch_add(1, Ordering::SeqCst) {
+                0 => "w1:t-owned-42",
+                1 => "w1:t-owned-43",
+                2 => "w1:t-recreated-42",
+                other => panic!("unexpected tab.create call {other}"),
+            };
+            let pane_id = format!("{tab_id}:root");
+            reply(
+                req,
+                serde_json::json!({
+                    "type":"tab_created",
+                    "tab": {"tab_id":tab_id,"workspace_id":"w1","number":10,
+                        "label":req["params"]["label"],"focused":false,"pane_count":1},
+                    "root_pane": {"pane_id":pane_id,"terminal_id":"term-root",
+                        "workspace_id":"w1","tab_id":tab_id,"focused":false,"revision":0}
+                }),
+            )
+        }
+        "pane.list" => reply(
+            req,
+            serde_json::json!({"type":"pane_list","panes":[{
+                "pane_id":"w1:p-owned","terminal_id":"term-owned","workspace_id":"w1",
+                "tab_id":"w1:t-owned-42","focused":false,"revision":0
+            }]}),
+        ),
+        "pane.layout" => reply(
+            req,
+            serde_json::json!({"type":"pane_layout","layout":{
+                "workspace_id":"w1","tab_id":"w1:t-owned-42","zoomed":false,
+                "area":{"x":0,"y":0,"width":100,"height":40},"focused_pane_id":"w1:p-owned",
+                "panes":[{"pane_id":"w1:p-owned","focused":true,
+                    "rect":{"x":0,"y":0,"width":100,"height":40}}],"splits":[]
+            }}),
+        ),
+        "pane.split" => pane_result(req, "w1:p-split-owned-42"),
+        "agent.start" => {
+            agent_started(req, req["params"]["pane_id"].as_str().unwrap(), false, true)
+        }
+        method => panic!("unexpected card-tab method {method}"),
+    });
+    let spawner = HerdrSpawner::new(fake.socket.clone());
+    let mut card_42 = pi_req(None);
+    card_42.tab_label = Some("card-42".into());
+    let mut card_43 = card_42.clone();
+    card_43.tab_label = Some("card-43".into());
+    card_43.name = "card-43-execute".into();
+
+    let first = spawner.spawn(&card_42).unwrap();
+    let reused = spawner.spawn(&card_42).unwrap();
+    let other = spawner.spawn(&card_43).unwrap();
+    let recreated = spawner.spawn(&card_42).unwrap();
+
+    assert_eq!(first.pane_id.as_deref(), Some("w1:t-owned-42:root"));
+    assert_eq!(reused.pane_id.as_deref(), Some("w1:p-split-owned-42"));
+    assert_eq!(other.pane_id.as_deref(), Some("w1:t-owned-43:root"));
+    assert_eq!(recreated.pane_id.as_deref(), Some("w1:t-recreated-42:root"));
+    let requests = fake.requests.lock().unwrap();
+    let created_labels = requests
+        .iter()
+        .filter(|request| request["method"] == "tab.create")
+        .map(|request| request["params"]["label"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(created_labels, ["card-42", "card-43", "card-42"]);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|r| r["method"] == "pane.split")
+            .count(),
+        1
+    );
+    assert!(requests.iter().all(|r| r["method"] != "tab.rename"));
+}
+
+#[test]
 fn herdr_protocol_gate_rejects_mismatches_before_any_spawn_or_placement_call() {
     for (version, protocol) in [("0.7.4", 17), ("0.7.5", 16)] {
         let fake = serve_recording_herdr_with_ping(

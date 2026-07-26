@@ -114,7 +114,7 @@ wire behavior. **See [`docs/herdr.md`](docs/herdr.md).**
 - **Panes don't inherit the workspace's env/cwd.** Protocol-17 launch is pane-first:
   `tab.create`/`pane.split` establishes cwd + env, then `agent.start` targets that pane with
   `{name, kind, pane_id, args}`. Workspace cwd is read from the workspace's pane snapshot.
-- **Tab labels are not unique** in herdr — resolve the `kanban` tab by find-or-create on id, not label.
+- Current durable runs use stable `card-<id>` tab labels, but reuse only an exact board-owned `tab_id` reconstructed from durable pane identity; labels are never ownership. Legacy `kanban` tabs remain untouched and legacy-only.
 - **Herdr events are a raw-socket stream** (`events.subscribe`, persistent connection); the CLI only
   has a blocking one-shot `events.wait`. Protocol-17 `pane_agent_status_changed` carries pane,
   workspace, agent, and status fields; `idle ≠ finished`, and a trailing `idle` may follow `done`

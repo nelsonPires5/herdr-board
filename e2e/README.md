@@ -9,7 +9,7 @@ exercises the herdr wire integration end to end.
 For the layers below this one (unit, daemon+CLI integration, TUI snapshots), the
 isolation/safety design, and the **how-to-write-a-scenario** guide, see
 [`../docs/testing.md`](../docs/testing.md). This file is the authoritative use-case catalog for board protocol v1 / SQLite schema v11:
-every numbered scenario from **01 through 24** must appear here and in `run-all.sh`. The provider-free
+every numbered scenario from **01 through 25** must appear here and in `run-all.sh`. The provider-free
 safe boundary is `fake-agent.sh`,
 `fake-bin/{pi,claude}`, and `test-harness.sh`; prompt/system-prompt contents are never logged.
 Scenario 21 is the active-run timer/event-refresh characterization. The catalog describes the live
@@ -20,7 +20,7 @@ gate, but this cleanup task runs only the static harness—not the full live sui
 | Use case | Scenario file | Status |
 |---|---|---|
 | Happy path: dispatch → run → outcome/comment (CLI) **and** create-a-card via the TUI | `01-core.sh` | live |
-| Mesh grid: several cards in one auto column tile into one `kanban` tab (one pane per card) | `02-kanban-grid.sh` | live |
+| Per-card tabs: several cards in one auto column use separate stable `card-<id>` tabs | `02-kanban-grid.sh` | live |
 | Multi-session: session/space scoping + cross-session dispatch against a **second** session the scenario boots itself | `03-sessions.sh` | live |
 | `board done --outcome fail` → card follows the column's `on_fail_column_id` | `04-fail-on-fail.sh` | live |
 | `board retry` re-runs a finished card as a NEW run row | `05-retry.sh` | live |
@@ -41,8 +41,9 @@ gate, but this cleanup task runs only the static harness—not the full live sui
 | Proxy outage/restart preserves `Unknown` and timeout budget; reconnect snapshot repairs an event gap once | `20-herdr-recovery.sh` | live, zero provider cost |
 | Active-run summary survives a card timestamp update and drives the timer in the real TUI | `21-active-run-timer.sh` | live, zero provider cost |
 | The `M` (Shift+m) TUI mini-mode reorders the focused column via one `column.reorder` (Enter commits, Esc cancels) | `22-move-column-tui.sh` | live, zero provider cost |
-| `agent_pane_busy` transient retry reuses one owned child after one split; persistent busy cleans that child and preserves the anchor | `23-agent-pane-busy-retry.sh` | live, zero provider cost |
+| `agent_pane_busy` transient retry reuses one owned child after one split; persistent busy cleans only that child and leaves any anchor intact | `23-agent-pane-busy-retry.sh` | live, zero provider cost |
 | A card moves to a column of another board via `card.move` with `board_id` (atomic transfer, both columns recompacted); a board/column mismatch is rejected with nothing written | `24-cross-board-move.sh` | live, zero provider cost |
+| Exact per-card tab ownership: duplicate labels are ignored, restart reconstructs from a durable pane, and closed tabs are recreated | `25-card-tabs.sh` | live, zero provider cost |
 
 ### How the live scenario produces Herdr `done`
 
@@ -115,7 +116,7 @@ unmarked, or out-of-root paths. Named-session sockets must be at most 92 bytes, 
 short `/tmp/hb-e2e.XXXXXX` isolated root. `TMPDIR` is pinned to that exact marker-owned root, so
 generated configured-harness scripts remain contained even if asynchronous `pane run` never opens
 their normal self-removing script. The forced-build standard suite passes
-scenarios 01–24 without provider calls. Scenarios 18–24 use only the configured or managed
+scenarios 01–25 without provider calls. Scenarios 18–25 use only the configured or managed
 fake harnesses and never record prompt or system-prompt bodies.
 
 ## Running
@@ -162,15 +163,16 @@ personal Claude state. Its intended contract is one authorized attempt with no r
 | `20-herdr-recovery.sh` / `herdr-proxy.py` | Controllable owned proxy for conservative outage/restart, dropped-stream recovery, and typed `agent_pane_busy` fault injection. |
 | `21-active-run-timer.sh` | Real-TUI active-run timer and event-refresh check; provider-free. |
 | `22-move-column-tui.sh` | TUI column reorder mini-mode and one committed `column.reorder`; provider-free. |
-| `23-agent-pane-busy-retry.sh` | Transient/persistent `agent_pane_busy`: same-pane retry, one split, owned-child cleanup, and anchor survival. |
+| `23-agent-pane-busy-retry.sh` | Transient/persistent `agent_pane_busy`: same-pane retry, no second split, and owned-child cleanup. |
 | `24-cross-board-move.sh` | Cross-board `card.move` transfer with source/destination recompaction and mismatch rejection; provider-free. |
+| `25-card-tabs.sh` | Exact per-card tab ownership across duplicate labels, daemon restart, and closed-tab recreation; provider-free. |
 | `real-pi-smoke.sh` | Fail-closed real-provider poem smoke. Detects Pi's runtime default model, passes low thinking, isolates board/Pi session output under `/tmp`, verifies integration/WezTerm, poem/comments/argv/git/settings, and supports keep mode for visual audit. Not in `run-all.sh`. |
 | `real-claude-haiku-smoke.sh` | Fail-closed intended-contract smoke. Requires exact opt-in, authorizes one Claude Haiku/low attempt with no retry/fallback, stages only completed onboarding/theme, exact workspace trust, the installed Herdr hook, credentials, and approved remote-settings bytes under `/tmp` so startup dialogs cannot consume `agent.prompt`; no broad personal Claude state is copied. Independently identity-gates the daemon and Herdr server and cleans exact resources. Not in `run-all.sh`. |
 | `hrpc.py` | One-shot raw **herdr** socket RPC (honours `HERDR_SOCKET_PATH`) for structural asserts (`tab.list`/`pane.list`/`pane.layout`). |
 | `12-cwd-boards.sh` | Scoped board identity/isolation plus real TUI title/picker. |
 | `13-jump-to-pane.sh` | Same-session pane focus through a real plugin overlay. |
 | `NN-*.sh` | The scenarios above. |
-| `run-all.sh` | Builds once, runs scenarios 01–24 as environment-scrubbed children with their own sessions, captures artifacts, and prints the summary (`--require-all` forbids skips). |
+| `run-all.sh` | Builds once, runs scenarios 01–25 as environment-scrubbed children with their own sessions, captures artifacts, and prints the summary (`--require-all` forbids skips). |
 
 Columns have no `board` CLI verb, so scenarios configure them over the boardd
 socket via `scripts/board-rpc.py` (wrapped by `lib.sh`'s `col_create` / `brpc`). The
