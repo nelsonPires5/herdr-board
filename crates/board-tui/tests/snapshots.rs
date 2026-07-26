@@ -6,7 +6,7 @@
 use board_core::client::{BoardClient, FakeBoardClient};
 use board_core::db::{EnqueueRun, FinalizeRun};
 use board_core::protocol::{AwaitingReason, CardCreateParams, CardStatus, RunOutcome};
-use board_tui::app::{App, Msg, Screen};
+use board_tui::app::{App, Msg, Screen, SwitcherLevel, SwitcherState};
 use board_tui::editor::FakeEditor;
 use board_tui::forms::{FieldId, FieldKind};
 use board_tui::testkit::{demo_client, DemoClient};
@@ -209,6 +209,41 @@ fn edit_card_modal_selectors() {
     key(&mut d, KeyCode::Right); // Plan
     key(&mut d, KeyCode::Char('e'));
     insta::assert_snapshot!("edit_card_modal", render(&mut d, 80, 24));
+}
+
+/// Regression for the lost-discoverability bug: at 80x24 the edit-card form's
+/// 9 visible fields (one multiline, capped at 5 rows) need 26 rows including
+/// borders/button-bar, but `main_area` only has 23 — the fields genuinely
+/// cannot all fit (not an under-requested `content_h`; see `draw_form`'s
+/// `content_h` comment), so the field window must show a scrollbar rather
+/// than silently dropping `space ref` with no visual trace.
+#[test]
+fn edit_card_modal_shows_scrollbar_when_fields_overflow() {
+    let mut d = driver(demo_client().unwrap());
+    key(&mut d, KeyCode::Right); // Plan
+    key(&mut d, KeyCode::Char('e'));
+    let output = render(&mut d, 80, 24);
+    assert!(
+        output.contains('█'),
+        "an overflowing field window must render a scrollbar thumb:\n{output}"
+    );
+    insta::assert_snapshot!("form_scrollbar_overflowing_80x24", output);
+}
+
+/// Counterpart: a form whose fields fit entirely within `main_area` at this
+/// size must render with no scrollbar column reserved at all (the reservation
+/// is conditional on `overflowing`, so the non-overflowing path never loses a
+/// content column).
+#[test]
+fn column_form_no_scrollbar_when_fields_fit() {
+    let mut d = driver(demo_client().unwrap());
+    key(&mut d, KeyCode::Char('N'));
+    let output = render(&mut d, 80, 24);
+    assert!(
+        !output.contains('█'),
+        "a fully-visible field window must not render a scrollbar thumb:\n{output}"
+    );
+    insta::assert_snapshot!("form_no_scrollbar_fits_80x24", output);
 }
 
 #[test]
@@ -659,3 +694,204 @@ fn done_card_detail_is_final() {
     key(&mut d, KeyCode::Enter);
     insta::assert_snapshot!("done_card_detail", render(&mut d, 80, 24));
 }
+
+// -- mobile-responsive size matrix -------------------------------------------
+//
+// The sizes below join the existing 80x24 (Regular) / 120x35 (Wide) coverage
+// with three narrower points: 40x20 and 52x24 are Compact
+// (`LayoutMode::from_width` < 60), 60x24 is the narrowest Regular width. Every
+// screen here uses one of the new Compact-mode widgets (fullscreen sheet,
+// compact header, windowed fields, switcher), so — unlike `render()` alone —
+// `app.last_area` must be set to the same size being drawn: view-layer mode
+// decisions (`App::layout_mode`, used by `sheet_area`/`draw_switcher`/
+// `draw_form` etc.) read `app.last_area`, not the `TestBackend` frame size.
+
+/// Generate one `#[test]` per matrix size instead of looping inside a single
+/// test: `insta`'s pending-review snapshots still panic the first time they
+/// see a name with no `.snap` baseline (even under `INSTA_UPDATE=new`), and a
+/// panic mid-loop would silently skip every later size in that same test.
+macro_rules! size_matrix_test {
+    ($mod_name:ident, |$w:ident, $h:ident| $body:block) => {
+        mod $mod_name {
+            use super::*;
+            #[test]
+            fn compact_40x20() {
+                let $w: u16 = 40;
+                let $h: u16 = 20;
+                $body
+            }
+            #[test]
+            fn compact_52x24() {
+                let $w: u16 = 52;
+                let $h: u16 = 24;
+                $body
+            }
+            #[test]
+            fn regular_60x24() {
+                let $w: u16 = 60;
+                let $h: u16 = 24;
+                $body
+            }
+        }
+    };
+}
+
+/// A >=300-char multi-line description: the Bug B regression target. Before
+/// the fix this rendered as `lines().join("  ⏎  ")` truncated to one
+/// ellipsized line; now it must render as real wrapped paragraph text.
+const LONG_MULTILINE_DESC: &str = "\
+This is the first paragraph of an intentionally long card description that \
+must word-wrap across many rendered rows instead of being cut off, which is \
+exactly the bug this change fixes for multiline text fields inside the edit \
+form.\n\
+This second paragraph, introduced by an explicit newline, is also long \
+enough to wrap multiple times at every terminal width this suite exercises, \
+from the narrowest Compact size up to the Wide desktop layout, and it keeps \
+going a bit further to comfortably clear the 300-character floor.\n\
+A short third line closes it out.";
+
+fn render_sized(d: &mut Driver, w: u16, h: u16) -> String {
+    d.app.last_area = Rect::new(0, 0, w, h);
+    render(d, w, h)
+}
+
+#[test]
+fn long_multiline_desc_is_at_least_300_chars_with_newlines() {
+    assert!(LONG_MULTILINE_DESC.len() >= 300, "fixture too short");
+    assert!(
+        LONG_MULTILINE_DESC.contains('\n'),
+        "fixture must be multi-line"
+    );
+}
+
+size_matrix_test!(size_matrix_board, |w, h| {
+    let mut d = driver(demo_client().unwrap());
+    insta::assert_snapshot!(format!("board_{w}x{h}"), render_sized(&mut d, w, h));
+});
+
+size_matrix_test!(size_matrix_card_detail_popup_and_fullscreen, |w, h| {
+    let mut d = driver(demo_client().unwrap());
+    // Review (idx 3): the failed card, first in the column.
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Enter);
+    insta::assert_snapshot!(
+        format!("card_detail_popup_{w}x{h}"),
+        render_sized(&mut d, w, h)
+    );
+    key(&mut d, KeyCode::Char('f'));
+    insta::assert_snapshot!(
+        format!("card_detail_fullscreen_{w}x{h}"),
+        render_sized(&mut d, w, h)
+    );
+});
+
+size_matrix_test!(size_matrix_edit_form_long_multiline_description, |w, h| {
+    let mut client = demo_client().unwrap();
+    let board = client.board_get().unwrap();
+    let todo = board
+        .columns
+        .iter()
+        .find(|column| column.name == "Todo")
+        .unwrap()
+        .id;
+    client
+        .card_create(&CardCreateParams {
+            title: "Long description demo".into(),
+            description: Some(LONG_MULTILINE_DESC.into()),
+            column_id: Some(todo),
+            harness: Some("claude".into()),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let mut d = driver(client);
+    // The newly created card is the second card in Todo (after "Update docs").
+    key(&mut d, KeyCode::Down);
+    key(&mut d, KeyCode::Char('e'));
+    assert_eq!(d.app.screen, Screen::CardForm);
+    {
+        let form = d.app.form.as_mut().expect("edit-card form");
+        let idx = form
+            .fields
+            .iter()
+            .position(|f| f.id == FieldId::Description)
+            .expect("Description field present");
+        form.focus = idx; // keep it inside the windowed field view
+    }
+
+    let output = render_sized(&mut d, w, h);
+    // The Bug B fix under test is about the VALUE text wrapping instead of
+    // ellipsizing; the field LABEL line is a separate, correctly-truncated
+    // string (a later fix) and is long enough to legitimately ellipsize at
+    // 40 cols once a column is reserved for the scrollbar — exclude it here
+    // rather than asserting zero '…' across the whole frame.
+    let body_ellipsized = output
+        .lines()
+        .filter(|l| !l.contains("(base prompt)"))
+        .any(|l| l.contains('…'));
+    assert!(
+        !body_ellipsized,
+        "long description VALUE must wrap, not ellipsize, at {w}x{h}:\n{output}"
+    );
+    assert!(
+        output.contains("first paragraph"),
+        "wrapped description text must be visible at {w}x{h}:\n{output}"
+    );
+    insta::assert_snapshot!(format!("edit_form_long_desc_{w}x{h}"), output);
+});
+
+size_matrix_test!(size_matrix_help, |w, h| {
+    let mut d = driver(demo_client().unwrap());
+    key(&mut d, KeyCode::Char('?'));
+    insta::assert_snapshot!(format!("help_{w}x{h}"), render_sized(&mut d, w, h));
+});
+
+size_matrix_test!(size_matrix_picker, |w, h| {
+    let mut d = driver(demo_client().unwrap());
+    key(&mut d, KeyCode::Char('m'));
+    insta::assert_snapshot!(format!("picker_{w}x{h}"), render_sized(&mut d, w, h));
+});
+
+size_matrix_test!(size_matrix_confirm, |w, h| {
+    let mut d = driver(demo_client().unwrap());
+    key(&mut d, KeyCode::Char('d'));
+    insta::assert_snapshot!(format!("confirm_{w}x{h}"), render_sized(&mut d, w, h));
+});
+
+size_matrix_test!(size_matrix_switcher_columns_and_boards, |w, h| {
+    let mut d = driver(demo_client().unwrap());
+    // Force Compact just long enough to open the switcher sheet at the
+    // Columns level (Regular/Wide keep the classic `b` -> board `Picker`).
+    // This mirrors the header's center-button tap (`Zone::HeaderSwitch`),
+    // NOT `b` — `b` now opens directly at the Boards level (it means
+    // "switch board"), so it can no longer reach Columns. The actual matrix
+    // size is applied by `render_sized` right before each draw.
+    d.app.last_area = Rect::new(0, 0, 40, 20);
+    d.app.switcher = Some(SwitcherState {
+        level: SwitcherLevel::Columns,
+        sel: d.app.sel_col,
+        columns_sel: d.app.sel_col,
+        boards: Vec::new(),
+        entered_at_boards: false,
+    });
+    d.app.screen = Screen::Switcher;
+    assert_eq!(d.app.screen, Screen::Switcher);
+    insta::assert_snapshot!(
+        format!("switcher_columns_{w}x{h}"),
+        render_sized(&mut d, w, h)
+    );
+
+    let n = d.app.board.columns.len();
+    d.app.switcher.as_mut().unwrap().sel = n; // trailing "switch board" row
+    key(&mut d, KeyCode::Enter);
+    assert_eq!(
+        d.app.switcher.as_ref().unwrap().level,
+        SwitcherLevel::Boards
+    );
+    insta::assert_snapshot!(
+        format!("switcher_boards_{w}x{h}"),
+        render_sized(&mut d, w, h)
+    );
+});

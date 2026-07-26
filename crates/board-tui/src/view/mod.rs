@@ -12,10 +12,33 @@ use crate::app::{App, CardFilter, Screen};
 
 const MIN_COL_W: u16 = 26;
 const CARD_H: u16 = 3;
+const COMPACT_CARD_H: u16 = 4;
 const MAX_SCOPE_LABEL: usize = 32;
 const NARROW_DETAIL_WIDTH: u16 = 100;
 const HELP_GUTTER_WIDTH: u16 = 2;
 const HELP_KEY_WIDTH: u16 = 13;
+
+/// Responsive breakpoint, derived from terminal width only. Compact drives a
+/// single-column mobile-first board + fullscreen sheets; Regular/Wide keep the
+/// existing multi-column desktop behaviour.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LayoutMode {
+    Compact,
+    Regular,
+    Wide,
+}
+
+impl LayoutMode {
+    pub fn from_width(w: u16) -> LayoutMode {
+        if w < 60 {
+            LayoutMode::Compact
+        } else if w <= 119 {
+            LayoutMode::Regular
+        } else {
+            LayoutMode::Wide
+        }
+    }
+}
 
 pub fn board_scope_label(board: &Board) -> String {
     let raw = match board.scope_path.as_deref() {
@@ -110,7 +133,8 @@ mod layout;
 mod overlays;
 
 pub use detail::{comment_wrapped_rows, detail_layout, detail_toggle_rect, DetailLayout};
-pub use layout::{board_layout, BoardLayout, ColLayout};
+pub use layout::{board_layout, BoardLayout, ColLayout, CompactHeader, ScrollInfo};
+pub use overlays::{help_content_width, help_list_rect, help_wrapped_rows};
 
 // -- glyphs ------------------------------------------------------------------
 
@@ -144,6 +168,7 @@ fn status_label(card: &Card) -> String {
 // -- entry point -------------------------------------------------------------
 
 pub fn view(app: &App, f: &mut Frame) {
+    app.hit_map.borrow_mut().clear();
     let area = f.area();
     board::draw_board(app, f, area);
 
@@ -152,13 +177,14 @@ pub fn view(app: &App, f: &mut Frame) {
         Screen::CardDetail => detail::draw_detail(app, f, area),
         Screen::CardForm | Screen::ColumnForm => {
             if let Some(form) = &app.form {
-                form::draw_form(form, f, area);
+                form::draw_form(app, form, f, area);
             }
         }
         Screen::Picker => overlays::draw_picker(app, f, area),
         Screen::MoveColumn => overlays::draw_move_column(app, f, area),
         Screen::Confirm => overlays::draw_confirm(app, f, area),
-        Screen::Help => overlays::draw_help(f, area),
+        Screen::Help => overlays::draw_help(app, f, area),
+        Screen::Switcher => board::draw_switcher(app, f, area),
     }
 
     overlays::draw_footer(app, f, area);
@@ -166,7 +192,7 @@ pub fn view(app: &App, f: &mut Frame) {
 
 // -- helpers -----------------------------------------------------------------
 
-fn truncate(s: &str, max: usize) -> String {
+pub(crate) fn truncate(s: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
     }
@@ -188,6 +214,21 @@ fn centered_rect_abs(w: u16, h: u16, area: Rect) -> Rect {
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     Rect::new(x, y, w, h)
+}
+
+/// Sheet placement: Compact overlays go fullscreen (over `main_area`, i.e.
+/// above the footer row); Regular/Wide keep today's centered floating box.
+///
+/// Both branches derive from `main_area(area)` (not the raw frame `area`), so
+/// the footer row is subtracted exactly once regardless of mode — passing the
+/// full frame `area` in here is always correct; do not pre-subtract the
+/// footer before calling this.
+pub fn sheet_area(mode: LayoutMode, pref_w: u16, pref_h: u16, area: Rect) -> Rect {
+    let base = main_area(area);
+    match mode {
+        LayoutMode::Compact => base,
+        LayoutMode::Regular | LayoutMode::Wide => centered_rect_abs(pref_w, pref_h, base),
+    }
 }
 
 // -- time --------------------------------------------------------------------

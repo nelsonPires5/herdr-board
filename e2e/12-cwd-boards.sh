@@ -65,8 +65,8 @@ tab_json="$(e2e_herdr_mutate -- tab create --workspace "$WS_ID" --label cwd-boar
 PANE_ID="$(printf '%s' "$tab_json" | jget pane_id)"
 CONTEXT="$(python3 -c 'import json,sys; print(json.dumps({"focused_pane_cwd":sys.argv[1],"workspace_cwd":sys.argv[2]}))' "$SUB" "$PLAIN")"
 CONTEXT_Q="$(printf '%q' "$CONTEXT")"
-e2e_herdr_mutate -- pane run "$PANE_ID" \
-  "env -u BOARD_SCOPE_PATH HERDR_PLUGIN_CONTEXT_JSON=$CONTEXT_Q HERDR_PLUGIN_ID=herdr-board HERDR_PANE_ID=$PANE_ID HERDR_BIN_PATH=$HERDR_BIN HERDR_SOCKET_PATH=$HERDR_SOCKET_PATH BOARD_SOCKET=$BOARD_SOCKET BOARD_DB=$BOARD_DB HERDR_BOARD_CONFIG=$HERDR_BOARD_CONFIG $BOARD_BIN tui"
+e2e_launch_tui "$PANE_ID" \
+  "env -u BOARD_SCOPE_PATH HERDR_PLUGIN_CONTEXT_JSON=$CONTEXT_Q HERDR_PLUGIN_ID=herdr-board HERDR_PANE_ID=$PANE_ID HERDR_BIN_PATH=$HERDR_BIN HERDR_SOCKET_PATH=$HERDR_SOCKET_PATH BOARD_SOCKET=$BOARD_SOCKET BOARD_DB=$BOARD_DB HERDR_BOARD_CONFIG=$HERDR_BOARD_CONFIG"
 
 expected="Board [$(basename "$REPO") · ACTIVE]"
 label=""

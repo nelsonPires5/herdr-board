@@ -51,6 +51,10 @@ Run `board tui` or invoke the `open-board` Herdr plugin action. Use arrows or `h
 card/column, `a` to archive/restore, `v` for active/all/archived visibility, and `?` for help.
 Moving into an `auto` column dispatches a run. `o` focuses the newest same-session run pane; `Enter`
 on an `awaiting` card confirms it through the same completion channel as `board done --outcome ok`.
+Below 60 columns the TUI switches to a single-column Compact layout with a tappable
+`‹ [ ⇄ <column> n/N] ›` header and a board/column switcher sheet (open it with `b`); every layout
+mode scrolls the focused column's cards independently, with a scrollbar shown whenever a column
+overflows.
 
 ## CLI taxonomy
 

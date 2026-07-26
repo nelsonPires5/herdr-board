@@ -6,20 +6,28 @@
 //! events and assert on state (navigation, form cycling, drag transitions) and on
 //! rendered snapshots deterministically.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use board_core::protocol::{BoardSnapshot, CardDetail, CardMoveParams, CardStatus, RunOutcome};
 use crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::layout::Rect;
 
 use crate::forms::Form;
+use crate::widgets::HitMap;
 use crate::OriginContext;
 
 mod board;
 mod confirm;
 mod detail;
 mod forms;
+mod help;
 mod mouse;
 mod move_column;
 mod picker;
+mod switcher;
+
+pub use switcher::enter_boards_level;
 
 /// Which modal/screen is active.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -33,6 +41,35 @@ pub enum Screen {
     MoveColumn,
     Confirm,
     Help,
+    /// Compact-only column/board switcher sheet.
+    Switcher,
+}
+
+/// Which level the Compact switcher sheet is showing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SwitcherLevel {
+    /// The current board's columns, plus a trailing "switch board" row.
+    Columns,
+    /// The list of boards (reached via the trailing row).
+    Boards,
+}
+
+/// State for the Compact-only two-level switcher sheet (`Screen::Switcher`).
+pub struct SwitcherState {
+    pub level: SwitcherLevel,
+    pub sel: usize,
+    /// The Columns-level selection to restore when backing out of `Boards`
+    /// via `Esc`, rather than resetting to the top row. Only meaningful when
+    /// `entered_at_boards` is `false`.
+    pub columns_sel: usize,
+    /// Whether this sheet was opened directly at `Boards` (`b`, which means
+    /// "switch board") rather than drilled into from `Columns` (the header's
+    /// center-button tap). Determines what `Esc` does at the `Boards` level:
+    /// `true` closes the sheet outright, `false` steps back to `Columns` and
+    /// restores `columns_sel`. Never used at the `Columns` level.
+    pub entered_at_boards: bool,
+    /// Populated on transition to `Boards`; `(label, board_id)`.
+    pub boards: Vec<(String, i64)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -79,6 +116,9 @@ pub enum Msg {
 pub enum Effect {
     Refetch,
     LoadBoards,
+    /// Compact-only switcher, level 2: fetch the board list into `app.switcher`
+    /// instead of the Regular/Wide `Picker`.
+    LoadBoardsForSwitcher,
     SwitchBoard(i64),
     /// Cross-board move, stage 1: open the destination-board picker.
     LoadBoardsForMove {
@@ -225,6 +265,17 @@ pub struct App {
     /// Last full draw area, for mouse hit-testing.
     pub last_area: Rect,
     last_click: Option<(u16, u16, u128)>,
+    /// Per-column vertical card-scroll offset, keyed by column id.
+    pub col_scroll: HashMap<i64, usize>,
+    /// Compact-only column/board switcher sheet state.
+    pub switcher: Option<SwitcherState>,
+    /// Vertical scroll offset (in wrapped rows) of the Compact single-column
+    /// help sheet; unused in Regular/Wide (fixed two-column layout).
+    pub help_scroll: usize,
+    /// Rects registered by the last `view()` call, for the new Compact-mode
+    /// widgets (header buttons, switcher rows, button bars). Cleared at the
+    /// start of every draw.
+    pub hit_map: RefCell<HitMap>,
 }
 
 impl App {
@@ -257,6 +308,10 @@ impl App {
             now_ms: 0,
             last_area: Rect::new(0, 0, 80, 24),
             last_click: None,
+            col_scroll: HashMap::new(),
+            switcher: None,
+            help_scroll: 0,
+            hit_map: RefCell::new(HitMap::default()),
         }
     }
 
@@ -275,9 +330,15 @@ impl App {
         self.confirm = None;
         self.move_column = None;
         self.drag = None;
+        self.switcher = None;
+        self.col_scroll.clear();
     }
 
     // -- board queries -------------------------------------------------------
+
+    pub fn layout_mode(&self) -> crate::view::LayoutMode {
+        crate::view::LayoutMode::from_width(self.last_area.width)
+    }
 
     pub fn col_id_at(&self, idx: usize) -> Option<i64> {
         self.board.columns.get(idx).map(|c| c.id)
@@ -478,10 +539,8 @@ fn on_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
         Screen::Picker => picker::picker_key(app, k),
         Screen::MoveColumn => move_column::move_column_key(app, k),
         Screen::Confirm => confirm::confirm_key(app, k),
-        Screen::Help => {
-            app.screen = Screen::Board;
-            vec![]
-        }
+        Screen::Help => help::help_key(app, k),
+        Screen::Switcher => switcher::switcher_key(app, k),
     }
 }
 

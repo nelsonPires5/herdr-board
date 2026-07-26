@@ -72,8 +72,8 @@ step "Open the real TUI against the isolated board daemon"
 TAB_JSON="$(e2e_herdr_mutate -- tab create --workspace "$WS_ID" --label board-timer --no-focus)"
 TUI_PANE="$(printf '%s' "$TAB_JSON" | jget pane_id)"
 [ -n "$TUI_PANE" ] || fail "TUI pane was not created"
-e2e_herdr_mutate -- pane run "$TUI_PANE" \
-  "BOARD_SOCKET=$BOARD_SOCKET BOARD_DB=$BOARD_DB HERDR_BOARD_CONFIG=$HERDR_BOARD_CONFIG BOARD_SCOPE_PATH=$BOARD_SCOPE_PATH $BOARD_BIN tui"
+e2e_launch_tui "$TUI_PANE" \
+  "BOARD_SOCKET=$BOARD_SOCKET BOARD_DB=$BOARD_DB HERDR_BOARD_CONFIG=$HERDR_BOARD_CONFIG BOARD_SCOPE_PATH=$BOARD_SCOPE_PATH"
 
 wait_for_tui_card() {
   local screen

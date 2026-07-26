@@ -2,20 +2,34 @@
 
 use std::io::{Read, Write};
 
+/// Result of an editor round-trip: the (possibly edited) text, plus whether
+/// the terminal needs a full repaint before the next `draw` call.
+///
+/// Bug A: `RealEditor` leaves the alternate screen for a *different* stdout
+/// handle than the one `ratatui::Terminal` owns; ratatui's buffer diff then
+/// has no idea the screen was ever clobbered by `$EDITOR`; and skips redrawing
+/// unchanged cells, leaving the screen blank. `needs_full_redraw: true` tells
+/// the driver to call `terminal.clear()` before the next draw so every cell is
+/// repainted regardless of the diff.
+pub struct EditResult {
+    pub text: String,
+    pub needs_full_redraw: bool,
+}
+
 /// Launches an external editor on some initial text, returning the edited text.
 ///
 /// The real implementation suspends the TUI (leaves the alternate screen and
 /// disables raw mode), spawns `$EDITOR` on a tempfile, then restores the
 /// terminal. Tests provide a fake that returns canned text without any I/O.
 pub trait EditorLauncher {
-    fn edit(&self, initial: &str) -> anyhow::Result<String>;
+    fn edit(&self, initial: &str) -> anyhow::Result<EditResult>;
 }
 
 /// Production launcher: `$EDITOR` (fallback `vi`) on a tempfile.
 pub struct RealEditor;
 
 impl EditorLauncher for RealEditor {
-    fn edit(&self, initial: &str) -> anyhow::Result<String> {
+    fn edit(&self, initial: &str) -> anyhow::Result<EditResult> {
         use crossterm::terminal::{
             disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
         };
@@ -54,7 +68,10 @@ impl EditorLauncher for RealEditor {
                 edited.pop();
             }
         }
-        Ok(edited)
+        Ok(EditResult {
+            text: edited,
+            needs_full_redraw: true,
+        })
     }
 }
 
@@ -75,7 +92,10 @@ impl FakeEditor {
 
 #[cfg(any(test, feature = "fake-client"))]
 impl EditorLauncher for FakeEditor {
-    fn edit(&self, _initial: &str) -> anyhow::Result<String> {
-        Ok(self.result.clone())
+    fn edit(&self, _initial: &str) -> anyhow::Result<EditResult> {
+        Ok(EditResult {
+            text: self.result.clone(),
+            needs_full_redraw: false,
+        })
     }
 }

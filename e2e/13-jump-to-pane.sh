@@ -39,7 +39,12 @@ step "Wait for the overlay and select the run's column"
 ready=0
 for _ in $(seq 1 50); do
   screen="$("$HERDR_BIN" pane read "$BOARD_PANE" --source recent-unwrapped --lines 100 2>/dev/null || true)"
-  if printf '%s\n' "$screen" | grep -q 'Todo ·'; then
+  # Match the column NAME only, not the desktop header's decoration: below 60
+  # columns the board renders LayoutMode::Compact, whose header reads
+  # `‹  [ ⇄ Todo  1/6 ]  ›` instead of `┌ Todo · 1 · manual ─┐`. Both contain the
+  # column name, and this loop only needs to know the TUI painted its first
+  # column — the visibility assertion below is unchanged.
+  if printf '%s\n' "$screen" | grep -q 'Todo'; then
     ready=1
     break
   fi

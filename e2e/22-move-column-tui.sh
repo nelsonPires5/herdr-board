@@ -65,8 +65,8 @@ step "Launch the real TUI in a disposable pane against the isolated boardd"
 TAB_JSON="$(e2e_herdr_mutate -- tab create --workspace "$WS_ID" --label move-column --no-focus)"
 PANE_ID="$(printf '%s' "$TAB_JSON" | jget pane_id)"
 [ -n "$PANE_ID" ] || fail "could not find pane for move-column tab"
-e2e_herdr_mutate -- pane run "$PANE_ID" \
-  "BOARD_SOCKET=$BOARD_SOCKET BOARD_DB=$BOARD_DB HERDR_BOARD_CONFIG=$HERDR_BOARD_CONFIG BOARD_SCOPE_PATH=$BOARD_SCOPE_PATH $BOARD_BIN tui"
+e2e_launch_tui "$PANE_ID" \
+  "BOARD_SOCKET=$BOARD_SOCKET BOARD_DB=$BOARD_DB HERDR_BOARD_CONFIG=$HERDR_BOARD_CONFIG BOARD_SCOPE_PATH=$BOARD_SCOPE_PATH"
 
 step "Wait for the TUI to render its first column header"
 wait_screen "$PANE_ID" "Todo"

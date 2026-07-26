@@ -1,0 +1,28 @@
+---
+source: crates/board-tui/tests/snapshots.rs
+expression: output
+---
+"┌ Edit card (Tab: field · Enter: save · Esc: cancel) ──────────────────────────┐"
+"│title                                                                        ▲│"
+"│Add retry to MELI scraper▏                                                   █│"
+"│description (base prompt)  (Ctrl+E: $EDITOR)                                 █│"
+"│Add exponential backoff to the MELI scraper HTTP client.                     █│"
+"│                                                                             █│"
+"│                                                                             █│"
+"│                                                                             █│"
+"│harness                                                                      █│"
+"│< claude >                                                                   █│"
+"│model                                                                        █│"
+"│< sonnet >                                                                   ││"
+"│effort                                                                       ││"
+"│< high >                                                                     ││"
+"│permission                                                                   ││"
+"│< acceptEdits >                                                              ││"
+"│session                                                                      ││"
+"│< (default) >                                                                ││"
+"│space                                                                        ││"
+"│< workspace >                                                                ││"
+"│                                                                             ▼│"
+"│[ Save ]  [ Cancel ]                                                          │"
+"└──────────────────────────────────────────────────────────────────────────────┘"
+"? help                                                                          "

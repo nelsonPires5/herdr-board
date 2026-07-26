@@ -65,9 +65,10 @@ PANE_ID="$(printf '%s' "$tab_json" | jget pane_id)"
 echo "  tui pane: $PANE_ID"
 
 # Pane shells do NOT inherit workspace --env; pass the isolated env inline so the
-# TUI talks to THIS test's daemon, not the default socket.
-e2e_herdr_mutate -- pane run "$PANE_ID" \
-  "BOARD_SOCKET=$BOARD_SOCKET BOARD_DB=$BOARD_DB HERDR_BOARD_CONFIG=$HERDR_BOARD_CONFIG BOARD_SCOPE_PATH=$BOARD_SCOPE_PATH $BOARD_BIN tui"
+# TUI talks to THIS test's daemon, not the default socket. e2e_launch_tui also
+# pins the pane to a deterministic Regular-mode width (65 cols) via `stty`.
+e2e_launch_tui "$PANE_ID" \
+  "BOARD_SOCKET=$BOARD_SOCKET BOARD_DB=$BOARD_DB HERDR_BOARD_CONFIG=$HERDR_BOARD_CONFIG BOARD_SCOPE_PATH=$BOARD_SCOPE_PATH"
 echo "  waiting for the TUI to come up..."
 sleep 3
 

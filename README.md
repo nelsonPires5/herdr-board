@@ -573,7 +573,7 @@ The Unix-socket transport retains only the raw request primitive; production cli
 - `scripts/install.sh` — local-development setup;
 - `scripts/open-board.sh` — open-or-focus plugin action;
 - `scripts/board-rpc.py` — raw daemon protocol client;
-- `e2e/` — scenarios 01–25 against disposable Herdr sessions/workspaces; checked-in fake Pi,
+- `e2e/` — scenarios 01–26 against disposable Herdr sessions/workspaces; checked-in fake Pi,
   Claude, and configured harnesses keep the standard suite provider-free. `e2e/test-harness.sh`
   performs static ownership/safety checks without starting Herdr; the live suite is a separate gate.
 

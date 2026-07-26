@@ -9,18 +9,16 @@ use ratatui::Frame;
 use crate::app::{App, DetailScrollTarget};
 
 use super::{
-    centered_rect_abs, main_area, parse_epoch, status_glyph, status_label, truncate,
-    NARROW_DETAIL_WIDTH,
+    main_area, parse_epoch, sheet_area, status_glyph, status_label, truncate, NARROW_DETAIL_WIDTH,
 };
 
 // -- detail ------------------------------------------------------------------
 
 fn detail_panel_area(app: &App, area: Rect) -> Rect {
-    let m = main_area(area);
     if app.detail_fullscreen {
-        m
+        main_area(area)
     } else {
-        centered_rect_abs(120, 30, m)
+        sheet_area(app.layout_mode(), 120, 30, area)
     }
 }
 
@@ -49,8 +47,9 @@ fn wrapped_line_count(text: &str, width: u16) -> u16 {
 /// many space-separated words as fit in `width` (by `chars().count()`), an
 /// over-long word is hard-broken, and a blank source line still occupies one
 /// row. Used for scroll clamping and section sizing so the scroll offset never
-/// runs past the real rendered content.
-fn wrapped_row_count(text: &str, width: u16) -> usize {
+/// runs past the real rendered content. Also reused by `layout` to size
+/// Compact board cards (1 vs. 2 title rows).
+pub(super) fn wrapped_row_count(text: &str, width: u16) -> usize {
     let width = (width as usize).max(1);
     text.lines()
         .map(|line| {

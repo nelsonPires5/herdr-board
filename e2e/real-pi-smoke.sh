@@ -161,8 +161,8 @@ export HERDR_SOCKET_PATH="$SOCK" BOARD_SPAWNER=herdr BOARD_SCOPE_PATH="$WORKSPAC
 "$BOARD_BIN" daemon --foreground >"$TMP/daemon.log" 2>&1 &
 DAEMON_PID=$!
 printf 'DAEMON_PID=%q\n' "$DAEMON_PID" >>"$STATE"
-for _ in $(seq 1 50); do "$BOARD_BIN" status >/dev/null 2>&1 && break; sleep .2; done
-"$BOARD_BIN" status >/dev/null
+for _ in $(seq 1 50); do "$BOARD_BIN" daemon status >/dev/null 2>&1 && break; sleep .2; done
+"$BOARD_BIN" daemon status >/dev/null
 
 BOARD_ID="$(python3 "$ROOT/scripts/board-rpc.py" board.open \
   "$(python3 -c 'import json,sys; print(json.dumps({"scope_path":sys.argv[1]}))' "$BOARD_SCOPE_PATH")" \
