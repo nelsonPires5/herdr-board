@@ -420,6 +420,57 @@ e2e_board_herdr_mutate() {
   "$BOARD_BIN" "$@"
 }
 
+# e2e_launch_tui <pane_id> <env-prefix...> — launch `board tui` inside
+# PANE_ID with a deterministic COLUMN count prefixed via `stty cols`, before
+# any other flags/env the caller needs (the isolated BOARD_SOCKET/BOARD_DB/etc
+# — pane shells do NOT inherit workspace --env). Defaults to 65 cols (Regular
+# mode, `LayoutMode::from_width`'s 60..=119 — the layout every pre-existing
+# scenario was written against); set E2E_TUI_COLS before calling to force a
+# different width (e.g. 26-compact-mobile.sh's 40-col Compact pane).
+#
+# Nothing in the protocol lets `workspace create`/`tab create`/`plugin pane
+# open` request a pane size, and `pane.info` never reports terminal columns
+# (only `viewport_rows`), so every scenario used to inherit whatever width
+# the host window happened to have. `LayoutMode::from_width` makes that
+# ambient width load-bearing (Compact/Regular/Wide render different things),
+# so scenarios written against the Regular layout only passed by luck. `stty
+# cols N` inside the pane's own shell, run before `board tui` execs, reliably
+# forces the width ratatui sees.
+#
+# Two empirical constraints found while wiring this up, both against real
+# Herdr 0.7.5 panes (see the task write-up for the full A/B):
+#
+# 1. COLUMNS-ONLY, never `rows`. A pane's row count is Herdr's own fixed
+#    internal bookkeeping (visible, unchanging, via `pane.list`'s
+#    `viewport_rows`), independent of the real pty and never updated by a
+#    child-side `stty`. Forcing `rows` to anything other than that value
+#    doesn't change what `herdr pane read` reconstructs (still the original
+#    row count) — it desyncs board-tui's real draw (now N rows) from Herdr's
+#    row-based replay (still expecting the original count), tearing
+#    multi-column frames into interleaved garbage. `cols` has no equivalent
+#    fixed counterpart to desync against.
+# 2. 65, not 100. Even cols-only, a width that lets board-tui draw a single
+#    contiguous text run longer than Herdr's own (also fixed, independent of
+#    the real pty) internal column buffer still corrupts `pane read` for
+#    that run specifically — e.g. `12-cwd-boards.sh`'s board-picker rows
+#    print a full scoped-board label (`"project-one — /tmp/.../project-one"`)
+#    as one span; at 100 cols the classic Picker draws that span wide enough
+#    to hit the corruption, at 65 it doesn't. Widths 45/55/62/65 read clean;
+#    70 and above (through 200) corrupt. So 65 is the WIDEST confirmed-clean
+#    value, not the narrowest, and the usable window for these scenarios is
+#    only 60..=65: `>= 60` to stay out of Compact, `<= ~65` to stay under the
+#    corruption threshold. That margin is five columns — if the Compact
+#    breakpoint in `LayoutMode::from_width` ever moves up, or a scenario's
+#    grepped text grows, revisit this rather than nudging the number blindly.
+#    Verified clean across every scenario this helper serves (01, 10, 12, 21, 22).
+e2e_launch_tui() {
+  local pane_id="$1"
+  shift
+  local cols="${E2E_TUI_COLS:-65}"
+  e2e_herdr_mutate -- pane run "$pane_id" \
+    "stty cols $cols; $* $BOARD_BIN tui"
+}
+
 # --- boardd RPC (columns have no CLI verb) ----------------------------------
 # brpc <method> [json-params] — one-shot boardd RPC via scripts/board-rpc.py,
 # with the protocol ENVELOPE stripped: prints just the `result` payload as one

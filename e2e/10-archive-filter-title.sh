@@ -21,8 +21,8 @@ PANE_ID="$(printf '%s' "$tab_json" | jget pane_id)"
 # Verified against Herdr 0.7.5 / protocol 17: `pane rename <pane_id> <label>`.
 # The plugin variables reproduce the real pane context without linking a plugin
 # into anything except this disposable session/workspace.
-e2e_herdr_mutate -- pane run "$PANE_ID" \
-  "HERDR_PLUGIN_ID=herdr-board HERDR_PANE_ID=$PANE_ID HERDR_BIN_PATH=$HERDR_BIN HERDR_SOCKET_PATH=$HERDR_SOCKET_PATH BOARD_SOCKET=$BOARD_SOCKET BOARD_DB=$BOARD_DB HERDR_BOARD_CONFIG=$HERDR_BOARD_CONFIG BOARD_SCOPE_PATH=$BOARD_SCOPE_PATH $BOARD_BIN tui"
+e2e_launch_tui "$PANE_ID" \
+  "HERDR_PLUGIN_ID=herdr-board HERDR_PANE_ID=$PANE_ID HERDR_BIN_PATH=$HERDR_BIN HERDR_SOCKET_PATH=$HERDR_SOCKET_PATH BOARD_SOCKET=$BOARD_SOCKET BOARD_DB=$BOARD_DB HERDR_BOARD_CONFIG=$HERDR_BOARD_CONFIG BOARD_SCOPE_PATH=$BOARD_SCOPE_PATH"
 
 pane_label() {
   hrpc pane.list "{\"workspace_id\":\"$WS_ID\"}" | python3 -c '
