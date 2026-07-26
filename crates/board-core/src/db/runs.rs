@@ -48,6 +48,26 @@ impl Db {
         pane_id: Option<&str>,
         timeout_deadline_at_ms: Option<i64>,
     ) -> Result<Run> {
+        self.promote_run_with_anchor_uow(
+            run_id,
+            workspace_id,
+            pane_id,
+            None,
+            timeout_deadline_at_ms,
+        )
+    }
+
+    /// Atomically promote an exact queued run and persist the runtime card-tab
+    /// anchor alongside its child pane. Legacy callers use
+    /// [`Self::promote_run_uow`] and retain a NULL anchor.
+    pub fn promote_run_with_anchor_uow(
+        &self,
+        run_id: i64,
+        workspace_id: Option<&str>,
+        pane_id: Option<&str>,
+        anchor_pane_id: Option<&str>,
+        timeout_deadline_at_ms: Option<i64>,
+    ) -> Result<Run> {
         let tx = self.conn.unchecked_transaction()?;
         let card_id: i64 = tx
             .query_row(
@@ -62,8 +82,8 @@ impl Db {
                 other => Error::Sqlite(other),
             })?;
         tx.execute(
-            "UPDATE runs SET started_at=datetime('now'),herdr_workspace_id=?1,herdr_pane_id=?2,timeout_deadline_at_ms=?4,timeout_paused_at_ms=NULL WHERE id=?3",
-            params![workspace_id,pane_id,run_id,timeout_deadline_at_ms],
+            "UPDATE runs SET started_at=datetime('now'),herdr_workspace_id=?1,herdr_pane_id=?2,herdr_anchor_pane_id=?3,timeout_deadline_at_ms=?5,timeout_paused_at_ms=NULL WHERE id=?4",
+            params![workspace_id,pane_id,anchor_pane_id,run_id,timeout_deadline_at_ms],
         )?;
         self.lifecycle_fault(LifecycleFaultPoint::PromoteAfterRunUpdate)?;
         tx.execute(

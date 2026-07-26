@@ -40,11 +40,11 @@ fn scheduler_index_sql(conn: &Connection, name: &str) -> Option<String> {
 }
 
 #[test]
-fn fresh_v11_has_exact_partial_scheduler_indexes_and_query_plans() {
+fn fresh_v12_has_exact_partial_scheduler_indexes_and_query_plans() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("board.db");
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 11);
+    assert_eq!(db.user_version().unwrap(), 12);
     drop(db);
     let conn = Connection::open(path).unwrap();
     for (name, expected) in [
@@ -76,7 +76,7 @@ fn fresh_v11_has_exact_partial_scheduler_indexes_and_query_plans() {
 }
 
 #[test]
-fn v9_file_fixture_upgrades_through_v11_without_changing_existing_bytes() {
+fn v9_file_fixture_upgrades_through_v12_without_changing_existing_bytes() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("v9.db");
     let (card_id, run_id) = {
@@ -88,7 +88,7 @@ fn v9_file_fixture_upgrades_through_v11_without_changing_existing_bytes() {
                 ..Default::default()
             })
             .unwrap();
-        // Historical v9→v11 migration fixture: enqueue_run_uow writes a v11
+        // Historical v9→v12 migration fixture: enqueue_run_uow writes a v12
         // row; after manual downgrade to user_version=9 the migration path
         // still re-adds indexes and must preserve every byte.
         let run = db
@@ -118,7 +118,7 @@ fn v9_file_fixture_upgrades_through_v11_without_changing_existing_bytes() {
     drop(conn);
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 11);
+    assert_eq!(db.user_version().unwrap(), 12);
     assert_eq!(db.get_card(card_id).unwrap().unwrap().id, card_id);
     assert_eq!(db.get_run(run_id).unwrap().id, run_id);
     drop(db);
@@ -130,7 +130,7 @@ fn v9_file_fixture_upgrades_through_v11_without_changing_existing_bytes() {
         assert_eq!(
             conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            11
+            12
         );
         assert_eq!(
             scheduler_index_sql(&conn, "idx_runs_queued_fifo").as_deref(),
@@ -542,7 +542,7 @@ fn v8_upgrade_retains_a_single_open_run_byte_for_byte() {
         .unwrap();
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 11);
+    assert_eq!(db.user_version().unwrap(), 12);
     assert_eq!(db.get_run(before.id).unwrap(), before);
 }
 
@@ -560,7 +560,7 @@ fn fresh_and_v7_upgrade_install_exact_partial_unique_index_sql() {
                 .unwrap();
         }
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.user_version().unwrap(), 11);
+        assert_eq!(db.user_version().unwrap(), 12);
         drop(db);
         let sql: String = Connection::open(&path)
             .unwrap()

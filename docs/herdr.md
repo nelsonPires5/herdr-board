@@ -70,23 +70,29 @@ deterministically rather than changing integrations or calling a provider.
 
 ## Protocol 17 launch contract
 
-Herdr 0.7.5 uses pane-first managed-agent launch. First create or split an
-existing pane with the required cwd and environment; then call `agent.start`
-with `{name, kind, pane_id, args, timeout_ms}`. `kind` selects Herdr's canonical
+Herdr 0.7.5 uses pane-first managed-agent launch. For a new durable card tab,
+herdr-board first creates a shell root and reserves it as `card-<id>-anchor`.
+It then splits a run child with the required cwd/environment and calls
+`agent.start` with `{name, kind, pane_id, args, timeout_ms}` on that child only.
+The anchor is never an `agent.start` target. `kind` selects Herdr's canonical
 agent executable and `args` contains only that executable's arguments. The old
 workspace/tab/split/env placement fields are not part of `agent.start`.
 
 After start, `agent.get <target>` exposes `interactive_ready` and
 `launch_pending`. herdr-board waits for `interactive_ready=true` and
 `launch_pending=false`, then submits the exact card task with `agent.prompt`
-instead of startup argv or synthetic keystrokes. A newly allocated pane can
+instead of startup argv or synthetic keystrokes. A newly allocated child can
 briefly retain prior agent state and return typed `agent_pane_busy`; the board
-retries the exact `agent.start` request on that same board-owned pane at most
-twice, with bounded 100ms/200ms backoff. It never allocates a second pane for
-that response. Persistent busy is a launch failure whose cleanup closes only
-the owned child pane; `pane_not_found` is handled separately as a placement
-race that restarts discovery from `tab.list` and retries complete placement once. `agent.read` remains a terminal
-screen/scrollback read, not a semantic result channel.
+retries the exact `agent.start` request on that same child at most twice, with
+bounded 100ms/200ms backoff. It never allocates a second child for that
+response. Persistent busy is a launch failure whose cleanup closes only the
+owned child pane and leaves the anchor; `pane_not_found` is handled separately
+as a placement race that restarts discovery from `tab.list` and retries
+complete placement once. Schema v12 persists the exact anchor id with the run;
+after restart both tab and anchor are selected only from scoped durable pane
+identities. Labels are display metadata and never authorize a tab or pane.
+`agent.read` remains a terminal screen/scrollback read, not a semantic result
+channel.
 
 Configured harnesses are intentionally unmanaged. Protocol 17 has a
 `herdr pane run <PANE_ID> <COMMAND>...` CLI command but no `pane.run` socket

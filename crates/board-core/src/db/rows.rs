@@ -112,6 +112,7 @@ pub(super) fn row_to_run(row: &Row) -> SqliteResult<Run> {
             .transpose()?,
         herdr_workspace_id: row.get("herdr_workspace_id")?,
         herdr_pane_id: row.get("herdr_pane_id")?,
+        herdr_anchor_pane_id: row.get("herdr_anchor_pane_id")?,
         session_id: row.get("session_id")?,
         session: row.get("session")?,
         started_at: row.get("started_at")?,

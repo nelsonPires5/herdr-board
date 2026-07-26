@@ -41,6 +41,14 @@ pub struct HerdrLaunchPlan {
     /// the Herdr spawner uses only that exact id together with the expected
     /// label.
     pub owned_tab_id: Option<String>,
+    /// Durable board-run pane ids, newest first. These prove the tab after a
+    /// daemon restart and authorize recovery of a missing anchor without
+    /// touching a foreign pane.
+    pub durable_pane_ids: Vec<String>,
+    /// Exact ended child ids that may be reclaimed before the next split.
+    pub reclaimable_pane_ids: Vec<String>,
+    /// Exact persisted anchor ids, newest first.
+    pub durable_anchor_pane_ids: Vec<String>,
     /// Working directory (resolved workspace cwd, or `LocalSpawner`).
     pub cwd: Option<PathBuf>,
     /// herdr workspace id (for `workspace` / `new_workspace` spaces).
@@ -59,6 +67,8 @@ pub struct HerdrLaunchPlan {
 pub struct RuntimeHandle {
     pub pane_id: Option<String>,
     pub workspace_id: Option<String>,
+    /// Exact persistent card-tab shell anchor, when placement used one.
+    pub anchor_pane_id: Option<String>,
     pub pid: Option<u32>,
     /// herdr socket this pane lives on (its session), so kill/liveness target
     /// the right session after a daemon restart. `None` = default socket.

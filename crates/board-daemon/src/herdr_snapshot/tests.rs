@@ -8,6 +8,7 @@ fn make_pane(pane_id: &str, agent_status: AgentStatus) -> PaneInfo {
         terminal_id: format!("t-{pane_id}"),
         workspace_id: "ws".into(),
         tab_id: "tab".into(),
+        label: None,
         agent: None,
         agent_status,
         cwd: None,

@@ -112,7 +112,7 @@ pub(super) fn reconstruct_owned_tab_id(
 }
 
 /// Return exact pane ids that can prove ownership of a card tab after a
-/// daemon restart. Only durable protocol-v11 launch rows for the selected
+/// daemon restart. Only durable protocol-v12 launch rows for the selected
 /// session and workspace are eligible; legacy rows and panes from another
 /// placement scope cannot confer tab ownership. The ids are newest-first so
 /// reconstruction remains deterministic if old runs occupy different tabs.
@@ -129,6 +129,56 @@ pub(super) fn durable_owned_pane_ids(
                 && run.herdr_workspace_id.as_deref() == Some(workspace_id)
         })
         .filter_map(|run| run.herdr_pane_id.as_deref().map(|pane| (run.id, pane)))
+        .filter(|(_, pane)| !pane.is_empty())
+        .map(|(run_id, pane)| (run_id, pane.to_string()))
+        .collect::<Vec<_>>();
+    owned.sort_unstable_by_key(|(run_id, _)| std::cmp::Reverse(*run_id));
+    owned.into_iter().map(|(_, pane)| pane).collect()
+}
+
+/// Return exact ended v12 run-child ids eligible for geometry reclamation.
+/// Queued/open rows are intentionally excluded; placement performs a second
+/// live status check before closing any exact pane.
+pub(super) fn reclaimable_owned_pane_ids(
+    runs: &[Run],
+    session: Option<&str>,
+    workspace_id: &str,
+) -> Vec<String> {
+    let mut owned = runs
+        .iter()
+        .filter(|run| {
+            run.launch_spec.is_some()
+                && run.ended_at.is_some()
+                && run.session.as_deref() == session
+                && run.herdr_workspace_id.as_deref() == Some(workspace_id)
+        })
+        .filter_map(|run| run.herdr_pane_id.as_deref().map(|pane| (run.id, pane)))
+        .filter(|(_, pane)| !pane.is_empty())
+        .map(|(run_id, pane)| (run_id, pane.to_string()))
+        .collect::<Vec<_>>();
+    owned.sort_unstable_by_key(|(run_id, _)| std::cmp::Reverse(*run_id));
+    owned.into_iter().map(|(_, pane)| pane).collect()
+}
+
+/// Return exact persisted card-tab anchors, newest run first. v11 rows have
+/// NULL here by design and therefore cannot prove an anchor after restart.
+pub(super) fn durable_owned_anchor_pane_ids(
+    runs: &[Run],
+    session: Option<&str>,
+    workspace_id: &str,
+) -> Vec<String> {
+    let mut owned = runs
+        .iter()
+        .filter(|run| {
+            run.launch_spec.is_some()
+                && run.session.as_deref() == session
+                && run.herdr_workspace_id.as_deref() == Some(workspace_id)
+        })
+        .filter_map(|run| {
+            run.herdr_anchor_pane_id
+                .as_deref()
+                .map(|pane| (run.id, pane))
+        })
         .filter(|(_, pane)| !pane.is_empty())
         .map(|(run_id, pane)| (run_id, pane.to_string()))
         .collect::<Vec<_>>();
@@ -233,6 +283,9 @@ async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result<bool> {
             "kanban".to_string()
         }),
         owned_tab_id: None,
+        durable_pane_ids: Vec::new(),
+        reclaimable_pane_ids: Vec::new(),
+        durable_anchor_pane_ids: Vec::new(),
         cwd: None,
         workspace_ref: None,
         herdr_socket: None,
@@ -291,23 +344,46 @@ async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result<bool> {
             )?;
             let prior_pane_ids =
                 durable_owned_pane_ids(&prior_runs, run_session.as_deref(), &workspace_id);
-            let owned_tab_id = if card_tab && !prior_pane_ids.is_empty() {
+            let reclaimable_pane_ids =
+                reclaimable_owned_pane_ids(&prior_runs, run_session.as_deref(), &workspace_id);
+            let anchor_pane_ids =
+                durable_owned_anchor_pane_ids(&prior_runs, run_session.as_deref(), &workspace_id);
+            let mut ownership_proof = anchor_pane_ids.clone();
+            ownership_proof.extend(prior_pane_ids.iter().cloned());
+            let owned_tab_id = if card_tab && !ownership_proof.is_empty() {
                 let snapshot = client
                     .session_snapshot()
                     .map_err(|e| anyhow::anyhow!("herdr session.snapshot: {e}"))?;
-                reconstruct_owned_tab_id(&snapshot, &workspace_id, &prior_pane_ids)
+                reconstruct_owned_tab_id(&snapshot, &workspace_id, &ownership_proof)
             } else {
                 None
             };
-            Ok::<_, anyhow::Error>((workspace_id, cwd, owned_tab_id))
+            Ok::<_, anyhow::Error>((
+                workspace_id,
+                cwd,
+                owned_tab_id,
+                prior_pane_ids,
+                reclaimable_pane_ids,
+                anchor_pane_ids,
+            ))
         })
         .await
         .map_err(|e| Error::BadRequest(format!("workspace resolve join: {e}")))?;
         match resolved {
-            Ok((id, cwd, owned_tab_id)) => {
+            Ok((
+                id,
+                cwd,
+                owned_tab_id,
+                durable_pane_ids,
+                reclaimable_pane_ids,
+                durable_anchor_pane_ids,
+            )) => {
                 req.workspace_ref = Some(id);
                 req.cwd = Some(PathBuf::from(cwd));
                 req.owned_tab_id = owned_tab_id;
+                req.durable_pane_ids = durable_pane_ids;
+                req.reclaimable_pane_ids = reclaimable_pane_ids;
+                req.durable_anchor_pane_ids = durable_anchor_pane_ids;
             }
             Err(e) => {
                 fail_queued_run(d, run.id, &format!("{e:#}"))?;
@@ -382,10 +458,11 @@ pub(crate) fn register_spawned_run(
         })?;
         let is_local = spawned.pid.is_some();
         let pane_id = spawned.pane_id.clone();
-        db.promote_run_uow(
+        db.promote_run_with_anchor_uow(
             run_id,
             spawned.workspace_id.as_deref(),
             spawned.pane_id.as_deref(),
+            spawned.anchor_pane_id.as_deref(),
             timeout_deadline_at_ms,
         )?;
         let registered_handle = handle.take().ok_or_else(|| {

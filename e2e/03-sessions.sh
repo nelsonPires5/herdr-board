@@ -55,11 +55,14 @@ ktab = card_tab[0]["tab_id"]
 # collision (the session may already hold a card-<id>-execute pane) it retries
 # with a -r<run> fallback, so accept that suffix (see AGENTS.md).
 want = re.compile(rf"^card-{re.escape(card)}-execute(-r\d+)?$")
-labels = [p.get("label") for p in panes if p.get("tab_id") == ktab]
+owned = [p for p in panes if p.get("tab_id") == ktab]
+labels = [p.get("label") for p in owned]
+anchors = [p for p in owned if p.get("label") == f"card-{card}-anchor" and not p.get("agent")]
+assert len(anchors) == 1
 match = next((l for l in labels if l and want.match(l)), None)
 if not match:
     sys.exit(f"no pane matching card-{card}-execute[-r<n>] in card tab labels {labels}")
-print(f"  [ok] card tab {ktab} holds agent pane {match}", file=sys.stderr)
+print(f"  [ok] card tab {ktab} holds shell anchor and agent pane {match}", file=sys.stderr)
 PY
 }
 

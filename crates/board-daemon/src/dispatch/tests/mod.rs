@@ -9,8 +9,8 @@ pub(super) use std::time::{Duration, Instant};
 pub(super) use super::enqueue::enqueue_run;
 pub(super) use super::finalize::{finalize_run, finalize_run_timeout};
 pub(super) use super::pass::{
-    dispatch_pass, durable_owned_pane_ids, harness_prompt_env, launch_session,
-    reconstruct_owned_tab_id, register_spawned_run,
+    dispatch_pass, durable_owned_anchor_pane_ids, durable_owned_pane_ids, harness_prompt_env,
+    launch_session, reconstruct_owned_tab_id, register_spawned_run,
 };
 pub(super) use super::space::{
     find_workspace_by_label, resolve_space, resolve_workspace_ref, validate_space_resolvable,

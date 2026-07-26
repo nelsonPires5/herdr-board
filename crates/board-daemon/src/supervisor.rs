@@ -250,6 +250,7 @@ fn adopt_alive(
     let handle = RuntimeHandle {
         pane_id: current_run.herdr_pane_id.clone(),
         workspace_id: current_run.herdr_workspace_id.clone(),
+        anchor_pane_id: current_run.herdr_anchor_pane_id.clone(),
         pid: None,
         herdr_socket: socket,
     };

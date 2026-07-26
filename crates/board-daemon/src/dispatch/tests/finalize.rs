@@ -210,6 +210,7 @@ fn spawned_run_registration_starts_row_card_and_active_bookkeeping_together() {
         run_id,
         RuntimeHandle {
             pid: Some(41),
+            anchor_pane_id: Some("anchor-41".into()),
             ..Default::default()
         },
         started,
@@ -220,7 +221,9 @@ fn spawned_run_registration_starts_row_card_and_active_bookkeeping_together() {
 
     let sched = d.sched.lock().unwrap();
     let db = d.store.lock();
-    assert!(db.get_run(run_id).unwrap().started_at.is_some());
+    let promoted = db.get_run(run_id).unwrap();
+    assert!(promoted.started_at.is_some());
+    assert_eq!(promoted.herdr_anchor_pane_id.as_deref(), Some("anchor-41"));
     assert_eq!(
         db.get_card(card_id).unwrap().unwrap().status,
         CardStatus::Running

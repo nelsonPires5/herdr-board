@@ -110,6 +110,10 @@ pub struct Run {
     pub launch_spec: Option<crate::launch::RunLaunchSpec>,
     pub herdr_workspace_id: Option<String>,
     pub herdr_pane_id: Option<String>,
+    /// Exact board-owned shell anchor pane for this card tab. This is
+    /// internal placement identity, not a run target.
+    #[serde(default, skip_serializing)]
+    pub herdr_anchor_pane_id: Option<String>,
     /// harness conversation id (`--resume`); distinct from the herdr `session`.
     pub session_id: Option<String>,
     /// herdr session name this run spawned into; `None` = default session.

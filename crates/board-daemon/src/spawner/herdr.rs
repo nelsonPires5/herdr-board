@@ -17,7 +17,7 @@ use board_herdr::{
 use super::placement::{
     allocate_owned_pane, close_owned_after_error, close_owned_for_retry,
     is_retryable_placement_race, mark_retryable_placement_race, mark_retryable_runner_race,
-    RetryablePlacementRace, ERR_PANE_NOT_FOUND,
+    CardOwnership, RetryablePlacementRace, ERR_PANE_NOT_FOUND,
 };
 use super::{
     HerdrLaunchPlan, RuntimeHandle, Spawner, AGENT_START_BUSY_BACKOFF, AGENT_START_BUSY_RETRIES,
@@ -61,14 +61,23 @@ impl PaneRunner for HerdrCliPaneRunner {
 // ---------------------------------------------------------------------------
 
 type CardTabKey = (PathBuf, String, String);
-type CardTabOwnership = Arc<Mutex<BTreeMap<CardTabKey, String>>>;
+
+#[derive(Debug, Clone)]
+struct OwnedCardTab {
+    tab_id: String,
+    anchor_pane_id: String,
+}
+
+type CardTabOwnership = Arc<Mutex<BTreeMap<CardTabKey, OwnedCardTab>>>;
 type CardTabLocks = Arc<Mutex<BTreeMap<CardTabKey, Arc<Mutex<()>>>>>;
 
 /// Launches managed agents through protocol-17 `agent.start`, and configured
-/// harnesses through a board-owned pane plus `herdr pane run`.
+/// harnesses through a board-owned split child plus `herdr pane run`.
 ///
-/// Every operation opens a client bound to the run's selected socket. Handles
-/// retain the run's explicit socket override so kill/liveness stay in-session.
+/// New durable card tabs retain their root as a shell anchor; the anchor is
+/// never started or closed as a run. Every operation opens a client bound to
+/// the run's selected socket. Handles retain the run's explicit socket
+/// override so kill/liveness stay in-session.
 #[derive(Clone)]
 pub struct HerdrSpawner {
     socket: PathBuf,
@@ -169,22 +178,32 @@ impl Spawner for HerdrSpawner {
 
         let mut last_placement_race = None;
         for attempt in 0..2 {
-            let remembered_tab_id = if req.owned_tab_id.is_some() {
-                req.owned_tab_id.clone()
-            } else {
-                self.owned_card_tabs
-                    .lock()
-                    .map_err(|_| anyhow!("card-tab ownership lock poisoned"))?
-                    .get(&tab_key)
-                    .cloned()
-            };
+            let remembered = self
+                .owned_card_tabs
+                .lock()
+                .map_err(|_| anyhow!("card-tab ownership lock poisoned"))?
+                .get(&tab_key)
+                .cloned();
+            let remembered_tab_id = req
+                .owned_tab_id
+                .clone()
+                .or_else(|| remembered.as_ref().map(|owned| owned.tab_id.clone()));
+            let remembered_anchor_id = remembered
+                .as_ref()
+                .map(|owned| owned.anchor_pane_id.as_str());
             let owned = match allocate_owned_pane(
                 &mut client,
                 workspace_id,
                 tab_label,
                 req.cwd.as_deref(),
                 &env,
-                remembered_tab_id.as_deref(),
+                CardOwnership {
+                    owned_tab_id: remembered_tab_id.as_deref(),
+                    durable_pane_ids: &req.durable_pane_ids,
+                    reclaimable_pane_ids: &req.reclaimable_pane_ids,
+                    durable_anchor_pane_ids: &req.durable_anchor_pane_ids,
+                    remembered_anchor_id,
+                },
             )
             .with_context(|| format!("placing pane in tab '{tab_label}' for {}", req.name))
             {
@@ -195,6 +214,21 @@ impl Spawner for HerdrSpawner {
                 }
                 Err(error) => return Err(error),
             };
+
+            if tab_label.starts_with("card-") {
+                if let Some(anchor_pane_id) = owned.anchor_pane_id.clone() {
+                    self.owned_card_tabs
+                        .lock()
+                        .map_err(|_| anyhow!("card-tab ownership lock poisoned"))?
+                        .insert(
+                            tab_key.clone(),
+                            OwnedCardTab {
+                                tab_id: owned.tab_id.clone(),
+                                anchor_pane_id,
+                            },
+                        );
+                }
+            }
 
             let launch_result = match req.agent_kind.as_deref() {
                 Some(kind) => launch_managed(
@@ -215,15 +249,10 @@ impl Spawner for HerdrSpawner {
 
             match launch_result {
                 Ok(()) => {
-                    if tab_label.starts_with("card-") {
-                        self.owned_card_tabs
-                            .lock()
-                            .map_err(|_| anyhow!("card-tab ownership lock poisoned"))?
-                            .insert(tab_key.clone(), owned.tab_id.clone());
-                    }
                     return Ok(RuntimeHandle {
                         pane_id: Some(owned.pane_id),
                         workspace_id: Some(owned.workspace_id),
+                        anchor_pane_id: owned.anchor_pane_id,
                         pid: None,
                         herdr_socket: req.herdr_socket.clone(),
                     });

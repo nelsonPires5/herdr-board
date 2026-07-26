@@ -282,6 +282,7 @@ async fn adopt_runs(d: &Arc<Daemon>) {
         let handle = RuntimeHandle {
             pane_id: run.herdr_pane_id.clone(),
             workspace_id: run.herdr_workspace_id.clone(),
+            anchor_pane_id: run.herdr_anchor_pane_id.clone(),
             pid: None,
             herdr_socket,
         };

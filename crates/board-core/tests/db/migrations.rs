@@ -9,7 +9,7 @@ use rusqlite::{Connection, OptionalExtension};
 #[test]
 fn migration_seeds_board_and_todo_column() {
     let db = mem();
-    assert_eq!(db.user_version().unwrap(), 11);
+    assert_eq!(db.user_version().unwrap(), 12);
     let board = db.get_board(BOARD_ID).unwrap();
     assert_eq!(board.name, "Global");
     assert_eq!(board.scope_path, None);
@@ -21,7 +21,7 @@ fn migration_seeds_board_and_todo_column() {
 }
 
 #[test]
-fn fresh_v11_launch_spec_column_has_exact_nullable_default() {
+fn fresh_v12_launch_and_anchor_columns_have_exact_nullable_defaults() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let path = tmp.path().to_path_buf();
     drop(Db::open(&path).unwrap());
@@ -34,6 +34,17 @@ fn fresh_v11_launch_spec_column_has_exact_nullable_default() {
         )
         .unwrap();
     assert_eq!(shape, ("launch_spec_json".into(), "TEXT".into(), 0, None));
+    let anchor_shape: (String, String, i64, Option<String>) = conn
+        .query_row(
+            "SELECT name,type,\"notnull\",dflt_value FROM pragma_table_info('runs') WHERE name='herdr_anchor_pane_id'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        anchor_shape,
+        ("herdr_anchor_pane_id".into(), "TEXT".into(), 0, None)
+    );
     let default_value: Option<String> = conn
         .query_row("SELECT launch_spec_json FROM runs LIMIT 1", [], |row| {
             row.get(0)
@@ -42,6 +53,43 @@ fn fresh_v11_launch_spec_column_has_exact_nullable_default() {
         .unwrap()
         .flatten();
     assert_eq!(default_value, None);
+}
+
+#[test]
+fn v11_rows_gain_nullable_anchor_column_without_backfill() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    {
+        let db = Db::open(&path).unwrap();
+        let card = db
+            .create_card(&CardCreateParams {
+                title: "v11 anchor compatibility".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        db.enqueue_run_uow(&EnqueueRun {
+            card_id: card.id,
+            column_id: card.column_id,
+            harness: "pi",
+            argv_json: "[\"pi\"]",
+            prompt_snapshot: "legacy",
+            system_prompt_snapshot: Some("system"),
+            launch_spec_json: Some(
+                "{\"version\":1,\"execution\":{\"argv\":[],\"env\":[],\"agent_kind\":null,\"initial_prompt\":null,\"system_prompt\":null}}",
+            ),
+            session_id: None,
+            session: Some("default"),
+        })
+        .unwrap();
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE runs DROP COLUMN herdr_anchor_pane_id; PRAGMA user_version=11;",
+        )
+        .unwrap();
+    }
+    let db = Db::open(&path).unwrap();
+    assert_eq!(db.user_version().unwrap(), 12);
+    assert_eq!(db.list_runs(1).unwrap()[0].herdr_anchor_pane_id, None);
 }
 
 #[test]
@@ -55,7 +103,7 @@ fn migration_idempotent_on_reopen() {
     // Reopen: must not re-seed (still exactly one board, one column).
     {
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.user_version().unwrap(), 11);
+        assert_eq!(db.user_version().unwrap(), 12);
         assert_eq!(db.list_columns(BOARD_ID).unwrap().len(), 1);
         assert_eq!(db.get_board(BOARD_ID).unwrap().name, "Global");
     }
@@ -145,7 +193,7 @@ fn migration_v2_upgrades_v1_database() {
     }
     // Open via Db → runs the v2 through v7 migrations.
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 11);
+    assert_eq!(db.user_version().unwrap(), 12);
     let cards = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(cards.len(), 2);
     for c in &cards {
@@ -287,7 +335,7 @@ fn migration_v4_preserves_claude_cards_and_accepts_pi_efforts() {
     }
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 11);
+    assert_eq!(db.user_version().unwrap(), 12);
     let existing = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(existing[0].harness, "claude");
     assert_eq!(db.list_comments(existing[0].id).unwrap().len(), 1);
@@ -309,14 +357,14 @@ fn migration_does_not_downgrade_future_schema_version() {
     let path = tmp.path().to_path_buf();
     {
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.user_version().unwrap(), 11);
+        assert_eq!(db.user_version().unwrap(), 12);
     }
     {
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch("PRAGMA user_version = 8;").unwrap();
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 11);
+    assert_eq!(db.user_version().unwrap(), 12);
 }
 
 #[test]
@@ -341,7 +389,7 @@ fn migration_v3_adds_archived_at_to_v2_database() {
         .unwrap();
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 11);
+    assert_eq!(db.user_version().unwrap(), 12);
     let cards = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(cards.len(), 1);
     assert!(cards[0].archived_at.is_none());
@@ -441,7 +489,7 @@ fn v6_to_v7_migration_preserves_legacy_queued_run_byte_for_byte() {
         .unwrap();
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 11);
+    assert_eq!(db.user_version().unwrap(), 12);
     let run = &db.list_runs(1).unwrap()[0];
     assert_eq!(run.argv_json, argv);
     assert_eq!(run.prompt_snapshot, prompt);
@@ -494,7 +542,7 @@ fn migration_v5_preserves_global_data_and_renames_it() {
 
     let db = Db::open(&path).unwrap();
     let global = db.get_board(BOARD_ID).unwrap();
-    assert_eq!(db.user_version().unwrap(), 11);
+    assert_eq!(db.user_version().unwrap(), 12);
     assert_eq!(global.name, "Global");
     assert!(global.scope_path.is_none());
     let cards = db.list_cards(BOARD_ID).unwrap();
@@ -588,7 +636,7 @@ fn migration_v6_rebuilds_cards_check_and_preserves_data() {
     }
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 11);
+    assert_eq!(db.user_version().unwrap(), 12);
     let cards = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(cards.len(), 2);
     let kept = &cards[0];

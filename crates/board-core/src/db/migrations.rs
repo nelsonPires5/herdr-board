@@ -8,7 +8,7 @@ use crate::{Error, Result};
 const SCHEMA_SQL: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../schema.sql"));
 
 /// The latest schema version embedded in [`SCHEMA_SQL`].
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
 
 /// v1 → v2 migration. SQLite cannot alter a CHECK constraint or drop a column
 /// in place, so `cards` is rebuilt. Legacy `space_kind` values `cwd`/`worktree`
@@ -204,6 +204,9 @@ const V10_QUEUED_INDEX_SQL: &str =
 const V10_ACTIVE_INDEX_SQL: &str =
     "CREATE INDEX idx_runs_active_open ON runs(id) WHERE started_at IS NOT NULL AND ended_at IS NULL";
 const V11_MIGRATION_SQL: &str = "ALTER TABLE runs ADD COLUMN launch_spec_json TEXT";
+/// v11 → v12: persist the exact shell anchor pane for durable card tabs.
+/// Existing runs remain NULL because their launch never recorded an anchor.
+const V12_MIGRATION_SQL: &str = "ALTER TABLE runs ADD COLUMN herdr_anchor_pane_id TEXT";
 
 impl Db {
     /// Apply migrations gated on `PRAGMA user_version`. Idempotent.
@@ -354,6 +357,15 @@ impl Db {
                 )?;
                 if !has_spec {
                     tx.execute_batch(V11_MIGRATION_SQL)?;
+                }
+            }
+            if version < 12 {
+                let has_anchor: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('runs') WHERE name='herdr_anchor_pane_id')",
+                    [], |r| r.get(0),
+                )?;
+                if !has_anchor {
+                    tx.execute_batch(V12_MIGRATION_SQL)?;
                 }
             }
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
