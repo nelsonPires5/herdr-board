@@ -1,6 +1,6 @@
 -- herdr-board SQLite schema (WAL mode; boardd is the only writer).
--- This file is the CURRENT (schema v12) shape: a fresh DB is created directly
--- from it and stamped `PRAGMA user_version = 12`. Existing databases are upgraded
+-- This file is the CURRENT (schema v13) shape: a fresh DB is created directly
+-- from it and stamped `PRAGMA user_version = 13`. Existing databases are upgraded
 -- by migrations in board-core/src/db/migrations.rs (kept in sync with this file).
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -73,8 +73,34 @@ CREATE TABLE comments (
   card_id    INTEGER NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
   author     TEXT NOT NULL,                    -- 'user' | 'agent:<run_id>' | 'system'
   body       TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  deleted_at TEXT                              -- NULL = current; timestamp = soft-deleted
 );
+
+-- Immutable snapshots of every user-visible comment state.  The current row
+-- remains in `comments` so its identity and ownership are stable; history is
+-- retained after a soft delete for audit and authorization decisions.
+CREATE TABLE comment_history (
+  id         INTEGER PRIMARY KEY,
+  comment_id INTEGER NOT NULL REFERENCES comments(id) ON DELETE CASCADE,
+  card_id    INTEGER NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+  author     TEXT NOT NULL,
+  body       TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  deleted_at TEXT
+);
+
+CREATE INDEX idx_comment_history_comment ON comment_history(comment_id, id);
+
+-- System and daemon-generated comments use the same insertion path as user
+-- comments (including run finalization), so every durable comment gets its
+-- initial audit snapshot without relying on one caller remembering to do so.
+CREATE TRIGGER comments_audit_insert
+AFTER INSERT ON comments
+BEGIN
+  INSERT INTO comment_history(comment_id, card_id, author, body, created_at, deleted_at)
+  VALUES(NEW.id, NEW.card_id, NEW.author, NEW.body, NEW.created_at, NEW.deleted_at);
+END;
 
 CREATE TABLE runs (
   id                 INTEGER PRIMARY KEY,

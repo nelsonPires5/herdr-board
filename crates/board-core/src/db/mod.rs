@@ -41,6 +41,23 @@ pub struct EnqueueRun<'a> {
     pub session: Option<&'a str>,
 }
 
+/// A target used by [`Db::apply_template_columns_uow`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnTarget {
+    /// A column that already exists on the board.
+    Existing(i64),
+    /// A column in the batch, addressed by its zero-based input index.
+    Created(usize),
+}
+
+/// One transition wiring update in [`Db::apply_template_columns_uow`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColumnWiring {
+    pub column_index: usize,
+    pub on_success: Option<ColumnTarget>,
+    pub on_fail: Option<ColumnTarget>,
+}
+
 /// Optional next run inserted atomically with finalization (an auto hop).
 pub struct FinalizeRun<'a> {
     pub run_id: i64,

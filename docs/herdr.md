@@ -88,9 +88,10 @@ bounded 100ms/200ms backoff. It never allocates a second child for that
 response. Persistent busy is a launch failure whose cleanup closes only the
 owned child pane and leaves the anchor; `pane_not_found` is handled separately
 as a placement race that restarts discovery from `tab.list` and retries
-complete placement once. Schema v12 persists the exact anchor id with the run;
-after restart both tab and anchor are selected only from scoped durable pane
-identities. Labels are display metadata and never authorize a tab or pane.
+complete placement once. Schema v13 persists the exact anchor id with the run
+(the anchor was introduced in v12) and adds comment audit state; after restart
+both tab and anchor are selected only from scoped durable pane identities.
+Labels are display metadata and never authorize a tab or pane.
 `agent.read` remains a terminal screen/scrollback read, not a semantic result
 channel.
 

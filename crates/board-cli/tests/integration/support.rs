@@ -95,9 +95,26 @@ impl TestDaemon {
         self.board_in(self._dir.path(), args)
     }
 
+    pub(crate) fn board_with_env(
+        &self,
+        args: &[&str],
+        envs: &[(&str, &str)],
+    ) -> std::process::Output {
+        self.board_in_with_env(self._dir.path(), args, envs)
+    }
+
     pub(crate) fn board_in(&self, cwd: &std::path::Path, args: &[&str]) -> std::process::Output {
-        Command::new(BOARD_BIN)
-            .args(args)
+        self.board_in_with_env(cwd, args, &[])
+    }
+
+    pub(crate) fn board_in_with_env(
+        &self,
+        cwd: &std::path::Path,
+        args: &[&str],
+        envs: &[(&str, &str)],
+    ) -> std::process::Output {
+        let mut cmd = Command::new(BOARD_BIN);
+        cmd.args(args)
             .current_dir(cwd)
             .env("BOARD_SOCKET", &self.socket)
             .env("BOARD_DB", self._dir.path().join("board.db"))
@@ -105,9 +122,14 @@ impl TestDaemon {
             .env("HOME", self._dir.path())
             .env_remove("BOARD_SCOPE_PATH")
             .env_remove("HERDR_PLUGIN_CONTEXT_JSON")
-            .stdin(Stdio::null())
-            .output()
-            .expect("run board binary")
+            // A test process should be a human context unless it opts in
+            // explicitly below; do not inherit an agent's ambient identity.
+            .env_remove("BOARD_RUN_ID")
+            .stdin(Stdio::null());
+        for (key, value) in envs {
+            cmd.env(key, value);
+        }
+        cmd.output().expect("run board binary")
     }
 }
 

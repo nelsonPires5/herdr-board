@@ -1,7 +1,7 @@
 # Testing
 
 How herdr-board is tested, and how to add tests for a change. The final contract is board
-protocol v1, SQLite schema v12, and Herdr 0.7.5 / protocol 17. Four layers, cheap and hermetic
+protocol v1, SQLite schema v13, and Herdr 0.7.5 / protocol 17. Four layers, cheap and hermetic
 first, expensive and live last:
 
 ```
@@ -36,14 +36,32 @@ The stable ownership layout is responsibility-oriented, not a file manifest:
 | `board-herdr` | Public envelope, event, and socket behavior is tested from `crates/board-herdr/tests/`, including ignored live probes. Event parsing, backoff, and stream handling are owned by `crates/board-herdr/src/events/`; all unsafe board-herdr Unix transport operations remain in `crates/board-herdr/src/transport.rs`. |
 | `board-tui` | Public reducer, form, and rendering behavior is tested from `crates/board-tui/tests/` (including `forms.rs`, `update.rs`, and snapshots). The implementation is organized under `crates/board-tui/src/app/`, `crates/board-tui/src/forms/`, and `crates/board-tui/src/view/`; only view tests that need private rendering helpers remain adjacent in `crates/board-tui/src/view/tests.rs`. |
 
-The public core suites cover deterministic engine decisions, schema-v12 migrations and atomic
+The public core suites cover deterministic engine decisions, schema-v13 migrations and atomic
 run units of work, protocol-v1 serde, typed client boundaries, configuration, prompt assembly,
 harness planning, and scoped-board behavior. Herdr suites cover protocol-17 event decoding and
 socket behavior against an in-process fake server. Daemon private suites cover queue claims,
 spawn/finalization atomicity, pane placement, configured and managed launch characterization,
-request routing, watcher signals, timeout handling, and per-session recovery. TUI suites cover
-fake-client reducer behavior, forms, and ratatui snapshots. Keep descriptions at this ownership
-level; add a path only when it is a stable boundary or a useful entry point.
+request routing, watcher signals, timeout handling, per-session recovery, and comment actor policy.
+TUI suites cover fake-client reducer behavior, forms, and ratatui snapshots. Keep descriptions at
+this ownership level; add a path only when it is a stable boundary or a useful entry point.
+
+### RED → GREEN parity and schema-v13 coverage
+
+The current parity/schema-v13 change is specified test-first:
+
+- **RED contracts:** `crates/board-core/tests/comments_boards_contract.rs` covers board identity,
+  visibility, comment CRUD, soft deletion, audit snapshots, system immutability, and author
+  retention; `comments_migration_contract.rs` upgrades a v12 fixture to v13 without changing
+  legacy board/card/comment/run values.
+- **GREEN implementation coverage:** `board-daemon/src/ops/tests/comments.rs` checks RPC routing,
+  exact open-run actor ownership, fake-harness compatibility, immutable system comments, hidden
+  deleted comments, and scoped change events. `board-cli/tests/integration/cli_contract.rs`
+  exercises canonical nested CRUD/history, JSON output/errors, global selectors, version/status
+  separation, and the canonical command surface; `compat.rs` protects top-level aliases.
+- **CLI/E2E boundary:** live scenarios 01, 04, 06, 08, 09, 11, 16, and 17 exercise CLI comment
+  creation, transition/silent-exit/timeout system comments, comment context in later prompts, and
+  managed/configured comment completion against disposable Herdr. CRUD/audit semantics stay in
+  hermetic core/daemon/CLI tests; the live suite does not duplicate every management RPC.
 
 Nullable update coverage in `board-core` is table-driven across every column/card nullable:
 protocol tests verify omitted/null/value serde states, database tests verify set → clear and reopen
@@ -146,7 +164,7 @@ case ↔ scenario ↔ status catalog):
 | `10-archive-filter-title.sh` | Archive filter → scoped dynamic pane title (`Board [scope · ACTIVE/ALL/ARCHIVED]`) + minimal footer. |
 | `11-pi-harness.sh` | Built-in Pi mint/retry through real Herdr with `e2e/fake-bin/pi`; validates model, low thinking, 0600 protocol system file, exact `agent.prompt` delivery, comments, and fork target without provider cost. |
 | `12-cwd-boards.sh` | Git root/subdir sharing, non-Git CWD isolation, independent columns/cards, scoped TUI title, and picker including Global. |
-| `13-jump-to-pane.sh` | Held fake-agent pane + real plugin overlay: detail `o` focuses the same-session target and closes the board pane. |
+| `13-jump-to-pane.sh` | Held fake-agent pane + real plugin overlay: canonical CLI `card run focus` and detail `o` both focus the same-session target; `o` also closes the board pane. |
 | `14-column-config.sh` | Column harness/effort/permission overrides flow into a config-defined harness. |
 | `15-awaiting.sh` | Integration-style reports on a live managed pane: blocked → working → end-of-turn idle (Herdr derives `done`) → `awaiting` (`agent_done`, run/pane stay open, timeout paused); `board done ok` confirms → `done`, no column move. |
 | `16-managed-p17.sh` | Pane-first protocol-17 Pi + Claude launch through checked-in no-provider fixtures: exact 0600 system files, readiness, session/idle reports, `agent.prompt`, and held layout. |
@@ -324,7 +342,7 @@ Checklist:
 | **done-race** | Managed built-ins still require a registered pane, so an instant `board done` for a queued built-in run is rejected. A configured harness is different: its exact `board done` is accepted even before runner registration, and the fake agent still sleeps `FAKE_AGENT_SLEEP` (default 1.5s) before reporting in ordinary scenarios. |
 | **A pane dies with its process** | A herdr pane closes when its command exits. To inspect a live layout, keep the process alive — set `FAKE_AGENT_HOLD` (e.g. 300) so the agent sleeps **after** `board done`. Cleanup closes the workspace to end it. |
 | **herdr closes the socket per request** | herdr serves one request per connection. `hrpc.py` (and `board-herdr`'s client) open a fresh connection every call — don't try to reuse one. |
-| **Tab labels are not unique** | New runs resolve `card-<id>` tabs and shell anchors only by exact ids reconstructed from scoped durable panes; schema v12 persists the anchor id. Duplicate tab/anchor labels and legacy `kanban` are never adopted as ownership proof. A renamed exact anchor remains owned; a missing anchor is recovered only from an exact durable child, otherwise a fresh tab is created. Legacy rows retain their historical lookup. |
+| **Tab labels are not unique** | New runs resolve `card-<id>` tabs and shell anchors only by exact ids reconstructed from scoped durable panes; schema v13 retains the anchor id introduced in v12. Duplicate tab/anchor labels and legacy `kanban` are never adopted as ownership proof. A renamed exact anchor remains owned; a missing anchor is recovered only from an exact durable child, otherwise a fresh tab is created. Legacy rows retain their historical lookup. |
 | **Agent names are exclusive** | While a pane is open its agent name is reserved. A collision (e.g. the session already has a `card-1-execute` pane) makes the daemon retry as `card-1-execute-r<run>`. Assertions must accept the optional `-r<n>` suffix. |
 | **A newly split pane can be busy** | Herdr may return typed `agent_pane_busy` while the child still drains prior state. The daemon retries the exact managed `agent.start` request twice on that same owned child with 100ms/200ms backoff; persistent busy closes only that child and leaves the shell anchor. Do not treat it as `pane_not_found`: that error triggers one bounded full placement rediscovery from `tab.list`. |
 | **Managed and configured pane identity differ** | Protocol-17 managed Pi/Claude panes expose the managed kind in `pane.agent`; configured panes are renamed to the daemon-assigned `card-<id>-<column>` label and remain unmanaged. Match the appropriate field and still accept the optional `-r<n>` name suffix. |

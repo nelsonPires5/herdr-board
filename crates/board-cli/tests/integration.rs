@@ -6,6 +6,10 @@
 mod support;
 pub(crate) use support::*;
 
+#[path = "integration/cli_contract.rs"]
+mod cli_contract;
+#[path = "integration/compat.rs"]
+mod compat;
 #[path = "integration/events.rs"]
 mod events;
 #[path = "integration/harness.rs"]

@@ -2,16 +2,17 @@ use serde_json::{json, Value};
 
 use crate::capability::HarnessCapabilities;
 
-use crate::model::{Card, Column, Comment};
+use crate::model::{Card, Column, Comment, CommentHistory, CommentRecord};
 
 use crate::protocol::{
-    BoardGetParams, BoardListResult, BoardOpenParams, BoardSnapshot, CardArchiveParams,
-    CardCreateParams, CardDetail, CardListParams, CardMoveParams, CardUpdateParams,
-    ColumnCreateParams, ColumnDeleteParams, ColumnReorderParams, ColumnUpdateParams,
-    CommentAddParams, DaemonStatus, DeletedResult, Event, HarnessCapabilitiesParams,
-    HarnessListResult, RunActionResult, RunCardParams, RunDoneParams, RunFocusParams,
-    RunFocusResult, RunOutcome, RunPaneExitedParams, SessionListResult, SpaceListParams,
-    SpaceListResult, StopResult, TemplateApplyParams,
+    BoardGetParams, BoardListResult, BoardOpenParams, BoardRenameParams, BoardSnapshot,
+    CardArchiveParams, CardCreateParams, CardDetail, CardListParams, CardMoveParams,
+    CardUpdateParams, CardVisibility, ColumnCreateParams, ColumnDeleteParams, ColumnReorderParams,
+    ColumnUpdateParams, CommentAddParams, CommentDeleteParams, CommentGetParams,
+    CommentHistoryParams, CommentUpdateParams, DaemonStatus, DeletedResult, Event,
+    HarnessCapabilitiesParams, HarnessListResult, RunActionResult, RunCardParams, RunDoneParams,
+    RunFocusParams, RunFocusResult, RunOutcome, RunPaneExitedParams, SessionListResult,
+    SpaceListParams, SpaceListResult, StopResult, TemplateApplyParams,
 };
 
 /// Blocking client to boardd. Object-safe so the TUI can hold `Box<dyn BoardClient>`.
@@ -59,6 +60,15 @@ pub trait BoardClient {
     }
     fn board_list(&mut self) -> anyhow::Result<BoardListResult> {
         Ok(serde_json::from_value(self.call("board.list", json!({}))?)?)
+    }
+    fn board_rename(&mut self, board_id: i64, name: &str) -> anyhow::Result<crate::model::Board> {
+        let p = BoardRenameParams {
+            board_id,
+            name: name.to_string(),
+        };
+        Ok(serde_json::from_value(
+            self.call("board.rename", serde_json::to_value(p)?)?,
+        )?)
     }
 
     fn harness_capabilities(&mut self, harness: &str) -> anyhow::Result<HarnessCapabilities> {
@@ -188,9 +198,25 @@ pub trait BoardClient {
         board_id: Option<i64>,
         column_id: Option<i64>,
     ) -> anyhow::Result<Vec<Card>> {
+        self.card_list_for_board_visible(board_id, column_id, None)
+    }
+    fn card_list_visible(
+        &mut self,
+        column_id: Option<i64>,
+        visibility: CardVisibility,
+    ) -> anyhow::Result<Vec<Card>> {
+        self.card_list_for_board_visible(None, column_id, Some(visibility))
+    }
+    fn card_list_for_board_visible(
+        &mut self,
+        board_id: Option<i64>,
+        column_id: Option<i64>,
+        visibility: Option<CardVisibility>,
+    ) -> anyhow::Result<Vec<Card>> {
         let p = CardListParams {
             board_id,
             column_id,
+            visibility,
         };
         Ok(serde_json::from_value(
             self.call("card.list", serde_json::to_value(p)?)?,
@@ -203,13 +229,61 @@ pub trait BoardClient {
         body: &str,
         author: Option<&str>,
     ) -> anyhow::Result<Comment> {
+        self.comment_add_for_run(card_id, body, author, None)
+    }
+    fn comment_add_for_run(
+        &mut self,
+        card_id: i64,
+        body: &str,
+        author: Option<&str>,
+        actor_run_id: Option<i64>,
+    ) -> anyhow::Result<Comment> {
         let p = CommentAddParams {
             card_id,
             body: body.to_string(),
             author: author.map(str::to_string),
+            actor_run_id,
         };
         Ok(serde_json::from_value(
             self.call("comment.add", serde_json::to_value(p)?)?,
+        )?)
+    }
+
+    fn comment_get(&mut self, id: i64) -> anyhow::Result<CommentRecord> {
+        let p = CommentGetParams { id };
+        Ok(serde_json::from_value(
+            self.call("comment.get", serde_json::to_value(p)?)?,
+        )?)
+    }
+    fn comment_update(
+        &mut self,
+        id: i64,
+        body: &str,
+        actor_run_id: Option<i64>,
+    ) -> anyhow::Result<CommentRecord> {
+        let p = CommentUpdateParams {
+            id,
+            body: body.to_string(),
+            actor_run_id,
+        };
+        Ok(serde_json::from_value(
+            self.call("comment.update", serde_json::to_value(p)?)?,
+        )?)
+    }
+    fn comment_delete(
+        &mut self,
+        id: i64,
+        actor_run_id: Option<i64>,
+    ) -> anyhow::Result<DeletedResult> {
+        let p = CommentDeleteParams { id, actor_run_id };
+        Ok(serde_json::from_value(
+            self.call("comment.delete", serde_json::to_value(p)?)?,
+        )?)
+    }
+    fn comment_history(&mut self, id: i64) -> anyhow::Result<Vec<CommentHistory>> {
+        let p = CommentHistoryParams { id };
+        Ok(serde_json::from_value(
+            self.call("comment.history", serde_json::to_value(p)?)?,
         )?)
     }
 

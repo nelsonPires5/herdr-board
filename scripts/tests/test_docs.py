@@ -14,19 +14,19 @@ class DocumentationContractTests(unittest.TestCase):
         index = (ROOT / "docs/README.md").read_text(encoding="utf-8")
         for text in (
             "Board socket | v1",
-            "SQLite | schema v12",
+            "SQLite | schema v13",
             "Herdr client | 0.7.5 / socket protocol 17",
             "Runtime launch | daemon-owned",
             "Config | typed `RootConfig`",
-            "scenarios 01–25",
+            "scenarios 01–26",
         ):
             self.assertIn(text, index)
 
-    def test_scenario_catalog_and_runner_cover_01_through_25(self) -> None:
+    def test_scenario_catalog_and_runner_cover_01_through_26(self) -> None:
         scenarios = sorted((ROOT / "e2e").glob("[0-9][0-9]-*.sh"))
         self.assertEqual(
             [path.name[:2] for path in scenarios],
-            [f"{number:02d}" for number in range(1, 26)],
+            [f"{number:02d}" for number in range(1, 27)],
         )
         runner = (ROOT / "e2e/run-all.sh").read_text(encoding="utf-8")
         for scenario in scenarios:

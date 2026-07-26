@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+- [#41](https://github.com/nelsonPires5/herdr-board/pull/41) Add canonical CLI parity plus schema-v13 comment CRUD, soft deletion, and immutable audit history.
 - [#NN](https://github.com/nelsonPires5/herdr-board/pull/NN) feat(tui): mobile-responsive Compact layout (terminal width `< 60` cols) — a single full-width column with a tappable `‹  [ ⇄ <column>  n/N ]  ›` header, a Compact-only board/column switcher sheet, per-column card scrolling with a scrollbar in every layout mode (mouse wheel now scrolls the hovered column instead of reordering the focused card), wrapped card titles and help/picker text, and a new widget/HitMap layer adding visible `[ Save ] [ Cancel ]` buttons and sheet close buttons for touch; also fixes the edit form's description field never wrapping (it hard-truncated to one line) and a blank screen after returning from `$EDITOR`.
 - [#40](https://github.com/nelsonPires5/herdr-board/pull/40) Reserve a durably owned shell anchor in each board-managed card tab; every stage/retry launches only from a split child, with safe anchor recovery and child-only cleanup.
 - [#39](https://github.com/nelsonPires5/herdr-board/pull/39) Per-card Herdr tabs use stable `card-<id>` labels, exact board-owned tab IDs, safe restart reconstruction, serialized first allocation, and closed-tab recreation; legacy `kanban` rows remain unchanged.

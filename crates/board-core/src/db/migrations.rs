@@ -8,7 +8,7 @@ use crate::{Error, Result};
 const SCHEMA_SQL: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../schema.sql"));
 
 /// The latest schema version embedded in [`SCHEMA_SQL`].
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 13;
 
 /// v1 → v2 migration. SQLite cannot alter a CHECK constraint or drop a column
 /// in place, so `cards` is rebuilt. Legacy `space_kind` values `cwd`/`worktree`
@@ -208,6 +208,31 @@ const V11_MIGRATION_SQL: &str = "ALTER TABLE runs ADD COLUMN launch_spec_json TE
 /// Existing runs remain NULL because their launch never recorded an anchor.
 const V12_MIGRATION_SQL: &str = "ALTER TABLE runs ADD COLUMN herdr_anchor_pane_id TEXT";
 
+/// v12 → v13: retain current comment identity while adding soft deletion and
+/// immutable audit snapshots. Existing rows seed the initial snapshot before
+/// the insert trigger is installed for future comment writers.
+const V13_MIGRATION_SQL: &str = "
+ALTER TABLE comments ADD COLUMN deleted_at TEXT;
+CREATE TABLE comment_history (
+  id         INTEGER PRIMARY KEY,
+  comment_id INTEGER NOT NULL REFERENCES comments(id) ON DELETE CASCADE,
+  card_id    INTEGER NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+  author     TEXT NOT NULL,
+  body       TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  deleted_at TEXT
+);
+INSERT INTO comment_history(comment_id,card_id,author,body,created_at,deleted_at)
+  SELECT id,card_id,author,body,created_at,deleted_at FROM comments;
+CREATE INDEX idx_comment_history_comment ON comment_history(comment_id, id);
+CREATE TRIGGER comments_audit_insert
+AFTER INSERT ON comments
+BEGIN
+  INSERT INTO comment_history(comment_id,card_id,author,body,created_at,deleted_at)
+  VALUES(NEW.id,NEW.card_id,NEW.author,NEW.body,NEW.created_at,NEW.deleted_at);
+END;
+";
+
 impl Db {
     /// Apply migrations gated on `PRAGMA user_version`. Idempotent.
     ///
@@ -366,6 +391,56 @@ impl Db {
                 )?;
                 if !has_anchor {
                     tx.execute_batch(V12_MIGRATION_SQL)?;
+                }
+            }
+            if version < 13 {
+                let has_deleted_at: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('comments') WHERE name='deleted_at')",
+                    [],
+                    |r| r.get(0),
+                )?;
+                if !has_deleted_at {
+                    tx.execute_batch(V13_MIGRATION_SQL)?;
+                } else {
+                    // Complete a partially applied shape without duplicating
+                    // an already-created table or trigger.
+                    let has_history: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM sqlite_master
+                         WHERE type='table' AND name='comment_history')",
+                        [],
+                        |r| r.get(0),
+                    )?;
+                    if !has_history {
+                        tx.execute_batch(
+                            "CREATE TABLE comment_history (
+                               id INTEGER PRIMARY KEY,
+                               comment_id INTEGER NOT NULL REFERENCES comments(id) ON DELETE CASCADE,
+                               card_id INTEGER NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+                               author TEXT NOT NULL, body TEXT NOT NULL,
+                               created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                               deleted_at TEXT
+                             );
+                             INSERT INTO comment_history(comment_id,card_id,author,body,created_at,deleted_at)
+                               SELECT id,card_id,author,body,created_at,deleted_at FROM comments;
+                             CREATE INDEX idx_comment_history_comment ON comment_history(comment_id,id);",
+                        )?;
+                    }
+                    let has_trigger: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM sqlite_master
+                         WHERE type='trigger' AND name='comments_audit_insert')",
+                        [],
+                        |r| r.get(0),
+                    )?;
+                    if !has_trigger {
+                        tx.execute_batch(
+                            "CREATE TRIGGER comments_audit_insert
+                             AFTER INSERT ON comments
+                             BEGIN
+                               INSERT INTO comment_history(comment_id,card_id,author,body,created_at,deleted_at)
+                               VALUES(NEW.id,NEW.card_id,NEW.author,NEW.body,NEW.created_at,NEW.deleted_at);
+                             END;",
+                        )?;
+                    }
                 }
             }
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;

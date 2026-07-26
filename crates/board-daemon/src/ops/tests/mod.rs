@@ -90,6 +90,7 @@ fn fake_herdr(reply: &'static str) -> (tempfile::TempDir, PathBuf) {
 
 mod boards;
 mod cards;
+mod comments;
 mod discovery;
 mod lifecycle;
 mod validation;

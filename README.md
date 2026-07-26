@@ -42,7 +42,7 @@ only `Todo`.
 
 Requires exactly **Herdr 0.7.5 (protocol 17)**, Git, and a Rust toolchain with `cargo`. Linux
 and macOS are supported. Ensure `~/.local/bin` is on your `PATH`. The board protocol is v1 and the
-current SQLite schema is v11; `schema.sql` defines fresh databases and the daemon applies tested
+current SQLite schema is v13; `schema.sql` defines fresh databases and the daemon applies tested
 upgrades through `board-core::db`.
 
 The daemon checks the selected Herdr socket before workspace discovery and pane launch. It rejects
@@ -102,7 +102,7 @@ regular, non-symlink `board` whose contents still match that marker.
 The same flow from the shell:
 
 ```bash
-board card new --title "Add retry to the uploader" \
+board card create --title "Add retry to the uploader" \
   -d "In src/upload.rs, retry failed PUTs 3x with backoff. Add a unit test." \
   --effort low \
   --space-kind new-workspace --space-ref uploader --space-cwd /path/to/repo
@@ -249,28 +249,134 @@ separate board stack.
 ## CLI reference
 
 <details>
-<summary><strong>Show all board commands</strong></summary>
+<summary><strong>Canonical commands, selectors, and JSON</strong></summary>
 
-```text
-board tui | daemon [--foreground] | status [--json]
-board card new --title T [-d D] [--column C] [--harness H] [--model M] [--effort E] \
-   [--permission P] [--session S] [--space-kind workspace|new-workspace] \
-   [--space-ref R] [--space-cwd DIR]      # space-cwd required for new-workspace
-board card show <ID> | card list [--column C] | card archive|restore <ID> | column list
-board comment [CARD_ID] <BODY>            # CARD_ID defaults to $BOARD_CARD_ID
-board done [CARD_ID] --outcome ok|fail [--summary S]
-board move <CARD_ID> <COLUMN> | cancel <CARD_ID> | retry <CARD_ID>
-board harness models [HARNESS] | efforts [HARNESS] --model M | permissions [HARNESS]
-board space list [--session S] | session list    # HARNESS defaults to "pi"
+`board` is one binary with a nested canonical taxonomy. Put the global selector before any command:
+
+```bash
+board --board <ID|PATH> card list --json
 ```
 
-Scope-sensitive CLI commands (`card new/list`, `column list`) use the current Git root, or the
-canonical CWD outside Git. `BOARD_SCOPE_PATH` overrides this for automation. Operations by card id
-remain independent of the caller's CWD; `move` resolves its destination in the card's own board.
+`--board` accepts a stable board id or canonical scope path. Without it, board-aware commands use the
+focused Git root (or canonical non-Git CWD; `BOARD_SCOPE_PATH` overrides both). Card-id operations
+(`show`, `edit`, `delete`, comments, and runs) infer the card's own board; `card create`, `card list`,
+`column list`, and board commands use the selected/current board.
 
-`--json` is accepted everywhere. In the TUI, `d` permanently deletes a card after confirmation;
-`D` deletes a column after asking where to move its cards, and refuses while a card is active.
-Archiving is reversible with `a`, `board card archive <ID>`, and `board card restore <ID>`.
+### Boards, templates, and cards
+
+```text
+board board list [--json]
+board board show [ID|PATH] [--json]
+board board open <PATH> [--json]
+board board rename [ID|PATH] <NAME> [--json]
+board template apply pipeline [--json]
+
+board card create --title T [-d DESC] [--column C] [--harness H] [--model M]
+  [--effort E] [--permission P] [--session S]
+  [--space-kind workspace|new-workspace] [--space-ref R] [--space-cwd DIR] [--json]
+board card edit <ID> [--title T] [-d DESC] [--clear-description]
+  [--harness H] [--model M|--clear-model] [--effort E|--clear-effort]
+  [--permission P|--clear-permission] [--session S|--clear-session]
+  [--space-ref R|--clear-space-ref] [--space-cwd DIR|--clear-space-cwd] [--json]
+board card show <ID> [--json]
+board card list [--column C] [--visibility active|all|archived] [--json]
+board card move <ID> <COLUMN> [--destination-board ID|PATH] [--json]
+board card archive|restore <ID> [--json]
+board card delete <ID> [--yes] [--json]
+```
+
+`card create` is the canonical spelling; `card new` remains an alias. A new card defaults to Pi and
+an omitted model/effort uses the harness default. `new-workspace` requires both `--space-ref` and
+`--space-cwd`; creating directly in an `auto` column dispatches a run. `card list` defaults to active
+cards; `all` includes archived cards and `archived` returns only archived cards. JSON list commands
+return arrays; `board show`/`open` return a snapshot `{board, columns, cards, active_runs}`; card
+show returns `{card, comments, runs}`. Card mutations return a card, except delete returns
+`{"deleted":true}`.
+
+Edits leave omitted fields unchanged. Use the explicit `--clear-*` flags to clear nullable values
+(`--clear-description` sets the description to an empty string). Harness cannot be cleared. Delete
+is permanent and removes history; it requires `--yes` when stdin is not a TTY, otherwise it prompts
+and cancels unless the answer is `y`/`yes`. Cards with an open run must be cancelled before edit of
+run settings, archive, or delete.
+
+### Comments and runs
+
+```text
+board card comment add <CARD_ID> <BODY> [--json]
+board card comment show <COMMENT_ID> [--json]
+board card comment edit <COMMENT_ID> <BODY> [--json]
+board card comment delete <COMMENT_ID> [--yes] [--json]
+board card comment history <COMMENT_ID> [--json]
+
+board card run done [CARD_ID] --outcome ok|fail [--summary S] [--json]
+board card run confirm [CARD_ID] [--summary S] [--json]
+board card run cancel <CARD_ID> [--json]
+board card run retry <CARD_ID> [--json]
+board card run focus <CARD_ID> [--origin-socket SOCKET] [--json]
+```
+
+Comment add returns the compact current comment (`id`, `card_id`, `author`, `body`,
+`created_at`); show/edit return the current record with those fields plus `deleted_at`; delete
+returns `{deleted:true}`; history is an array of immutable snapshots. Ordinary card detail hides soft-deleted comments. A comment created
+inside a durable run is owned by `agent:<BOARD_RUN_ID>`; with `BOARD_RUN_ID` set, that run may
+edit/delete only its own comment while the run is open. Human calls without it may edit/delete
+non-system comments. System comments and deleted comments are immutable. `card run confirm` is the
+`done --outcome ok` channel for awaiting review.
+Focus returns `{run_id, pane_id}` and requires the target run to belong to the current Herdr session;
+without `--origin-socket`, it uses `HERDR_SOCKET_PATH` or `HERDR_SOCK`.
+
+### Columns and discovery
+
+```text
+board column list [--json]
+board column create --name NAME [--prompt TEXT] [--trigger manual|auto]
+  [--on-success COLUMN] [--on-fail COLUMN] [--fresh-session|--reuse-session]
+  [--harness H] [--model M] [--effort E] [--permission P]
+  [--timeout MINUTES] [--position N] [--json]
+board column show <ID|NAME> [--json]
+board column edit <ID|NAME> [--name NAME] [--prompt TEXT|--clear-prompt]
+  [--trigger manual|auto] [--on-success COLUMN|--clear-on-success]
+  [--on-fail COLUMN|--clear-on-fail] [--fresh-session|--reuse-session]
+  [--harness H|--clear-harness] [--model M|--clear-model]
+  [--effort E|--clear-effort] [--permission P|--clear-permission]
+  [--timeout MINUTES|--clear-timeout] [--json]
+board column reorder <ID|NAME> <ZERO-BASED-POSITION> [--json]
+board column delete <ID|NAME> [--move-cards-to COLUMN] [--yes] [--json]
+board harness list|models|efforts|permissions [--json]
+board space list [--session S] [--json]
+board session list [--json]
+```
+
+Column list/reorder JSON is an ordered array; create/show/edit JSON is a column. Column transition
+references are names (case-insensitive) or ids. `--fresh-session` and `--reuse-session` are
+mutually exclusive. A column with cards requires `--move-cards-to`; any open card run blocks column
+deletion. `template apply pipeline` is atomic and only works on a board containing exactly its seed
+`Todo` column and no cards; it returns the resulting column array.
+
+### Daemon, version, skill, and compatibility aliases
+
+```text
+board daemon [--foreground] [--stop]
+board daemon status [--json]
+board version [--json]
+board skill
+```
+
+`daemon status` is the operational probe and returns `{version, db_path, herdr_connected, active_runs,
+queued_runs}`. `version` never starts boardd: it reports `{cli_version, daemon_version}`, where the
+daemon value is `null`/`unavailable` when boardd is offline. `skill` prints the exact checked-in
+`skill/SKILL.md` bytes, not a JSON envelope.
+
+The older top-level action forms remain supported: `board comment [CARD_ID] BODY` (card id defaults
+to `$BOARD_CARD_ID`), `board done`, `board move`, `board cancel`, and `board retry`. Only
+`board daemon status [--json]` is supported for daemon status. The nested forms above are canonical;
+`card new` and `--to-board` remain accepted aliases.
+
+Every command accepts `--json` where shown. Successful JSON is written to stdout. JSON errors are
+written to stderr with no stdout output and keep the stable envelope
+`{"error":{"code":N,"kind":"...","message":"...","details":...}}`; additive `kind` and
+`details` may be omitted. Codes are 1 bad request, 2 not found/CLI error, 3 invalid state, 4 Herdr
+unavailable, and 5 internal error.
 
 The pane title combines scope and filter, for example `Board [my-repo · ACTIVE]`. In card detail,
 `o` focuses the latest recorded run pane only when it belongs to the current Herdr session; errors
@@ -467,7 +573,7 @@ The Unix-socket transport retains only the raw request primitive; production cli
 - `scripts/install.sh` — local-development setup;
 - `scripts/open-board.sh` — open-or-focus plugin action;
 - `scripts/board-rpc.py` — raw daemon protocol client;
-- `e2e/` — scenarios 01–25 against disposable Herdr sessions/workspaces; checked-in fake Pi,
+- `e2e/` — scenarios 01–26 against disposable Herdr sessions/workspaces; checked-in fake Pi,
   Claude, and configured harnesses keep the standard suite provider-free. `e2e/test-harness.sh`
   performs static ownership/safety checks without starting Herdr; the live suite is a separate gate.
 
@@ -486,7 +592,7 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`AGENTS.md`](AGENTS.md) before con
 
 ## Status
 
-**v1 board protocol / schema v12.** Rust with Ratatui, Rusqlite, and Tokio. Pi is the default
+**v1 board protocol / schema v13.** Rust with Ratatui, Rusqlite, and Tokio. Pi is the default
 built-in harness and Claude Code remains explicitly selectable; config-defined harnesses are also
 supported. Execution happens in visible Herdr panes, and extension-owned state remains separate from
 Herdr's state. See [`docs/README.md`](docs/README.md) for version, source-ownership, and test-gate

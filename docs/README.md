@@ -6,8 +6,9 @@ The reference detail behind the [root README](../README.md). Start here to find 
 
 | Surface | Final version / owner | Canonical source |
 |---|---|---|
-| Board socket | v1; `board-core::protocol` | [protocol.md](protocol.md) |
-| SQLite | schema v12; `schema.sql` + `board-core::db` migrations | [design.md](design.md) |
+| Board socket | v1; `board-core::protocol` (additive `active_runs`, error `kind`/`details`) | [protocol.md](protocol.md) |
+| SQLite | schema v13; `schema.sql` + `board-core::db` migrations | [design.md](design.md) |
+| CLI | canonical nested `board board/card/comment/run/column` taxonomy; `board-cli` wiring | [README CLI reference](../README.md#cli-reference), [skill](../skill/SKILL.md) |
 | Herdr client | 0.7.5 / socket protocol 17; `board-herdr` typed calls | [herdr.md](herdr.md) |
 | Runtime launch | daemon-owned `Spawner`, placement, process/pane handles | [implementation.md](implementation.md) |
 | Config | typed `RootConfig`, one parse, environment overrides after parse | [design.md](design.md) |
@@ -29,8 +30,8 @@ isolation is an agent prompt concern, not a board space primitive.
 
 The [`schema.sql`](../schema.sql) at the repo root is the fresh SQLite schema; migration behavior
 and upgrade tests live in `board-core::db`. Before handoff, check that docs still point to existing
-files, that the version matrix above says v11 / v1 / Herdr 0.7.5-protocol 17, and that the scenario
-catalog lists every `e2e/NN-*.sh` from 01 through 25. The provider-free static safety gate is:
+files, that the version matrix above says schema v13 / protocol v1 / Herdr 0.7.5-protocol 17, and that
+the scenario catalog lists every `e2e/NN-*.sh` from 01 through 26. The provider-free static safety gate is:
 
 ```bash
 cargo fmt --all --check
