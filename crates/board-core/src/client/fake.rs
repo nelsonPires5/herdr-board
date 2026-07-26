@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::db::{Db, FinalizeEffects, FinalizeRun, BOARD_ID};
+use crate::db::{ColumnTarget, ColumnWiring, Db, FinalizeEffects, FinalizeRun, BOARD_ID};
 
 use crate::engine;
 
@@ -10,10 +10,35 @@ use crate::protocol::{
     CardUpdateParams, ColumnCreateParams, ColumnDeleteParams, ColumnReorderParams,
     ColumnUpdateParams, CommentAddParams, CommentDeleteParams, CommentGetParams,
     CommentHistoryParams, CommentUpdateParams, DeletedResult, Event, RunActionResult,
-    RunDoneParams, RunFocusParams, RunFocusResult,
+    RunDoneParams, RunFocusParams, RunFocusResult, TemplateApplyParams, Trigger,
 };
 
 use super::BoardClient;
+
+// Mirrors `crates/board-daemon/src/ops/boards.rs` (`template_apply`) and
+// `crates/board-daemon/src/template.rs`: same prompts, same five columns, same
+// transitions. Duplicated here (rather than shared) because the daemon logic
+// lives in board-daemon, which board-core cannot depend on; the column
+// creation/wiring itself is shared via `Db::apply_template_columns_uow` so
+// that part cannot drift.
+const PLAN_PROMPT: &str =
+    "You are in the PLAN stage. Use /quick-planner style planning: produce a written
+implementation plan and save it under docs/plans/ (or .plans/). Do not write code.
+When finished you MUST run:
+  board comment $BOARD_CARD_ID \"Plan ready at <filepath>. <3-line summary>\"
+  board done $BOARD_CARD_ID --outcome ok";
+
+const EXECUTE_PROMPT: &str =
+    "You are in the EXECUTE stage. Implement the plan referenced in the card comments.
+Run tests. When finished:
+  board comment $BOARD_CARD_ID \"<what changed, files touched, test results>\"
+  board done $BOARD_CARD_ID --outcome ok    # or --outcome fail with reasons";
+
+const REVIEW_PROMPT: &str =
+    "You are in the REVIEW stage. Review the diff against the card description and the
+plan/execution comments. Be adversarial. Then:
+  board comment $BOARD_CARD_ID \"<verdict + findings>\"
+  board done $BOARD_CARD_ID --outcome ok    # ok = ship to human; fail = back to Execute";
 
 /// In-memory board state machine for TUI tests. Backed by an in-memory
 /// SQLite db, so CRUD/move/positions/comments behave exactly like the real
@@ -285,6 +310,80 @@ impl BoardClient for FakeBoardClient {
                 let p: CommentHistoryParams = serde_json::from_value(params)?;
                 serde_json::to_value(db.list_comment_history(p.id)?)?
             }
+            "template.apply" => {
+                let p: TemplateApplyParams = serde_json::from_value(params)?;
+                if p.name != "pipeline" {
+                    return Err(
+                        crate::Error::BadRequest(format!("unknown template: {}", p.name)).into(),
+                    );
+                }
+                let board_id = p.board_id.unwrap_or(BOARD_ID);
+                db.get_board(board_id)?;
+                let existing = db.list_columns(board_id)?;
+                let cards = db.list_cards(board_id)?;
+                if existing.len() != 1 || existing[0].name != "Todo" || !cards.is_empty() {
+                    return Err(crate::Error::InvalidState(
+                        "template.apply requires an empty board (only the seed Todo column, no cards)"
+                            .into(),
+                    )
+                    .into());
+                }
+                let todo = existing[0].id;
+                let specs = vec![
+                    ColumnCreateParams {
+                        name: "Plan".into(),
+                        board_id: Some(board_id),
+                        trigger: Some(Trigger::Auto),
+                        system_prompt: Some(PLAN_PROMPT.into()),
+                        ..Default::default()
+                    },
+                    ColumnCreateParams {
+                        name: "Execute".into(),
+                        board_id: Some(board_id),
+                        trigger: Some(Trigger::Auto),
+                        system_prompt: Some(EXECUTE_PROMPT.into()),
+                        ..Default::default()
+                    },
+                    ColumnCreateParams {
+                        name: "Review".into(),
+                        board_id: Some(board_id),
+                        trigger: Some(Trigger::Auto),
+                        system_prompt: Some(REVIEW_PROMPT.into()),
+                        model_override: Some("opus".into()),
+                        ..Default::default()
+                    },
+                    ColumnCreateParams {
+                        name: "Human Review".into(),
+                        board_id: Some(board_id),
+                        trigger: Some(Trigger::Manual),
+                        ..Default::default()
+                    },
+                    ColumnCreateParams {
+                        name: "Done".into(),
+                        board_id: Some(board_id),
+                        trigger: Some(Trigger::Manual),
+                        ..Default::default()
+                    },
+                ];
+                let wiring = [
+                    ColumnWiring {
+                        column_index: 0,
+                        on_success: Some(ColumnTarget::Created(1)),
+                        on_fail: Some(ColumnTarget::Existing(todo)),
+                    },
+                    ColumnWiring {
+                        column_index: 1,
+                        on_success: Some(ColumnTarget::Created(2)),
+                        on_fail: None,
+                    },
+                    ColumnWiring {
+                        column_index: 2,
+                        on_success: Some(ColumnTarget::Created(3)),
+                        on_fail: Some(ColumnTarget::Created(1)),
+                    },
+                ];
+                serde_json::to_value(db.apply_template_columns_uow(board_id, &specs, &wiring)?)?
+            }
             other => anyhow::bail!("FakeBoardClient: unsupported method {other}"),
         };
         Ok(v)
@@ -292,5 +391,84 @@ impl BoardClient for FakeBoardClient {
 
     fn subscribe(&mut self) -> anyhow::Result<Box<dyn Iterator<Item = Event> + Send>> {
         Ok(Box::new(std::iter::empty()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Column;
+    use serde_json::json;
+
+    fn columns(client: &mut FakeBoardClient) -> Vec<Column> {
+        serde_json::from_value(
+            client
+                .call("template.apply", json!({"name": "pipeline"}))
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn template_apply_creates_expected_pipeline() {
+        let mut client = FakeBoardClient::new().unwrap();
+        let cols = columns(&mut client);
+
+        let names: Vec<&str> = cols.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["Todo", "Plan", "Execute", "Review", "Human Review", "Done"]
+        );
+
+        let by_name = |name: &str| cols.iter().find(|c| c.name == name).unwrap();
+        assert_eq!(by_name("Plan").trigger, Trigger::Auto);
+        assert_eq!(by_name("Execute").trigger, Trigger::Auto);
+        assert_eq!(by_name("Review").trigger, Trigger::Auto);
+        assert_eq!(by_name("Human Review").trigger, Trigger::Manual);
+        assert_eq!(by_name("Done").trigger, Trigger::Manual);
+
+        // Transitions: Plan ok->Execute, fail->Todo; Execute ok->Review;
+        // Review ok->Human Review, fail->Execute.
+        let todo = by_name("Todo").id;
+        let execute = by_name("Execute").id;
+        let review = by_name("Review").id;
+        let human = by_name("Human Review").id;
+
+        assert_eq!(by_name("Plan").on_success_column_id, Some(execute));
+        assert_eq!(by_name("Plan").on_fail_column_id, Some(todo));
+        assert_eq!(by_name("Execute").on_success_column_id, Some(review));
+        assert_eq!(by_name("Execute").on_fail_column_id, None);
+        assert_eq!(by_name("Review").on_success_column_id, Some(human));
+        assert_eq!(by_name("Review").on_fail_column_id, Some(execute));
+    }
+
+    #[test]
+    fn template_apply_rejects_board_with_a_card() {
+        let mut client = FakeBoardClient::new().unwrap();
+        let todo_id = client.db().list_columns(BOARD_ID).unwrap()[0].id;
+        client
+            .call(
+                "card.create",
+                json!({"title": "existing card", "column_id": todo_id}),
+            )
+            .unwrap();
+
+        let err = client
+            .call("template.apply", json!({"name": "pipeline"}))
+            .unwrap_err();
+        assert!(err.to_string().contains(
+            "template.apply requires an empty board (only the seed Todo column, no cards)"
+        ));
+    }
+
+    #[test]
+    fn template_apply_rejects_unknown_template_name() {
+        let mut client = FakeBoardClient::new().unwrap();
+        let err = client
+            .call("template.apply", json!({"name": "not-a-real-template"}))
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("unknown template: not-a-real-template"));
     }
 }
