@@ -83,6 +83,10 @@ pub struct Card {
 }
 
 /// A timestamped note; author is `user`, `agent:<run_id>`, or `system`.
+///
+/// This is the compact, non-deleted projection used by prompts and ordinary
+/// card lists. Deleted comments are intentionally not representable here so
+/// existing prompt/client callers cannot accidentally render them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Comment {
     pub id: i64,
@@ -91,6 +95,39 @@ pub struct Comment {
     pub body: String,
     pub created_at: String,
 }
+
+/// The current comment row, including its soft-deletion marker. This separate
+/// projection keeps the original `Comment` struct source-compatible for prompt
+/// builders while exposing deletion state at management/audit boundaries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommentRecord {
+    pub id: i64,
+    pub card_id: i64,
+    pub author: String,
+    pub body: String,
+    pub created_at: String,
+    pub deleted_at: Option<String>,
+}
+
+/// Alias emphasizing that this is the current (as opposed to historical)
+/// comment projection.
+pub type CurrentComment = CommentRecord;
+pub type CommentCurrent = CommentRecord;
+
+/// One immutable snapshot in a comment's audit trail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommentHistory {
+    pub id: i64,
+    pub comment_id: i64,
+    pub card_id: i64,
+    pub author: String,
+    pub body: String,
+    pub created_at: String,
+    pub deleted_at: Option<String>,
+}
+
+pub type CommentHistoryEntry = CommentHistory;
+pub type CommentAudit = CommentHistory;
 
 /// One agent execution of a card in a column.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

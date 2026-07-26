@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+- Add canonical CLI parity plus schema-v13 comment CRUD, soft deletion, and immutable audit history.
 - [#40](https://github.com/nelsonPires5/herdr-board/pull/40) Reserve a durably owned shell anchor in each board-managed card tab; every stage/retry launches only from a split child, with safe anchor recovery and child-only cleanup.
 - [#39](https://github.com/nelsonPires5/herdr-board/pull/39) Per-card Herdr tabs use stable `card-<id>` labels, exact board-owned tab IDs, safe restart reconstruction, serialized first allocation, and closed-tab recreation; legacy `kanban` rows remain unchanged.
 - [#38](https://github.com/nelsonPires5/herdr-board/pull/38) docs(visual-validation): require ALWAYS-isolated board state — DB, socket, AND daemon — under a short `/tmp` dir (no exceptions for trivial or "quick peek" runs; `board tui` auto-starts its own isolated daemon) and open runnable prototypes in a visible wezterm tab for interactive validation, matching the Prototyping-column prompt.

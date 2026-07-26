@@ -14,7 +14,7 @@ class DocumentationContractTests(unittest.TestCase):
         index = (ROOT / "docs/README.md").read_text(encoding="utf-8")
         for text in (
             "Board socket | v1",
-            "SQLite | schema v12",
+            "SQLite | schema v13",
             "Herdr client | 0.7.5 / socket protocol 17",
             "Runtime launch | daemon-owned",
             "Config | typed `RootConfig`",

@@ -90,9 +90,10 @@ keeps a predictable strip: the prototype targets a 0.40 ratio for the initial sp
 narrow terminals so the anchor remains reusable) and uses live geometry thereafter. Placement fails
 closed below the minimum of 24x6 for the shell and 12x8 for the agent; it never launches an agent
 on an undersized root or child.
-Herdr labels are not unique, so neither tab nor anchor ownership is inferred from one. Schema v12
-persists the exact anchor pane id with each promoted run; after restart, the daemon reconstructs the
-exact tab and anchor only from scoped durable pane identities in the same session and workspace.
+Herdr labels are not unique, so neither tab nor anchor ownership is inferred from one. The current
+schema v13 retains the exact anchor pane id introduced by v12 with each promoted run; after restart,
+the daemon reconstructs the exact tab and anchor only from scoped durable pane identities in the same
+session and workspace.
 A renamed anchor remains owned by identity. If that exact anchor was closed, it is recreated only by
 splitting a currently live durable board-run child; if no such proof remains, a fresh tab is created
 instead of touching a foreign pane. Before a later split, exact ended run children may be reclaimed
@@ -123,7 +124,8 @@ cards(id, board_id, column_id, position, title, description,
       space_kind ('workspace'|'new_workspace'), space_ref, space_cwd,
       status, awaiting_reason,                   -- reason set in 'awaiting', NULL otherwise
       session_id, created_at, updated_at, archived_at)
-comments(id, card_id, author, body, created_at)
+comments(id, card_id, author, body, created_at, deleted_at)
+comment_history(id, comment_id, card_id, author, body, created_at, deleted_at)
 runs(id, card_id, column_id, harness, argv_json, prompt_snapshot,
      system_prompt_snapshot,                    -- nullable; enqueue-time, trailer-inclusive
      launch_spec_json,                          -- nullable pre-v11; tagged durable execution spec
@@ -134,8 +136,8 @@ runs(id, card_id, column_id, harness, argv_json, prompt_snapshot,
      result_summary, log_path)
 ```
 
-Schema is versioned via `PRAGMA user_version` (current = **v11**). A fresh DB is built straight from
-`schema.sql` and stamped v11. Existing v1→v4 migrations retain their space/session, archive, and Pi
+Schema is versioned via `PRAGMA user_version` (current = **v13**). A fresh DB is built straight from
+`schema.sql` and stamped v13. Existing v1→v4 migrations retain their space/session, archive, and Pi
 effort behavior. v5 adds unique non-null `boards.scope_path`, preserves board `id=1` plus every
 related row as `Global`, and leaves existing card harnesses unchanged. v6 rebuilds `cards` to admit
 the `awaiting`/`done` statuses and adds `cards.awaiting_reason` (NULL outside `awaiting`). v7 adds
@@ -153,12 +155,19 @@ stores a format-tagged (`version: 1`) fully materialized argv/env/prompt launch 
 format versions are rejected rather than interpreted. Dispatch uses that spec and the persisted
 `runs.session`, so queued runs, retries, and auto-hops are unaffected by later card, column, or
 configuration edits. New runs also atomically preserve the fully resolved,
-board-protocol-trailer-inclusive system prompt at enqueue time. A legacy NULL remains a
+board-protocol-trailer-inclusive system prompt at enqueue time. v12 adds the durable anchor identity;
+v13 adds current comment soft deletion plus immutable audit snapshots. A legacy NULL remains a
 launch-version marker: pre-v7 built-ins
 execute their persisted all-in-one argv unchanged, while pre-v7 configured rows retain their
 historical spawn-time current-column reconstruction. `Run` deserialization defaults an omitted field
 to NULL, but serialization always omits `system_prompt_snapshot` and its contents from boardd wire
 responses. `launch_spec_json` is likewise internal and omitted in full from boardd wire responses.
+
+Source ownership is explicit: `schema.sql` is the fresh schema source, `board-core::db` owns ordered
+upgrades through v13, and `board-core::protocol` owns the v1 wire DTOs and additive compatibility
+rules. The CLI and TUI use typed `BoardClient` wrappers; only boardd reads or writes SQLite. New
+v1 fields such as `BoardSnapshot.active_runs` and RPC error `kind`/`details` are additive, so older
+clients can continue decoding the existing fields.
 
 ### Partial updates
 
@@ -421,7 +430,7 @@ opens the script, the residual configured-script orphan is an accepted asynchron
 3. Column engine: *Plan* is `trigger=auto` → **enqueue run** on the card's space queue.
 4. Dispatcher (respecting per-space serial queue + global cap):
    a. Resolve the card's session socket and `ping` it. Anything except exact Herdr 0.7.5/protocol 17 fails before workspace discovery/creation. Then reuse workspace `w4`, or create/reuse the card's labeled `new_workspace`; repository worktree isolation remains an agent prompt responsibility.
-   b. Preflight the selected socket again at the spawner boundary. For a new durable run, the card's **`card-<id>` tab** is resolved by exact owned id (reconstructed from the newest matching durable pane in the same session/workspace when boardd restarts), or `tab.create {workspace_id,cwd,env,…}` supplies a new shell anchor. The anchor is labeled `card-<id>-anchor`, its exact id is persisted on the promoted v12 run, and the run child is always created by `pane.split` from that anchor; `agent.start`/`pane run` never target the root. A renamed anchor is still selected only by exact identity; a closed anchor is recreated only from a durable board-run child in the exact proven tab, and missing proof creates a fresh tab without selecting a duplicate-label user tab. Exact ended children may be reclaimed before a later split so the anchor keeps usable geometry. The child receives the run env; the anchor receives only stable card identity. If multiple historical panes are live, newest run id wins; legacy rows retain their old lookup. There is no protocol-16 placement inside `agent.start`.
+   b. Preflight the selected socket again at the spawner boundary. For a new durable run, the card's **`card-<id>` tab** is resolved by exact owned id (reconstructed from the newest matching durable pane in the same session/workspace when boardd restarts), or `tab.create {workspace_id,cwd,env,…}` supplies a new shell anchor. The anchor is labeled `card-<id>-anchor`, its exact id is persisted on the promoted run, and the run child is always created by `pane.split` from that anchor; `agent.start`/`pane run` never target the root. A renamed anchor is still selected only by exact identity; a closed anchor is recreated only from a durable board-run child in the exact proven tab, and missing proof creates a fresh tab without selecting a duplicate-label user tab. Exact ended children may be reclaimed before a later split so the anchor keeps usable geometry. The child receives the run env; the anchor receives only stable card identity. If multiple historical panes are live, newest run id wins; legacy rows retain their old lookup. There is no protocol-16 placement inside `agent.start`.
    c. For Pi/Claude, write the snapshotted system prompt to a mode-`0600` temporary file; issue `agent.start {name,kind,pane_id,args}` on the split child with prompt-free startup args; a typed `agent_pane_busy` retries the exact request on that same child with bounded 100ms/200ms backoff (never another split); poll `agent.get` for readiness; then send only the task snapshot through `agent.prompt`. Remove the file. Card status → `running`; record the exact child pane/workspace ids. The pane is **visible** — you can watch or type into it anytime.
 
    **Pane naming and ownership**: the managed agent name is `card-<id>-<column-slug>` (e.g. `card-42-plan`, `card-42-execute`). Herdr names are exclusive while a pane is open, so `agent_name_taken` retries once on the same pane with `card-<id>-<column-slug>-r<run>`. A persistent `agent_pane_busy` closes only the board-owned child and leaves the pre-existing anchor. If a placement target disappears, boardd closes only the pane it created (a missing pane is already clean), restarts discovery from `tab.list`, and retries the complete placement once. A terminal launch error also closes only that board-owned pane; pre-existing user panes are never cleanup targets.
@@ -522,7 +531,7 @@ executes the returned plan; it performs no Herdr or SQLite I/O in the pure decis
 
 ## 9. Decisions (user-confirmed 2026-07-14)
 
-1. **Language: Rust** — ratatui TUI, rusqlite, tokio daemon; single binary `board` with subcommands (`tui`, `daemon`, `comment`, `done`, `move`, `card`).
+1. **Language: Rust** — ratatui TUI, rusqlite, tokio daemon; single binary `board` with canonical nested subcommands (`board`, `card`, `column`, `comment`, `run`) plus retained top-level aliases.
 2. **Access: overlay keybinding only** (no pinned workspace); `?` shows all keybinds.
 3. **DB: `~/.local/share/herdr-board/board.db`** (XDG data; overridable via `BOARD_DB` for tests). Plugin config dir holds only config — DB survives plugin reinstall.
 4. **Long-text editing: modal textarea + `Ctrl+E` → `$EDITOR`.**
@@ -533,7 +542,7 @@ executes the returned plan; it performs no Herdr or SQLite I/O in the pure decis
 
 ## 10. The herdr-board skill
 
-The repo ships a **skill** (`skill/SKILL.md`, optionally installed into an agent's skill directory) teaching agents the `board` CLI: command reference (`board card new/show/list`, `board comment`, `board move`, `board done --outcome ok|fail`), the card lifecycle, and the rules (always comment results *before* `board done`; `fail` means "this stage's goal was not met", not "I crashed").
+The repo ships a **skill** (`skill/SKILL.md`, optionally installed into an agent's skill directory) teaching agents the canonical `board` CLI: board/card/column CRUD, nested comment and run operations, visibility, JSON errors, and the card lifecycle. It preserves `card new` and the top-level `comment`/`done`/`move`/`cancel`/`retry` aliases. The critical rules remain: always comment results before `board done`; `fail` means "this stage's goal was not met", not "I crashed".
 
 Two consumers:
 

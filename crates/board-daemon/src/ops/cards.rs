@@ -1,11 +1,119 @@
 use super::*;
-use crate::dispatch::enqueue_run;
-use board_core::db::BOARD_ID;
+use crate::dispatch::{map_harness_err, PreparedEnqueue};
+use board_core::db::{Db, BOARD_ID};
 use board_core::engine::{
-    decide_entry, merge_card_update, validate_card_archive, validate_card_edit,
-    validate_card_settings, validate_card_values, validate_effective_settings,
+    decide_entry, decide_resumability, merge_card_update, validate_card_archive,
+    validate_card_edit, validate_card_settings, validate_card_values, validate_effective_settings,
+    ResumabilityDecision,
 };
-use board_core::harness::DEFAULT_HARNESS;
+use board_core::harness::{build_invocation, plan_session, SessionPlan, DEFAULT_HARNESS};
+use board_core::launch::{ExecutionSpec, RunLaunchSpec};
+use board_core::model::Card;
+use board_core::prompt::{assemble_prompt, effective_settings};
+use uuid::Uuid;
+
+fn prepare_enqueue_values(
+    d: &Daemon,
+    db: &Db,
+    card: &Card,
+    column_id: i64,
+    is_retry: bool,
+) -> Result<PreparedEnqueue> {
+    let column = db
+        .get_column(column_id)?
+        .ok_or_else(|| Error::NotFound(format!("column {column_id}")))?;
+    let comments = db.list_comments(card.id)?;
+    let session_used = matches!(
+        decide_resumability(
+            card.session_id.as_deref(),
+            &db.list_runs(card.id)?,
+            &comments,
+        ),
+        ResumabilityDecision::Resumable
+    );
+    validate_effective_settings(card, &column, &d.config)?;
+    let settings = effective_settings(card, &column)?;
+    let prompt = assemble_prompt(&card.description, &comments);
+    let existing_session = card.session_id.as_deref().filter(|_| session_used);
+    let plan = plan_session(existing_session, settings.fresh_session, is_retry);
+    let target_session = matches!(plan, SessionPlan::Mint | SessionPlan::Fork(_))
+        .then(|| Uuid::new_v4().to_string());
+    let invocation = build_invocation(
+        &settings.harness,
+        &d.config,
+        &settings,
+        &plan,
+        target_session.as_deref(),
+        &prompt,
+    )
+    .map_err(map_harness_err)?;
+    let session_id = invocation
+        .resulting_session_id
+        .clone()
+        .or_else(|| match &plan {
+            SessionPlan::Mint => target_session.clone(),
+            SessionPlan::Resume(id) | SessionPlan::Fork(id) => Some(id.clone()),
+        });
+    Ok(PreparedEnqueue {
+        card_id: card.id,
+        column_id,
+        harness: settings.harness.clone(),
+        argv_json: serde_json::to_string(&invocation.argv)?,
+        prompt: prompt.clone(),
+        system_prompt: invocation.system_prompt.clone().unwrap_or_else(|| {
+            board_core::harness::protocol_system_prompt(settings.system_prompt.as_deref())
+        }),
+        launch_spec_json: serde_json::to_string(&RunLaunchSpec::v1(ExecutionSpec {
+            argv: invocation.argv,
+            env: invocation.env,
+            agent_kind: invocation.agent_kind,
+            initial_prompt: invocation.initial_prompt,
+            system_prompt: invocation.system_prompt,
+        }))?,
+        session_id,
+        session: card.session.clone(),
+    })
+}
+
+fn pending_create_card(db: &Db, p: &CardCreateParams) -> Result<Card> {
+    let board_id = p.board_id.unwrap_or(BOARD_ID);
+    let column_id = p.column_id.unwrap_or(db.default_column_id(board_id)?);
+    let column = db
+        .get_column(column_id)?
+        .ok_or_else(|| Error::NotFound(format!("column {column_id}")))?;
+    if column.board_id != board_id {
+        return Err(Error::InvalidState(format!(
+            "column {column_id} belongs to board {}, expected {board_id}",
+            column.board_id
+        )));
+    }
+    Ok(Card {
+        id: 0,
+        board_id,
+        column_id,
+        position: 0,
+        title: p.title.clone(),
+        description: p.description.clone().unwrap_or_default(),
+        harness: p
+            .harness
+            .clone()
+            .unwrap_or_else(|| DEFAULT_HARNESS.to_string()),
+        model: p.model.clone(),
+        effort: p.effort,
+        permission_mode: p.permission_mode.clone(),
+        session: p.session.clone(),
+        space_kind: p.space_kind.unwrap_or(SpaceKind::Workspace),
+        space_ref: p.space_ref.clone(),
+        space_cwd: p.space_cwd.clone(),
+        status: CardStatus::Idle,
+        awaiting_reason: None,
+        session_id: None,
+        created_at: String::new(),
+        updated_at: String::new(),
+        archived_at: None,
+    })
+}
+
 pub(super) fn card_create(d: &Arc<Daemon>, p: CardCreateParams) -> Result<Value> {
     validate_card_values(
         p.harness.as_deref().unwrap_or(DEFAULT_HARNESS),
@@ -17,24 +125,36 @@ pub(super) fn card_create(d: &Arc<Daemon>, p: CardCreateParams) -> Result<Value>
         p.space_cwd.as_deref(),
         &d.config,
     )?;
-    let card = d.store.lock().create_card(&p)?;
-    let column = require_column(d, card.column_id)?;
+
+    let (card, enqueue) = {
+        // Scheduler state and card creation/enqueue share one critical
+        // section. The DB UoW below contains no Herdr or process I/O.
+        let mut _sched = d.sched.lock().unwrap();
+        let db = d.store.lock();
+        let pending = pending_create_card(&db, &p)?;
+        let column = db
+            .get_column(pending.column_id)?
+            .ok_or_else(|| Error::NotFound(format!("column {}", pending.column_id)))?;
+        let entry = decide_entry(&column, pending.status, false);
+        if entry.enqueue {
+            let prepared = prepare_enqueue_values(d, &db, &pending, pending.column_id, false)?;
+            let (card, _run) = db.create_card_and_enqueue_uow(&p, &prepared.borrowed())?;
+            _sched.chain_hops.remove(&card.id);
+            (card, true)
+        } else {
+            (db.create_card(&p)?, false)
+        }
+    };
+
     d.emit_changed(
         BoardChangedReason::CardCreated,
         Some(card.id),
         Some(card.column_id),
     );
-
-    // Creating directly into an auto column dispatches immediately.
-    if column.trigger == Trigger::Auto {
-        let entry = decide_entry(&column, card.status, false);
-        if entry.enqueue {
-            d.sched.lock().unwrap().chain_hops.remove(&card.id);
-            enqueue_run(d, card.id, card.column_id, false)?;
-            d.wake_dispatch();
-        }
+    if enqueue {
+        d.wake_dispatch();
     }
-    Ok(json!(require_card(d, card.id)?))
+    Ok(json!(card))
 }
 
 pub(super) fn card_update(d: &Arc<Daemon>, p: CardUpdateParams) -> Result<Value> {
@@ -107,8 +227,8 @@ pub(super) fn card_archive(d: &Arc<Daemon>, p: CardArchiveParams) -> Result<Valu
 }
 
 pub(super) fn card_move(d: &Arc<Daemon>, p: CardMoveParams) -> Result<Value> {
-    let (card, target, source_board_id, source_column_id) = {
-        let _sched = d.sched.lock().unwrap();
+    let (card, target, source_board_id, source_column_id, enqueue) = {
+        let mut _sched = d.sched.lock().unwrap();
         let db = d.store.lock();
         let current = db
             .get_card(p.id)?
@@ -125,7 +245,9 @@ pub(super) fn card_move(d: &Arc<Daemon>, p: CardMoveParams) -> Result<Value> {
         if cross {
             // The destination board must actually exist; the declared board
             // must match the target column's board.
-            let declared = p.board_id.unwrap();
+            let declared = p.board_id.ok_or_else(|| {
+                Error::InvalidState("cross-board move has no destination board".into())
+            })?;
             db.get_board(declared)?;
             if target.board_id != declared {
                 return Err(Error::InvalidState(format!(
@@ -169,15 +291,51 @@ pub(super) fn card_move(d: &Arc<Daemon>, p: CardMoveParams) -> Result<Value> {
                 }
             }
         }
-        let card = if cross {
-            db.transfer_card(p.id, p.board_id.unwrap(), p.column_id, p.position)?
+
+        let entry = decide_entry(&target, current.status, false);
+        let card = if entry.enqueue {
+            let prepared = prepare_enqueue_values(d, &db, &current, p.column_id, false)?;
+            let (card, _run) = if cross {
+                db.transfer_card_and_enqueue_uow(
+                    p.id,
+                    p.board_id.ok_or_else(|| {
+                        Error::InvalidState("cross-board move has no destination board".into())
+                    })?,
+                    p.column_id,
+                    p.position,
+                    &prepared.borrowed(),
+                )?
+            } else {
+                db.move_card_and_enqueue_uow(p.id, p.column_id, p.position, &prepared.borrowed())?
+            };
+            // This scheduler-only mutation follows the DB commit and is not
+            // observable when the durable move/enqueue UoW fails.
+            _sched.chain_hops.remove(&card.id);
+            card
+        } else if cross {
+            db.transfer_card(
+                p.id,
+                p.board_id.ok_or_else(|| {
+                    Error::InvalidState("cross-board move has no destination board".into())
+                })?,
+                p.column_id,
+                p.position,
+            )?
         } else {
             db.move_card(p.id, p.column_id, p.position)?
         };
-        (card, target, current.board_id, current.column_id)
+        (
+            card,
+            target,
+            current.board_id,
+            current.column_id,
+            entry.enqueue,
+        )
     };
+
     // One precise CardMoved per affected board (the event now carries
-    // board_id), replacing the old double coarse emit.
+    // board_id), replacing the old double coarse emit. Events are published
+    // only after both the move and any initial enqueue have committed.
     if source_board_id != target.board_id {
         d.emit_changed_board(
             BoardChangedReason::CardMoved,
@@ -192,15 +350,10 @@ pub(super) fn card_move(d: &Arc<Daemon>, p: CardMoveParams) -> Result<Value> {
         Some(card.id),
         Some(p.column_id),
     );
-
-    let entry = decide_entry(&target, card.status, false);
-    if entry.enqueue {
-        // Human move resets the auto-chain counter.
-        d.sched.lock().unwrap().chain_hops.remove(&card.id);
-        enqueue_run(d, card.id, p.column_id, false)?;
+    if enqueue {
         d.wake_dispatch();
     }
-    Ok(json!(require_card(d, card.id)?))
+    Ok(json!(card))
 }
 
 pub(super) fn card_get(d: &Arc<Daemon>, p: CardIdParams) -> Result<Value> {
@@ -218,6 +371,7 @@ pub(super) fn card_get(d: &Arc<Daemon>, p: CardIdParams) -> Result<Value> {
 pub(super) fn card_list(d: &Arc<Daemon>, p: CardListParams) -> Result<Value> {
     let db = d.store.lock();
     let board_id = p.board_id.unwrap_or(BOARD_ID);
+    let visibility = p.visibility.unwrap_or(CardVisibility::Active);
     let cards = match p.column_id {
         Some(c) => {
             let column = db
@@ -229,9 +383,9 @@ pub(super) fn card_list(d: &Arc<Daemon>, p: CardListParams) -> Result<Value> {
                     column.board_id
                 )));
             }
-            db.list_cards_in_column(c)?
+            db.list_cards_in_column_visible(c, visibility)?
         }
-        None => db.list_cards(board_id)?,
+        None => db.list_cards_visible(board_id, visibility)?,
     };
     Ok(json!(cards))
 }

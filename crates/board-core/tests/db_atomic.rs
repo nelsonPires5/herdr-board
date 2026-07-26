@@ -44,7 +44,7 @@ fn fresh_v12_has_exact_partial_scheduler_indexes_and_query_plans() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("board.db");
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 12);
+    assert_eq!(db.user_version().unwrap(), 13);
     drop(db);
     let conn = Connection::open(path).unwrap();
     for (name, expected) in [
@@ -118,7 +118,7 @@ fn v9_file_fixture_upgrades_through_v12_without_changing_existing_bytes() {
     drop(conn);
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 12);
+    assert_eq!(db.user_version().unwrap(), 13);
     assert_eq!(db.get_card(card_id).unwrap().unwrap().id, card_id);
     assert_eq!(db.get_run(run_id).unwrap().id, run_id);
     drop(db);
@@ -130,7 +130,7 @@ fn v9_file_fixture_upgrades_through_v12_without_changing_existing_bytes() {
         assert_eq!(
             conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            12
+            13
         );
         assert_eq!(
             scheduler_index_sql(&conn, "idx_runs_queued_fifo").as_deref(),
@@ -542,7 +542,7 @@ fn v8_upgrade_retains_a_single_open_run_byte_for_byte() {
         .unwrap();
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 12);
+    assert_eq!(db.user_version().unwrap(), 13);
     assert_eq!(db.get_run(before.id).unwrap(), before);
 }
 
@@ -560,7 +560,7 @@ fn fresh_and_v7_upgrade_install_exact_partial_unique_index_sql() {
                 .unwrap();
         }
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.user_version().unwrap(), 12);
+        assert_eq!(db.user_version().unwrap(), 13);
         drop(db);
         let sql: String = Connection::open(&path)
             .unwrap()
@@ -658,4 +658,177 @@ fn timeout_resume_rolls_back_run_when_card_write_fails() {
     let persisted = db.get_run(run.id).unwrap();
     assert_eq!(persisted.timeout_deadline_at_ms, Some(1_000));
     assert_eq!(persisted.timeout_paused_at_ms, Some(100));
+}
+
+#[test]
+fn reorder_column_rolls_back_partial_position_compaction() {
+    let (_dir, path, _card) = create_file_db("reorder atomic");
+    let db = Db::open(&path).unwrap();
+    let todo = db.default_column_id(board_core::db::BOARD_ID).unwrap();
+    let first = db
+        .create_column(&board_core::protocol::ColumnCreateParams {
+            name: "First".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let second = db
+        .create_column(&board_core::protocol::ColumnCreateParams {
+            name: "Second".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let last = db
+        .create_column(&board_core::protocol::ColumnCreateParams {
+            name: "Last".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let before = db.list_columns(board_core::db::BOARD_ID).unwrap();
+
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch(&format!(
+            "CREATE TRIGGER abort_reorder BEFORE UPDATE OF position ON columns
+             WHEN OLD.id={todo} AND NEW.position=1
+             BEGIN SELECT RAISE(ABORT, 'fault: reorder'); END;"
+        ))
+        .unwrap();
+
+    let error = db.reorder_column(last.id, 0).unwrap_err();
+    assert!(error.to_string().contains("fault: reorder"), "{error}");
+    assert_eq!(
+        db.list_columns(board_core::db::BOARD_ID).unwrap(),
+        before,
+        "column positions must remain unchanged after an intermediate reorder failure"
+    );
+    let _ = (first, second);
+}
+
+#[test]
+fn move_card_rolls_back_column_and_position_compaction_failure() {
+    let (_dir, path, _card) = create_file_db("move atomic");
+    let db = Db::open(&path).unwrap();
+    let source = db.default_column_id(board_core::db::BOARD_ID).unwrap();
+    let target = db
+        .create_column(&board_core::protocol::ColumnCreateParams {
+            name: "Target".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let keep = db
+        .create_card(&board_core::protocol::CardCreateParams {
+            title: "keep".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let moved = db
+        .create_card(&board_core::protocol::CardCreateParams {
+            title: "moved".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let target_first = db
+        .create_card(&board_core::protocol::CardCreateParams {
+            title: "target first".into(),
+            column_id: Some(target.id),
+            ..Default::default()
+        })
+        .unwrap();
+    db.create_card(&board_core::protocol::CardCreateParams {
+        title: "target second".into(),
+        column_id: Some(target.id),
+        ..Default::default()
+    })
+    .unwrap();
+    let before_source = db.list_cards_in_column(source).unwrap();
+    let before_target = db.list_cards_in_column(target.id).unwrap();
+
+    let target_first_id = target_first.id;
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch(&format!(
+            "CREATE TRIGGER abort_card_compaction BEFORE UPDATE OF position ON cards
+             WHEN OLD.id={target_first_id} AND NEW.position=1
+             BEGIN SELECT RAISE(ABORT, 'fault: card compaction'); END;"
+        ))
+        .unwrap();
+
+    let error = db.move_card(moved.id, target.id, Some(0)).unwrap_err();
+    assert!(
+        error.to_string().contains("fault: card compaction"),
+        "{error}"
+    );
+    assert_eq!(db.list_cards_in_column(source).unwrap(), before_source);
+    assert_eq!(db.list_cards_in_column(target.id).unwrap(), before_target);
+    assert_eq!(db.get_card(moved.id).unwrap().unwrap().column_id, source);
+    assert_eq!(
+        db.get_card(keep.id).unwrap().unwrap().position,
+        before_source
+            .iter()
+            .find(|card| card.id == keep.id)
+            .unwrap()
+            .position
+    );
+}
+
+#[test]
+fn delete_column_rolls_back_card_migration_and_both_position_compactions() {
+    let (_dir, path, _card) = create_file_db("delete migration atomic");
+    let db = Db::open(&path).unwrap();
+    let target = db.default_column_id(board_core::db::BOARD_ID).unwrap();
+    let source = db
+        .create_column(&board_core::protocol::ColumnCreateParams {
+            name: "Source".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    db.create_card(&board_core::protocol::CardCreateParams {
+        title: "existing target".into(),
+        ..Default::default()
+    })
+    .unwrap();
+    let first = db
+        .create_card(&board_core::protocol::CardCreateParams {
+            title: "first source".into(),
+            column_id: Some(source.id),
+            ..Default::default()
+        })
+        .unwrap();
+    let second = db
+        .create_card(&board_core::protocol::CardCreateParams {
+            title: "second source".into(),
+            column_id: Some(source.id),
+            ..Default::default()
+        })
+        .unwrap();
+    let before_columns = db.list_columns(board_core::db::BOARD_ID).unwrap();
+    let before_target = db.list_cards_in_column(target).unwrap();
+    let before_source = db.list_cards_in_column(source.id).unwrap();
+
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch(&format!(
+            "CREATE TRIGGER abort_second_card_migration BEFORE UPDATE OF column_id ON cards
+             WHEN OLD.id={} AND OLD.column_id={}
+             BEGIN SELECT RAISE(ABORT, 'fault: card migration'); END;",
+            second.id, source.id
+        ))
+        .unwrap();
+
+    let error = db.delete_column(source.id, Some(target)).unwrap_err();
+    assert!(
+        error.to_string().contains("fault: card migration"),
+        "{error}"
+    );
+    assert_eq!(
+        db.list_columns(board_core::db::BOARD_ID).unwrap(),
+        before_columns
+    );
+    assert_eq!(db.list_cards_in_column(target).unwrap(), before_target);
+    assert_eq!(db.list_cards_in_column(source.id).unwrap(), before_source);
+    assert_eq!(db.get_card(first.id).unwrap().unwrap().column_id, source.id);
+    assert_eq!(
+        db.get_card(second.id).unwrap().unwrap().column_id,
+        source.id
+    );
 }

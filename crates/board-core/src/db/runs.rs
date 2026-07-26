@@ -20,24 +20,36 @@ impl Db {
             ));
         }
         let tx = self.conn.unchecked_transaction()?;
+        let id = self.enqueue_run_tx(&tx, p.card_id, p)?;
+        tx.commit()?;
+        self.get_run(id)
+    }
+
+    /// Insert a queued run and update its card while an enclosing transaction
+    /// is active. The caller owns the transaction boundary.
+    pub(super) fn enqueue_run_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        card_id: i64,
+        p: &EnqueueRun<'_>,
+    ) -> Result<i64> {
         tx.execute(
             "INSERT INTO runs
              (card_id,column_id,harness,argv_json,prompt_snapshot,system_prompt_snapshot,launch_spec_json,session_id,session)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-            params![p.card_id,p.column_id,p.harness,p.argv_json,p.prompt_snapshot,
+            params![card_id,p.column_id,p.harness,p.argv_json,p.prompt_snapshot,
                     p.system_prompt_snapshot,p.launch_spec_json,p.session_id,p.session],
         )?;
         let id = tx.last_insert_rowid();
         self.lifecycle_fault(LifecycleFaultPoint::EnqueueAfterRunInsert)?;
         let changed = tx.execute(
             "UPDATE cards SET status='queued',awaiting_reason=NULL,session_id=COALESCE(?2,session_id),updated_at=datetime('now') WHERE id=?1",
-            params![p.card_id, p.session_id],
+            params![card_id, p.session_id],
         )?;
         if changed != 1 {
-            return Err(Error::NotFound(format!("card {}", p.card_id)));
+            return Err(Error::NotFound(format!("card {card_id}")));
         }
-        tx.commit()?;
-        self.get_run(id)
+        Ok(id)
     }
 
     /// Atomically promote an exact queued run and its card to running.

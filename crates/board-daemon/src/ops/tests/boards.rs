@@ -1,4 +1,5 @@
 use super::*;
+use rusqlite::Connection;
 
 #[test]
 fn daemon_stop_triggers_shutdown_and_reports_stopping() {
@@ -44,6 +45,35 @@ fn board_open_list_get_and_legacy_default_are_scoped() {
     assert_eq!(omitted["board"]["name"], "Global");
     let list = handle_request(&d, "board.list", json!({})).unwrap();
     assert_eq!(list["boards"][0]["name"], "Global");
+}
+
+#[test]
+fn board_get_snapshot_includes_archived_cards() {
+    let d = test_daemon(Config::default());
+    let active = handle_request(&d, "card.create", json!({"title":"active"})).unwrap();
+    let archived = handle_request(&d, "card.create", json!({"title":"archived"})).unwrap();
+    handle_request(
+        &d,
+        "card.archive",
+        json!({"id": archived["id"], "archived": true}),
+    )
+    .unwrap();
+
+    let cards = handle_request(&d, "board.get", json!({})).unwrap()["cards"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let ids = cards
+        .iter()
+        .map(|card| card["id"].as_i64().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        vec![
+            active["id"].as_i64().unwrap(),
+            archived["id"].as_i64().unwrap()
+        ]
+    );
 }
 
 #[test]
@@ -158,4 +188,63 @@ fn template_and_scheduler_operate_on_scoped_board() {
         .unwrap()
         .iter()
         .any(|(_, queued)| queued.id == card["id"].as_i64().unwrap()));
+}
+
+#[test]
+fn template_apply_rolls_back_columns_after_intermediate_wiring_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("template-atomic.db");
+    let db = Db::open(&path).unwrap();
+    let before = db.list_columns(BOARD_ID).unwrap();
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER abort_template_execute_wire
+             BEFORE UPDATE OF on_success_column_id ON columns
+             WHEN NEW.name='Execute'
+             BEGIN SELECT RAISE(ABORT, 'fault: template wire'); END;",
+        )
+        .unwrap();
+
+    let (events_tx, mut events_rx) = broadcast::channel(16);
+    let (dispatch_tx, mut dispatch_rx) = mpsc::unbounded_channel();
+    let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+    let d = Arc::new(Daemon::new(
+        Store::new(db),
+        Config::default(),
+        DaemonSettings::default(),
+        path.clone(),
+        dir.path().join("board.sock"),
+        Arc::new(LocalSpawner::new()),
+        None,
+        None,
+        events_tx,
+        dispatch_tx,
+        shutdown_tx,
+    ));
+
+    let error = handle_request(
+        &d,
+        "template.apply",
+        json!({"name":"pipeline", "board_id":BOARD_ID}),
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("fault: template wire"),
+        "{error}"
+    );
+
+    assert!(matches!(
+        events_rx.try_recv(),
+        Err(broadcast::error::TryRecvError::Empty)
+    ));
+    assert!(matches!(
+        dispatch_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+
+    drop(d);
+    let reopened = Db::open(&path).unwrap();
+    assert_eq!(reopened.list_columns(BOARD_ID).unwrap(), before);
+    assert!(reopened.list_cards(BOARD_ID).unwrap().is_empty());
 }

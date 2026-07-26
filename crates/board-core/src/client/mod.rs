@@ -8,4 +8,4 @@ mod unix;
 #[cfg(feature = "fake-client")]
 pub use fake::FakeBoardClient;
 pub use traits::BoardClient;
-pub use unix::{EventStream, UnixClient};
+pub use unix::{BoardRpcError, EventStream, RpcClientError, RpcError, UnixClient};

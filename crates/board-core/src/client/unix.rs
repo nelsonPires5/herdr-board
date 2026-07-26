@@ -4,11 +4,86 @@ use std::os::unix::net::UnixStream;
 
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::protocol::{Event, Request, Response};
+use crate::protocol::{Event, Request};
 
 use super::BoardClient;
+
+/// Structured error returned by boardd over the Unix RPC transport.
+///
+/// This is deliberately a public `std::error::Error` so callers retaining the
+/// existing `anyhow::Result` APIs can still downcast and render protocol
+/// failures without parsing an opaque display string.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RpcClientError {
+    pub code: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
+}
+
+impl RpcClientError {
+    pub fn new(code: i32, kind: Option<String>, message: String, details: Option<Value>) -> Self {
+        Self {
+            code,
+            kind,
+            message,
+            details,
+        }
+    }
+
+    pub fn kind(&self) -> Option<&str> {
+        self.kind.as_deref()
+    }
+
+    pub fn details(&self) -> Option<&Value> {
+        self.details.as_ref()
+    }
+}
+
+impl std::fmt::Display for RpcClientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "boardd error {}", self.code)?;
+        if let Some(kind) = &self.kind {
+            write!(f, " ({kind})")?;
+        }
+        write!(f, ": {}", self.message)?;
+        if let Some(details) = &self.details {
+            write!(f, " [{details}]")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for RpcClientError {}
+
+/// Compatibility aliases for callers that prefer a transport- or board-
+/// oriented name. All aliases downcast to the same concrete error.
+pub type BoardRpcError = RpcClientError;
+pub type RpcError = RpcClientError;
+
+#[derive(Debug, Deserialize)]
+struct WireResponse {
+    id: String,
+    #[serde(default)]
+    result: Option<Value>,
+    #[serde(default)]
+    error: Option<WireRpcError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WireRpcError {
+    code: i32,
+    #[serde(default)]
+    kind: Option<String>,
+    message: String,
+    #[serde(default)]
+    details: Option<Value>,
+}
 
 /// The real Unix-socket client.
 pub struct UnixClient {
@@ -56,7 +131,7 @@ impl BoardClient for UnixClient {
                 anyhow::bail!("boardd connection closed");
             }
             // Skip anything that isn't a matching response (e.g. event lines).
-            let resp: Response = match serde_json::from_str(buf.trim_end()) {
+            let resp: WireResponse = match serde_json::from_str(buf.trim_end()) {
                 Ok(r) => r,
                 Err(_) => continue,
             };
@@ -64,7 +139,12 @@ impl BoardClient for UnixClient {
                 continue;
             }
             if let Some(err) = resp.error {
-                anyhow::bail!("boardd error {}: {}", err.code, err.message);
+                return Err(anyhow::Error::new(RpcClientError::new(
+                    err.code,
+                    err.kind,
+                    err.message,
+                    err.details,
+                )));
             }
             return Ok(resp.result.unwrap_or(Value::Null));
         }

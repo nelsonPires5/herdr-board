@@ -18,8 +18,26 @@ pub(crate) fn current_scope_path() -> Result<String> {
     })
 }
 
-pub(crate) fn open_current_board(c: &mut UnixClient) -> Result<BoardSnapshot> {
-    c.board_open(&current_scope_path()?)
+/// Resolve an ID-or-path board selector. Paths are normalized in the same way
+/// as the daemon's current-scope fallback, so all board-aware commands share
+/// one selection rule.
+pub(crate) fn open_selected_board(
+    c: &mut UnixClient,
+    selector: Option<&str>,
+) -> Result<BoardSnapshot> {
+    match selector {
+        Some(value) => {
+            if let Ok(id) = value.parse::<i64>() {
+                return c.board_get_by_id(id);
+            }
+            let path = resolve_scope_path(std::path::Path::new(value))?;
+            let path = path
+                .to_str()
+                .ok_or_else(|| anyhow!("board path is not valid UTF-8: {}", path.display()))?;
+            c.board_open(path)
+        }
+        None => c.board_open(&current_scope_path()?),
+    }
 }
 
 /// Resolve a column reference within one board snapshot.
