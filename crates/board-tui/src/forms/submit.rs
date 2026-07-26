@@ -108,6 +108,13 @@ impl Form {
                 }
                 Ok(Submit::Comment { card_id, body })
             }
+            FormKind::CommentEdit { comment_id } => {
+                let body = self.trim(FieldId::CommentBody);
+                if body.is_empty() {
+                    return Err("comment is empty".into());
+                }
+                Ok(Submit::CommentEdit { comment_id, body })
+            }
         }
     }
 

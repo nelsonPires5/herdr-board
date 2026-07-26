@@ -296,6 +296,19 @@ pub(super) fn draw_switcher(app: &App, f: &mut Frame, area: Rect) {
                 " ⇄  Switch board  → ",
                 trailing_style,
             )));
+            let template_idx = trailing_idx + 1;
+            let template_enabled = app.is_empty_board();
+            let template_style = if state.sel == template_idx {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else if template_enabled {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            rows.push(ListItem::new(Span::styled(
+                " ⊞  Apply template  ",
+                template_style,
+            )));
             rows
         }
         SwitcherLevel::Boards => state
@@ -322,6 +335,9 @@ pub(super) fn draw_switcher(app: &App, f: &mut Frame, area: Rect) {
         let zone = match state.level {
             SwitcherLevel::Columns if (row as usize) == app.board.columns.len() => {
                 Zone::SwitcherSwitchBoard
+            }
+            SwitcherLevel::Columns if (row as usize) == app.board.columns.len() + 1 => {
+                Zone::SwitcherApplyTemplate
             }
             _ => Zone::SwitcherRow(row as usize),
         };

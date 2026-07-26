@@ -9,6 +9,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+use board_core::model::CommentHistory;
 use board_core::protocol::{BoardSnapshot, CardDetail, CardMoveParams, CardStatus, RunOutcome};
 use crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::layout::Rect;
@@ -18,6 +19,7 @@ use crate::widgets::HitMap;
 use crate::OriginContext;
 
 mod board;
+mod comment_history;
 mod confirm;
 mod detail;
 mod forms;
@@ -28,6 +30,22 @@ mod picker;
 mod switcher;
 
 pub use switcher::enter_boards_level;
+
+/// The only template that exists today. Single source of truth so the board
+/// `T` key and the switcher's "Apply template" row can't drift apart.
+pub const PIPELINE_TEMPLATE: &str = "pipeline";
+
+/// Shared gate for applying [`PIPELINE_TEMPLATE`]: only onto an empty board
+/// (`App::is_empty_board`), otherwise raises the same explanatory toast
+/// everywhere it's invoked from (board `T` key, switcher "Apply template"
+/// row) instead of silently doing nothing.
+pub(super) fn apply_template(app: &mut App) -> Vec<Effect> {
+    if app.is_empty_board() {
+        return vec![Effect::TemplateApply(PIPELINE_TEMPLATE.into())];
+    }
+    app.set_toast("template only applies to an empty board", true);
+    vec![]
+}
 
 /// Which modal/screen is active.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -43,6 +61,9 @@ pub enum Screen {
     Help,
     /// Compact-only column/board switcher sheet.
     Switcher,
+    /// A focused comment's audit trail (`comment.history`), reached via `h`
+    /// from `CardDetail`.
+    CommentHistory,
 }
 
 /// Which level the Compact switcher sheet is showing.
@@ -76,6 +97,22 @@ pub struct SwitcherState {
 pub enum DetailScrollTarget {
     Comments,
     Runs,
+}
+
+/// State for the `Screen::CommentHistory` sheet: one comment's full audit
+/// trail, oldest → newest, with its own scroll offset.
+pub struct CommentHistoryView {
+    pub comment_id: i64,
+    pub entries: Vec<CommentHistory>,
+    pub scroll: usize,
+}
+
+/// The single definition of "is this a system comment" (author `"system"`),
+/// shared by key handling (`e`/`d` immutability) and rendering (dimmed
+/// `[Edit]`/`[Del]` labels) so the `"system"` literal lives in exactly one
+/// place.
+pub fn is_system_comment(c: &board_core::model::Comment) -> bool {
+    c.author == "system"
 }
 
 /// Which cards are visible on the board. Archiving never deletes history.
@@ -153,6 +190,18 @@ pub enum Effect {
         card_id: i64,
         body: String,
     },
+    CommentUpdate {
+        id: i64,
+        body: String,
+    },
+    CommentDelete {
+        id: i64,
+    },
+    /// Fetch a comment's full audit trail (`comment.history`) and open
+    /// `Screen::CommentHistory` with it.
+    LoadCommentHistory {
+        id: i64,
+    },
     TemplateApply(String),
     RunCancel(i64),
     RunRetry(i64),
@@ -213,6 +262,7 @@ pub enum ConfirmPurpose {
     DeleteCard(i64),
     DeleteColumn(i64),
     CancelRun(i64),
+    DeleteComment(i64),
 }
 
 /// In-progress "move column" mini-mode state (entered with `M`).
@@ -247,6 +297,13 @@ pub struct App {
     pub detail_scroll_target: DetailScrollTarget,
     pub detail_comments_scroll: usize,
     pub detail_runs_scroll: usize,
+    /// Index into `detail.comments` of the focused comment (edit/delete/
+    /// history act on it). Only meaningful while `detail_scroll_target ==
+    /// Comments` and `detail.comments` is non-empty — see `focused_comment`.
+    pub detail_comment_sel: usize,
+    /// The comment-history sheet's state (`Screen::CommentHistory`); `None`
+    /// when not open.
+    pub comment_history: Option<CommentHistoryView>,
     pub form: Option<Form>,
     /// Forms opened from card detail return there on save/cancel.
     pub form_from_detail: bool,
@@ -295,6 +352,8 @@ impl App {
             detail_scroll_target: DetailScrollTarget::Comments,
             detail_comments_scroll: 0,
             detail_runs_scroll: 0,
+            detail_comment_sel: 0,
+            comment_history: None,
             form: None,
             form_from_detail: false,
             picker: None,
@@ -324,6 +383,8 @@ impl App {
         self.detail_fullscreen = false;
         self.detail_comments_scroll = 0;
         self.detail_runs_scroll = 0;
+        self.detail_comment_sel = 0;
+        self.comment_history = None;
         self.form = None;
         self.form_from_detail = false;
         self.picker = None;
@@ -405,7 +466,7 @@ impl App {
         // wrapped height; runs stay one row each.
         let comments_total = crate::view::comment_wrapped_rows(detail, layout.comments.width);
         let runs_total = detail.runs.len();
-        let comments_visible = layout.comments.height.saturating_sub(1) as usize;
+        let (_, comments_visible) = crate::view::comments_viewport(self, &layout);
         let runs_visible = layout.runs.height.saturating_sub(1) as usize;
         self.detail_comments_scroll = comments_total.saturating_sub(comments_visible.max(1));
         self.detail_runs_scroll = runs_total.saturating_sub(runs_visible.max(1));
@@ -419,23 +480,73 @@ impl App {
     fn scroll_detail(&mut self, delta: isize) {
         let Some(detail) = &self.detail else { return };
         let layout = crate::view::detail_layout(self, self.last_area);
+        let (_, comments_visible) = crate::view::comments_viewport(self, &layout);
+        let comments_total = crate::view::comment_wrapped_rows(detail, layout.comments.width);
+        let runs_total = detail.runs.len();
+        let runs_visible = layout.runs.height.saturating_sub(1) as usize;
         let (offset, total, visible) = match self.detail_scroll_target {
-            DetailScrollTarget::Comments => {
-                // Row-based: comments wrap, so total/visible are wrapped rows.
-                (
-                    &mut self.detail_comments_scroll,
-                    crate::view::comment_wrapped_rows(detail, layout.comments.width),
-                    layout.comments.height.saturating_sub(1) as usize,
-                )
-            }
-            DetailScrollTarget::Runs => (
-                &mut self.detail_runs_scroll,
-                detail.runs.len(),
-                layout.runs.height.saturating_sub(1) as usize,
+            // Row-based: comments wrap, so total/visible are wrapped rows.
+            DetailScrollTarget::Comments => (
+                &mut self.detail_comments_scroll,
+                comments_total,
+                comments_visible,
             ),
+            DetailScrollTarget::Runs => (&mut self.detail_runs_scroll, runs_total, runs_visible),
         };
         let max = total.saturating_sub(visible.max(1));
         *offset = (*offset as isize + delta).clamp(0, max as isize) as usize;
+    }
+
+    /// Whether the focused comment can be edited/deleted: system comments are
+    /// immutable (`Db::update_comment`/`soft_delete_comment` reject
+    /// `author == "system"`; see `docs/protocol.md`), so `e`/`d` and the
+    /// action bar's `[Edit]`/`[Del]` labels must treat it as read-only.
+    /// `comment.history` is unaffected — history stays available regardless.
+    pub fn focused_comment_is_system(&self) -> bool {
+        self.focused_comment().is_some_and(is_system_comment)
+    }
+
+    /// The focused comment (edit/delete/history act on it): `Some` only while
+    /// the comments section is focused and non-empty.
+    pub fn focused_comment(&self) -> Option<&board_core::model::Comment> {
+        if self.detail_scroll_target != DetailScrollTarget::Comments {
+            return None;
+        }
+        let detail = self.detail.as_ref()?;
+        if detail.comments.is_empty() {
+            return None;
+        }
+        let idx = self.detail_comment_sel.min(detail.comments.len() - 1);
+        detail.comments.get(idx)
+    }
+
+    /// After `detail_comment_sel` changes, keep it in range and scroll the
+    /// comments viewport just enough to keep the focused comment's wrapped
+    /// row span fully visible (when it fits).
+    fn follow_comment_focus(&mut self) {
+        let len = match &self.detail {
+            Some(d) if !d.comments.is_empty() => d.comments.len(),
+            _ => return,
+        };
+        self.detail_comment_sel = self.detail_comment_sel.min(len - 1);
+        let layout = crate::view::detail_layout(self, self.last_area);
+        let spans =
+            crate::view::comment_row_spans(self.detail.as_ref().unwrap(), layout.comments.width);
+        let (_, visible) = crate::view::comments_viewport(self, &layout);
+        let Some(&(start, span_len)) = spans.get(self.detail_comment_sel) else {
+            return;
+        };
+        let mut scroll = self.detail_comments_scroll;
+        if start < scroll {
+            scroll = start;
+        }
+        if start + span_len > scroll + visible {
+            scroll = (start + span_len).saturating_sub(visible);
+        }
+        if scroll > start {
+            scroll = start;
+        }
+        self.detail_comments_scroll = scroll;
     }
 
     // -- navigation ----------------------------------------------------------
@@ -541,6 +652,7 @@ fn on_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
         Screen::Confirm => confirm::confirm_key(app, k),
         Screen::Help => help::help_key(app, k),
         Screen::Switcher => switcher::switcher_key(app, k),
+        Screen::CommentHistory => comment_history::comment_history_key(app, k),
     }
 }
 

@@ -1,3 +1,4 @@
+use board_core::model::CommentHistory;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -348,6 +349,103 @@ fn render_help_column(f: &mut Frame, area: Rect, keys: &[(&str, &str)]) {
         })
         .collect();
     f.render_widget(Paragraph::new(lines), area);
+}
+
+// -- comment history sheet ---------------------------------------------------
+
+const COMMENT_HISTORY_W: u16 = 90;
+const COMMENT_HISTORY_H: u16 = 24;
+
+/// Inner content rect of the comment-history sheet, independent of drawing —
+/// mirrors what `draw_comment_history` renders into so scroll clamping
+/// (`app::comment_history_key`) agrees with what got drawn.
+pub fn comment_history_rect(app: &App, area: Rect) -> Rect {
+    let box_area = sheet_area(
+        app.layout_mode(),
+        COMMENT_HISTORY_W,
+        COMMENT_HISTORY_H,
+        area,
+    );
+    ratatui::widgets::Block::default()
+        .borders(ratatui::widgets::Borders::ALL)
+        .inner(box_area)
+}
+
+/// One entry's header line: `#<n> <created_at>`, plus `· deleted` when the
+/// entry records a deletion.
+fn comment_history_header(idx: usize, entry: &CommentHistory) -> String {
+    let mut header = format!("#{} {}", idx + 1, entry.created_at);
+    if entry.deleted_at.is_some() {
+        header.push_str(" · deleted");
+    }
+    header
+}
+
+/// Total wrapped rows the comment-history sheet's entries occupy at `width`:
+/// one header line plus the wrapped body, per entry, oldest → newest. Shared
+/// by `draw_comment_history` and `app::comment_history_key` so scroll
+/// clamping matches what is drawn.
+pub fn comment_history_wrapped_rows(entries: &[CommentHistory], width: u16) -> usize {
+    entries
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            wrapped_row_count(&comment_history_header(i, e), width)
+                + wrapped_row_count(&e.body, width)
+        })
+        .sum::<usize>()
+        .max(1)
+}
+
+pub(super) fn draw_comment_history(app: &App, f: &mut Frame, area: Rect) {
+    let Some(state) = &app.comment_history else {
+        return;
+    };
+    let mode = app.layout_mode();
+    let compact = mode == LayoutMode::Compact;
+    let box_area = sheet_area(mode, COMMENT_HISTORY_W, COMMENT_HISTORY_H, area);
+    f.render_widget(Clear, box_area);
+    let mut hit_map = app.hit_map.borrow_mut();
+    let inner = render_sheet_frame(
+        f,
+        box_area,
+        compact,
+        "Comment history (j/k scroll · Esc close)",
+        "History",
+        Style::default().fg(Color::Blue),
+        &mut hit_map,
+    );
+    drop(hit_map);
+
+    if state.entries.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "(no history)",
+                Style::default().fg(Color::Gray),
+            )),
+            inner,
+        );
+        return;
+    }
+
+    let width = inner.width.max(1);
+    let mut lines: Vec<Line> = Vec::with_capacity(state.entries.len() * 2);
+    for (i, e) in state.entries.iter().enumerate() {
+        lines.push(Line::from(Span::styled(
+            comment_history_header(i, e),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(e.body.as_str()));
+    }
+    let total_rows = comment_history_wrapped_rows(&state.entries, width);
+    let visible = inner.height.max(1) as usize;
+    let scroll = state.scroll.min(total_rows.saturating_sub(visible));
+    let p = Paragraph::new(Text::from(lines))
+        .wrap(Wrap { trim: false })
+        .scroll((scroll as u16, 0));
+    f.render_widget(p, inner);
 }
 
 pub(super) fn draw_footer(app: &App, f: &mut Frame, area: Rect) {

@@ -6,8 +6,11 @@
 
 use board_core::client::{BoardClient, FakeBoardClient};
 use board_core::protocol::CardCreateParams;
-use board_tui::app::App;
-use board_tui::view::{board_layout, sheet_area, LayoutMode};
+use board_tui::app::{App, DetailScrollTarget, Screen};
+use board_tui::view::{
+    board_layout, comment_row_spans, comment_wrapped_rows, comments_action_bar_shown,
+    detail_layout, sheet_area, LayoutMode,
+};
 use ratatui::layout::Rect;
 
 fn card(title: &str, column_id: i64) -> CardCreateParams {
@@ -251,4 +254,87 @@ fn scrollbar_rect_present_iff_column_overflows() {
     let col = layout.cols.iter().find(|c| c.idx == 0).unwrap();
     assert!(col.scroll.overflowing());
     assert!(col.scrollbar_rect.is_some());
+}
+
+// -- comment detail: action bar geometry + comment_row_spans --------------------
+
+/// A `CardDetail` with `n` comments, opened in `CardDetail` with comments
+/// focused.
+fn app_with_detail_comments(n: usize) -> App {
+    let mut c = FakeBoardClient::new().unwrap();
+    let column_id = c.board_get().unwrap().columns[0].id;
+    let card = c.card_create(&card("comment fixture", column_id)).unwrap();
+    for i in 0..n {
+        c.comment_add(card.id, &format!("comment {i}"), Some("test"))
+            .unwrap();
+    }
+    let detail = c.card_get(card.id).unwrap();
+    let mut app = App::new(c.board_get().unwrap());
+    app.detail = Some(detail);
+    app.screen = Screen::CardDetail;
+    app.detail_scroll_target = DetailScrollTarget::Comments;
+    app
+}
+
+#[test]
+fn action_bar_row_sits_inside_comments_and_never_overlaps_runs_or_footer() {
+    let app = app_with_detail_comments(3);
+    let area = Rect::new(0, 0, 80, 24);
+    let layout = detail_layout(&app, area);
+    assert!(
+        comments_action_bar_shown(&app, &layout),
+        "focused + non-empty + tall enough must show the bar"
+    );
+    let bar_y = layout.comments.y + layout.comments.height - 1;
+
+    // Inside `layout.comments`'s own bounds.
+    assert!(bar_y >= layout.comments.y && bar_y < layout.comments.y + layout.comments.height);
+    // Never overlaps `layout.runs` (which starts strictly after it).
+    assert!(bar_y < layout.runs.y, "bar row must not overlap runs");
+    // Never overlaps the global footer row.
+    let footer_y = area.y + area.height - 1;
+    assert!(bar_y < footer_y, "bar row must not overlap the footer");
+}
+
+#[test]
+fn action_bar_absent_when_unfocused_empty_or_too_short() {
+    let area = Rect::new(0, 0, 80, 24);
+
+    // Unfocused (Runs focused instead).
+    let mut app = app_with_detail_comments(3);
+    app.detail_scroll_target = DetailScrollTarget::Runs;
+    let layout = detail_layout(&app, area);
+    assert!(!comments_action_bar_shown(&app, &layout));
+
+    // No comments.
+    let app = app_with_detail_comments(0);
+    let layout = detail_layout(&app, area);
+    assert!(!comments_action_bar_shown(&app, &layout));
+
+    // Focused + non-empty, but the section is too short to spare a row.
+    let mut app = app_with_detail_comments(3);
+    app.detail_scroll_target = DetailScrollTarget::Comments;
+    let short_area = Rect::new(0, 0, 80, 3);
+    let layout = detail_layout(&app, short_area);
+    if layout.comments.height < 3 {
+        assert!(!comments_action_bar_shown(&app, &layout));
+    }
+}
+
+#[test]
+fn comment_row_spans_sum_equals_comment_wrapped_rows() {
+    for n in [0, 1, 5, 12] {
+        let app = app_with_detail_comments(n);
+        let detail = app.detail.as_ref().unwrap();
+        for width in [20u16, 40, 78, 118] {
+            let spans = comment_row_spans(detail, width);
+            let sum: usize = spans.iter().map(|&(_, len)| len).sum();
+            let total = comment_wrapped_rows(detail, width);
+            assert_eq!(
+                sum.max(1),
+                total,
+                "n={n} width={width}: comment_row_spans must sum to comment_wrapped_rows"
+            );
+        }
+    }
 }

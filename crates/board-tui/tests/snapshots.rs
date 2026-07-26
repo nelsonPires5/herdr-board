@@ -443,6 +443,46 @@ fn card_detail_history_overflow_starts_latest_and_scrolls_sections() {
 }
 
 #[test]
+fn comment_history_sheet_40x20_and_80x24() {
+    let mut client = demo_client().unwrap();
+    let board = client.board_get().unwrap();
+    let card = board
+        .cards
+        .iter()
+        .find(|card| card.status == CardStatus::Failed)
+        .unwrap()
+        .clone();
+    let comment = client
+        .comment_add(card.id, "first draft of the note", Some("reviewer"))
+        .unwrap();
+    client
+        .comment_update(comment.id, "revised wording of the note", None)
+        .unwrap();
+    client
+        .comment_update(comment.id, "final text of the note", None)
+        .unwrap();
+
+    let mut d = driver(client);
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Enter);
+    // Opening detail focuses the newest comment (the one just edited twice).
+    key(&mut d, KeyCode::Char('h'));
+    assert_eq!(d.app.screen, Screen::CommentHistory);
+    // The audit trail's timestamps are real wall-clock time (unlike
+    // `board`/`detail`, `pin()` has nothing to rewrite them from); stabilize
+    // them here so the snapshot is deterministic.
+    if let Some(state) = d.app.comment_history.as_mut() {
+        for (i, entry) in state.entries.iter_mut().enumerate() {
+            entry.created_at = format!("2026-07-14 12:0{}:00", i);
+        }
+    }
+    insta::assert_snapshot!("comment_history_40x20", render_sized(&mut d, 40, 20));
+    insta::assert_snapshot!("comment_history_80x24", render_sized(&mut d, 80, 24));
+}
+
+#[test]
 fn board_picker_wide_and_narrow() {
     let mut wide = driver(demo_client().unwrap());
     key(&mut wide, KeyCode::Char('b'));

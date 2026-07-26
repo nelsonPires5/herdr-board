@@ -97,16 +97,16 @@ pub(super) fn board_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
                 app.detail_scroll_target = DetailScrollTarget::Comments;
                 app.detail_comments_scroll = 0;
                 app.detail_runs_scroll = 0;
+                // Sentinel: "not yet focused anywhere" — `load_detail` clamps
+                // this against the freshly fetched comment count, landing it
+                // on the newest comment (matching `scroll_detail_to_latest`'s
+                // bottom-open behaviour) instead of jumping to the oldest.
+                app.detail_comment_sel = usize::MAX;
                 app.screen = Screen::CardDetail;
                 return vec![Effect::LoadDetail(id)];
             }
         }
-        KeyCode::Char('T') => {
-            if app.is_empty_board() {
-                return vec![Effect::TemplateApply("pipeline".into())];
-            }
-            app.set_toast("template only applies to an empty board", true);
-        }
+        KeyCode::Char('T') => return super::apply_template(app),
         KeyCode::Char('r') | KeyCode::Char('R') => {
             app.set_toast("refreshed", false);
             return vec![Effect::Refetch];

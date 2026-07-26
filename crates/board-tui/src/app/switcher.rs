@@ -16,10 +16,10 @@ use crossterm::event::{KeyCode, KeyEvent};
 
 use super::{App, Effect, Screen, SwitcherLevel, SwitcherState};
 
-/// Rows in the level-1 (columns) list: one per column plus the trailing
-/// "switch board" row.
+/// Rows in the level-1 (columns) list: one per column plus the two trailing
+/// rows ("switch board", then "apply template").
 fn columns_row_count(app: &App) -> usize {
-    app.board.columns.len() + 1
+    app.board.columns.len() + 2
 }
 
 pub(super) fn switcher_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
@@ -82,7 +82,7 @@ fn activate(app: &mut App) -> Vec<Effect> {
     match level {
         SwitcherLevel::Columns => {
             let n = app.board.columns.len();
-            if sel >= n {
+            if sel == n {
                 // Trailing "switch board" row: remember where we were in the
                 // Columns list (so `Esc` from Boards can restore it), then
                 // fetch the board list.
@@ -90,6 +90,16 @@ fn activate(app: &mut App) -> Vec<Effect> {
                     state.columns_sel = sel;
                 }
                 return vec![Effect::LoadBoardsForSwitcher];
+            }
+            if sel == n + 1 {
+                // Trailing "apply template" row: same gate/toast/effect as
+                // the board `T` key, via the shared helper.
+                let effects = super::apply_template(app);
+                if !effects.is_empty() {
+                    app.switcher = None;
+                    app.screen = Screen::Board;
+                }
+                return effects;
             }
             app.sel_col = sel;
             app.clamp_card();

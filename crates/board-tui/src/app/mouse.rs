@@ -78,6 +78,9 @@ pub(super) fn on_mouse(app: &mut App, m: MouseEvent) -> Vec<Effect> {
                         app.detail_scroll_target = DetailScrollTarget::Comments;
                         app.detail_comments_scroll = 0;
                         app.detail_runs_scroll = 0;
+                        // See `board::board_key`'s `Enter` arm: sentinel for
+                        // "not yet focused anywhere".
+                        app.detail_comment_sel = usize::MAX;
                         app.screen = Screen::CardDetail;
                         return vec![Effect::LoadDetail(id)];
                     }
@@ -203,6 +206,13 @@ fn handle_zone(app: &mut App, zone: Zone) -> Option<Vec<Effect>> {
             }
             Some(super::on_key(app, key(KeyCode::Enter)))
         }
+        Zone::SwitcherApplyTemplate if app.screen == Screen::Switcher => {
+            if let Some(state) = app.switcher.as_mut() {
+                let trailing = app.board.columns.len() + 1;
+                state.sel = trailing;
+            }
+            Some(super::on_key(app, key(KeyCode::Enter)))
+        }
         Zone::BarSave if matches!(app.screen, Screen::CardForm | Screen::ColumnForm) => {
             Some(super::on_key(app, key(KeyCode::Enter)))
         }
@@ -210,6 +220,21 @@ fn handle_zone(app: &mut App, zone: Zone) -> Option<Vec<Effect>> {
             Some(super::on_key(app, key(KeyCode::Esc)))
         }
         Zone::SheetClose => Some(super::on_key(app, key(KeyCode::Esc))),
+        Zone::CommentRow(idx) if app.screen == Screen::CardDetail => {
+            app.detail_scroll_target = DetailScrollTarget::Comments;
+            app.detail_comment_sel = idx;
+            app.follow_comment_focus();
+            Some(vec![])
+        }
+        Zone::CommentEdit if app.screen == Screen::CardDetail => {
+            Some(super::on_key(app, key(KeyCode::Char('e'))))
+        }
+        Zone::CommentDelete if app.screen == Screen::CardDetail => {
+            Some(super::on_key(app, key(KeyCode::Char('d'))))
+        }
+        Zone::CommentHistory if app.screen == Screen::CardDetail => {
+            Some(super::on_key(app, key(KeyCode::Char('h'))))
+        }
         _ => None,
     }
 }
