@@ -14,7 +14,7 @@ Read [`references/playbook.md`](references/playbook.md) before executing live He
 1. Read repository `AGENTS.md`, `skill/SKILL.md`, `docs/herdr.md`, and `docs/testing.md` completely. Treat `skill/SKILL.md` as the source of truth for operating the board; do not duplicate its general CLI/TUI reference here.
 2. Verify the installed Herdr with `herdr --version`, `herdr status`, `herdr api schema --json`, and relevant `--help`; never guess command shapes.
 3. Mutate only an ephemeral named Herdr session and workspaces created inside it. Prefix every mutation log with `HERDR MUTATION:`.
-4. Isolate board state under a short `/tmp` directory via `BOARD_DB`, `BOARD_SOCKET`, and `HERDR_BOARD_CONFIG`.
+4. ALWAYS isolate board state — DB, socket, AND daemon — under a short `/tmp` directory via `BOARD_DB`, `BOARD_SOCKET`, and `HERDR_BOARD_CONFIG`. No exceptions: trivial prototypes, "quick peeks", and one-off TUI runs all use the isolated env; the user's real board database and daemon are never a valid target. `board tui` with an isolated `BOARD_SOCKET` auto-starts its own isolated daemon. Keep this rule identical to the board's Prototyping-column prompt. When a prototype is runnable/visible, open it in a new wezterm tab (`wezterm cli spawn --cwd <src> -- bash -lc '<run cmd>'`; the spawned process inherits the isolated env) so the user can validate interactively before approval.
 5. Choose the validation mode before changing files:
    - **Prototype mode:** prototype in a detached temporary worktree under `/tmp`; keep the implementation checkout unchanged until approval.
    - **Execution-validation mode:** validate an existing implementation worktree; do not create a second implementation worktree or copy production changes into another branch.
