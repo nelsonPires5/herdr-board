@@ -34,7 +34,8 @@ use ratatui::layout::Rect;
 use ratatui::Terminal;
 
 use crate::app::{
-    clamp_selection, update, App, CardFilter, Effect, Msg, Picker, PickerPurpose, Screen,
+    clamp_selection, update, App, CardFilter, CommentHistoryView, Effect, Msg, Picker,
+    PickerPurpose, Screen,
 };
 use crate::editor::{EditorLauncher, RealEditor};
 use crate::view::{board_picker_label, pane_title, view};
@@ -302,6 +303,25 @@ impl Driver {
         let r = self.client.card_get(id);
         if let Some(detail) = self.guard(r) {
             self.app.detail = Some(detail);
+            let len = self
+                .app
+                .detail
+                .as_ref()
+                .map(|d| d.comments.len())
+                .unwrap_or(0);
+            // `detail_comment_sel == usize::MAX` is the sentinel the Enter/
+            // double-click open handlers set before dispatching `LoadDetail`
+            // ("not yet focused anywhere"); clamping it against the freshly
+            // fetched comment count below lands it on the newest comment,
+            // matching `scroll_detail_to_latest`'s bottom-open behaviour. A
+            // normal in-range value (a reload after a comment edit/delete) is
+            // preserved instead of reset, so editing/deleting a comment
+            // doesn't jump focus elsewhere.
+            self.app.detail_comment_sel = if len == 0 {
+                0
+            } else {
+                self.app.detail_comment_sel.min(len - 1)
+            };
             self.app.scroll_detail_to_latest();
         }
     }
@@ -404,6 +424,29 @@ impl Driver {
                 if self.guard(r).is_some() {
                     self.reload_open_detail();
                     self.refetch();
+                }
+            }
+            Effect::CommentUpdate { id, body } => {
+                let r = self.client.comment_update(id, &body, None);
+                if self.guard(r).is_some() {
+                    self.reload_open_detail();
+                }
+            }
+            Effect::CommentDelete { id } => {
+                let r = self.client.comment_delete(id, None);
+                if self.guard(r).is_some() {
+                    self.reload_open_detail();
+                }
+            }
+            Effect::LoadCommentHistory { id } => {
+                let r = self.client.comment_history(id);
+                if let Some(entries) = self.guard(r) {
+                    self.app.comment_history = Some(CommentHistoryView {
+                        comment_id: id,
+                        entries,
+                        scroll: 0,
+                    });
+                    self.app.screen = Screen::CommentHistory;
                 }
             }
             Effect::TemplateApply(name) => {

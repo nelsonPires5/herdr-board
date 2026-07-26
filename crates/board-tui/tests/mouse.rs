@@ -187,6 +187,40 @@ fn setup_help() -> Driver {
     d
 }
 
+/// Open the detail of the seeded `Failed` card (Review column, index 3),
+/// which already carries a few demo comments — the comment zone matrix needs
+/// at least one to render `CommentRow`/`CommentEdit`/`CommentDelete`/
+/// `CommentHistory`. Opening detail focuses the newest comment, which in this
+/// fixture is the `[system]` one — see `setup_card_detail_non_system_focus`
+/// for a variant focused on an editable comment.
+fn setup_card_detail() -> Driver {
+    let mut d = driver();
+    d.handle(key_msg(KeyCode::Right));
+    d.handle(key_msg(KeyCode::Right));
+    d.handle(key_msg(KeyCode::Right));
+    d.handle(key_msg(KeyCode::Enter));
+    assert_eq!(d.app.screen, Screen::CardDetail);
+    assert!(
+        !d.app.detail.as_ref().unwrap().comments.is_empty(),
+        "fixture card must carry comments"
+    );
+    d
+}
+
+/// Same fixture, but with focus moved off the newest (`[system]`) comment
+/// onto the second-newest (`[agent:2]`, editable) one, so the `CommentEdit`/
+/// `CommentDelete` zones exercise the normal (non-immutable) path.
+fn setup_card_detail_non_system_focus() -> Driver {
+    let mut d = setup_card_detail();
+    assert!(
+        d.app.focused_comment().unwrap().author == "system",
+        "fixture assumption: detail opens focused on the [system] comment"
+    );
+    d.handle(key_msg(KeyCode::Up));
+    assert_ne!(d.app.focused_comment().unwrap().author, "system");
+    d
+}
+
 // -- dead-zone contract: board header (Compact only) -------------------------
 
 #[test]
@@ -264,6 +298,15 @@ fn switcher_columns_level_rows_select_and_close() {
                     let state = d.app.switcher.as_ref().unwrap();
                     assert_eq!(state.level, SwitcherLevel::Boards);
                     assert!(!state.boards.is_empty());
+                }
+                Zone::SwitcherApplyTemplate => {
+                    // The demo board is non-empty, so this row is disabled:
+                    // activating it must raise the same toast the board `T`
+                    // key raises, and keep the sheet open rather than apply.
+                    assert_eq!(d.app.screen, Screen::Switcher);
+                    assert!(d.app.switcher.is_some());
+                    let toast = d.app.toast.as_ref().expect("error toast must be set");
+                    assert!(toast.is_error);
                 }
                 Zone::SheetClose => {
                     assert_eq!(d.app.screen, Screen::Board);
@@ -498,6 +541,131 @@ fn help_sheet_close_returns_to_board() {
                     assert_eq!(d.app.screen, Screen::Help);
                 }
                 other => panic!("unexpected zone on the help screen: {other:?}"),
+            }
+        }
+    }
+}
+
+// -- dead-zone contract: card detail comment zones ---------------------------
+
+#[test]
+fn card_detail_comment_zones_row_edit_delete_history() {
+    for &(w, h) in &[COMPACT, REGULAR] {
+        let mut probe = setup_card_detail_non_system_focus();
+        render_at(&mut probe, w, h);
+        let zones = hit_zones(&probe, w, h);
+        assert!(
+            !zones.is_empty(),
+            "card detail must register at least the comment zones at {w}x{h}"
+        );
+
+        for ((x, y), zone) in zones {
+            let mut d = setup_card_detail_non_system_focus();
+            render_at(&mut d, w, h);
+            d.handle(left_down(x, y));
+            match zone {
+                Zone::CommentRow(idx) => {
+                    assert_eq!(d.app.screen, Screen::CardDetail);
+                    assert_eq!(
+                        d.app.detail_scroll_target,
+                        board_tui::app::DetailScrollTarget::Comments
+                    );
+                    assert_eq!(d.app.detail_comment_sel, idx);
+                }
+                Zone::CommentEdit => {
+                    assert_eq!(d.app.screen, Screen::CardForm);
+                    assert!(matches!(
+                        d.app.form.as_ref().map(|f| f.kind),
+                        Some(board_tui::forms::FormKind::CommentEdit { .. })
+                    ));
+                }
+                Zone::CommentDelete => {
+                    assert_eq!(d.app.screen, Screen::Confirm);
+                    assert!(d.app.confirm.is_some());
+                }
+                Zone::CommentHistory => {
+                    assert_eq!(d.app.screen, Screen::CommentHistory);
+                    assert!(d.app.comment_history.is_some());
+                }
+                other if is_leaked_board_header_zone(other) => {
+                    assert_eq!(d.app.screen, Screen::CardDetail);
+                }
+                other => panic!("unexpected zone on the card detail screen: {other:?}"),
+            }
+        }
+    }
+}
+
+/// System comments are immutable (`docs/protocol.md`): tapping `[Edit]`/
+/// `[Del]` while a `[system]` comment is focused must toast rather than open
+/// the form/confirm — the zone stays tappable (not a dead zone), it just
+/// routes to the same toast the `e`/`d` keys produce.
+#[test]
+fn card_detail_system_comment_edit_delete_zones_toast_without_changing_screen() {
+    for &(w, h) in &[COMPACT, REGULAR] {
+        let mut probe = setup_card_detail();
+        assert_eq!(probe.app.focused_comment().unwrap().author, "system");
+        render_at(&mut probe, w, h);
+        let zones = hit_zones(&probe, w, h);
+
+        for ((x, y), zone) in zones {
+            if !matches!(zone, Zone::CommentEdit | Zone::CommentDelete) {
+                continue;
+            }
+            let mut d = setup_card_detail();
+            render_at(&mut d, w, h);
+            d.handle(left_down(x, y));
+            assert_eq!(
+                d.app.screen,
+                Screen::CardDetail,
+                "{zone:?} on a system comment must not change screen"
+            );
+            assert!(d.app.form.is_none());
+            assert!(d.app.confirm.is_none());
+            assert!(
+                d.app
+                    .toast
+                    .as_ref()
+                    .is_some_and(|t| t.is_error && t.text.contains("immutable")),
+                "{zone:?} on a system comment must toast"
+            );
+        }
+    }
+}
+
+#[test]
+fn comment_history_sheet_close_returns_to_detail_not_board() {
+    for &(w, h) in &[COMPACT, REGULAR] {
+        let mut probe = setup_card_detail();
+        probe.handle(key_msg(KeyCode::Char('h')));
+        assert_eq!(probe.app.screen, Screen::CommentHistory);
+        render_at(&mut probe, w, h);
+        let zones = hit_zones(&probe, w, h);
+        if w < 60 {
+            assert!(
+                !zones.is_empty(),
+                "Compact comment-history sheet must register a sheet-close zone"
+            );
+        }
+
+        for ((x, y), zone) in zones {
+            let mut d = setup_card_detail();
+            d.handle(key_msg(KeyCode::Char('h')));
+            render_at(&mut d, w, h);
+            d.handle(left_down(x, y));
+            match zone {
+                Zone::SheetClose => {
+                    assert_eq!(
+                        d.app.screen,
+                        Screen::CardDetail,
+                        "closing the history sheet must return to detail, not the board"
+                    );
+                    assert!(d.app.comment_history.is_none());
+                }
+                other if is_leaked_board_header_zone(other) => {
+                    assert_eq!(d.app.screen, Screen::CommentHistory);
+                }
+                other => panic!("unexpected zone on the comment-history screen: {other:?}"),
             }
         }
     }

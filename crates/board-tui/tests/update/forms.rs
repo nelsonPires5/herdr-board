@@ -6,6 +6,7 @@ use super::helpers::{
 };
 use board_core::capability::{claude_capabilities, pi_capabilities};
 use board_core::client::BoardClient;
+use board_core::model::Comment;
 use board_core::protocol::{Effort, Patch, SpaceInfo, SpaceKind};
 use board_tui::app::{update, Effect, Screen};
 use board_tui::forms::{ChoiceVal, FieldId, Form, Submit};
@@ -671,4 +672,41 @@ fn session_selector_offers_default_plus_running() {
     assert_eq!(labels[0], "(default)");
     assert!(labels.contains(&"default".to_string()));
     assert!(labels.contains(&"feature".to_string()));
+}
+
+// -- comment edit form --------------------------------------------------------
+
+fn comment_fixture(id: i64, body: &str) -> Comment {
+    Comment {
+        id,
+        card_id: 7,
+        author: "user".into(),
+        body: body.into(),
+        created_at: "2026-07-14 12:00:00".into(),
+    }
+}
+
+#[test]
+fn comment_edit_form_prefills_body_and_submits_the_update() {
+    let comment = comment_fixture(42, "original text");
+    let mut form = Form::comment_edit(&comment);
+    assert_eq!(form.title(), "Edit comment");
+    assert_eq!(form.fields[0].get_text(), "original text");
+
+    form.fields[0].set_text("updated text");
+    match form.submit().unwrap() {
+        Submit::CommentEdit { comment_id, body } => {
+            assert_eq!(comment_id, 42);
+            assert_eq!(body, "updated text");
+        }
+        _ => panic!("expected Submit::CommentEdit"),
+    }
+}
+
+#[test]
+fn comment_edit_form_rejects_an_empty_body() {
+    let comment = comment_fixture(1, "x");
+    let mut form = Form::comment_edit(&comment);
+    form.fields[0].set_text("   ");
+    assert!(form.submit().is_err());
 }

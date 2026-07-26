@@ -81,28 +81,58 @@ pub(super) fn wrapped_row_count(text: &str, width: u16) -> usize {
         .max(1)
 }
 
+/// Per-comment `(start_row, row_count)` in the wrapped comments block, using
+/// exactly the measurement the renderer draws: a 1-char focus gutter (`▸` on
+/// the focused comment, a space otherwise — uniform width either way) then
+/// `"[author] body"`. Exposed so the app layer can map a comment index to its
+/// rows (scroll clamping, focus-follow) and mouse can map a clicked row back
+/// to a comment index.
+pub fn comment_row_spans(detail: &CardDetail, width: u16) -> Vec<(usize, usize)> {
+    let mut out = Vec::with_capacity(detail.comments.len());
+    let mut row = 0usize;
+    for c in &detail.comments {
+        let n = wrapped_row_count(&format!(" [{}] {}", c.author, c.body), width);
+        out.push((row, n));
+        row += n;
+    }
+    out
+}
+
 /// Total wrapped rows the comment bodies occupy at `width`, one block per
-/// comment (`"[author] body"`). Exposed so the app layer can clamp comment
-/// scrolling (row-based) to the real rendered height.
+/// comment (the gutter + `"[author] body"`). Exposed so the app layer can
+/// clamp comment scrolling (row-based) to the real rendered height.
 pub fn comment_wrapped_rows(detail: &CardDetail, width: u16) -> usize {
-    detail
-        .comments
+    comment_row_spans(detail, width)
         .iter()
-        .map(|c| wrapped_row_count(&format!("[{}] {}", c.author, c.body), width))
+        .map(|&(_, n)| n)
         .sum::<usize>()
         .max(1)
 }
 
 /// Size sections by content. Surplus height stays outside their borders; when
 /// content exceeds the viewport, rows go to the greatest unmet demand first.
-fn detail_section_heights(detail: &CardDetail, width: u16, available: u16) -> ([u16; 3], u16) {
+///
+/// `comments_active` accounts for the action bar's row in the comments
+/// section's demand (`needs[1]`) when it would render (focused + non-empty),
+/// so the section can grow to fit it rather than clip.
+fn detail_section_heights(
+    detail: &CardDetail,
+    width: u16,
+    available: u16,
+    comments_active: bool,
+) -> ([u16; 3], u16) {
     let desc_lines = wrapped_line_count(&detail.card.description, width);
     // Comments word-wrap across multiple rows; size the section by the summed
     // wrapped height so long bodies get the rows they need instead of clipping.
     let comment_lines = comment_wrapped_rows(detail, width) as u16;
     let run_lines = (detail.runs.len() as u16).max(1);
+    let bar_row = if comments_active && !detail.comments.is_empty() {
+        1
+    } else {
+        0
+    };
     // One additional row for each section's titled divider.
-    let needs = [desc_lines + 1, comment_lines + 1, run_lines + 1];
+    let needs = [desc_lines + 1, comment_lines + 1 + bar_row, run_lines + 1];
 
     let minimum = if available >= 6 { 2 } else { available / 3 };
     let mut heights = [minimum; 3];
@@ -153,8 +183,13 @@ pub fn detail_layout(app: &App, area: Rect) -> DetailLayout {
         3
     };
     let content_budget = inner.height.saturating_sub(status_h);
-    let (section_h, spacer_h) =
-        detail_section_heights(detail, inner.width.saturating_sub(1), content_budget);
+    let comments_active = app.detail_scroll_target == DetailScrollTarget::Comments;
+    let (section_h, spacer_h) = detail_section_heights(
+        detail,
+        inner.width.saturating_sub(1),
+        content_budget,
+        comments_active,
+    );
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -172,6 +207,35 @@ pub fn detail_layout(app: &App, area: Rect) -> DetailLayout {
         comments: chunks[3],
         runs: chunks[4],
     }
+}
+
+/// Whether the `[Edit] [Del] [Hist]` action bar renders on the comments
+/// section's last row: only when comments are focused, there is at least one
+/// comment to act on, and the section is tall enough to spare a row for it.
+pub fn comments_action_bar_shown(app: &App, layout: &DetailLayout) -> bool {
+    let Some(detail) = &app.detail else {
+        return false;
+    };
+    app.detail_scroll_target == DetailScrollTarget::Comments
+        && !detail.comments.is_empty()
+        && layout.comments.height >= 3
+}
+
+/// The comments section's content viewport (below its title row, above the
+/// action bar row when shown) plus the visible row count used for scroll
+/// clamping. Shared by the renderer, `App::scroll_detail`,
+/// `App::scroll_detail_to_latest`, and `App::follow_comment_focus` so the
+/// bar's row-stealing arithmetic is computed in exactly one place.
+pub fn comments_viewport(app: &App, layout: &DetailLayout) -> (Rect, usize) {
+    let bar_row = comments_action_bar_shown(app, layout) as u16;
+    let visible = layout.comments.height.saturating_sub(1 + bar_row);
+    let rect = Rect::new(
+        layout.comments.x,
+        layout.comments.y + 1,
+        layout.comments.width,
+        visible,
+    );
+    (rect, visible as usize)
 }
 
 pub(super) fn detail_section_title(
@@ -320,7 +384,18 @@ pub(super) fn draw_detail(app: &App, f: &mut Frame, area: Rect) {
 
     let comments_active = app.detail_scroll_target == DetailScrollTarget::Comments;
     let comments_content_w = layout.comments.width;
-    let comments_visible = layout.comments.height.saturating_sub(1) as usize;
+    let (viewport, comments_visible) = comments_viewport(app, &layout);
+    let show_bar = comments_action_bar_shown(app, &layout);
+    // The action bar (when shown) claims the section's last row; render the
+    // comments `Paragraph` into a rect one row shorter so its own content
+    // never overlaps the bar.
+    let bar_rows: u16 = show_bar as u16;
+    let paragraph_rect = Rect::new(
+        layout.comments.x,
+        layout.comments.y,
+        layout.comments.width,
+        layout.comments.height.saturating_sub(bar_rows),
+    );
     let comments_widget = if detail.comments.is_empty() {
         Paragraph::new(Text::from(Line::from(Span::styled(
             "(no comments)",
@@ -337,21 +412,39 @@ pub(super) fn draw_detail(app: &App, f: &mut Frame, area: Rect) {
                 .title("comments"),
         )
     } else {
-        // Render every comment as one `Line` carrying a styled `[author] `
-        // prefix + the raw body, then let the wrapped `Paragraph` word-break
-        // the combined line at the panel border. ratatui keeps the author
-        // prefix on the first rendered row and wraps the body onto later
-        // rows, so each comment reads as one styled block.
+        // Render every comment as one `Line` carrying a 1-char focus gutter
+        // (`▸` on the focused comment, a space otherwise), a styled
+        // `[author] ` prefix, and the raw body, then let the wrapped
+        // `Paragraph` word-break the combined line at the panel border.
+        // ratatui keeps the gutter+author prefix on the first rendered row
+        // and wraps the body onto later rows, so each comment reads as one
+        // styled block.
+        let sel = comments_active.then(|| app.detail_comment_sel.min(detail.comments.len() - 1));
         let lines: Vec<Line> = detail
             .comments
             .iter()
-            .map(|c| {
+            .enumerate()
+            .map(|(i, c)| {
+                let focused = sel == Some(i);
+                let gutter_style = if focused {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                let body_style = if focused {
+                    Style::default().add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
                 Line::from(vec![
+                    Span::styled(if focused { "▸" } else { " " }, gutter_style),
                     Span::styled(
                         format!("[{}] ", c.author),
                         Style::default().fg(Color::LightCyan),
                     ),
-                    Span::raw(c.body.clone()),
+                    Span::styled(c.body.clone(), body_style),
                 ])
             })
             .collect();
@@ -376,7 +469,35 @@ pub(super) fn draw_detail(app: &App, f: &mut Frame, area: Rect) {
                     .title(comments_title),
             )
     };
-    f.render_widget(comments_widget, layout.comments);
+    f.render_widget(comments_widget, paragraph_rect);
+
+    if !detail.comments.is_empty() {
+        let spans = comment_row_spans(detail, comments_content_w);
+        let mut hit_map = app.hit_map.borrow_mut();
+        for (i, &(start, len)) in spans.iter().enumerate() {
+            let row_lo = start.max(app.detail_comments_scroll);
+            let row_hi = (start + len).min(app.detail_comments_scroll + comments_visible);
+            if row_hi <= row_lo {
+                continue;
+            }
+            let y = viewport.y + (row_lo - app.detail_comments_scroll) as u16;
+            let h = (row_hi - row_lo) as u16;
+            hit_map.push(
+                Rect::new(viewport.x, y, viewport.width, h),
+                crate::widgets::Zone::CommentRow(i),
+            );
+        }
+        if show_bar {
+            let bar_rect = Rect::new(
+                layout.comments.x,
+                layout.comments.y + layout.comments.height.saturating_sub(1),
+                layout.comments.width,
+                1,
+            );
+            drop(hit_map);
+            draw_comment_action_bar(app, f, bar_rect);
+        }
+    }
 
     let runs: Vec<ListItem> = detail
         .runs
@@ -416,6 +537,40 @@ pub(super) fn draw_detail(app: &App, f: &mut Frame, area: Rect) {
         ),
         layout.runs,
     );
+}
+
+/// The comments section's `[Edit] [Del] [Hist]` action bar, drawn on the
+/// section's last row when `comments_action_bar_shown` allows it. `[Edit]`
+/// and `[Del]` render dimmed (but still tappable — the tap routes to the same
+/// "system comments are immutable" toast as the `e`/`d` keys, never a dead
+/// zone) when the focused comment is a system comment; `[Hist]` is unaffected
+/// since history stays available for system comments.
+fn draw_comment_action_bar(app: &App, f: &mut Frame, area: Rect) {
+    let immutable = app.focused_comment_is_system();
+    let mut hit_map = app.hit_map.borrow_mut();
+    let labels: [(&str, crate::widgets::Zone, bool); 3] = [
+        ("[Edit]", crate::widgets::Zone::CommentEdit, immutable),
+        ("[Del]", crate::widgets::Zone::CommentDelete, immutable),
+        ("[Hist]", crate::widgets::Zone::CommentHistory, false),
+    ];
+    let mut x = area.x;
+    for (label, zone, dimmed) in labels {
+        let w = label.chars().count() as u16;
+        if x.saturating_add(w) > area.x + area.width {
+            break;
+        }
+        let rect = Rect::new(x, area.y, w, 1);
+        let style = if dimmed {
+            Style::default().fg(Color::DarkGray)
+        } else {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        };
+        f.render_widget(Paragraph::new(Span::styled(label, style)), rect);
+        hit_map.push(rect, zone);
+        x = x.saturating_add(w).saturating_add(1);
+    }
 }
 
 fn run_duration(app: &App, run: &board_core::model::Run) -> String {

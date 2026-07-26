@@ -14,6 +14,8 @@ pub(super) fn detail_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
             app.detail_fullscreen = false;
             app.detail_comments_scroll = 0;
             app.detail_runs_scroll = 0;
+            app.detail_comment_sel = 0;
+            app.comment_history = None;
         }
         KeyCode::Char('f') => app.toggle_detail_fullscreen(),
         KeyCode::Tab => {
@@ -21,15 +23,66 @@ pub(super) fn detail_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
                 DetailScrollTarget::Comments => DetailScrollTarget::Runs,
                 DetailScrollTarget::Runs => DetailScrollTarget::Comments,
             };
+            if let Some(detail) = &app.detail {
+                if !detail.comments.is_empty() {
+                    app.detail_comment_sel = app.detail_comment_sel.min(detail.comments.len() - 1);
+                }
+            }
         }
-        KeyCode::Up | KeyCode::Char('k') => app.scroll_detail(-1),
-        KeyCode::Down | KeyCode::Char('j') => app.scroll_detail(1),
+        KeyCode::Up | KeyCode::Char('k') => {
+            if app.detail_scroll_target == DetailScrollTarget::Comments
+                && app.detail.as_ref().is_some_and(|d| !d.comments.is_empty())
+            {
+                app.detail_comment_sel = app.detail_comment_sel.saturating_sub(1);
+                app.follow_comment_focus();
+            } else {
+                app.scroll_detail(-1);
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if app.detail_scroll_target == DetailScrollTarget::Comments
+                && app.detail.as_ref().is_some_and(|d| !d.comments.is_empty())
+            {
+                let len = app.detail.as_ref().unwrap().comments.len();
+                app.detail_comment_sel = (app.detail_comment_sel + 1).min(len - 1);
+                app.follow_comment_focus();
+            } else {
+                app.scroll_detail(1);
+            }
+        }
         KeyCode::Char('e') => {
-            if let Some(card) = app.detail.as_ref().map(|d| d.card.clone()) {
+            if let Some(comment) = app.focused_comment().cloned() {
+                if super::is_system_comment(&comment) {
+                    app.set_toast("system comments are immutable", true);
+                } else {
+                    app.form_from_detail = true;
+                    app.form = Some(Form::comment_edit(&comment));
+                    app.screen = Screen::CardForm;
+                }
+            } else if let Some(card) = app.detail.as_ref().map(|d| d.card.clone()) {
                 app.form_from_detail = true;
                 app.form = Some(Form::card_edit(&card));
                 app.screen = Screen::CardForm;
                 return vec![Effect::LoadFormOptions];
+            }
+        }
+        KeyCode::Char('d') => {
+            if let Some(comment) = app.focused_comment() {
+                if super::is_system_comment(comment) {
+                    app.set_toast("system comments are immutable", true);
+                } else {
+                    let id = comment.id;
+                    app.confirm = Some(Confirm {
+                        message: "Delete this comment?".into(),
+                        purpose: ConfirmPurpose::DeleteComment(id),
+                    });
+                    app.screen = Screen::Confirm;
+                }
+            }
+        }
+        KeyCode::Char('h') => {
+            if let Some(comment) = app.focused_comment() {
+                return vec![Effect::LoadCommentHistory { id: comment.id }];
             }
         }
         KeyCode::Char('a') => {

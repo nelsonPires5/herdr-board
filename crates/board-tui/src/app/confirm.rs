@@ -27,10 +27,17 @@ pub(super) fn confirm_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
                     app.screen = Screen::CardDetail;
                     vec![Effect::RunCancel(id)]
                 }
+                ConfirmPurpose::DeleteComment(id) => {
+                    app.screen = Screen::CardDetail;
+                    vec![Effect::CommentDelete { id }]
+                }
             }
         }
         KeyCode::Char('n') | KeyCode::Esc => {
-            let back_detail = matches!(confirm.purpose, ConfirmPurpose::CancelRun(_));
+            let back_detail = matches!(
+                confirm.purpose,
+                ConfirmPurpose::CancelRun(_) | ConfirmPurpose::DeleteComment(_)
+            );
             app.confirm = None;
             app.screen = if back_detail {
                 Screen::CardDetail

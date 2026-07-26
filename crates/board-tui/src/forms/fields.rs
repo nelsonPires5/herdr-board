@@ -201,6 +201,7 @@ pub enum FormKind {
     ColumnCreate,
     ColumnEdit { column_id: i64 },
     Comment { card_id: i64 },
+    CommentEdit { comment_id: i64 },
 }
 
 /// A modal form.
@@ -237,4 +238,5 @@ pub enum Submit {
     ColumnCreate(ColumnCreateParams),
     ColumnUpdate(ColumnUpdateParams),
     Comment { card_id: i64, body: String },
+    CommentEdit { comment_id: i64, body: String },
 }

@@ -2,7 +2,7 @@
 
 use board_core::capability::{efforts_for, HarnessCapabilities};
 use board_core::harness::{BUILTIN_HARNESSES, DEFAULT_HARNESS};
-use board_core::model::{Card, Column};
+use board_core::model::{Card, Column, Comment};
 use board_core::protocol::{Effort, SessionInfo, SpaceInfo};
 
 use super::{ChoiceOpt, ChoiceVal, Field, FieldId, Form, FormKind};
@@ -99,6 +99,27 @@ impl Form {
             sessions: Vec::new(),
         }
     }
+
+    pub fn comment_edit(comment: &Comment) -> Form {
+        Form {
+            kind: FormKind::CommentEdit {
+                comment_id: comment.id,
+            },
+            fields: vec![Field::text(
+                FieldId::CommentBody,
+                "comment",
+                &comment.body,
+                true,
+            )],
+            focus: 0,
+            caps: None,
+            harnesses: default_harnesses(),
+            columns: Vec::new(),
+            spaces: Vec::new(),
+            sessions: Vec::new(),
+        }
+    }
+
     pub fn title(&self) -> &'static str {
         match self.kind {
             FormKind::CardCreate { .. } => "New card",
@@ -106,6 +127,7 @@ impl Form {
             FormKind::ColumnCreate => "New column",
             FormKind::ColumnEdit { .. } => "Edit column",
             FormKind::Comment { .. } => "Add comment",
+            FormKind::CommentEdit { .. } => "Edit comment",
         }
     }
 }

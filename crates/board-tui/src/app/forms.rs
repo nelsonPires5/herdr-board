@@ -82,6 +82,12 @@ fn submit_form(app: &mut App) -> Vec<Effect> {
                 }
                 Submit::ColumnUpdate(p) => vec![Effect::ColumnUpdate(p)],
                 Submit::Comment { card_id, body } => vec![Effect::CommentAdd { card_id, body }],
+                Submit::CommentEdit { comment_id, body } => {
+                    vec![Effect::CommentUpdate {
+                        id: comment_id,
+                        body,
+                    }]
+                }
             };
             close_form(app, true);
             effects

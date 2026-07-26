@@ -106,11 +106,13 @@ pub const HELP_KEYS: &[(&str, &str)] = &[
     ("q / Esc", "back / quit"),
     ("--", "-- card detail --"),
     ("Enter", "confirm done (awaiting)"),
-    ("e", "edit card"),
+    ("e", "edit card / comment"),
     ("a", "archive / restore card"),
     ("c", "add comment"),
+    ("d", "delete focused comment"),
+    ("h", "comment history"),
     ("Tab", "focus comments / runs"),
-    ("↑/↓ k/j", "scroll focused section"),
+    ("↑/↓ k/j", "focus comment / runs"),
     ("f / click", "toggle popup / fullscreen"),
     ("o", "jump to pane"),
     ("x", "cancel run"),
@@ -132,9 +134,15 @@ pub const HELP_KEYS: &[(&str, &str)] = &[
 mod layout;
 mod overlays;
 
-pub use detail::{comment_wrapped_rows, detail_layout, detail_toggle_rect, DetailLayout};
+pub use detail::{
+    comment_row_spans, comment_wrapped_rows, comments_action_bar_shown, comments_viewport,
+    detail_layout, detail_toggle_rect, DetailLayout,
+};
 pub use layout::{board_layout, BoardLayout, ColLayout, CompactHeader, ScrollInfo};
-pub use overlays::{help_content_width, help_list_rect, help_wrapped_rows};
+pub use overlays::{
+    comment_history_rect, comment_history_wrapped_rows, help_content_width, help_list_rect,
+    help_wrapped_rows,
+};
 
 // -- glyphs ------------------------------------------------------------------
 
@@ -185,6 +193,7 @@ pub fn view(app: &App, f: &mut Frame) {
         Screen::Confirm => overlays::draw_confirm(app, f, area),
         Screen::Help => overlays::draw_help(app, f, area),
         Screen::Switcher => board::draw_switcher(app, f, area),
+        Screen::CommentHistory => overlays::draw_comment_history(app, f, area),
     }
 
     overlays::draw_footer(app, f, area);

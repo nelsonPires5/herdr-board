@@ -25,12 +25,24 @@ pub enum Zone {
     SwitcherRow(usize),
     /// The switcher's trailing "switch board" row (level 1 only).
     SwitcherSwitchBoard,
+    /// The switcher's trailing "apply template" row (level 1 only), after
+    /// `SwitcherSwitchBoard`.
+    SwitcherApplyTemplate,
     /// `ButtonBar` save action.
     BarSave,
     /// `ButtonBar` cancel action.
     BarCancel,
     /// Sheet title-bar close `×`.
     SheetClose,
+    /// A rendered comment row in the card detail's comments section, by index
+    /// into `CardDetail::comments`.
+    CommentRow(usize),
+    /// Card detail comments action bar: edit the focused comment.
+    CommentEdit,
+    /// Card detail comments action bar: delete the focused comment.
+    CommentDelete,
+    /// Card detail comments action bar: view the focused comment's history.
+    CommentHistory,
 }
 
 /// Rects registered during the current frame's draw, consulted by the mouse
