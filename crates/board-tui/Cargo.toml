@@ -37,3 +37,7 @@ required-features = ["fake-client"]
 [[test]]
 name = "snapshots"
 required-features = ["fake-client"]
+
+[[test]]
+name = "mouse"
+required-features = ["fake-client"]

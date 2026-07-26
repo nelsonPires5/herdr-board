@@ -1,0 +1,24 @@
+---
+source: crates/board-tui/tests/snapshots.rs
+expression: output
+---
+"┌ Edit card ───────────────────────[×]─┐"
+"│title                                ▲│"
+"│Long description demo                █│"
+"│description (base prompt)  (Ctrl+E: …█│"
+"│This is the first paragraph of an    █│"
+"│intentionally long card description  █│"
+"│that must word-wrap across many      █│"
+"│rendered rows instead of being cut   █│"
+"│harness                              ││"
+"│< claude >                           ││"
+"│model                                ││"
+"│< (default) >                        ││"
+"│effort                               ││"
+"│< (default) >                        ││"
+"│permission                           ││"
+"│< (default) >                        ││"
+"│                                     ▼│"
+"│[ Save ]  [ Cancel ]                  │"
+"└──────────────────────────────────────┘"
+"? help                                  "

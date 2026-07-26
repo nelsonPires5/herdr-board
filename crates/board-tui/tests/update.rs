@@ -6,9 +6,13 @@ mod helpers;
 
 #[path = "update/detail.rs"]
 mod detail;
+#[path = "update/editor.rs"]
+mod editor;
 #[path = "update/forms.rs"]
 mod forms;
 #[path = "update/scope.rs"]
 mod scope;
 #[path = "update/support_nav.rs"]
 mod support_nav;
+#[path = "update/switcher.rs"]
+mod switcher;

@@ -1,6 +1,6 @@
 ---
 source: crates/board-tui/tests/snapshots.rs
-expression: "render(&mut d, 80, 24)"
+expression: output
 ---
 "┌ Edit card (Tab: field · Enter: save · Esc: cancel) ──────────────────────────┐"
 "│title                                                                        ▲│"

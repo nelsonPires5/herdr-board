@@ -14,6 +14,7 @@ pub mod forms;
 #[cfg(feature = "fake-client")]
 pub mod testkit;
 pub mod view;
+pub mod widgets;
 
 use std::io::Stdout;
 use std::process::{Command, Stdio};
@@ -83,6 +84,11 @@ pub struct Driver {
     client: Box<dyn BoardClient>,
     editor: Box<dyn EditorLauncher>,
     origin: OriginContext,
+    /// Bug A: set when the terminal contents were clobbered outside
+    /// ratatui's diff (an `$EDITOR` round-trip) or the size changed; the next
+    /// `event_loop` iteration calls `terminal.clear()` before drawing so every
+    /// cell is repainted, then resets this.
+    needs_full_redraw: bool,
 }
 
 impl Driver {
@@ -130,6 +136,7 @@ impl Driver {
             client,
             editor,
             origin,
+            needs_full_redraw: false,
         };
         driver.set_pane_title(CardFilter::Active);
         Ok(driver)
@@ -147,6 +154,32 @@ impl Driver {
         for eff in update(&mut self.app, msg) {
             self.dispatch(eff);
         }
+    }
+
+    /// Whether the next draw needs a full `terminal.clear()` first (Bug A: an
+    /// `$EDITOR` round-trip or a terminal-size change). Exposed read-only so
+    /// tests/embedders can observe it without consuming it.
+    pub fn needs_full_redraw(&self) -> bool {
+        self.needs_full_redraw
+    }
+
+    /// Consume the full-redraw flag, resetting it — the same
+    /// check-then-clear-then-reset step `event_loop` performs before every
+    /// draw. Exposed so tests can simulate that step without a real terminal.
+    pub fn take_needs_full_redraw(&mut self) -> bool {
+        std::mem::take(&mut self.needs_full_redraw)
+    }
+
+    /// Sync the driver to the frame area the next draw will use, setting the
+    /// full-redraw flag when it differs from the last one (Bug A: shrinking
+    /// then growing a terminal can leave stale cells behind). Called by
+    /// `event_loop` every iteration; exposed so tests can simulate a resize
+    /// without a real terminal.
+    pub fn sync_frame_area(&mut self, area: Rect) {
+        if area != self.app.last_area {
+            self.needs_full_redraw = true;
+        }
+        self.app.last_area = area;
     }
 
     fn guard<T>(&mut self, r: Result<T>) -> Option<T> {
@@ -187,6 +220,27 @@ impl Driver {
                 purpose: PickerPurpose::SwitchBoard,
             });
             self.app.screen = Screen::Picker;
+        }
+    }
+
+    /// Compact switcher level 2: fetch boards into `app.switcher` in place
+    /// (does not touch the Regular/Wide `Picker`).
+    fn load_boards_for_switcher(&mut self) {
+        let r = self.client.board_list();
+        if let Some(result) = self.guard(r) {
+            let boards: Vec<(String, i64)> = result
+                .boards
+                .iter()
+                .map(|board| (board_picker_label(board), board.id))
+                .collect();
+            let sel = result
+                .boards
+                .iter()
+                .position(|board| board.id == self.app.board.board.id)
+                .unwrap_or(0);
+            if let Some(state) = self.app.switcher.as_mut() {
+                crate::app::enter_boards_level(state, boards, sel);
+            }
         }
     }
 
@@ -258,9 +312,12 @@ impl Driver {
         };
         let initial = form.focused().get_text();
         match self.editor.edit(&initial) {
-            Ok(edited) => {
+            Ok(result) => {
                 if let Some(form) = self.app.form.as_mut() {
-                    form.focused_mut().set_text(&edited);
+                    form.focused_mut().set_text(&result.text);
+                }
+                if result.needs_full_redraw {
+                    self.needs_full_redraw = true;
                 }
             }
             Err(e) => self.app.set_toast(e.to_string(), true),
@@ -271,6 +328,7 @@ impl Driver {
         match eff {
             Effect::Refetch => self.refetch(),
             Effect::LoadBoards => self.load_boards(),
+            Effect::LoadBoardsForSwitcher => self.load_boards_for_switcher(),
             Effect::SwitchBoard(id) => self.switch_board(id),
             Effect::LoadBoardsForMove { card_id } => self.load_boards_for_move(card_id),
             Effect::LoadColumnsForMove { card_id, board_id } => {
@@ -579,7 +637,15 @@ fn event_loop(
         driver.expire_toast();
 
         let size = terminal.size()?;
-        driver.app.last_area = Rect::new(0, 0, size.width, size.height);
+        let new_area = Rect::new(0, 0, size.width, size.height);
+        // Bug A (resize half): a size change can leave stale cells behind too
+        // (e.g. shrinking then growing back); force a full repaint whenever
+        // the terminal size differs from what the last frame used.
+        driver.sync_frame_area(new_area);
+
+        if driver.take_needs_full_redraw() {
+            terminal.clear()?;
+        }
         terminal.draw(|f| view(&driver.app, f))?;
 
         if crossterm::event::poll(Duration::from_millis(200))? {

@@ -2,10 +2,11 @@ use board_core::protocol::{CardMoveParams, CardStatus};
 use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::forms::Form;
+use crate::view::LayoutMode;
 
 use super::{
     App, Confirm, ConfirmPurpose, DetailScrollTarget, Effect, MoveColumnState, Picker,
-    PickerPurpose, Screen,
+    PickerPurpose, Screen, SwitcherLevel, SwitcherState,
 };
 
 pub(super) fn board_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
@@ -14,7 +15,28 @@ pub(super) fn board_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
         KeyCode::Right | KeyCode::Char('l') => app.move_col(1),
         KeyCode::Up | KeyCode::Char('k') => app.move_card(-1),
         KeyCode::Down | KeyCode::Char('j') => app.move_card(1),
-        KeyCode::Char('b') => return vec![Effect::LoadBoards],
+        KeyCode::Char('b') => {
+            if app.layout_mode() == LayoutMode::Compact {
+                // `b` means "switch board": open the sheet straight at the
+                // Boards level (board names only exist there), unlike the
+                // header's center-button tap, which opens at Columns. The
+                // board list loads via `Effect::LoadBoardsForSwitcher`,
+                // which (synchronously) flips `level` to `Boards` once it
+                // resolves; `entered_at_boards` records the entry point so
+                // `Esc` from `Boards` closes the sheet instead of stepping
+                // back to a Columns view the user never asked for.
+                app.switcher = Some(SwitcherState {
+                    level: SwitcherLevel::Columns,
+                    sel: app.sel_col,
+                    columns_sel: app.sel_col,
+                    boards: Vec::new(),
+                    entered_at_boards: true,
+                });
+                app.screen = Screen::Switcher;
+                return vec![Effect::LoadBoardsForSwitcher];
+            }
+            return vec![Effect::LoadBoards];
+        }
         KeyCode::Char('n') => {
             if let Some(col_id) = app.col_id_at(app.sel_col) {
                 app.form_from_detail = false;
@@ -89,7 +111,10 @@ pub(super) fn board_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
             app.set_toast("refreshed", false);
             return vec![Effect::Refetch];
         }
-        KeyCode::Char('?') => app.screen = Screen::Help,
+        KeyCode::Char('?') => {
+            app.help_scroll = 0;
+            app.screen = Screen::Help;
+        }
         KeyCode::Char('q') | KeyCode::Esc => return vec![Effect::Quit],
         _ => {}
     }
