@@ -9,7 +9,7 @@ use board_core::protocol::{AwaitingReason, CardCreateParams, CardStatus, RunOutc
 use board_tui::app::{App, Msg, Screen};
 use board_tui::editor::FakeEditor;
 use board_tui::forms::{FieldId, FieldKind};
-use board_tui::testkit::demo_client;
+use board_tui::testkit::{demo_client, DemoClient};
 use board_tui::view::{parse_epoch, view};
 use board_tui::{Driver, OriginContext};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -447,10 +447,57 @@ fn move_card_flow() {
     let mut d = driver(demo_client().unwrap());
     // "before": Todo's card is selected.
     insta::assert_snapshot!("move_before", render(&mut d, 80, 24));
-    // Open the move picker and move the card to Plan (first option).
+    // `m` opens the active board's column picker directly (same-board fast path).
     key(&mut d, KeyCode::Char('m'));
+    insta::assert_snapshot!("move_pick_column", render(&mut d, 80, 24));
+    // Move the card to Plan (Down once from Todo).
+    key(&mut d, KeyCode::Down);
     key(&mut d, KeyCode::Enter);
     insta::assert_snapshot!("move_after", render(&mut d, 80, 24));
+}
+
+#[test]
+fn move_card_cross_board_via_b_toggle() {
+    let mut d = driver(demo_client().unwrap());
+    key(&mut d, KeyCode::Char('m')); // active board (Global) column picker
+    key(&mut d, KeyCode::Char('b')); // -> destination-board picker
+    insta::assert_snapshot!("move_pick_board", render(&mut d, 80, 24));
+}
+
+/// A client wrapper that simulates the daemon's blocking sanity check
+/// rejecting a cross-board move (e.g. an unresolvable session), so the TUI
+/// surfaces the error as a toast.
+struct FailingMoveClient(DemoClient);
+impl BoardClient for FailingMoveClient {
+    fn call(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        if method == "card.move" {
+            anyhow::bail!(
+                "boardd error 3: invalid state: cannot move: session does not resolve: \
+                 herdr session 'ghost' not found"
+            );
+        }
+        self.0.call(method, params)
+    }
+    fn subscribe(
+        &mut self,
+    ) -> anyhow::Result<Box<dyn Iterator<Item = board_core::protocol::Event> + Send>> {
+        self.0.subscribe()
+    }
+}
+
+#[test]
+fn move_blocked_shows_error_toast() {
+    let mut d = driver(FailingMoveClient(demo_client().unwrap()));
+    key(&mut d, KeyCode::Char('m')); // active board column picker
+    key(&mut d, KeyCode::Down); // Plan
+    key(&mut d, KeyCode::Enter); // commit -> daemon rejects -> toast
+    assert!(d.app.toast.as_ref().is_some_and(|t| t.is_error));
+    assert_eq!(d.app.screen, Screen::Board);
+    insta::assert_snapshot!("move_blocked_toast", render(&mut d, 80, 24));
 }
 
 #[test]

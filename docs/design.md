@@ -256,6 +256,30 @@ Notes:
 - Column `system_prompt` is combined with the mandatory board-protocol trailer and snapshotted at enqueue. For managed Pi it is delivered through a temporary file passed to `--append-system-prompt`; for managed Claude the file flag is `--append-system-prompt-file`. Neither replaces harness defaults/context files, and neither puts the system text directly in startup argv. It can invoke skills (`/quick-planner`, `/code-review`) — that's how "column triggers a skill" works, no special mechanism needed.
 - `on_fail = "Execute"` from Review + comments-as-context gives the fix loop for free: the re-entered Execute run sees the reviewer's findings in its prompt.
 
+### Cross-board card move (prototype)
+
+A card can be moved to a column of **another board**. `card.move` gains an optional `board_id`
+(destination board). When it is present and differs from the card's current board, the daemon
+performs an atomic **transfer**:
+
+- the store validates the target `column_id` belongs to the declared `board_id` (and that the board
+  exists), then updates `cards.board_id` / `cards.column_id` in one transaction and recompacts the
+  positions of **both** the source and destination columns (`Db::transfer_card`);
+- a **blocking sanity check runs before any mutation**, scoped to the cross-board transfer: the
+  merged effective harness/model/effort/permission for the target column is validated
+  (`validate_effective_settings`, reused from enqueue), the card's herdr session must resolve, and —
+  only when the destination is an auto column that would run — the card's workspace must be
+  resolvable in a read-only preflight (`validate_space_resolvable`). An incompatible target or an
+  unresolvable session/workspace aborts the move with an explicit error — nothing is written;
+- the daemon emits one precise `CardMoved` per affected board. `board_changed` carries an optional
+  `board_id`, so a transfer emits two events (source + destination) each scoped to its board rather
+  than two coarse, board-agnostic refreshes.
+
+The TUI `m` flow is a hybrid: `m` opens the active board's column picker directly (the fast
+same-board path); pressing `b` inside it switches to the destination-board picker for a cross-board
+move (board → column). Validation errors from the blocking check surface as the existing red
+footer toast (the `guard()` path is unchanged). The help line reads `m  move card (board→column)`.
+
 ### Scope selection
 
 At the CLI/TUI boundary, non-empty `BOARD_SCOPE_PATH` wins. TUI otherwise uses

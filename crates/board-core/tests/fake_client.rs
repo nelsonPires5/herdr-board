@@ -36,6 +36,7 @@ fn fake_seeds_board_and_supports_crud() {
         .card_move(&CardMoveParams {
             id: card.id,
             column_id: plan.id,
+            board_id: None,
             position: None,
         })
         .unwrap();
@@ -212,4 +213,48 @@ fn fake_delete_column_with_active_card_refused() {
     let todo = c.board_get().unwrap().columns[0].id;
     let _ = card;
     assert!(c.column_delete(col.id, Some(todo)).unwrap().deleted);
+}
+
+#[test]
+fn fake_card_move_transfers_across_boards() {
+    let mut c = FakeBoardClient::new().unwrap();
+    let alpha = c.board_open("/alpha").unwrap();
+    let beta = c.board_open("/beta").unwrap();
+    let beta_done = c
+        .column_create(&ColumnCreateParams {
+            board_id: Some(beta.board.id),
+            name: "Done".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let card = c
+        .card_create(&CardCreateParams {
+            board_id: Some(alpha.board.id),
+            title: "ship".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(card.board_id, alpha.board.id);
+
+    let moved = c
+        .card_transfer(card.id, beta.board.id, beta_done.id, None)
+        .unwrap();
+    assert_eq!(moved.board_id, beta.board.id);
+    assert_eq!(moved.column_id, beta_done.id);
+
+    // The typed wrapper serializes board_id; the card now belongs to beta.
+    assert!(c.board_get_by_id(alpha.board.id).unwrap().cards.is_empty());
+    assert_eq!(c.board_get_by_id(beta.board.id).unwrap().cards.len(), 1);
+
+    // A cross-board move lying about the board (beta column, declared alpha)
+    // is rejected by the fake's underlying transfer_card.
+    let err = c
+        .card_move(&CardMoveParams {
+            id: moved.id,
+            column_id: beta_done.id,
+            board_id: Some(alpha.board.id),
+            position: None,
+        })
+        .unwrap_err();
+    assert!(err.to_string().contains("belongs to board"));
 }

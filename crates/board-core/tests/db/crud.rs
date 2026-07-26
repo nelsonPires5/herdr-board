@@ -627,3 +627,166 @@ fn delete_column_rolls_back_card_moves_when_delete_fails() {
     );
     assert!(db.get_column(source.id).unwrap().is_some());
 }
+
+// --- cross-board transfer (prototype) ---
+
+#[test]
+fn transfer_card_moves_board_and_column_and_compacts_both() {
+    let db = mem();
+    let alpha = db.open_board("/alpha").unwrap();
+    let beta = db.open_board("/beta").unwrap();
+    let alpha_todo = db.default_column_id(alpha.id).unwrap();
+    let beta_done = db
+        .create_column(&ColumnCreateParams {
+            board_id: Some(beta.id),
+            name: "Done".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    // Three cards in alpha Todo: [a, b, c].
+    let a = db
+        .create_card(&CardCreateParams {
+            board_id: Some(alpha.id),
+            title: "a".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let b = db
+        .create_card(&CardCreateParams {
+            board_id: Some(alpha.id),
+            title: "b".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let c = db
+        .create_card(&CardCreateParams {
+            board_id: Some(alpha.id),
+            title: "c".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    // Two cards already in beta Done: [x, y].
+    let x = db
+        .create_card(&CardCreateParams {
+            board_id: Some(beta.id),
+            column_id: Some(beta_done.id),
+            title: "x".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let y = db
+        .create_card(&CardCreateParams {
+            board_id: Some(beta.id),
+            column_id: Some(beta_done.id),
+            title: "y".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+    // Move b into beta Done at position 1 (between x and y).
+    let moved = db
+        .transfer_card(b.id, beta.id, beta_done.id, Some(1))
+        .unwrap();
+    assert_eq!(moved.board_id, beta.id);
+    assert_eq!(moved.column_id, beta_done.id);
+
+    // Destination compacted: [x, b, y] -> 0,1,2.
+    let beta_order: Vec<(i64, i64)> = [x.id, b.id, y.id]
+        .iter()
+        .map(|id| (*id, db.get_card(*id).unwrap().unwrap().position))
+        .collect();
+    assert_eq!(beta_order, vec![(x.id, 0), (b.id, 1), (y.id, 2)]);
+
+    // Source compacted: remaining [a, c] -> 0,1.
+    let alpha_order: Vec<(i64, i64)> = [a.id, c.id]
+        .iter()
+        .map(|id| (*id, db.get_card(*id).unwrap().unwrap().position))
+        .collect();
+    assert_eq!(alpha_order, vec![(a.id, 0), (c.id, 1)]);
+
+    // b no longer appears under alpha's board id.
+    assert_eq!(db.get_card(b.id).unwrap().unwrap().board_id, beta.id);
+    let _ = alpha_todo; // alpha Todo column still intact
+}
+
+#[test]
+fn transfer_card_rejects_column_from_another_board() {
+    let db = mem();
+    let alpha = db.open_board("/alpha").unwrap();
+    let beta = db.open_board("/beta").unwrap();
+    let beta_done = db
+        .create_column(&ColumnCreateParams {
+            board_id: Some(beta.id),
+            name: "Done".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let card = db
+        .create_card(&CardCreateParams {
+            board_id: Some(alpha.id),
+            title: "card".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+    // Declare destination board alpha but a beta column: must be rejected.
+    let err = db
+        .transfer_card(card.id, alpha.id, beta_done.id, None)
+        .unwrap_err();
+    assert!(
+        matches!(err, board_core::Error::InvalidState(_)),
+        "expected InvalidState, got {err:?}"
+    );
+    // And the symmetric lie: declare beta but hand an alpha column (the card's
+    // own default column belongs to alpha).
+    let alpha_todo = db.default_column_id(alpha.id).unwrap();
+    let err = db
+        .transfer_card(card.id, beta.id, alpha_todo, None)
+        .unwrap_err();
+    assert!(matches!(err, board_core::Error::InvalidState(_)));
+
+    // Card untouched.
+    let after = db.get_card(card.id).unwrap().unwrap();
+    assert_eq!(after.board_id, alpha.id);
+    assert_eq!(after.column_id, alpha_todo);
+}
+
+#[test]
+fn transfer_card_is_atomic_on_bad_destination() {
+    let db = mem();
+    let alpha = db.open_board("/alpha").unwrap();
+    let beta = db.open_board("/beta").unwrap();
+    let a = db
+        .create_card(&CardCreateParams {
+            board_id: Some(alpha.id),
+            title: "a".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let _b = db
+        .create_card(&CardCreateParams {
+            board_id: Some(alpha.id),
+            title: "b".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let _beta_done = db
+        .create_column(&ColumnCreateParams {
+            board_id: Some(beta.id),
+            name: "Done".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+    // A bogus destination column id must roll back the whole transaction:
+    // neither board_id nor any position changes.
+    let err = db
+        .transfer_card(a.id, beta.id, 9_999_999, None)
+        .unwrap_err();
+    assert!(
+        matches!(err, board_core::Error::NotFound(_)),
+        "expected NotFound for missing column, got {err:?}"
+    );
+    let after = db.get_card(a.id).unwrap().unwrap();
+    assert_eq!(after.board_id, alpha.id);
+}

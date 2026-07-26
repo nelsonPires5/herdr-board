@@ -160,23 +160,33 @@ fn open_move_picker(app: &mut App) -> Vec<Effect> {
         app.set_toast("restore archived card before moving", true);
         return vec![];
     }
-    let card_id = card.id;
-    let cur = app.col_id_at(app.sel_col);
+    // Fast path: open the active board's column picker directly (one step for
+    // the common same-board move). Press `b` inside it to switch to the
+    // destination-board picker for a cross-board move.
+    let board_id = app.board.board.id;
+    let cur = card.column_id;
     let options: Vec<(String, i64)> = app
         .board
         .columns
         .iter()
-        .filter(|c| Some(c.id) != cur)
+        .filter(|c| c.id != cur)
         .map(|c| (c.name.clone(), c.id))
         .collect();
     if options.is_empty() {
+        app.set_toast("no other column to move cards to", true);
         return vec![];
     }
     app.picker = Some(Picker {
-        title: "Move card to which column?".into(),
+        title: format!(
+            "Move card to which column? ({})  · b = other board",
+            app.board.board.name
+        ),
         options,
         sel: 0,
-        purpose: PickerPurpose::MoveCard { card_id },
+        purpose: PickerPurpose::MoveCardPickColumn {
+            card_id: card.id,
+            board_id,
+        },
     });
     app.screen = Screen::Picker;
     vec![]
@@ -219,6 +229,7 @@ fn shove_card(app: &mut App, delta: isize) -> Vec<Effect> {
     vec![Effect::CardMove(CardMoveParams {
         id: card_id,
         column_id,
+        board_id: None,
         position: None,
     })]
 }

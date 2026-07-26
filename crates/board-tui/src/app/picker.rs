@@ -26,16 +26,34 @@ pub(super) fn picker_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
             app.screen = Screen::Board;
             return match purpose {
                 PickerPurpose::SwitchBoard => vec![Effect::SwitchBoard(target)],
-                PickerPurpose::MoveCard { card_id } => vec![Effect::CardMove(CardMoveParams {
-                    id: card_id,
-                    column_id: target,
-                    position: None,
-                })],
+                PickerPurpose::MoveCardPickBoard { card_id } => {
+                    vec![Effect::LoadColumnsForMove {
+                        card_id,
+                        board_id: target,
+                    }]
+                }
+                PickerPurpose::MoveCardPickColumn { card_id, board_id } => {
+                    vec![Effect::CardMove(CardMoveParams {
+                        id: card_id,
+                        column_id: target,
+                        board_id: Some(board_id),
+                        position: None,
+                    })]
+                }
                 PickerPurpose::DeleteColumnMoveTo { column_id } => vec![Effect::ColumnDelete {
                     id: column_id,
                     move_cards_to: Some(target),
                 }],
             };
+        }
+        KeyCode::Char('b') => {
+            // Inside a move-column picker, `b` switches to the destination-board
+            // picker for a cross-board move. No-op for other picker purposes.
+            if let PickerPurpose::MoveCardPickColumn { card_id, .. } = picker.purpose {
+                app.picker = None;
+                app.screen = Screen::Board;
+                return vec![Effect::LoadBoardsForMove { card_id }];
+            }
         }
         KeyCode::Esc | KeyCode::Char('q') => {
             app.picker = None;

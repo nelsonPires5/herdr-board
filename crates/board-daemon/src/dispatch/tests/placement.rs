@@ -268,3 +268,42 @@ fn new_workspace_selected_socket_preflights_protocol_before_resolution() {
 
 // ---------------------------------------------------------------------------
 // T13: manual enqueue vs auto-hop → identical persisted EnqueueRun fields
+
+#[test]
+fn validate_space_resolvable_accepts_existing_workspace() {
+    let (_dir, socket) = workspace_resolution_server(None);
+    let mut client = HerdrClient::connect(&socket).unwrap();
+    // "w1" is in the fake workspace.list -> resolvable.
+    validate_space_resolvable(&mut client, SpaceKind::Workspace, Some("w1"), None)
+        .expect("an existing workspace resolves");
+}
+
+#[test]
+fn validate_space_resolvable_rejects_missing_workspace() {
+    let (_dir, socket) = workspace_resolution_server(None);
+    let mut client = HerdrClient::connect(&socket).unwrap();
+    let err = validate_space_resolvable(&mut client, SpaceKind::Workspace, Some("ghost"), None)
+        .expect_err("a missing workspace must not resolve");
+    assert!(
+        err.to_string().contains("not found"),
+        "expected a not-found error, got: {err}"
+    );
+}
+
+#[test]
+fn validate_space_resolvable_new_workspace_only_needs_a_label() {
+    let (_dir, socket) = workspace_resolution_server(None);
+    let mut client = HerdrClient::connect(&socket).unwrap();
+    // new_workspace is created at run time, so the preflight only checks the
+    // label is present (it still pings the session socket).
+    validate_space_resolvable(
+        &mut client,
+        SpaceKind::NewWorkspace,
+        Some("brand-new"),
+        Some("/repo"),
+    )
+    .expect("a labelled new_workspace is structurally valid");
+    let err = validate_space_resolvable(&mut client, SpaceKind::NewWorkspace, None, Some("/repo"))
+        .expect_err("an empty new_workspace label must be rejected");
+    assert!(err.to_string().contains("label"));
+}

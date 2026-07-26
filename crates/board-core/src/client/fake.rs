@@ -111,7 +111,15 @@ impl BoardClient for FakeBoardClient {
                 if card.archived_at.is_some() {
                     anyhow::bail!("archived card must be restored before moving");
                 }
-                serde_json::to_value(db.move_card(p.id, p.column_id, p.position)?)?
+                let card = match p.board_id {
+                    // Cross-board transfer only when an explicit destination
+                    // board is named and differs from the current one.
+                    Some(bid) if bid != card.board_id => {
+                        db.transfer_card(p.id, bid, p.column_id, p.position)?
+                    }
+                    _ => db.move_card(p.id, p.column_id, p.position)?,
+                };
+                serde_json::to_value(card)?
             }
             "card.get" => {
                 let id = params["id"].as_i64().unwrap_or_default();

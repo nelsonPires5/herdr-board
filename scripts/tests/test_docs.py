@@ -18,15 +18,15 @@ class DocumentationContractTests(unittest.TestCase):
             "Herdr client | 0.7.5 / socket protocol 17",
             "Runtime launch | daemon-owned",
             "Config | typed `RootConfig`",
-            "scenarios 01–23",
+            "scenarios 01–24",
         ):
             self.assertIn(text, index)
 
-    def test_scenario_catalog_and_runner_cover_01_through_23(self) -> None:
+    def test_scenario_catalog_and_runner_cover_01_through_24(self) -> None:
         scenarios = sorted((ROOT / "e2e").glob("[0-9][0-9]-*.sh"))
         self.assertEqual(
             [path.name[:2] for path in scenarios],
-            [f"{number:02d}" for number in range(1, 24)],
+            [f"{number:02d}" for number in range(1, 25)],
         )
         runner = (ROOT / "e2e/run-all.sh").read_text(encoding="utf-8")
         for scenario in scenarios:

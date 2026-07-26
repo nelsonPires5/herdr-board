@@ -208,7 +208,8 @@ impl Db {
     }
 
     /// Move a card to `target_column` at `position` (append if `None`), compacting
-    /// both the source and target columns.
+    /// both the source and target columns. The target column must belong to the
+    /// card's current board; use [`Db::transfer_card`] to cross boards.
     pub fn move_card(&self, id: i64, target_column: i64, position: Option<i64>) -> Result<Card> {
         let card = self.require_card(id)?;
         let target = self.require_column(target_column)?;
@@ -223,7 +224,55 @@ impl Db {
             "UPDATE cards SET column_id=?1, updated_at=datetime('now') WHERE id=?2",
             params![target_column, id],
         )?;
-        // Place within the target column.
+        self.place_card_in_column(id, target_column, position)?;
+        if old_column != target_column {
+            self.renumber_column_cards(old_column)?;
+        }
+        self.require_card(id)
+    }
+
+    /// Transfer a card to `target_column` (which must belong to `target_board`)
+    /// at `position` (append if `None`), atomically moving its `board_id` and
+    /// `column_id` and compacting both the source and destination columns.
+    /// Unlike [`Db::move_card`], this is wrapped in a single transaction so a
+    /// failure leaves the source board untouched.
+    pub fn transfer_card(
+        &self,
+        id: i64,
+        target_board: i64,
+        target_column: i64,
+        position: Option<i64>,
+    ) -> Result<Card> {
+        let tx = self.conn.unchecked_transaction()?;
+        let card = self.require_card(id)?;
+        self.get_board(target_board)?;
+        let target = self.require_column(target_column)?;
+        if target.board_id != target_board {
+            return Err(Error::InvalidState(format!(
+                "column {target_column} belongs to board {}, declared destination board is {target_board}",
+                target.board_id
+            )));
+        }
+        let old_column = card.column_id;
+        self.conn.execute(
+            "UPDATE cards SET board_id=?1, column_id=?2, updated_at=datetime('now') WHERE id=?3",
+            params![target_board, target_column, id],
+        )?;
+        self.place_card_in_column(id, target_column, position)?;
+        self.renumber_column_cards(old_column)?;
+        tx.commit()?;
+        self.require_card(id)
+    }
+
+    /// (Re)place `id` within `target_column` at `position` (append if `None`),
+    /// zero-basing every card's position in that column. Shared by move and
+    /// transfer. Caller must already have set the card's `column_id`.
+    fn place_card_in_column(
+        &self,
+        id: i64,
+        target_column: i64,
+        position: Option<i64>,
+    ) -> Result<()> {
         let mut ids: Vec<i64> = self
             .conn
             .prepare("SELECT id FROM cards WHERE column_id=?1 AND id<>?2 ORDER BY position, id")?
@@ -240,10 +289,7 @@ impl Db {
                 params![i as i64, cid],
             )?;
         }
-        if old_column != target_column {
-            self.renumber_column_cards(old_column)?;
-        }
-        self.require_card(id)
+        Ok(())
     }
 
     pub(super) fn renumber_column_cards(&self, column_id: i64) -> Result<()> {

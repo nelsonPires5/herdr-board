@@ -12,6 +12,7 @@ mod tests;
 pub(crate) use enqueue::enqueue_run;
 pub(crate) use finalize::{finalize_run, finalize_run_timeout};
 pub(crate) use pass::dispatch_pass;
+pub(crate) use space::validate_space_resolvable;
 
 use board_core::db::EnqueueRun;
 use board_core::harness::HarnessError;

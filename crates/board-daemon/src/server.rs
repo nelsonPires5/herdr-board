@@ -253,6 +253,7 @@ fn spawn_event_forwarder(d: &Arc<Daemon>, outbox: Arc<Outbox>) -> tokio::task::J
                 Ok(ev) => ev,
                 Err(broadcast::error::RecvError::Lagged(_)) => Event::BoardChanged {
                     reason: BoardChangedReason::CardUpdated,
+                    board_id: None,
                     card_id: None,
                     column_id: None,
                 },

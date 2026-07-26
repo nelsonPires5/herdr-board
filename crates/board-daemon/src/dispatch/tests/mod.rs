@@ -11,7 +11,9 @@ pub(super) use super::finalize::{finalize_run, finalize_run_timeout};
 pub(super) use super::pass::{
     dispatch_pass, harness_prompt_env, launch_session, register_spawned_run,
 };
-pub(super) use super::space::{find_workspace_by_label, resolve_space, resolve_workspace_ref};
+pub(super) use super::space::{
+    find_workspace_by_label, resolve_space, resolve_workspace_ref, validate_space_resolvable,
+};
 pub(super) use crate::settings::DaemonSettings;
 pub(super) use crate::spawner::{HerdrLaunchPlan, RuntimeHandle, Spawner};
 pub(super) use crate::state::{ActiveRun, Daemon};

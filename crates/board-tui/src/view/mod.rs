@@ -73,7 +73,7 @@ pub const HELP_KEYS: &[(&str, &str)] = &[
     ("v", "cycle active/all/archived"),
     ("d", "delete card"),
     ("D", "delete/move column cards"),
-    ("m", "move card (column picker)"),
+    ("m", "move card (board→column)"),
     ("M", "move focused column"),
     ("H / L", "shove card left / right"),
     ("Enter", "card detail"),

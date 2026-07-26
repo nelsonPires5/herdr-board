@@ -80,6 +80,16 @@ pub enum Effect {
     Refetch,
     LoadBoards,
     SwitchBoard(i64),
+    /// Cross-board move, stage 1: open the destination-board picker.
+    LoadBoardsForMove {
+        card_id: i64,
+    },
+    /// Cross-board move, stage 2: load the selected destination board's columns
+    /// into the picker.
+    LoadColumnsForMove {
+        card_id: i64,
+        board_id: i64,
+    },
     LoadDetail(i64),
     CardCreate(board_core::protocol::CardCreateParams),
     CardUpdate(board_core::protocol::CardUpdateParams),
@@ -138,8 +148,18 @@ pub struct Picker {
 #[derive(Clone, Copy)]
 pub enum PickerPurpose {
     SwitchBoard,
-    MoveCard { card_id: i64 },
-    DeleteColumnMoveTo { column_id: i64 },
+    /// Cross-board move: choosing the destination board (stage 1).
+    MoveCardPickBoard {
+        card_id: i64,
+    },
+    /// Cross-board move: choosing a column of `board_id` (stage 2).
+    MoveCardPickColumn {
+        card_id: i64,
+        board_id: i64,
+    },
+    DeleteColumnMoveTo {
+        column_id: i64,
+    },
 }
 
 /// A yes/no confirmation.
@@ -428,6 +448,7 @@ impl App {
                 Some(column_id) => vec![Effect::CardMove(CardMoveParams {
                     id: card_id,
                     column_id,
+                    board_id: None,
                     position: None,
                 })],
                 None => vec![],
