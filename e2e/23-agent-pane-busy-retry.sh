@@ -85,11 +85,11 @@ starts = status["agent_start_panes"]
 assert status["busy_injections"] == 1
 assert len(starts) == 2
 assert starts == [sys.argv[2], sys.argv[2]]
-assert status["pane_splits"] == []
+assert len(status["pane_splits"]) == 1
 assert not status["pane_closes"]
 PY
 TRANSIENT_LAYOUT="$(hrpc pane.layout "{\"pane_id\":\"$TRANSIENT_PANE\"}")"
-layout_check "$TRANSIENT_LAYOUT" "$TRANSIENT_PANE" 1 0 "$TRANSIENT_PANE"
+layout_check "$TRANSIENT_LAYOUT" "$TRANSIENT_PANE" 2 1 "$TRANSIENT_PANE"
 ok "transient busy retried agent.start on one newly allocated child"
 
 step "Persistent agent_pane_busy must clean the owned child"
@@ -118,7 +118,7 @@ closes = after["pane_closes"][len(before["pane_closes"]):]
 assert len(starts) == expected_attempts
 assert after["busy_injections"] - before["busy_injections"] == expected_attempts
 assert len(set(starts)) == 1
-assert after["pane_splits"][len(before["pane_splits"]):] == []
+assert len(after["pane_splits"][len(before["pane_splits"]):]) == 1
 assert closes == [starts[0]]
 PY
 PERSISTENT_PANES="$(hrpc pane.list "{\"workspace_id\":\"$PERSISTENT_WS\"}")"
@@ -126,7 +126,9 @@ python3 - "$PERSISTENT_PANES" "$PERSISTENT_CARD" <<'PY'
 import json, sys
 panes=json.loads(sys.argv[1]).get("panes",[])
 card=sys.argv[2]
-assert not any(card in (p.get("label") or "") for p in panes)
+anchors=[p for p in panes if p.get("label") == f"card-{card}-anchor" and not p.get("agent")]
+assert len(anchors) == 1
+assert not any(card in (p.get("label") or "") and p not in anchors for p in panes)
 PY
 [ "$(card_field "$PERSISTENT_CARD" runs[-1].outcome)" = fail ] \
   || fail "persistent run did not have fail outcome"

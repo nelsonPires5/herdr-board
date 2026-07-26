@@ -634,6 +634,7 @@ fn run_with_session(id: i64, started: bool, session_id: Option<&str>) -> Run {
         launch_spec: None,
         herdr_workspace_id: None,
         herdr_pane_id: None,
+        herdr_anchor_pane_id: None,
         session_id: session_id.map(str::to_owned),
         session: None,
         started_at: started.then(|| "started".into()),

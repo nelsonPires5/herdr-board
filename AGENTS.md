@@ -17,7 +17,7 @@ TUI + daemon + CLI. Rust, cargo workspace, edition 2021, all crates share the wo
 Ownership is strict: edit your crate(s) + append to root `[workspace.dependencies]`. Semantics
 source of truth: `docs/protocol.md` + `docs/design.md`. Docs live in `docs/` (index: `docs/README.md`);
 `schema.sql` is the fresh-schema source of truth and `board-core::db` owns upgrades. Final compatibility
-is board protocol v1, SQLite schema v11, and exactly Herdr 0.7.5 / socket protocol 17. The complete
+is board protocol v1, SQLite schema v12, and exactly Herdr 0.7.5 / socket protocol 17. The complete
 live catalog is `e2e/README.md` (scenarios 01–25); `e2e/test-harness.sh` is the provider-free static
 safety gate.
 

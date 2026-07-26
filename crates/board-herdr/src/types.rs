@@ -93,6 +93,10 @@ pub struct PaneInfo {
     pub workspace_id: String,
     #[serde(default)]
     pub tab_id: String,
+    /// Herdr's user-visible pane label. The daemon uses this only after an
+    /// exact board-owned tab has already been proven by a durable run pane.
+    #[serde(default)]
+    pub label: Option<String>,
     #[serde(default)]
     pub agent: Option<String>,
     #[serde(default = "unknown_status")]

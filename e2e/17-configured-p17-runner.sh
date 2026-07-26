@@ -107,15 +107,16 @@ tabs=json.loads(sys.argv[1]).get("tabs",[]); panes=json.loads(sys.argv[2]).get("
 card=sys.argv[3]; card_tabs=[t for t in tabs if t.get("label")==f"card-{card}"]
 assert len(card_tabs)==1
 kp=[p for p in panes if p.get("tab_id")==card_tabs[0]["tab_id"]]
+assert any(p.get("label") == f"card-{card}-anchor" and not p.get("agent") for p in kp)
 assert any(re.search(rf"card-{card}-p17-runner(?:-r\d+)?$", p.get("label") or "") for p in kp)
-print(f"  card tab {card_tabs[0]['tab_id']} has the configured runner pane")
+print(f"  card tab {card_tabs[0]['tab_id']} has its shell anchor and configured runner pane")
 PY
 LAYOUT_PANE="$(printf '%s' "$panes_json" | python3 -c '
 import json, re, sys
 panes=json.load(sys.stdin).get("panes", [])
 card=sys.argv[1]
 matched=[p for p in panes if re.search(rf"card-{re.escape(card)}-p17-runner(?:-r\d+)?$", p.get("label") or "")]
-assert len(matched) == 1, panes
+assert len(matched) == 1
 print(matched[0]["pane_id"])
 ' "$CARD_ID")"
 layout_json="$(hrpc pane.layout "{\"pane_id\":\"$LAYOUT_PANE\"}")"

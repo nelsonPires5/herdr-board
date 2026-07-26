@@ -186,6 +186,11 @@ assert by_id[pi_id].get("tab_id") == pi_tab[0]["tab_id"]
 assert by_id[claude_id].get("tab_id") == claude_tab[0]["tab_id"]
 assert by_id[pi_id].get("agent") == "pi"
 assert by_id[claude_id].get("agent") == "claude"
+for card, tab in ((pi_card, pi_tab[0]), (claude_card, claude_tab[0])):
+    owned=[p for p in panes if p.get("tab_id") == tab["tab_id"]]
+    anchors=[p for p in owned if p.get("label") == f"card-{card}-anchor" and not p.get("agent")]
+    assert len(anchors) == 1
+    assert anchors[0]["pane_id"] not in {pi_id, claude_id}
 PY
 for managed_pane in "$PI_PANE_ID" "$CLAUDE_PANE_ID"; do
   layout_json="$(hrpc pane.layout "{\"pane_id\":\"$managed_pane\"}")"

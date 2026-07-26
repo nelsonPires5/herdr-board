@@ -1,7 +1,7 @@
 # Testing
 
 How herdr-board is tested, and how to add tests for a change. The final contract is board
-protocol v1, SQLite schema v11, and Herdr 0.7.5 / protocol 17. Four layers, cheap and hermetic
+protocol v1, SQLite schema v12, and Herdr 0.7.5 / protocol 17. Four layers, cheap and hermetic
 first, expensive and live last:
 
 ```
@@ -36,7 +36,7 @@ The stable ownership layout is responsibility-oriented, not a file manifest:
 | `board-herdr` | Public envelope, event, and socket behavior is tested from `crates/board-herdr/tests/`, including ignored live probes. Event parsing, backoff, and stream handling are owned by `crates/board-herdr/src/events/`; all unsafe board-herdr Unix transport operations remain in `crates/board-herdr/src/transport.rs`. |
 | `board-tui` | Public reducer, form, and rendering behavior is tested from `crates/board-tui/tests/` (including `forms.rs`, `update.rs`, and snapshots). The implementation is organized under `crates/board-tui/src/app/`, `crates/board-tui/src/forms/`, and `crates/board-tui/src/view/`; only view tests that need private rendering helpers remain adjacent in `crates/board-tui/src/view/tests.rs`. |
 
-The public core suites cover deterministic engine decisions, schema-v11 migrations and atomic
+The public core suites cover deterministic engine decisions, schema-v12 migrations and atomic
 run units of work, protocol-v1 serde, typed client boundaries, configuration, prompt assembly,
 harness planning, and scoped-board behavior. Herdr suites cover protocol-17 event decoding and
 socket behavior against an in-process fake server. Daemon private suites cover queue claims,
@@ -135,7 +135,7 @@ case ↔ scenario ↔ status catalog):
 | `fake-agent.sh` | The fake harness dispatched instead of a real agent. Mirrors the crate fixture and adds `FAKE_AGENT_HOLD` (keep the pane alive after the run). |
 | `hrpc.py` | One-shot raw herdr socket RPC (honours `HERDR_SOCKET_PATH`) for structural assertions (`tab.list`/`pane.list`/`pane.layout`). |
 | `01-core.sh` | CLI path (dispatch → run → outcome/comment) + TUI path (drive the new-card form via send-keys). |
-| `02-kanban-grid.sh` | Several cards → one auto column → asserts separate stable `card-<id>` tabs (one pane per card). |
+| `02-kanban-grid.sh` | Several cards → one auto column → asserts separate stable `card-<id>` tabs, each with one shell anchor and its run child. |
 | `03-sessions.sh` | Multi-session behaviour against a **second collision-resistant ephemeral session it boots itself** (`hb-e2e-<scenario-b>-<pid>-<random64>`). |
 | `04-fail-on-fail.sh` | `board done --outcome fail` → card follows the column's `on_fail_column_id`. |
 | `05-retry.sh` | `board retry` spawns a NEW run row for a finished card (run count grows). |
@@ -158,7 +158,7 @@ case ↔ scenario ↔ status catalog):
 | `22-move-column-tui.sh` | TUI column reorder mini-mode commits one `column.reorder` and cancels without mutation; provider-free. |
 | `23-agent-pane-busy-retry.sh` | Typed `agent_pane_busy` retries the exact request twice on one owned child with 100ms/200ms backoff; persistent failure cleans only that child (any pre-existing anchor remains). |
 | `24-cross-board-move.sh` | `card.move` with `board_id` transfers a card to another board's column atomically (source and destination columns recompacted); a destination column whose board differs from the declared `board_id` is rejected with nothing written. |
-| `25-card-tabs.sh` | Duplicate card-tab labels are ignored, durable pane ownership reconstructs the exact tab after daemon restart, and a closed owned tab is recreated safely. |
+| `25-card-tabs.sh` | Duplicate card-tab labels are ignored, the shell anchor and exact tab are reused after daemon restart, and a closed tab is recreated safely. |
 | `real-pi-smoke.sh` | Separate opt-in (`E2E_REAL_PI=1`) real-provider poem smoke; never included by `run-all.sh`. |
 | `real-claude-haiku-smoke.sh` | Opt-in intended-contract smoke (`E2E_REAL_CLAUDE_HAIKU=1`): exactly one authorized Claude Haiku/low attempt, stages only completed onboarding/theme, exact workspace trust, the installed Herdr hook, credentials, and approved remote-settings bytes, preventing startup dialogs from consuming `agent.prompt`; no broad personal Claude state, retry/fallback, or standard-suite inclusion. |
 | `run-all.sh` | Builds once, runs every standard no-cost scenario, prints a PASS/FAIL/SKIP summary. |
@@ -323,9 +323,9 @@ Checklist:
 | **done-race** | Managed built-ins still require a registered pane, so an instant `board done` for a queued built-in run is rejected. A configured harness is different: its exact `board done` is accepted even before runner registration, and the fake agent still sleeps `FAKE_AGENT_SLEEP` (default 1.5s) before reporting in ordinary scenarios. |
 | **A pane dies with its process** | A herdr pane closes when its command exits. To inspect a live layout, keep the process alive — set `FAKE_AGENT_HOLD` (e.g. 300) so the agent sleeps **after** `board done`. Cleanup closes the workspace to end it. |
 | **herdr closes the socket per request** | herdr serves one request per connection. `hrpc.py` (and `board-herdr`'s client) open a fresh connection every call — don't try to reuse one. |
-| **Tab labels are not unique** | New runs resolve `card-<id>` tabs only by an exact id reconstructed from the newest durable v11 pane in the same session/workspace; duplicate labels, renamed/empty owned tabs, and legacy `kanban` are never adopted as ownership proof. Legacy rows retain their historical lookup. |
+| **Tab labels are not unique** | New runs resolve `card-<id>` tabs and shell anchors only by exact ids reconstructed from scoped durable panes; schema v12 persists the anchor id. Duplicate tab/anchor labels and legacy `kanban` are never adopted as ownership proof. A renamed exact anchor remains owned; a missing anchor is recovered only from an exact durable child, otherwise a fresh tab is created. Legacy rows retain their historical lookup. |
 | **Agent names are exclusive** | While a pane is open its agent name is reserved. A collision (e.g. the session already has a `card-1-execute` pane) makes the daemon retry as `card-1-execute-r<run>`. Assertions must accept the optional `-r<n>` suffix. |
-| **A newly split pane can be busy** | Herdr may return typed `agent_pane_busy` while the child still drains prior state. The daemon retries the exact managed `agent.start` request twice on that same owned child with 100ms/200ms backoff; persistent busy closes only that child. Do not treat it as `pane_not_found`: that error triggers one bounded full placement rediscovery from `tab.list`. |
+| **A newly split pane can be busy** | Herdr may return typed `agent_pane_busy` while the child still drains prior state. The daemon retries the exact managed `agent.start` request twice on that same owned child with 100ms/200ms backoff; persistent busy closes only that child and leaves the shell anchor. Do not treat it as `pane_not_found`: that error triggers one bounded full placement rediscovery from `tab.list`. |
 | **Managed and configured pane identity differ** | Protocol-17 managed Pi/Claude panes expose the managed kind in `pane.agent`; configured panes are renamed to the daemon-assigned `card-<id>-<column>` label and remain unmanaged. Match the appropriate field and still accept the optional `-r<n>` name suffix. |
 | **`pane.layout` nests under `layout`** | `hrpc pane.layout …` returns `{"type":"pane_layout","layout":{…panes,splits…}}`; read `.layout.panes`. |
 | **Never `pkill` by "board daemon"** | That pattern matches your own shell too. Stop only the daemon you started after verifying its signed platform identity token (`e2e_daemon_stop`); PID liveness alone is insufficient. Linux uses `/proc`; Darwin uses native process APIs. Inspect only exact PIDs emitted by the invocation. |

@@ -7,6 +7,7 @@ fn card_tab_reconstruction_requires_a_durable_owned_pane_not_a_label() {
         terminal_id: format!("terminal-{pane_id}"),
         workspace_id: workspace_id.into(),
         tab_id: tab_id.into(),
+        label: None,
         agent: None,
         agent_status: AgentStatus::Unknown,
         title: None,
@@ -42,6 +43,7 @@ fn card_tab_reconstruction_prefers_newest_durable_pane_order_not_snapshot_order(
         terminal_id: format!("terminal-{pane_id}"),
         workspace_id: "w1".into(),
         tab_id: tab_id.into(),
+        label: None,
         agent: None,
         agent_status: AgentStatus::Unknown,
         title: None,
@@ -66,7 +68,7 @@ fn card_tab_reconstruction_prefers_newest_durable_pane_order_not_snapshot_order(
 }
 
 #[test]
-fn durable_card_tab_panes_are_scoped_to_v11_session_and_workspace_ownership() {
+fn durable_card_tab_panes_are_scoped_to_v12_session_and_workspace_ownership() {
     use board_core::launch::{ExecutionSpec, RunLaunchSpec};
 
     let launch_spec = || {
@@ -90,6 +92,7 @@ fn durable_card_tab_panes_are_scoped_to_v11_session_and_workspace_ownership() {
             launch_spec: durable.then(|| launch_spec().expect("test launch spec")),
             herdr_workspace_id: workspace.map(str::to_string),
             herdr_pane_id: Some(pane.into()),
+            herdr_anchor_pane_id: None,
             session_id: None,
             session: session.map(str::to_string),
             started_at: Some("now".into()),
@@ -100,7 +103,7 @@ fn durable_card_tab_panes_are_scoped_to_v11_session_and_workspace_ownership() {
             result_summary: None,
             log_path: None,
         };
-    let runs = vec![
+    let mut runs = vec![
         run(1, "legacy", Some("s1"), Some("w1"), false),
         run(2, "wrong-session", Some("s2"), Some("w1"), true),
         run(3, "older", Some("s1"), Some("w1"), true),
@@ -110,6 +113,12 @@ fn durable_card_tab_panes_are_scoped_to_v11_session_and_workspace_ownership() {
     assert_eq!(
         durable_owned_pane_ids(&runs, Some("s1"), "w1"),
         ["newer".to_string(), "older".to_string()]
+    );
+    runs[2].herdr_anchor_pane_id = Some("anchor-older".into());
+    runs[4].herdr_anchor_pane_id = Some("anchor-newer".into());
+    assert_eq!(
+        durable_owned_anchor_pane_ids(&runs, Some("s1"), "w1"),
+        ["anchor-newer".to_string(), "anchor-older".to_string()]
     );
 }
 

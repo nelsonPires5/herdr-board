@@ -7,7 +7,7 @@ The reference detail behind the [root README](../README.md). Start here to find 
 | Surface | Final version / owner | Canonical source |
 |---|---|---|
 | Board socket | v1; `board-core::protocol` | [protocol.md](protocol.md) |
-| SQLite | schema v11; `schema.sql` + `board-core::db` migrations | [design.md](design.md) |
+| SQLite | schema v12; `schema.sql` + `board-core::db` migrations | [design.md](design.md) |
 | Herdr client | 0.7.5 / socket protocol 17; `board-herdr` typed calls | [herdr.md](herdr.md) |
 | Runtime launch | daemon-owned `Spawner`, placement, process/pane handles | [implementation.md](implementation.md) |
 | Config | typed `RootConfig`, one parse, environment overrides after parse | [design.md](design.md) |

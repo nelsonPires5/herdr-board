@@ -300,6 +300,7 @@ fn pane_split_targets_pane_and_returns_new_pane() {
             cwd: Some("/tmp/card".into()),
             env: [("CARD".into(), "42".into())].into_iter().collect(),
             direction: SplitDirection::Right,
+            ratio: None,
             focus: false,
         })
         .unwrap();

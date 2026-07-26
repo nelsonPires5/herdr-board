@@ -89,6 +89,10 @@ pub struct PaneSplitParams {
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
     pub direction: SplitDirection,
+    /// Fraction retained by the existing/target pane. Anchor placement uses
+    /// this to keep a predictable shell strip while leaving the child usable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ratio: Option<f64>,
     pub focus: bool,
 }
 

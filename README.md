@@ -23,8 +23,9 @@ only `Todo`.
 
 ## Why herdr-board?
 
-- **Agents stay visible.** New runs open in a stable per-card `card-<id>` Herdr tab, so each card's
-  panes stay together while they work; legacy runs retain the historical `kanban` tab.
+- **Agents stay visible.** New runs open in a stable per-card `card-<id>` Herdr tab with a reserved
+  shell anchor and one split child per stage/retry, so each card's panes stay together while they
+  work; legacy runs retain the historical `kanban` tab.
 - **Pipelines, not just a queue.** Each column can prepend a system prompt and route successful or
   failed runs to another stage.
 - **Human gates where they matter.** Automatic stages keep moving; manual columns stop the pipeline
@@ -144,8 +145,11 @@ All board state lives under `~/.local/share/herdr-board/`; Herdr's own state is 
 
 ### Agents run in visible Herdr panes
 
-The daemon creates one stable `card-<id>` tab per new card and places that card's agent panes
-there. It never adopts a user tab solely because its label matches; legacy runs retain `kanban`.
+The daemon creates one stable `card-<id>` tab per new card, reserves its root as a labeled
+`card-<id>-anchor` shell, and splits every agent/configured run into a child from that anchor. It
+never adopts a user tab solely because its label matches; after exact tab proof, a missing anchor
+is recovered only from a durable board pane, otherwise a fresh tab is created. Legacy runs retain
+`kanban`.
 
 <p align="center">
   <img src="docs/assets/readme/agent-panes.png" alt="Herdr workspace with board agents in separate per-card tabs" width="100%">
@@ -482,7 +486,7 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`AGENTS.md`](AGENTS.md) before con
 
 ## Status
 
-**v1 board protocol / schema v11.** Rust with Ratatui, Rusqlite, and Tokio. Pi is the default
+**v1 board protocol / schema v12.** Rust with Ratatui, Rusqlite, and Tokio. Pi is the default
 built-in harness and Claude Code remains explicitly selectable; config-defined harnesses are also
 supported. Execution happens in visible Herdr panes, and extension-owned state remains separate from
 Herdr's state. See [`docs/README.md`](docs/README.md) for version, source-ownership, and test-gate

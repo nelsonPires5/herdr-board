@@ -82,20 +82,31 @@ values. This happens before workspace discovery or `workspace.create`; the spawn
 as its first call before `tab.create`, `pane.split`, `agent.start`, or the configured-harness runner.
 A mismatch fails the queued run without mutating the workspace.
 
-Protocol 17 is pane-first. New durable runs place each card in a stable short `card-<id>` tab with
-`cwd` and `env`, using its root pane, or split a selected pane in that exact board-owned tab. Herdr
-tab labels are not unique, so the daemon reuses only an exact tab id reconstructed from the newest
-matching durable v11 run pane in the same session and workspace; a missing, renamed, closed, or empty
-owned tab is recreated. If older runs provide multiple live panes, newest run id wins deterministically.
-Per-card first allocation is serialized by `(session socket, workspace, card label)`. Legacy pre-v11
-rows retain the `kanban` lookup. Only then does it start a managed agent in that exact pane or run a
-configured harness there.
+Protocol 17 is pane-first. New durable runs place each card in a stable short `card-<id>` tab. The
+root created by `tab.create` is reserved as a labeled shell anchor (`card-<id>-anchor`); it is never
+an agent target. Every run, including the first, splits a child from that anchor with the run's `cwd`
+and `env`, and only that child receives `agent.start` or the configured `pane run` bridge. The anchor
+keeps a predictable strip: the prototype targets a 0.40 ratio for the initial split (clamped on
+narrow terminals so the anchor remains reusable) and uses live geometry thereafter. Placement fails
+closed below the minimum of 24x6 for the shell and 12x8 for the agent; it never launches an agent
+on an undersized root or child.
+Herdr labels are not unique, so neither tab nor anchor ownership is inferred from one. Schema v12
+persists the exact anchor pane id with each promoted run; after restart, the daemon reconstructs the
+exact tab and anchor only from scoped durable pane identities in the same session and workspace.
+A renamed anchor remains owned by identity. If that exact anchor was closed, it is recreated only by
+splitting a currently live durable board-run child; if no such proof remains, a fresh tab is created
+instead of touching a foreign pane. Before a later split, exact ended run children may be reclaimed
+to preserve anchor geometry; foreign or open panes are never closed. If older runs provide multiple
+live identities, newest run id wins deterministically. A fresh/recovered split also requires enough
+live geometry for both minimum pane sizes. Per-card first allocation is serialized by `(session
+socket, workspace, card label)`. Legacy pre-v11 rows retain the `kanban` lookup and old root/split
+behavior.
 Placement, cwd, and env are never passed to `agent.start`. A newly allocated child can briefly retain
 Herdr's previous agent state, so a typed `agent_pane_busy` response gets at most two retries of the
-exact same `agent.start` request on that same board-owned pane, with 100ms then 200ms backoff. It
+exact same `agent.start` request on that same board-owned child, with 100ms then 200ms backoff. It
 never allocates another pane for this transient. Persistent busy is terminal and closes only that
-owned child; `pane_not_found` is a separate placement race that closes the child when present,
-restarts from `tab.list`, and retries complete placement once.
+owned child; the shell anchor remains. `pane_not_found` is a separate placement race that closes the
+child when present, restarts from `tab.list`, and retries complete placement once.
 
 ## 3. Data model
 
@@ -410,8 +421,8 @@ opens the script, the residual configured-script orphan is an accepted asynchron
 3. Column engine: *Plan* is `trigger=auto` → **enqueue run** on the card's space queue.
 4. Dispatcher (respecting per-space serial queue + global cap):
    a. Resolve the card's session socket and `ping` it. Anything except exact Herdr 0.7.5/protocol 17 fails before workspace discovery/creation. Then reuse workspace `w4`, or create/reuse the card's labeled `new_workspace`; repository worktree isolation remains an agent prompt responsibility.
-   b. Preflight the selected socket again at the spawner boundary. For a new durable run, the card's **`card-<id>` tab** is resolved by exact owned id (reconstructed from the newest matching durable pane in the same session/workspace when boardd restarts), or `tab.create {workspace_id,cwd,env,…}` supplies a new root pane. A missing, renamed, or empty owned tab is replaced; duplicate labels, including legacy `kanban`, are never ownership proof. If multiple historical panes are live, newest run id wins; legacy rows retain their old lookup. There is no protocol-16 placement inside `agent.start` and no leftover root shell to close.
-   c. For Pi/Claude, write the snapshotted system prompt to a mode-`0600` temporary file; issue `agent.start {name,kind,pane_id,args}` with prompt-free startup args; a typed `agent_pane_busy` retries the exact request on that same owned pane with bounded 100ms/200ms backoff (never another split); poll `agent.get` for readiness; then send only the task snapshot through `agent.prompt`. Remove the file. Card status → `running`; record the exact pane/workspace ids. The pane is **visible** — you can watch or type into it anytime.
+   b. Preflight the selected socket again at the spawner boundary. For a new durable run, the card's **`card-<id>` tab** is resolved by exact owned id (reconstructed from the newest matching durable pane in the same session/workspace when boardd restarts), or `tab.create {workspace_id,cwd,env,…}` supplies a new shell anchor. The anchor is labeled `card-<id>-anchor`, its exact id is persisted on the promoted v12 run, and the run child is always created by `pane.split` from that anchor; `agent.start`/`pane run` never target the root. A renamed anchor is still selected only by exact identity; a closed anchor is recreated only from a durable board-run child in the exact proven tab, and missing proof creates a fresh tab without selecting a duplicate-label user tab. Exact ended children may be reclaimed before a later split so the anchor keeps usable geometry. The child receives the run env; the anchor receives only stable card identity. If multiple historical panes are live, newest run id wins; legacy rows retain their old lookup. There is no protocol-16 placement inside `agent.start`.
+   c. For Pi/Claude, write the snapshotted system prompt to a mode-`0600` temporary file; issue `agent.start {name,kind,pane_id,args}` on the split child with prompt-free startup args; a typed `agent_pane_busy` retries the exact request on that same child with bounded 100ms/200ms backoff (never another split); poll `agent.get` for readiness; then send only the task snapshot through `agent.prompt`. Remove the file. Card status → `running`; record the exact child pane/workspace ids. The pane is **visible** — you can watch or type into it anytime.
 
    **Pane naming and ownership**: the managed agent name is `card-<id>-<column-slug>` (e.g. `card-42-plan`, `card-42-execute`). Herdr names are exclusive while a pane is open, so `agent_name_taken` retries once on the same pane with `card-<id>-<column-slug>-r<run>`. A persistent `agent_pane_busy` closes only the board-owned child and leaves the pre-existing anchor. If a placement target disappears, boardd closes only the pane it created (a missing pane is already clean), restarts discovery from `tab.list`, and retries the complete placement once. A terminal launch error also closes only that board-owned pane; pre-existing user panes are never cleanup targets.
 5. Agent plans, writes `docs/plans/meli-retry.md`, then calls `board comment 42 "Plan ready at docs/plans/meli-retry.md …"` and `board done 42 --outcome ok`. From a run, the CLI forwards `BOARD_RUN_ID`; manual/TUI completion omits it and remains compatible.
