@@ -480,10 +480,10 @@ if [ -z "$DAEMON_IDENTITY" ]; then
 fi
 write_state
 for _ in $(seq 1 50); do
-  "$BOARD_BIN" status >/dev/null 2>&1 && break
+  "$BOARD_BIN" daemon status >/dev/null 2>&1 && break
   sleep 0.2
 done
-"$BOARD_BIN" status >/dev/null 2>&1 || fail "candidate daemon did not become ready"
+"$BOARD_BIN" daemon status >/dev/null 2>&1 || fail "candidate daemon did not become ready"
 
 BOARD_ID="$(python3 "$ROOT/scripts/board-rpc.py" board.open \
   "$(python3 -c 'import json,sys; print(json.dumps({"scope_path":sys.argv[1]}))' "$WORKSPACE_DIR")" \

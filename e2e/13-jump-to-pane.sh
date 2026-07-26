@@ -24,21 +24,33 @@ hrpc pane.get "{\"pane_id\":\"$TARGET_PANE\"}" >/dev/null \
   || fail "held fake-agent pane is not accessible"
 ok "target pane $TARGET_PANE remains alive after board done"
 
-step "HERDR MUTATION: launch the real plugin overlay in the target workspace"
-e2e_herdr_mutate -- --session "$E2E_SESSION" plugin link "$REPO_ROOT" >/dev/null
+step "HERDR MUTATION: launch board tui in the target workspace"
 e2e_herdr_mutate -- workspace focus "$WS_ID" >/dev/null
 e2e_hrpc_mutate -- pane.focus "{\"pane_id\":\"$TARGET_PANE\"}" >/dev/null
-open_json="$(e2e_herdr_mutate -- plugin pane open --plugin herdr-board --entrypoint board \
-  --placement overlay \
-  --env "BOARD_SOCKET=$BOARD_SOCKET" --env "BOARD_DB=$BOARD_DB" \
-  --env "HERDR_BOARD_CONFIG=$HERDR_BOARD_CONFIG" \
-  --env "BOARD_SCOPE_PATH=$BOARD_SCOPE_PATH" --focus)"
-BOARD_PANE="$(printf '%s' "$open_json" | jget pane_id)"
+tab_json="$(e2e_herdr_mutate -- tab create --workspace "$WS_ID" --label board-tui --no-focus)"
+BOARD_PANE="$(printf '%s' "$tab_json" | jget pane_id)"
+[ -n "$BOARD_PANE" ] || fail "could not find pane for board tui tab"
+# Pane shells do NOT inherit workspace --env; pass the isolated env inline so the
+# TUI talks to THIS test's daemon, not the default socket. e2e_launch_tui also
+# pins the pane to a deterministic Regular-mode width (65 cols) via `stty`, which
+# `plugin pane open --entrypoint board` cannot do (it execs `board tui` directly
+# per herdr-plugin.toml, with no shell to inject `stty` into first) — without
+# this the pane would inherit this harness's narrow ambient pty width and render
+# `LayoutMode::Compact`'s switcher header instead of the Regular header this
+# scenario's assertions below expect.
+#
+# A real plugin-launched pane gets HERDR_PLUGIN_ID/HERDR_PANE_ID/HERDR_BIN_PATH/
+# HERDR_SOCKET_PATH injected automatically by Herdr; a plain `tab create` pane
+# does not, so they are passed explicitly here (as 10-archive-filter-title.sh
+# and 12-cwd-boards.sh already do) — the `o` jump-to-pane feature this scenario
+# exercises requires all four (`crates/board-tui/src/lib.rs`).
+e2e_launch_tui "$BOARD_PANE" \
+  "HERDR_PLUGIN_ID=herdr-board HERDR_PANE_ID=$BOARD_PANE HERDR_BIN_PATH=$HERDR_BIN HERDR_SOCKET_PATH=$HERDR_SOCKET_PATH BOARD_SOCKET=$BOARD_SOCKET BOARD_DB=$BOARD_DB HERDR_BOARD_CONFIG=$HERDR_BOARD_CONFIG BOARD_SCOPE_PATH=$BOARD_SCOPE_PATH"
 
 step "Wait for the overlay and select the run's column"
 ready=0
 for _ in $(seq 1 50); do
-  screen="$("$HERDR_BIN" pane read "$BOARD_PANE" --source recent-unwrapped --lines 100 2>/dev/null || true)"
+  screen="$("$HERDR_BIN" pane read "$BOARD_PANE" --source recent-unwrapped --lines 200 2>/dev/null || true)"
   if printf '%s\n' "$screen" | grep -q 'Todo ·'; then
     ready=1
     break
@@ -51,7 +63,7 @@ done
 # navigate before asserting its card is visible.
 e2e_herdr_mutate -- pane send-keys "$BOARD_PANE" right
 for _ in $(seq 1 50); do
-  screen="$("$HERDR_BIN" pane read "$BOARD_PANE" --source recent-unwrapped --lines 100 2>/dev/null || true)"
+  screen="$("$HERDR_BIN" pane read "$BOARD_PANE" --source recent-unwrapped --lines 200 2>/dev/null || true)"
   printf '%s\n' "$screen" | grep -q 'jump-target' && break
   sleep .1
 done
@@ -62,7 +74,7 @@ if ! printf '%s\n' "$screen" | grep -q 'jump-target'; then
   printf '  overlay diagnostics (pane=%s workspace=%s):\n' "$BOARD_PANE" "$WS_ID" >&2
   "$HERDR_BIN" pane get "$BOARD_PANE" >&2 || true
   printf '%s\n' '--- overlay recent-unwrapped ---' >&2
-  "$HERDR_BIN" pane read "$BOARD_PANE" --source recent-unwrapped --lines 100 >&2 || true
+  "$HERDR_BIN" pane read "$BOARD_PANE" --source recent-unwrapped --lines 200 >&2 || true
   printf '%s\n' '--- target workspace panes ---' >&2
   hrpc pane.list "{\"workspace_id\":\"$WS_ID\"}" >&2 || true
   printf '%s\n' '--- board daemon log (tail 80) ---' >&2
@@ -101,7 +113,7 @@ step "Open card detail and press o"
 e2e_herdr_mutate -- pane send-keys "$BOARD_PANE" enter
 detail_ready=0
 for _ in $(seq 1 50); do
-  detail_screen="$("$HERDR_BIN" pane read "$BOARD_PANE" --source recent-unwrapped --lines 100 2>/dev/null || true)"
+  detail_screen="$("$HERDR_BIN" pane read "$BOARD_PANE" --source recent-unwrapped --lines 200 2>/dev/null || true)"
   if printf '%s\n' "$detail_screen" | grep -q 'focus this run' \
     && printf '%s\n' "$detail_screen" | grep -q 'runs'; then
     detail_ready=1

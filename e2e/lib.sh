@@ -1642,10 +1642,10 @@ e2e_daemon_start() {
   e2e_manifest_event daemon_boot board-daemon "owned pid=$E2E_DAEMON_PID"
   local _
   for _ in $(seq 1 30); do
-    if "$BOARD_BIN" status >/dev/null 2>&1; then break; fi
+    if "$BOARD_BIN" daemon status >/dev/null 2>&1; then break; fi
     sleep 0.2
   done
-  "$BOARD_BIN" status >/dev/null 2>&1 || fail "daemon did not come up (see $E2E_TMP/daemon.log)"
+  "$BOARD_BIN" daemon status >/dev/null 2>&1 || fail "daemon did not come up (see $E2E_TMP/daemon.log)"
   local scope_params opened
   scope_params="$(python3 -c 'import json,sys; print(json.dumps({"scope_path":sys.argv[1]}))' "$BOARD_SCOPE_PATH")"
   opened="$(brpc board.open "$scope_params")"

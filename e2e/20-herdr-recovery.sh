@@ -123,5 +123,5 @@ comments=[c for c in x["comments"] if c["body"] in
 assert len(comments) == 1
 print("  reconnect snapshot finalized the missing pane exactly once")
 PY
-$BOARD_BIN status >/dev/null
+$BOARD_BIN daemon status >/dev/null
 step "20-herdr-recovery: ALL CHECKS PASSED"

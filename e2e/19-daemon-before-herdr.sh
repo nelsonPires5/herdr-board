@@ -14,7 +14,7 @@ e2e_write_config "$HERDR_BOARD_CONFIG"
 LATE_SOCKET="$E2E_TMP/late-herdr.sock"
 export HERDR_SOCKET_PATH="$LATE_SOCKET"
 e2e_daemon_start
-STATUS="$($BOARD_BIN status --json)"
+STATUS="$($BOARD_BIN daemon status --json)"
 printf '%s' "$STATUS" | python3 -c 'import json,sys; assert json.load(sys.stdin)["herdr_connected"] is False' \
   || fail "boardd unexpectedly connected before owned Herdr existed"
 
@@ -56,5 +56,5 @@ matches=[c for c in x["comments"] if c["body"] == "pane exited without board don
 assert len(matches) == 1
 print("  late stream observed exact pane exit once")
 PY
-$BOARD_BIN status >/dev/null
+$BOARD_BIN daemon status >/dev/null
 step "19-daemon-before-herdr: ALL CHECKS PASSED"
