@@ -13,8 +13,10 @@ protocol version.
 - Newline-delimited JSON (NDJSON), UTF-8. One JSON object per line, both directions.
 - Request: `{"id":"<string>","method":"<name>","params":{...}}` (params may be omitted = `{}`).
 - Response: `{"id":"<same>","result":<any>}` or `{"id":"<same>","error":{"code":<int>,"message":"..."}}`.
+  Error objects may add `kind` and `details`; old clients may ignore those members.
 - Error codes: `1` bad request / unknown method, `2` not found, `3` invalid state
-  (e.g. delete column with running card), `4` herdr unavailable, `5` internal.
+  (e.g. delete column with running card), `4` herdr unavailable, `5` internal. The CLI preserves
+  this envelope for `--json` errors on stderr and emits no JSON on stdout.
 - A connection may send `{"id":"...","method":"events.subscribe"}`; boardd replies
   `{"id":"...","result":{"subscribed":true}}` and then streams event objects
   (no `id` field) on that connection until it closes. A subscribed connection can still
@@ -72,8 +74,10 @@ Boards are independent pipelines keyed by canonical path. `Global` is board `id=
   new board with exactly one manual `Todo` column.
 - `board.list {}` → `{boards:[Board…]}`; `Global` first, then scoped boards ordered by full path.
 - `board.get {board_id?}` → `{board:{id,name,scope_path}, columns:[Column…ordered], cards:[Card…], active_runs:[{card_id,started_at}…]}`.
-  Omitted `board_id` means `Global`. Cards include active and archived rows for local filtering.
-  `active_runs` is additive in protocol v1 and contains only started, open runs whose cards belong
+  Omitted `board_id` means `Global`. `board.open` returns the same snapshot shape. Both `board.get`
+  and `board.open` include **all active and archived cards** in `cards`, so the TUI can filter
+  locally and templates can evaluate the complete board state. `active_runs` is additive in
+  protocol v1 and contains only started, open runs whose cards belong
   to the requested board; queued, ended, and other-board runs are omitted. Older clients may omit
   the field when decoding a snapshot, which is treated as an empty list.
 - `column.create {name, board_id?, position?, system_prompt?, trigger?, on_success_column_id?, on_fail_column_id?, fresh_session?, harness_override?, model_override?, effort_override?, permission_override?, timeout_minutes?}` → `Column`; omitted `board_id` means `Global`.
@@ -129,7 +133,7 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
     - `new_workspace` — the daemon creates the workspace on first dispatch (label = `space_ref`, cwd = `space_cwd`), reusing an open workspace with that label if one exists. **Requires** non-empty `space_ref` and `space_cwd` on create (else error 1).
   - creating directly into an `auto` column dispatches immediately (same as move)
   - In the legacy v1→v2 migration, `cwd`/`worktree` kinds and `worktree_base` were removed;
-    current schema v12 treats worktree isolation as the agent's job via prompt instructions, not a
+    current schema v13 treats worktree isolation as the agent's job via prompt instructions, not a
     board concept. Existing databases migrate those cards to `workspace` (best effort,
     `space_ref` kept).
 - `card.update {id, …subset}` → `Card`; nullable update fields use the tri-state encoding below. Harness/model/effort/permission/session/space fields are refused while the card has an open run (`queued|running|blocked|awaiting`). Title/description remain editable; `done` is not open.
@@ -149,11 +153,28 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
   `null`, but the field is never serialized onto the board wire. Schema v7 writes this nullable
   snapshot only for new runs; legacy `NULL` rows are not backfilled and retain their historical
   launch behavior.
-- `card.list {board_id?, column_id?}` → `[Card…]`; omitted `board_id` means `Global`, and a column filter must belong to the requested board.
+- `card.list {board_id?, column_id?, visibility?}` → `[Card…]`; omitted `board_id` means `Global`,
+  and a column filter must belong to the requested board. `visibility` defaults to `"active"` and
+  accepts `"active"`, `"all"`, or `"archived"`.
 
 ### comments / runs
-- `comment.add {card_id, body, author?}` → `Comment`. CLI `board comment` sets author
-  `agent:<run_id>` when `$BOARD_RUN_ID` is set, else `user`.
+
+- `comment.add {card_id, body, author?, actor_run_id?}` → `Comment`. CLI `board comment` and
+  `board card comment add` set `author` to `agent:<BOARD_RUN_ID>` and send `actor_run_id` when
+  `$BOARD_RUN_ID` is set; otherwise the author defaults to `user`. The additive actor field is
+  checked against the comment author, card, and open run.
+- `comment.get {id}` → `CommentRecord` (`id,card_id,author,body,created_at,deleted_at`). It returns
+  the current row even after a soft delete.
+- `comment.update {id,body,actor_run_id?}` → `CommentRecord`. It preserves the original author and
+  appends an immutable audit snapshot. An agent actor may update only its own comment from its exact
+  open run; a human actor may update non-system comments.
+- `comment.delete {id,actor_run_id?}` → `{deleted:true}`. This is a soft delete: the current row and
+  audit history remain, while ordinary card detail and future run prompts omit the comment. A deleted
+  comment cannot be edited or deleted again.
+- `comment.history {id}` → `[CommentHistory…]` ordered from creation through the latest edit. Every
+  insert creates the initial snapshot; edits append a snapshot; deletion marks the final snapshot's
+  `deleted_at` without changing its body. System comments are immutable at the database boundary and
+  cannot be edited or deleted by any actor.
 - `run.done {card_id, outcome:"ok"|"fail", summary?, run_id?}` → `{run, card}` — backend of
   `board done`. `run_id` is optional for compatibility: manual and TUI callers may omit it,
   and an omitted id completes the current active run. When supplied, it must exactly match the
@@ -161,18 +182,18 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
   `BOARD_RUN_ID` when present and omits `run_id` otherwise. It closes the active run, posts a
   `system` comment, and applies the column transition (`ok`→on_success, `fail`→on_fail; no
   target → card stays, status `done`/`failed`). It is also the confirm channel for an `awaiting`
-  card (TUI `Enter` sends the same request). The only queued exception is a configured harness:
-  its `board done` must provide the exact queued run id and may arrive before runner registration.
-  A queued built-in Pi/Claude run is rejected because managed completion requires a registered
-  pane. A mismatched id, missing id for the queued exception, or otherwise ineligible run returns
-  an error.
+  card (TUI `Enter` and `card run confirm` send the same request). The only queued exception is a
+  configured harness: its `board done` must provide the exact queued run id and may arrive before
+  runner registration. A queued built-in Pi/Claude run is rejected because managed completion
+  requires a registered pane. A mismatched id, missing id for the queued exception, or otherwise
+  ineligible run returns an error.
 - `run.cancel {card_id}` → `{run, card}` — kills the pane (herdr `pane.close`), outcome `cancelled`, card status `failed`, no transition.
-- `run.retry {card_id}` → re-enqueue in current column (fresh run). Claude resumes with
-  `--fork-session`; Pi uses `--fork <old-id> --session-id <new-id>` and persists the new id.
+- `run.retry {card_id}` → `{run, card}` — re-enqueue in the current column as a fresh run. Claude
+  resumes with `--fork-session`; Pi uses `--fork <old-id> --session-id <new-id>` and persists it.
 - `run.focus {card_id, origin_socket}` → `{run_id,pane_id}` — chooses the newest run with a
   recorded pane, resolves its Herdr session, and calls socket `pane.focus`. `origin_socket` and the
   target socket are canonicalized and must match; cross-session focus is error 3, unavailable/stale
-  Herdr is error 4.
+  Herdr is error 4. The CLI resolves it from `--origin-socket`, `$HERDR_SOCKET_PATH`, or `$HERDR_SOCK`.
 
 **Internal runner-only method (not public board API):**
 `run.pane_exited {card_id,run_id}` is sent only by the hidden `board __pane-exited` configured-harness
@@ -267,7 +288,7 @@ Coarse by design — the TUI refetches only its selected `board.get {board_id}` 
    - harness session: resume `card.session_id` unless `column.fresh_session` or none. Pi mint/resume use exact `--session-id`; Pi retry forks old → a newly minted target id. Claude retains mint/`--resume`/`--fork-session`. Existing cards keep their stored harness/session.
    - **preflight before workspace mutation:** `ping` the selected socket and require exact Herdr 0.7.5/protocol 17. Only then resolve `workspace` by id/case-insensitive label, or resolve `new_workspace` by label and, if absent, call `workspace.create {label,cwd,focus:false}`. Read the workspace cwd from its pane snapshot; snapshot failure or missing live cwd fails dispatch, never falling back to process cwd or a stale snapshot.
    - **preflight again at the spawner boundary:** this is the spawner's first protocol call, before placement, managed launch, or the configured runner.
-   - build the run-child env `{BOARD_CARD_ID,BOARD_RUN_ID,BOARD_SOCKET,BOARD_BIN}` plus configured-harness prompt env. New v12 runs place each card in a stable short `card-<id>` tab whose `tab.create` root is a shell anchor labeled `card-<id>-anchor`. The anchor receives only stable card identity; every run child is created by `pane.split` from it with the complete run cwd/env. Promotion persists the exact anchor id with the run. The daemon reuses only exact tab/anchor identities reconstructed from the newest matching durable panes in the same session/workspace; labels are display metadata, never ownership. A renamed anchor remains selected by identity; a closed anchor is recreated only by splitting a currently live durable board child, otherwise a fresh tab is created. The initial split targets ratio `0.40` and clamps it on narrow terminals so the anchor remains reusable; later splits use layout geometry. Both fresh and recovered placement fail closed unless the live layout can provide a 24x6 anchor and a 12x8 child. Concurrent first allocations for one `(session,workspace,card)` key are serialized; if multiple historical panes are live, newest run id wins. Legacy rows retain the historical `kanban` lookup. Thus cwd/env/placement exist **before** launch; protocol-17 `agent.start` receives none of them and never receives the anchor pane id.
+   - build the run-child env `{BOARD_CARD_ID,BOARD_RUN_ID,BOARD_SOCKET,BOARD_BIN}` plus configured-harness prompt env. Current schema v13 runs place each card in a stable short `card-<id>` tab whose `tab.create` root is a shell anchor labeled `card-<id>-anchor`. The anchor receives only stable card identity; every run child is created by `pane.split` from it with the complete run cwd/env. Promotion persists the exact anchor id with the run. The daemon reuses only exact tab/anchor identities reconstructed from the newest matching durable panes in the same session/workspace; labels are display metadata, never ownership. A renamed anchor remains selected by identity; a closed anchor is recreated only by splitting a currently live durable board child, otherwise a fresh tab is created. The initial split targets ratio `0.40` and clamps it on narrow terminals so the anchor remains reusable; later splits use layout geometry. Both fresh and recovered placement fail closed unless the live layout can provide a 24x6 anchor and a 12x8 child. Concurrent first allocations for one `(session,workspace,card)` key are serialized; if multiple historical panes are live, newest run id wins. Legacy rows retain the historical `kanban` lookup. Thus cwd/env/placement exist **before** launch; protocol-17 `agent.start` receives none of them and never receives the anchor pane id.
    - managed Pi/Claude: create a mode-`0600` file containing the snapshotted system prompt; call `agent.start {name,kind,pane_id,args,timeout_ms:30000}` on the newly split child with prompt-free startup args and the harness-specific file flag. A typed `agent_pane_busy` response is treated as a bounded transient on that same child: retry the exact same request on the same pane at most twice, with 100ms then 200ms backoff; do not split or allocate another pane. Persistent busy is terminal and follows child-only cleanup, leaving the anchor. This is distinct from `pane_not_found`, which is a placement race: close the child when present, rediscover from `tab.list`, and retry complete placement once. Poll `agent.get {target:pane_id}` for at most 30s until `interactive_ready && !launch_pending`; then call `agent.prompt {target:pane_id,text:prompt_snapshot}`. Remove the prompt file before returning, including error paths.
    - managed pane name is `card-<id>-<column-slug>` (e.g. `card-14-execute`); `agent_name_taken` retries once on the same pane with `card-<id>-<column-slug>-r<run>`.
    - configured harness: `pane.rename` the owned pane, create one mode-`0700` self-removing script whose POSIX-quoted command is the exact configured argv, and invoke exactly the selected Herdr binary (`HERDR_BIN_PATH` when nonempty, otherwise `herdr`) as `pane run <pane_id> <script_path>` with `HERDR_SOCKET_PATH` set to the selected socket. The script runs the child, preserves its status, then calls hidden `board __pane-exited --run-id "$BOARD_RUN_ID"`; the internal run-id guard accepts only the exact open queued/started configured run (including callback-before-registration), rejects stale/completed and built-in runs, and never applies `on_fail`.

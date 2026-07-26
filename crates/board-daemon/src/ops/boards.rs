@@ -1,5 +1,6 @@
 use super::*;
-use board_core::db::BOARD_ID;
+use board_core::db::{ColumnTarget, ColumnWiring, BOARD_ID};
+use board_core::protocol::{BoardChangedReason, ColumnCreateParams, TemplateApplyParams, Trigger};
 pub(super) fn daemon_status(d: &Arc<Daemon>) -> Result<Value> {
     let (active_runs, queued_runs) = {
         let db = d.store.lock();
@@ -42,8 +43,116 @@ pub(super) fn board_list(d: &Arc<Daemon>) -> Result<Value> {
     }))
 }
 
+pub(super) fn board_rename(d: &Arc<Daemon>, p: BoardRenameParams) -> Result<Value> {
+    let board = d.store.lock().rename_board(p.board_id, &p.name)?;
+    // There is no board-renamed reason in protocol v1. ColumnChanged is the
+    // existing board-structure refresh signal and, unlike the legacy coarse
+    // emit, scopes the refresh to the renamed board.
+    d.emit_changed_board(BoardChangedReason::ColumnChanged, board.id, None, None);
+    Ok(json!(board))
+}
+
 pub(super) fn board_get(d: &Arc<Daemon>, p: BoardGetParams) -> Result<Value> {
     board_snapshot(d, p.board_id.unwrap_or(BOARD_ID))
+}
+
+const PLAN_PROMPT: &str =
+    "You are in the PLAN stage. Use /quick-planner style planning: produce a written
+implementation plan and save it under docs/plans/ (or .plans/). Do not write code.
+When finished you MUST run:
+  board comment $BOARD_CARD_ID \"Plan ready at <filepath>. <3-line summary>\"
+  board done $BOARD_CARD_ID --outcome ok";
+
+const EXECUTE_PROMPT: &str =
+    "You are in the EXECUTE stage. Implement the plan referenced in the card comments.
+Run tests. When finished:
+  board comment $BOARD_CARD_ID \"<what changed, files touched, test results>\"
+  board done $BOARD_CARD_ID --outcome ok    # or --outcome fail with reasons";
+
+const REVIEW_PROMPT: &str =
+    "You are in the REVIEW stage. Review the diff against the card description and the
+plan/execution comments. Be adversarial. Then:
+  board comment $BOARD_CARD_ID \"<verdict + findings>\"
+  board done $BOARD_CARD_ID --outcome ok    # ok = ship to human; fail = back to Execute";
+
+/// Apply the pipeline template as one DB unit of work. Preparation and the
+/// post-commit event are outside the transaction; no dispatcher wake is needed
+/// because a template creates no cards or runs.
+pub(super) fn template_apply(d: &Arc<Daemon>, p: TemplateApplyParams) -> Result<Value> {
+    if p.name != "pipeline" {
+        return Err(Error::BadRequest(format!("unknown template: {}", p.name)));
+    }
+    let board_id = p.board_id.unwrap_or(BOARD_ID);
+    let columns = {
+        let _sched = d.sched.lock().unwrap();
+        let db = d.store.lock();
+        db.get_board(board_id)?;
+        let existing = db.list_columns(board_id)?;
+        let cards = db.list_cards(board_id)?;
+        if existing.len() != 1 || existing[0].name != "Todo" || !cards.is_empty() {
+            return Err(Error::InvalidState(
+                "template.apply requires an empty board (only the seed Todo column, no cards)"
+                    .into(),
+            ));
+        }
+        let todo = existing[0].id;
+        let specs = vec![
+            ColumnCreateParams {
+                name: "Plan".into(),
+                board_id: Some(board_id),
+                trigger: Some(Trigger::Auto),
+                system_prompt: Some(PLAN_PROMPT.into()),
+                ..Default::default()
+            },
+            ColumnCreateParams {
+                name: "Execute".into(),
+                board_id: Some(board_id),
+                trigger: Some(Trigger::Auto),
+                system_prompt: Some(EXECUTE_PROMPT.into()),
+                ..Default::default()
+            },
+            ColumnCreateParams {
+                name: "Review".into(),
+                board_id: Some(board_id),
+                trigger: Some(Trigger::Auto),
+                system_prompt: Some(REVIEW_PROMPT.into()),
+                model_override: Some("opus".into()),
+                ..Default::default()
+            },
+            ColumnCreateParams {
+                name: "Human Review".into(),
+                board_id: Some(board_id),
+                trigger: Some(Trigger::Manual),
+                ..Default::default()
+            },
+            ColumnCreateParams {
+                name: "Done".into(),
+                board_id: Some(board_id),
+                trigger: Some(Trigger::Manual),
+                ..Default::default()
+            },
+        ];
+        let wiring = [
+            ColumnWiring {
+                column_index: 0,
+                on_success: Some(ColumnTarget::Created(1)),
+                on_fail: Some(ColumnTarget::Existing(todo)),
+            },
+            ColumnWiring {
+                column_index: 1,
+                on_success: Some(ColumnTarget::Created(2)),
+                on_fail: None,
+            },
+            ColumnWiring {
+                column_index: 2,
+                on_success: Some(ColumnTarget::Created(3)),
+                on_fail: Some(ColumnTarget::Created(1)),
+            },
+        ];
+        db.apply_template_columns_uow(board_id, &specs, &wiring)?
+    };
+    d.emit_changed_board(BoardChangedReason::ColumnChanged, board_id, None, None);
+    Ok(json!(columns))
 }
 
 // -- columns ----------------------------------------------------------------

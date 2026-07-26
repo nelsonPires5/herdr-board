@@ -216,6 +216,102 @@ fn fake_delete_column_with_active_card_refused() {
 }
 
 #[test]
+fn fake_comment_actor_authorization_matches_daemon() {
+    let mut c = FakeBoardClient::new().unwrap();
+    let card = c
+        .card_create(&CardCreateParams {
+            title: "owned card".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let other_card = c
+        .card_create(&CardCreateParams {
+            title: "other card".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let enqueue = |c: &FakeBoardClient, card_id: i64| {
+        let card = c.db().get_card(card_id).unwrap().unwrap();
+        c.db()
+            .enqueue_run_uow(&EnqueueRun {
+                card_id,
+                column_id: card.column_id,
+                harness: "pi",
+                argv_json: "[]",
+                prompt_snapshot: "prompt",
+                system_prompt_snapshot: None,
+                launch_spec_json: None,
+                session_id: None,
+                session: None,
+            })
+            .unwrap()
+            .id
+    };
+    let own_run = enqueue(&c, card.id);
+    let other_run = enqueue(&c, other_card.id);
+
+    let own_author = format!("agent:{own_run}");
+    let own_comment = c.comment_add(card.id, "owned", Some(&own_author)).unwrap();
+    assert_eq!(
+        c.comment_update(own_comment.id, "edited by owner", Some(own_run))
+            .unwrap()
+            .body,
+        "edited by owner"
+    );
+    assert!(c
+        .comment_update(own_comment.id, "edited by other", Some(other_run))
+        .is_err());
+    assert!(c.comment_delete(own_comment.id, Some(other_run)).is_err());
+    assert!(
+        c.comment_delete(own_comment.id, Some(own_run))
+            .unwrap()
+            .deleted
+    );
+
+    // A durable run must also belong to the comment's card, not merely match
+    // the author string.
+    let other_author = format!("agent:{other_run}");
+    let forged = c
+        .comment_add(card.id, "forged", Some(&other_author))
+        .unwrap();
+    assert!(c
+        .comment_update(forged.id, "must be rejected", Some(other_run))
+        .is_err());
+    assert!(c.comment_delete(forged.id, Some(other_run)).is_err());
+
+    // Human callers may mutate non-system comments without an actor run.
+    let human = c.comment_add(card.id, "human", Some("user")).unwrap();
+    assert!(c.comment_update(human.id, "human edit", None).is_ok());
+    assert!(c.comment_delete(human.id, None).unwrap().deleted);
+
+    let system = c.comment_add(card.id, "system", Some("system")).unwrap();
+    assert!(c
+        .comment_update(system.id, "must be immutable", None)
+        .is_err());
+    assert!(c.comment_delete(system.id, None).is_err());
+}
+
+#[test]
+fn fake_agent_comments_keep_no_run_harness_compatibility() {
+    let mut c = FakeBoardClient::new().unwrap();
+    let card = c
+        .card_create(&CardCreateParams {
+            title: "fake harness".into(),
+            harness: Some("fake".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    let comment = c
+        .comment_add(card.id, "fake output", Some("agent:12345"))
+        .unwrap();
+
+    assert!(c
+        .comment_update(comment.id, "revised fake output", Some(12345))
+        .is_ok());
+    assert!(c.comment_delete(comment.id, Some(12345)).is_ok());
+}
+
+#[test]
 fn fake_card_move_transfers_across_boards() {
     let mut c = FakeBoardClient::new().unwrap();
     let alpha = c.board_open("/alpha").unwrap();

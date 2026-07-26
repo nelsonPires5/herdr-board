@@ -1,7 +1,7 @@
 use rusqlite::{types::Type, Error as SqliteError, Result as SqliteResult, Row};
 
 use super::conv_err;
-use crate::model::{Board, Card, Column, Comment, Run};
+use crate::model::{Board, Card, Column, Comment, CommentHistory, CommentRecord, Run};
 use crate::protocol::{AwaitingReason, CardStatus, Effort, RunOutcome, SpaceKind, Trigger};
 use crate::{Error, Result};
 
@@ -86,6 +86,29 @@ pub(super) fn row_to_comment(row: &Row) -> SqliteResult<Comment> {
         author: row.get("author")?,
         body: row.get("body")?,
         created_at: row.get("created_at")?,
+    })
+}
+
+pub(super) fn row_to_comment_record(row: &Row) -> SqliteResult<CommentRecord> {
+    Ok(CommentRecord {
+        id: row.get("id")?,
+        card_id: row.get("card_id")?,
+        author: row.get("author")?,
+        body: row.get("body")?,
+        created_at: row.get("created_at")?,
+        deleted_at: row.get("deleted_at")?,
+    })
+}
+
+pub(super) fn row_to_comment_history(row: &Row) -> SqliteResult<CommentHistory> {
+    Ok(CommentHistory {
+        id: row.get("id")?,
+        comment_id: row.get("comment_id")?,
+        card_id: row.get("card_id")?,
+        author: row.get("author")?,
+        body: row.get("body")?,
+        created_at: row.get("created_at")?,
+        deleted_at: row.get("deleted_at")?,
     })
 }
 

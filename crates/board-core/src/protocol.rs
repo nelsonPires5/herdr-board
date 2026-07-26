@@ -9,7 +9,7 @@ use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
 };
 
-use crate::model::{Board, Card, Column, Comment, Run};
+use crate::model::{Board, Card, Column, Comment, CommentHistory, CommentRecord, Run};
 
 /// A nullable field in a partial update.
 ///
@@ -138,6 +138,15 @@ pub enum RunOutcome {
     Lost,
 }
 
+/// Which archived-card set a card list should expose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CardVisibility {
+    Active,
+    All,
+    Archived,
+}
+
 /// Reasoning effort level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -184,6 +193,9 @@ str_enum!(AwaitingReason {
 str_enum!(RunOutcome {
     Ok => "ok", Fail => "fail", Cancelled => "cancelled", Lost => "lost",
 });
+str_enum!(CardVisibility {
+    Active => "active", All => "all", Archived => "archived",
+});
 str_enum!(Effort {
     Off => "off", Minimal => "minimal", Low => "low", Medium => "medium",
     High => "high", Xhigh => "xhigh", Max => "max",
@@ -221,22 +233,41 @@ impl Response {
         }
     }
     pub fn err(id: impl Into<String>, code: i32, message: impl Into<String>) -> Self {
+        Self::err_with_details(id, code, None::<String>, message, None)
+    }
+
+    /// Construct an additive structured error without changing the legacy
+    /// `Response::err` call sites.
+    pub fn err_with_details(
+        id: impl Into<String>,
+        code: i32,
+        kind: Option<impl Into<String>>,
+        message: impl Into<String>,
+        details: Option<serde_json::Value>,
+    ) -> Self {
         Response {
             id: id.into(),
             result: None,
             error: Some(RpcError {
                 code,
+                kind: kind.map(Into::into),
                 message: message.into(),
+                details,
             }),
         }
     }
 }
 
-/// Structured error payload.
+/// Structured error payload. `kind` and `details` are optional additions so
+/// protocol-v1 clients that only know `code` and `message` remain readable.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RpcError {
     pub code: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +344,15 @@ pub struct SubscribeResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoardOpenParams {
     pub scope_path: String,
+}
+
+/// `board.rename` params. The board id is stable; only its display name is
+/// changed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardRenameParams {
+    #[serde(alias = "id")]
+    pub board_id: i64,
+    pub name: String,
 }
 
 /// `board.get` params. Omitted id preserves the legacy Global default.
@@ -540,6 +580,9 @@ pub struct CardListParams {
     pub board_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub column_id: Option<i64>,
+    /// Omitted preserves the active-only board view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<CardVisibility>,
 }
 
 /// `card.get` result.
@@ -561,7 +604,49 @@ pub struct CommentAddParams {
     pub body: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
+    /// Optional daemon-supplied actor identity used to authorize agent-owned
+    /// comments. It is additive and absent for human callers.
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "run_id")]
+    pub actor_run_id: Option<i64>,
 }
+
+/// `comment.get`, `comment.delete`, and `comment.history` id params.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommentIdParams {
+    #[serde(alias = "comment_id")]
+    pub id: i64,
+}
+
+pub type CommentGetParams = CommentIdParams;
+pub type CommentHistoryParams = CommentIdParams;
+
+/// `comment.delete` params.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommentDeleteParams {
+    #[serde(alias = "comment_id")]
+    pub id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "run_id")]
+    pub actor_run_id: Option<i64>,
+}
+
+/// `comment.update` params.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommentUpdateParams {
+    #[serde(alias = "comment_id")]
+    pub id: i64,
+    pub body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "run_id")]
+    pub actor_run_id: Option<i64>,
+}
+
+/// Current comment returned by management methods.
+pub type CommentResult = CommentRecord;
+pub type CommentGetResult = CommentRecord;
+pub type CommentUpdateResult = CommentRecord;
+pub type CommentDeleteResult = DeletedResult;
+
+/// Audit snapshots returned by `comment.history`.
+pub type CommentHistoryResult = Vec<CommentHistory>;
 
 /// `run.done` params.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

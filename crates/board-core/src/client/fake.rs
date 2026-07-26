@@ -5,11 +5,12 @@ use crate::db::{Db, FinalizeEffects, FinalizeRun, BOARD_ID};
 use crate::engine;
 
 use crate::protocol::{
-    BoardGetParams, BoardListResult, BoardOpenParams, BoardSnapshot, CardArchiveParams,
-    CardCreateParams, CardDetail, CardListParams, CardMoveParams, CardUpdateParams,
-    ColumnCreateParams, ColumnDeleteParams, ColumnReorderParams, ColumnUpdateParams,
-    CommentAddParams, DeletedResult, Event, RunActionResult, RunDoneParams, RunFocusParams,
-    RunFocusResult,
+    BoardGetParams, BoardListResult, BoardOpenParams, BoardRenameParams, BoardSnapshot,
+    CardArchiveParams, CardCreateParams, CardDetail, CardListParams, CardMoveParams,
+    CardUpdateParams, ColumnCreateParams, ColumnDeleteParams, ColumnReorderParams,
+    ColumnUpdateParams, CommentAddParams, CommentDeleteParams, CommentGetParams,
+    CommentHistoryParams, CommentUpdateParams, DeletedResult, Event, RunActionResult,
+    RunDoneParams, RunFocusParams, RunFocusResult,
 };
 
 use super::BoardClient;
@@ -19,6 +20,53 @@ use super::BoardClient;
 /// store — but there is no dispatch: moving into an auto column just moves.
 pub struct FakeBoardClient {
     db: Db,
+}
+
+/// Validate an agent actor exactly as the daemon does. The fake harness may
+/// invoke the board before its lifecycle row exists, so retain that narrow
+/// compatibility path only for fake cards with no open durable run.
+fn require_agent_run(db: &Db, actor_run_id: i64, card_id: i64, author: &str) -> anyhow::Result<()> {
+    let expected_author = format!("agent:{actor_run_id}");
+    if author != expected_author {
+        anyhow::bail!("agent run {actor_run_id} may only act as {expected_author}");
+    }
+
+    match db.get_run(actor_run_id) {
+        Ok(run) => {
+            if run.card_id != card_id {
+                anyhow::bail!("agent run {actor_run_id} does not belong to comment card {card_id}");
+            }
+            if run.ended_at.is_some() {
+                anyhow::bail!("agent run {actor_run_id} is no longer open");
+            }
+            Ok(())
+        }
+        Err(crate::Error::NotFound(_)) => {
+            let card = db
+                .get_card(card_id)?
+                .ok_or_else(|| anyhow::anyhow!("card {card_id} not found"))?;
+            if card.harness == "fake" && db.open_run_for_card(card_id)?.is_none() {
+                Ok(())
+            } else {
+                anyhow::bail!("run {actor_run_id} not found");
+            }
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn comment_for_mutation(
+    db: &Db,
+    id: i64,
+    actor_run_id: Option<i64>,
+) -> anyhow::Result<crate::model::CommentRecord> {
+    let comment = db
+        .get_comment(id)?
+        .ok_or_else(|| anyhow::anyhow!("comment {id} not found"))?;
+    if let Some(run_id) = actor_run_id {
+        require_agent_run(db, run_id, comment.card_id, &comment.author)?;
+    }
+    Ok(comment)
 }
 
 impl FakeBoardClient {
@@ -62,6 +110,10 @@ impl BoardClient for FakeBoardClient {
             "board.list" => serde_json::to_value(BoardListResult {
                 boards: db.list_boards()?,
             })?,
+            "board.rename" => {
+                let p: BoardRenameParams = serde_json::from_value(params)?;
+                serde_json::to_value(db.rename_board(p.board_id, &p.name)?)?
+            }
             "column.create" => {
                 let p: ColumnCreateParams = serde_json::from_value(params)?;
                 serde_json::to_value(db.create_column(&p)?)?
@@ -136,6 +188,9 @@ impl BoardClient for FakeBoardClient {
             "card.list" => {
                 let p: CardListParams = serde_json::from_value(params)?;
                 let board_id = p.board_id.unwrap_or(BOARD_ID);
+                let visibility = p
+                    .visibility
+                    .unwrap_or(crate::protocol::CardVisibility::Active);
                 let cards = match p.column_id {
                     Some(c) => {
                         let column = db
@@ -144,9 +199,9 @@ impl BoardClient for FakeBoardClient {
                         if column.board_id != board_id {
                             anyhow::bail!("column {c} belongs to another board");
                         }
-                        db.list_cards_in_column(c)?
+                        db.list_cards_in_column_visible(c, visibility)?
                     }
-                    None => db.list_cards(board_id)?,
+                    None => db.list_cards_visible(board_id, visibility)?,
                 };
                 serde_json::to_value(cards)?
             }
@@ -194,8 +249,41 @@ impl BoardClient for FakeBoardClient {
             }
             "comment.add" => {
                 let p: CommentAddParams = serde_json::from_value(params)?;
-                let author = p.author.as_deref().unwrap_or("user");
-                serde_json::to_value(db.add_comment(p.card_id, author, &p.body)?)?
+                let author = match p.actor_run_id {
+                    Some(run_id) => {
+                        let expected = format!("agent:{run_id}");
+                        if let Some(author) = p.author.as_deref() {
+                            require_agent_run(db, run_id, p.card_id, author)?;
+                        } else {
+                            require_agent_run(db, run_id, p.card_id, &expected)?;
+                        }
+                        expected
+                    }
+                    None => p.author.unwrap_or_else(|| "user".into()),
+                };
+                serde_json::to_value(db.add_comment(p.card_id, &author, &p.body)?)?
+            }
+            "comment.get" => {
+                let p: CommentGetParams = serde_json::from_value(params)?;
+                serde_json::to_value(
+                    db.get_comment(p.id)?
+                        .ok_or_else(|| anyhow::anyhow!("comment {} not found", p.id))?,
+                )?
+            }
+            "comment.update" => {
+                let p: CommentUpdateParams = serde_json::from_value(params)?;
+                comment_for_mutation(db, p.id, p.actor_run_id)?;
+                serde_json::to_value(db.update_comment(p.id, &p.body)?)?
+            }
+            "comment.delete" => {
+                let p: CommentDeleteParams = serde_json::from_value(params)?;
+                comment_for_mutation(db, p.id, p.actor_run_id)?;
+                db.soft_delete_comment(p.id)?;
+                serde_json::to_value(DeletedResult { deleted: true })?
+            }
+            "comment.history" => {
+                let p: CommentHistoryParams = serde_json::from_value(params)?;
+                serde_json::to_value(db.list_comment_history(p.id)?)?
             }
             other => anyhow::bail!("FakeBoardClient: unsupported method {other}"),
         };

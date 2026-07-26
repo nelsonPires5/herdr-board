@@ -30,6 +30,7 @@ pub fn handle_request(d: &Arc<Daemon>, method: &str, params: Value) -> Result<Va
             Ok(json!(StopResult { stopping: true }))
         }
         "board.open" => boards::board_open(d, from(params)?),
+        "board.rename" => boards::board_rename(d, from(params)?),
         "board.list" => boards::board_list(d),
         "board.get" => boards::board_get(
             d,
@@ -43,7 +44,12 @@ pub fn handle_request(d: &Arc<Daemon>, method: &str, params: Value) -> Result<Va
         "column.update" => columns::column_update(d, from(params)?),
         "column.reorder" => columns::column_reorder(d, from(params)?),
         "column.delete" => columns::column_delete(d, from(params)?),
-        "template.apply" => template::apply(d, from(params)?),
+        "template.apply" => {
+            // Keep the legacy module linked while the atomic implementation
+            // lives with request operations.
+            let _ = template::apply;
+            boards::template_apply(d, from(params)?)
+        }
         "card.create" => cards::card_create(d, from(params)?),
         "card.update" => cards::card_update(d, from(params)?),
         "card.delete" => cards::card_delete(d, from(params)?),
@@ -52,6 +58,10 @@ pub fn handle_request(d: &Arc<Daemon>, method: &str, params: Value) -> Result<Va
         "card.get" => cards::card_get(d, from(params)?),
         "card.list" => cards::card_list(d, from(params)?),
         "comment.add" => comments::comment_add(d, from(params)?),
+        "comment.get" => comments::comment_get(d, from(params)?),
+        "comment.update" => comments::comment_update(d, from(params)?),
+        "comment.delete" => comments::comment_delete(d, from(params)?),
+        "comment.history" => comments::comment_history(d, from(params)?),
         "run.done" => runs::run_done(d, from(params)?),
         "run.pane_exited" => runs::run_pane_exited(d, from(params)?),
         "run.cancel" => runs::run_cancel(d, from(params)?),
@@ -74,11 +84,4 @@ fn require_card(d: &Arc<Daemon>, id: i64) -> Result<board_core::model::Card> {
         .lock()
         .get_card(id)?
         .ok_or_else(|| Error::NotFound(format!("card {id}")))
-}
-
-fn require_column(d: &Arc<Daemon>, id: i64) -> Result<board_core::model::Column> {
-    d.store
-        .lock()
-        .get_column(id)?
-        .ok_or_else(|| Error::NotFound(format!("column {id}")))
 }

@@ -164,7 +164,9 @@ fn response_ok_and_error_shapes() {
         err.error,
         Some(RpcError {
             code: 3,
-            message: "invalid state".into()
+            kind: None,
+            message: "invalid state".into(),
+            details: None,
         })
     );
     roundtrip(&err);
