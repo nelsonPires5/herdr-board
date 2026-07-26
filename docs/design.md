@@ -82,15 +82,20 @@ values. This happens before workspace discovery or `workspace.create`; the spawn
 as its first call before `tab.create`, `pane.split`, `agent.start`, or the configured-harness runner.
 A mismatch fails the queued run without mutating the workspace.
 
-Protocol 17 is pane-first. boardd creates the `kanban` tab with `cwd` and `env`, using its root pane,
-or splits a selected pane in an existing tab with the same `cwd` and `env`. Only then does it start
-a managed agent in that exact pane or run a configured harness there. Placement, cwd, and env are
-never passed to `agent.start`. A newly allocated child can briefly retain Herdr's previous agent
-state, so a typed `agent_pane_busy` response gets at most two retries of the exact same
-`agent.start` request on that same board-owned pane, with 100ms then 200ms backoff. It never
-allocates another pane for this transient. Persistent busy is terminal and closes only that owned
-child; `pane_not_found` is a separate placement race that closes the child when present, restarts
-from `tab.list`, and retries complete placement once.
+Protocol 17 is pane-first. New durable runs place each card in a stable short `card-<id>` tab with
+`cwd` and `env`, using its root pane, or split a selected pane in that exact board-owned tab. Herdr
+tab labels are not unique, so the daemon reuses only an exact tab id reconstructed from the newest
+matching durable v11 run pane in the same session and workspace; a missing, renamed, closed, or empty
+owned tab is recreated. If older runs provide multiple live panes, newest run id wins deterministically.
+Per-card first allocation is serialized by `(session socket, workspace, card label)`. Legacy pre-v11
+rows retain the `kanban` lookup. Only then does it start a managed agent in that exact pane or run a
+configured harness there.
+Placement, cwd, and env are never passed to `agent.start`. A newly allocated child can briefly retain
+Herdr's previous agent state, so a typed `agent_pane_busy` response gets at most two retries of the
+exact same `agent.start` request on that same board-owned pane, with 100ms then 200ms backoff. It
+never allocates another pane for this transient. Persistent busy is terminal and closes only that
+owned child; `pane_not_found` is a separate placement race that closes the child when present,
+restarts from `tab.list`, and retries complete placement once.
 
 ## 3. Data model
 
@@ -187,7 +192,7 @@ Cards target a **herdr session** plus a space in it. Because two sessions can ea
 On first dispatch of a `new_workspace` card: preflight the selected socket for exact Herdr
 0.7.5/protocol 17, then list the session's workspaces; if one's label matches `space_ref`
 (case-insensitive) reuse it, else `workspace.create {label:space_ref, cwd:space_cwd, focus:false}`.
-Then proceed identically to a `workspace` card (cwd snapshot, pane-first kanban-tab placement). If the reused or existing workspace snapshot fails, or contains no live cwd, dispatch fails; it never falls back to process cwd or a stale snapshot.
+Then proceed identically to a `workspace` card (cwd snapshot, pane-first per-card tab placement). If the reused or existing workspace snapshot fails, or contains no live cwd, dispatch fails; it never falls back to process cwd or a stale snapshot.
 
 ### Worktree removal
 
@@ -405,7 +410,7 @@ opens the script, the residual configured-script orphan is an accepted asynchron
 3. Column engine: *Plan* is `trigger=auto` → **enqueue run** on the card's space queue.
 4. Dispatcher (respecting per-space serial queue + global cap):
    a. Resolve the card's session socket and `ping` it. Anything except exact Herdr 0.7.5/protocol 17 fails before workspace discovery/creation. Then reuse workspace `w4`, or create/reuse the card's labeled `new_workspace`; repository worktree isolation remains an agent prompt responsibility.
-   b. Preflight the selected socket again at the spawner boundary. In the workspace's **`kanban` tab**, `tab.create {workspace_id,cwd,env,…}` supplies a new root pane, or an existing tab's largest pane is selected and `pane.split {target_pane_id,cwd,env,…}` creates the owned pane (`Right` when the target is ≥ 2× as wide as tall in cells, else `Down`). There is no protocol-16 placement inside `agent.start` and no leftover root shell to close.
+   b. Preflight the selected socket again at the spawner boundary. For a new durable run, the card's **`card-<id>` tab** is resolved by exact owned id (reconstructed from the newest matching durable pane in the same session/workspace when boardd restarts), or `tab.create {workspace_id,cwd,env,…}` supplies a new root pane. A missing, renamed, or empty owned tab is replaced; duplicate labels, including legacy `kanban`, are never ownership proof. If multiple historical panes are live, newest run id wins; legacy rows retain their old lookup. There is no protocol-16 placement inside `agent.start` and no leftover root shell to close.
    c. For Pi/Claude, write the snapshotted system prompt to a mode-`0600` temporary file; issue `agent.start {name,kind,pane_id,args}` with prompt-free startup args; a typed `agent_pane_busy` retries the exact request on that same owned pane with bounded 100ms/200ms backoff (never another split); poll `agent.get` for readiness; then send only the task snapshot through `agent.prompt`. Remove the file. Card status → `running`; record the exact pane/workspace ids. The pane is **visible** — you can watch or type into it anytime.
 
    **Pane naming and ownership**: the managed agent name is `card-<id>-<column-slug>` (e.g. `card-42-plan`, `card-42-execute`). Herdr names are exclusive while a pane is open, so `agent_name_taken` retries once on the same pane with `card-<id>-<column-slug>-r<run>`. A persistent `agent_pane_busy` closes only the board-owned child and leaves the pre-existing anchor. If a placement target disappears, boardd closes only the pane it created (a missing pane is already clean), restarts discovery from `tab.list`, and retries the complete placement once. A terminal launch error also closes only that board-owned pane; pre-existing user panes are never cleanup targets.

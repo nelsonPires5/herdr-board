@@ -13,26 +13,38 @@ pub(crate) const ERR_EMPTY_LAYOUT: &str = "empty_layout";
 pub(crate) struct OwnedPane {
     pub(crate) pane_id: String,
     pub(crate) workspace_id: String,
+    pub(crate) tab_id: String,
 }
 
-/// Find/create the board tab, then consume its root pane or split an explicitly
-/// selected existing pane. The caller owns the single bounded full-placement
-/// retry, so a race at any discovery step restarts from `tab.list`.
+/// Resolve a card tab by exact owned id, or create it, then consume its root
+/// pane or split an explicitly selected existing pane. Labels are not ownership
+/// proof because Herdr permits duplicate labels. The caller owns the single
+/// bounded full-placement retry, so a race at any discovery step restarts from
+/// `tab.list`.
 pub(crate) fn allocate_owned_pane(
     client: &mut HerdrClient,
     workspace_id: &str,
     label: &str,
     cwd: Option<&Path>,
     env: &BTreeMap<String, String>,
+    owned_tab_id: Option<&str>,
 ) -> anyhow::Result<OwnedPane> {
     let cwd = cwd.map(|path| path.to_string_lossy().into_owned());
     let tabs = client
         .tab_list(Some(workspace_id))
         .map_err(anyhow::Error::new)?;
-    let existing = tabs
-        .iter()
-        .filter(|tab| tab.label == label)
-        .min_by_key(|tab| tab.number);
+    let existing = if label.starts_with("card-") {
+        owned_tab_id.and_then(|tab_id| {
+            tabs.iter()
+                .find(|tab| tab.tab_id == tab_id && tab.label == label)
+        })
+    } else {
+        // Legacy callers retain the historical kanban lookup. New card tabs
+        // never enter this branch and never adopt a tab by label.
+        tabs.iter()
+            .filter(|tab| tab.label == label)
+            .min_by_key(|tab| tab.number)
+    };
 
     let Some(tab) = existing else {
         let created = client
@@ -47,6 +59,7 @@ pub(crate) fn allocate_owned_pane(
         return Ok(OwnedPane {
             pane_id: created.root_pane.pane_id,
             workspace_id: created.tab.workspace_id,
+            tab_id: created.tab.tab_id,
         });
     };
 
@@ -56,12 +69,32 @@ pub(crate) fn allocate_owned_pane(
         .into_iter()
         .filter(|pane| pane.tab_id == tab.tab_id)
         .collect();
-    let anchor = panes.first().ok_or_else(|| {
-        mark_retryable_placement_race(HerdrError::Protocol {
+    let Some(anchor) = panes.first() else {
+        // An exact card-owned tab can survive after its last pane was closed.
+        // It is still safe to leave that empty tab alone and create a fresh
+        // replacement; selecting another same-label tab would be unsafe. Keep
+        // the legacy kanban race behavior unchanged.
+        if label.starts_with("card-") && owned_tab_id.is_some() {
+            let created = client
+                .tab_create(&TabCreateParams {
+                    workspace_id: Some(workspace_id.to_string()),
+                    cwd: cwd.clone(),
+                    label: Some(label.to_string()),
+                    env: env.clone(),
+                    focus: false,
+                })
+                .map_err(anyhow::Error::new)?;
+            return Ok(OwnedPane {
+                pane_id: created.root_pane.pane_id,
+                workspace_id: created.tab.workspace_id,
+                tab_id: created.tab.tab_id,
+            });
+        }
+        return Err(mark_retryable_placement_race(HerdrError::Protocol {
             code: ERR_EMPTY_TAB.to_string(),
             message: format!("existing tab {} has no pane available to split", tab.tab_id),
-        })
-    })?;
+        }));
+    };
     let layout = client
         .pane_layout(Some(&anchor.pane_id))
         .map_err(mark_retryable_placement_race)?;
@@ -84,6 +117,7 @@ pub(crate) fn allocate_owned_pane(
         } else {
             pane.workspace_id
         },
+        tab_id: tab.tab_id.clone(),
     })
 }
 

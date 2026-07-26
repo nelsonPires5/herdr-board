@@ -32,10 +32,15 @@ pub struct HerdrLaunchPlan {
     /// agent names are exclusive while a pane using one is open). `None` skips
     /// the retry.
     pub name_fallback: Option<String>,
-    /// herdr tab label to place the agent pane in (find-or-create + grid
-    /// layout). `None` = no tab placement (cwd spaces / `LocalSpawner`, which
-    /// ignore it). Only honored when `workspace_ref` is also set.
+    /// Herdr tab label for the placement request. Card-tab ownership is never
+    /// inferred from this non-unique label.
     pub tab_label: Option<String>,
+    /// An exact board-owned tab id reconstructed from a durable run pane, if
+    /// available. The optional value itself is not ownership proof: dispatch
+    /// supplies it only after validating the pane/session/workspace boundary;
+    /// the Herdr spawner uses only that exact id together with the expected
+    /// label.
+    pub owned_tab_id: Option<String>,
     /// Working directory (resolved workspace cwd, or `LocalSpawner`).
     pub cwd: Option<PathBuf>,
     /// herdr workspace id (for `workspace` / `new_workspace` spaces).

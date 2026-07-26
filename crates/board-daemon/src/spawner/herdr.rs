@@ -4,7 +4,7 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -60,6 +60,10 @@ impl PaneRunner for HerdrCliPaneRunner {
 // HerdrSpawner
 // ---------------------------------------------------------------------------
 
+type CardTabKey = (PathBuf, String, String);
+type CardTabOwnership = Arc<Mutex<BTreeMap<CardTabKey, String>>>;
+type CardTabLocks = Arc<Mutex<BTreeMap<CardTabKey, Arc<Mutex<()>>>>>;
+
 /// Launches managed agents through protocol-17 `agent.start`, and configured
 /// harnesses through a board-owned pane plus `herdr pane run`.
 ///
@@ -70,6 +74,12 @@ pub struct HerdrSpawner {
     socket: PathBuf,
     pane_runner: Arc<dyn PaneRunner>,
     agent_start_delay: Arc<DelayFn>,
+    /// Exact tab ids known to this daemon, keyed by session, workspace, and
+    /// card label. Labels are intentionally not ownership.
+    owned_card_tabs: CardTabOwnership,
+    /// Per-ownership-key locks serialize first allocation without serializing
+    /// unrelated cards/workspaces.
+    card_tab_locks: CardTabLocks,
 }
 
 impl HerdrSpawner {
@@ -78,6 +88,8 @@ impl HerdrSpawner {
             socket,
             pane_runner: Arc::new(HerdrCliPaneRunner),
             agent_start_delay: Arc::new(thread::sleep),
+            owned_card_tabs: Arc::new(Mutex::new(BTreeMap::new())),
+            card_tab_locks: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -99,6 +111,8 @@ impl HerdrSpawner {
             socket,
             pane_runner,
             agent_start_delay,
+            owned_card_tabs: Arc::new(Mutex::new(BTreeMap::new())),
+            card_tab_locks: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -137,15 +151,40 @@ impl Spawner for HerdrSpawner {
             .as_deref()
             .ok_or_else(|| anyhow!("Herdr spawn requires tab_label for pane placement"))?;
         let env: BTreeMap<String, String> = req.env.iter().cloned().collect();
+        let tab_key = (
+            selected_socket.clone(),
+            workspace_id.to_string(),
+            tab_label.to_string(),
+        );
+        let allocation_lock = self
+            .card_tab_locks
+            .lock()
+            .map_err(|_| anyhow!("card-tab allocation lock poisoned"))?
+            .entry(tab_key.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let _allocation_guard = allocation_lock
+            .lock()
+            .map_err(|_| anyhow!("card-tab allocation lock poisoned"))?;
 
         let mut last_placement_race = None;
         for attempt in 0..2 {
+            let remembered_tab_id = if req.owned_tab_id.is_some() {
+                req.owned_tab_id.clone()
+            } else {
+                self.owned_card_tabs
+                    .lock()
+                    .map_err(|_| anyhow!("card-tab ownership lock poisoned"))?
+                    .get(&tab_key)
+                    .cloned()
+            };
             let owned = match allocate_owned_pane(
                 &mut client,
                 workspace_id,
                 tab_label,
                 req.cwd.as_deref(),
                 &env,
+                remembered_tab_id.as_deref(),
             )
             .with_context(|| format!("placing pane in tab '{tab_label}' for {}", req.name))
             {
@@ -176,6 +215,12 @@ impl Spawner for HerdrSpawner {
 
             match launch_result {
                 Ok(()) => {
+                    if tab_label.starts_with("card-") {
+                        self.owned_card_tabs
+                            .lock()
+                            .map_err(|_| anyhow!("card-tab ownership lock poisoned"))?
+                            .insert(tab_key.clone(), owned.tab_id.clone());
+                    }
                     return Ok(RuntimeHandle {
                         pane_id: Some(owned.pane_id),
                         workspace_id: Some(owned.workspace_id),

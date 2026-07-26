@@ -8,7 +8,7 @@ use board_core::db::FinalizeRun;
 use board_core::harness::is_builtin_harness;
 use board_core::model::{Card, Run, SpaceKey};
 use board_core::protocol::{BoardChangedReason, CardStatus, RunOutcome};
-use board_herdr::HerdrClient;
+use board_herdr::{HerdrClient, SessionSnapshot};
 
 use crate::dispatch::space::resolve_space;
 use crate::spawner::HerdrLaunchPlan;
@@ -86,6 +86,54 @@ pub(crate) fn launch_session<'a>(run: &'a Run, card: &'a Card) -> Option<&'a str
     } else {
         card.session.as_deref()
     }
+}
+
+/// Reconstruct a card tab's ownership from a durable board-owned pane id.
+/// A matching pane is proof of ownership; tab labels alone are never used.
+pub(super) fn reconstruct_owned_tab_id(
+    snapshot: &SessionSnapshot,
+    workspace_id: &str,
+    prior_pane_ids: &[String],
+) -> Option<String> {
+    // `prior_pane_ids` is ordered by newest durable run first. Herdr snapshot
+    // ordering is not an ownership or recency signal, so never let it decide
+    // which exact board-owned pane wins an otherwise valid reconstruction.
+    prior_pane_ids.iter().find_map(|pane_id| {
+        snapshot
+            .panes
+            .iter()
+            .find(|pane| {
+                pane.pane_id == *pane_id
+                    && pane.workspace_id == workspace_id
+                    && !pane.tab_id.is_empty()
+            })
+            .map(|pane| pane.tab_id.clone())
+    })
+}
+
+/// Return exact pane ids that can prove ownership of a card tab after a
+/// daemon restart. Only durable protocol-v11 launch rows for the selected
+/// session and workspace are eligible; legacy rows and panes from another
+/// placement scope cannot confer tab ownership. The ids are newest-first so
+/// reconstruction remains deterministic if old runs occupy different tabs.
+pub(super) fn durable_owned_pane_ids(
+    runs: &[Run],
+    session: Option<&str>,
+    workspace_id: &str,
+) -> Vec<String> {
+    let mut owned = runs
+        .iter()
+        .filter(|run| {
+            run.launch_spec.is_some()
+                && run.session.as_deref() == session
+                && run.herdr_workspace_id.as_deref() == Some(workspace_id)
+        })
+        .filter_map(|run| run.herdr_pane_id.as_deref().map(|pane| (run.id, pane)))
+        .filter(|(_, pane)| !pane.is_empty())
+        .map(|(run_id, pane)| (run_id, pane.to_string()))
+        .collect::<Vec<_>>();
+    owned.sort_unstable_by_key(|(run_id, _)| std::cmp::Reverse(*run_id));
+    owned.into_iter().map(|(_, pane)| pane).collect()
 }
 
 /// Promote one queued run to running. Returns `Ok(true)` if it started,
@@ -177,8 +225,14 @@ async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result<bool> {
         initial_prompt,
         system_prompt,
         name_fallback: Some(run_pane_name_unique(card.id, &column.name, run.id)),
-        // Both space kinds land in a `kanban` tab (find-or-create + grid layout).
-        tab_label: Some("kanban".to_string()),
+        // New durable runs get one exact tab per card. Legacy rows retain the
+        // historical kanban placement and lookup behavior unchanged.
+        tab_label: Some(if run.launch_spec.is_some() {
+            format!("card-{}", card.id)
+        } else {
+            "kanban".to_string()
+        }),
+        owned_tab_id: None,
         cwd: None,
         workspace_ref: None,
         herdr_socket: None,
@@ -219,22 +273,41 @@ async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result<bool> {
         let kind = card.space_kind;
         let space_ref = card.space_ref.clone();
         let space_cwd = card.space_cwd.clone();
-        let resolved = tokio::task::spawn_blocking(move || -> anyhow::Result<(String, String)> {
+        let prior_runs = if run.launch_spec.is_some() {
+            d.store.lock().list_runs(card.id)?
+        } else {
+            Vec::new()
+        };
+        let card_tab = run.launch_spec.is_some();
+        let run_session = launch_session.map(str::to_owned);
+        let resolved = tokio::task::spawn_blocking(move || {
             let mut client = HerdrClient::connect(&socket)
                 .map_err(|e| anyhow::anyhow!("herdr unavailable: {e}"))?;
-            resolve_space(
+            let (workspace_id, cwd) = resolve_space(
                 &mut client,
                 kind,
                 space_ref.as_deref(),
                 space_cwd.as_deref(),
-            )
+            )?;
+            let prior_pane_ids =
+                durable_owned_pane_ids(&prior_runs, run_session.as_deref(), &workspace_id);
+            let owned_tab_id = if card_tab && !prior_pane_ids.is_empty() {
+                let snapshot = client
+                    .session_snapshot()
+                    .map_err(|e| anyhow::anyhow!("herdr session.snapshot: {e}"))?;
+                reconstruct_owned_tab_id(&snapshot, &workspace_id, &prior_pane_ids)
+            } else {
+                None
+            };
+            Ok::<_, anyhow::Error>((workspace_id, cwd, owned_tab_id))
         })
         .await
         .map_err(|e| Error::BadRequest(format!("workspace resolve join: {e}")))?;
         match resolved {
-            Ok((id, cwd)) => {
+            Ok((id, cwd, owned_tab_id)) => {
                 req.workspace_ref = Some(id);
                 req.cwd = Some(PathBuf::from(cwd));
+                req.owned_tab_id = owned_tab_id;
             }
             Err(e) => {
                 fail_queued_run(d, run.id, &format!("{e:#}"))?;

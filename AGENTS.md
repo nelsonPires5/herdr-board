@@ -18,7 +18,7 @@ Ownership is strict: edit your crate(s) + append to root `[workspace.dependencie
 source of truth: `docs/protocol.md` + `docs/design.md`. Docs live in `docs/` (index: `docs/README.md`);
 `schema.sql` is the fresh-schema source of truth and `board-core::db` owns upgrades. Final compatibility
 is board protocol v1, SQLite schema v11, and exactly Herdr 0.7.5 / socket protocol 17. The complete
-live catalog is `e2e/README.md` (scenarios 01–24); `e2e/test-harness.sh` is the provider-free static
+live catalog is `e2e/README.md` (scenarios 01–25); `e2e/test-harness.sh` is the provider-free static
 safety gate.
 
 ## Build / test gates (keep green)
@@ -37,7 +37,7 @@ cargo fmt --all --check                      # formatted
   your real sessions; each uses a marker-gated mode-0700 short HOME with explicit AF_UNIX margin,
   an isolated temp DB + socket, and **disposable**
   marked workspaces, prefixes every Herdr mutation `HERDR MUTATION:`, and tears everything down on exit
-  (`--keep` leaves sessions/workspaces for review). The forced-build standard suite passes 01–24
+  (`--keep` leaves sessions/workspaces for review). The forced-build standard suite passes 01–25
   provider-free under a mode-0700 root with controlled HOME/ZDOT/rc/PATH, never sourcing user rc;
   Herdr and Bash >=4 are resolved absolutely before PATH narrowing. The standard suite supports Linux and macOS: process identity uses Linux `/proc` or Darwin `libproc` + `KERN_PROCARGS2`, and every token is HMAC-bound to a non-exported per-invocation key delivered to the verifier over an inherited file descriptor. Linux additionally rechecks the owner token in `/proc/environ`; Darwin requires a signed direct-child capability before the exact PID/start/executable/complete-argv transition can be adopted. Session mutation, board-daemon signals, workspace close, and session stop/delete are never authorized by PID liveness alone; scenario mutation wrappers freshly verify boardd and each primary/secondary target. Stop and post-stop delete have separate fail-closed
   authorization, with delete requiring the exact private ownership marker. The opt-in real-Claude smoke retains its independent Linux-only identity implementation and is not part of the portable provider-free gate. Cleanup is limited to invocation-emitted exact names/roots/PIDs; marker and script-content digests are reverified immediately before destructive cleanup, and inherited roots always fail closed (reuse is process-local with exact path/mode/header/token/owner validation). A post-spawn server is provisionally ledgered by PID/start/exe/argv/owner token before full capture and is signalled only after a fresh match,
@@ -114,7 +114,7 @@ wire behavior. **See [`docs/herdr.md`](docs/herdr.md).**
 - **Panes don't inherit the workspace's env/cwd.** Protocol-17 launch is pane-first:
   `tab.create`/`pane.split` establishes cwd + env, then `agent.start` targets that pane with
   `{name, kind, pane_id, args}`. Workspace cwd is read from the workspace's pane snapshot.
-- **Tab labels are not unique** in herdr — resolve the `kanban` tab by find-or-create on id, not label.
+- Current durable runs use stable `card-<id>` tab labels, but reuse only an exact board-owned `tab_id` reconstructed from durable pane identity; labels are never ownership. Legacy `kanban` tabs remain untouched and legacy-only.
 - **Herdr events are a raw-socket stream** (`events.subscribe`, persistent connection); the CLI only
   has a blocking one-shot `events.wait`. Protocol-17 `pane_agent_status_changed` carries pane,
   workspace, agent, and status fields; `idle ≠ finished`, and a trailing `idle` may follow `done`

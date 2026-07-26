@@ -173,26 +173,29 @@ PY
 step "Assert held managed panes have the expected tab/pane/layout structure"
 tabs_json="$(hrpc tab.list "{\"workspace_id\":\"$WS_ID\"}")"
 panes_json="$(hrpc pane.list "{\"workspace_id\":\"$WS_ID\"}")"
-LAYOUT_PANE="$(python3 - "$tabs_json" "$panes_json" "$PI_PANE_ID" "$CLAUDE_PANE_ID" <<'PY'
+python3 - "$tabs_json" "$panes_json" "$PI_PANE_ID" "$CLAUDE_PANE_ID" "$PI_ID" "$CLAUDE_ID" <<'PY'
 import json, sys
 tabs=json.loads(sys.argv[1]).get("tabs",[]); panes=json.loads(sys.argv[2]).get("panes",[])
-pi_id, claude_id = sys.argv[3:]
-kanban=[t for t in tabs if t.get("label")=="kanban"]
-assert len(kanban)==1
-kp=[p for p in panes if p.get("tab_id")==kanban[0]["tab_id"]]
-by_id={p["pane_id"]: p for p in kp}
+pi_id, claude_id, pi_card, claude_card = sys.argv[3:]
+pi_tab=[t for t in tabs if t.get("label")==f"card-{pi_card}"]
+claude_tab=[t for t in tabs if t.get("label")==f"card-{claude_card}"]
+assert len(pi_tab)==len(claude_tab)==1
+assert pi_tab[0]["tab_id"] != claude_tab[0]["tab_id"]
+by_id={p["pane_id"]: p for p in panes}
+assert by_id[pi_id].get("tab_id") == pi_tab[0]["tab_id"]
+assert by_id[claude_id].get("tab_id") == claude_tab[0]["tab_id"]
 assert by_id[pi_id].get("agent") == "pi"
 assert by_id[claude_id].get("agent") == "claude"
-print(pi_id)
 PY
-)"
-layout_json="$(hrpc pane.layout "{\"pane_id\":\"$LAYOUT_PANE\"}")"
-python3 - "$layout_json" "$PI_PANE_ID" "$CLAUDE_PANE_ID" <<'PY'
+for managed_pane in "$PI_PANE_ID" "$CLAUDE_PANE_ID"; do
+  layout_json="$(hrpc pane.layout "{\"pane_id\":\"$managed_pane\"}")"
+  python3 - "$layout_json" "$managed_pane" <<'PY'
 import json, sys
 pane_ids={p["pane_id"] for p in json.loads(sys.argv[1]).get("layout", {}).get("panes", [])}
-assert set(sys.argv[2:]).issubset(pane_ids)
-print("  pane.layout contains both exact bounded-held managed card panes")
+assert sys.argv[2] in pane_ids
 PY
+done
+printf '  pane.layout contains both exact bounded-held managed card panes\n'
 
 ok "fixture boundary: no provider was called; passing required live Herdr readiness, ordered identity/idle reports, and exact stdin delivery"
 step "16-managed-p17: SYSTEM FILE + AGENT.PROMPT + HELD LAYOUT CONTRACTS PASSED"
