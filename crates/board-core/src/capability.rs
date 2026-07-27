@@ -372,6 +372,43 @@ pub fn capabilities_for(harness: &str, config: &Config) -> Option<HarnessCapabil
     meta_for(harness, config).map(|m| HarnessCapabilities::from_meta(m.as_ref()))
 }
 
+/// Capabilities for a harness when no [`Config`] is at hand: the built-in
+/// snapshot for `pi`/`claude`, and a permissive-but-safe fallback otherwise.
+///
+/// Prefer [`capabilities_for`] wherever the config is available — it is the
+/// only path that can honour a `[harness.NAME]` declaration. This function
+/// exists for callers (notably the TUI) that must answer "does this harness
+/// take permission modes?" before any capability snapshot has been fetched,
+/// and that would otherwise hardcode a harness name.
+///
+/// The unknown-harness fallback is permissive about what we cannot validate
+/// (any model string, any effort) and fails closed about what we would have to
+/// invent: no permission-mode vocabulary — another CLI's enum is never a safe
+/// guess — and no resume support, matching [`resume_support_for`].
+pub fn default_capabilities(harness: &str) -> HarnessCapabilities {
+    match harness {
+        "pi" => pi_capabilities(),
+        "claude" => claude_capabilities(),
+        _ => HarnessCapabilities {
+            harness: harness.to_string(),
+            models: Vec::new(),
+            model_freeform: true,
+            default_efforts: [
+                Effort::Off,
+                Effort::Minimal,
+                Effort::Low,
+                Effort::Medium,
+                Effort::High,
+                Effort::Xhigh,
+                Effort::Max,
+            ]
+            .to_vec(),
+            permission_modes: Vec::new(),
+            resume: ResumeSupport::Unsupported,
+        },
+    }
+}
+
 /// Ask one harness whether it can resume a recorded conversation by id.
 ///
 /// An **unknown** harness answers [`ResumeSupport::Unsupported`] rather than

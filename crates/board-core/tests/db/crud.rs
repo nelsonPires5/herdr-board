@@ -1,4 +1,4 @@
-use super::mem;
+use super::{arm_fault, mem};
 use board_core::db::{Db, EnqueueRun, FinalizeRun, BOARD_ID};
 use board_core::protocol::{
     AwaitingReason, CardCreateParams, CardStatus, ColumnCreateParams, ColumnUpdateParams, Effort,
@@ -798,4 +798,178 @@ fn transfer_card_is_atomic_on_bad_destination() {
     );
     let after = db.get_card(a.id).unwrap().unwrap();
     assert_eq!(after.board_id, alpha.id);
+}
+
+#[test]
+fn require_card_and_require_column_are_not_found_aware_lookups() {
+    let db = mem();
+    let column_id = db.default_column_id(BOARD_ID).unwrap();
+    let card = db
+        .create_card(&CardCreateParams {
+            title: "required".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+    assert_eq!(db.require_card(card.id).unwrap(), card);
+    assert_eq!(
+        db.require_column(column_id).unwrap(),
+        db.get_column(column_id).unwrap().unwrap()
+    );
+
+    let err = db.require_card(9_999_999).unwrap_err();
+    assert!(
+        matches!(&err, board_core::Error::NotFound(m) if m == "card 9999999"),
+        "expected NotFound for missing card, got {err:?}"
+    );
+    let err = db.require_column(9_999_999).unwrap_err();
+    assert!(
+        matches!(&err, board_core::Error::NotFound(m) if m == "column 9999999"),
+        "expected NotFound for missing column, got {err:?}"
+    );
+}
+
+// -- duplicate-name constraints ---------------------------------------------
+//
+// A duplicate name is something the *request* got wrong, so it must reach the
+// user as protocol code 1 with an actionable message — never as code 5 with
+// SQLite's table and column names in it.
+
+/// A user-facing duplicate-name rejection: code 1 and no storage-layer detail.
+fn assert_actionable_duplicate(err: &board_core::Error, expected: &str) {
+    assert_eq!(err.code(), 1, "expected a bad request, got {err:?}");
+    let message = err.to_string();
+    assert!(
+        message.contains(expected),
+        "message must name the offending value: {message}"
+    );
+    for leak in ["sqlite", "UNIQUE", "constraint", "columns.", "boards."] {
+        assert!(
+            !message.contains(leak),
+            "message leaks the storage layer ({leak}): {message}"
+        );
+    }
+}
+
+#[test]
+fn duplicate_column_name_on_the_same_board_is_a_bad_request() {
+    let db = mem();
+    let duplicate = db
+        .create_column(&ColumnCreateParams {
+            name: "Todo".into(),
+            ..Default::default()
+        })
+        .unwrap_err();
+
+    assert_actionable_duplicate(&duplicate, r#"column "Todo" already exists on this board"#);
+    assert_eq!(db.list_columns(BOARD_ID).unwrap().len(), 1);
+}
+
+#[test]
+fn the_same_column_name_on_another_board_is_accepted() {
+    let db = mem();
+    let other = db.open_board("/other").unwrap();
+
+    // The constraint is per-board: reusing a name across boards must not be
+    // swept up by the duplicate-name rejection.
+    let reused = db
+        .create_column(&ColumnCreateParams {
+            board_id: Some(other.id),
+            name: "Todo".into(),
+            ..Default::default()
+        })
+        .unwrap_err();
+    assert_actionable_duplicate(&reused, r#"column "Todo" already exists on this board"#);
+
+    let fresh = db
+        .create_column(&ColumnCreateParams {
+            board_id: Some(other.id),
+            name: "Review".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let global_review = db
+        .create_column(&ColumnCreateParams {
+            name: "Review".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_ne!(fresh.id, global_review.id);
+    assert_eq!(fresh.board_id, other.id);
+    assert_eq!(global_review.board_id, BOARD_ID);
+}
+
+#[test]
+fn renaming_a_column_onto_a_sibling_name_is_a_bad_request() {
+    let db = mem();
+    let review = db
+        .create_column(&ColumnCreateParams {
+            name: "Review".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let clash = db
+        .update_column(&ColumnUpdateParams {
+            id: review.id,
+            name: Some("Todo".into()),
+            ..Default::default()
+        })
+        .unwrap_err();
+
+    assert_actionable_duplicate(&clash, r#"column "Todo" already exists on this board"#);
+    assert_eq!(db.require_column(review.id).unwrap().name, "Review");
+}
+
+#[test]
+fn renaming_a_board_onto_an_existing_name_is_a_bad_request() {
+    let db = mem();
+    let one = db.open_board("/one").unwrap();
+    let two = db.open_board("/two").unwrap();
+
+    let clash = db.rename_board(one.id, &two.name).unwrap_err();
+
+    assert_actionable_duplicate(&clash, r#"board "/two" already exists"#);
+    assert_eq!(db.get_board(one.id).unwrap().name, one.name);
+}
+
+#[test]
+fn opening_a_scope_whose_board_name_is_taken_is_a_bad_request() {
+    let db = mem();
+    // A board renamed onto a path-shaped name collides with the board that
+    // opening that scope would have to create.
+    db.rename_board(BOARD_ID, "/repo/project").unwrap();
+
+    let clash = db.open_board("/repo/project").unwrap_err();
+
+    assert_actionable_duplicate(&clash, r#"board "/repo/project" already exists"#);
+    assert_eq!(db.list_boards().unwrap().len(), 1);
+}
+
+#[test]
+fn a_non_unique_constraint_failure_is_still_an_internal_error() {
+    // A trigger abort is also a SQLITE_CONSTRAINT failure, but it is not a
+    // duplicate name: reclassifying it would tell an agent to edit its request
+    // when the daemon is the thing that is broken.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("board.db");
+    let db = Db::open(&path).unwrap();
+    arm_fault(
+        &path,
+        "CREATE TRIGGER abort_columns BEFORE INSERT ON columns
+         BEGIN SELECT RAISE(ABORT,'fault: columns'); END;",
+    );
+
+    let err = db
+        .create_column(&ColumnCreateParams {
+            name: "Review".into(),
+            ..Default::default()
+        })
+        .unwrap_err();
+
+    assert_eq!(err.code(), 5, "expected an internal error, got {err:?}");
+    assert!(
+        matches!(&err, board_core::Error::Sqlite(_)),
+        "a trigger abort must stay a storage error, got {err:?}"
+    );
 }

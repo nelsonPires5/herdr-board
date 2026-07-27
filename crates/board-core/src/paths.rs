@@ -41,6 +41,20 @@ pub fn log_path() -> PathBuf {
     data_dir().join("daemon.log")
 }
 
+/// Parse a herdr session name from a `HERDR_SOCKET_PATH` value.
+///
+/// A named session's socket lives at `…/sessions/<name>/herdr.sock`; anything
+/// else (unset, or the plain default `…/herdr.sock`) means the daemon's default
+/// session, represented as `None`. This function is pure so production
+/// composition can inject its result without test-time environment reads.
+pub fn session_name_from_socket(path: Option<&str>) -> Option<String> {
+    // Expect the tail `sessions/<name>/herdr.sock`.
+    let rest = path?.strip_suffix("/herdr.sock")?;
+    let (parent, name) = rest.rsplit_once('/')?;
+    let last_seg = parent.rsplit('/').next().unwrap_or(parent);
+    (last_seg == "sessions" && !name.is_empty()).then(|| name.to_string())
+}
+
 /// Config file path: `$HERDR_BOARD_CONFIG` else `<config>/config.toml`.
 pub fn config_path() -> PathBuf {
     match std::env::var_os("HERDR_BOARD_CONFIG") {

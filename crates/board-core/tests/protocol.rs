@@ -3,12 +3,12 @@
 use board_core::launch::{ExecutionSpec, RunLaunchSpec};
 use board_core::model::Run;
 use board_core::protocol::{
-    ActiveRunSummary, AwaitingReason, BoardChangedReason, BoardGetParams, BoardListResult,
-    BoardOpenParams, BoardSnapshot, CardArchiveParams, CardCreateParams, CardListParams,
-    CardStatus, CardUpdateParams, ColumnCreateParams, ColumnUpdateParams, Effort, Event,
-    HarnessCapabilitiesParams, Patch, Request, Response, RpcError, RunDoneParams, RunFocusAction,
-    RunFocusParams, RunFocusResult, RunOutcome, RunPaneExitedParams, SpaceInfo, SpaceKind,
-    SpaceListResult, TemplateApplyParams, Trigger,
+    parse_timestamp, ActiveRunSummary, AwaitingReason, BoardChangedReason, BoardGetParams,
+    BoardListResult, BoardOpenParams, BoardSnapshot, CardArchiveParams, CardCreateParams,
+    CardListParams, CardStatus, CardUpdateParams, ColumnCreateParams, ColumnUpdateParams, Effort,
+    Event, HarnessCapabilitiesParams, Patch, Request, Response, RpcError, RunDoneParams,
+    RunFocusAction, RunFocusParams, RunFocusResult, RunOutcome, RunPaneExitedParams, SpaceInfo,
+    SpaceKind, SpaceListResult, TemplateApplyParams, Trigger,
 };
 use serde_json::json;
 
@@ -474,4 +474,75 @@ fn awaiting_reason_snake_case_wire_strings() {
         Some(AwaitingReason::IdleExpired)
     );
     assert_eq!(AwaitingReason::parse_str("bogus"), None);
+}
+
+#[test]
+fn space_kind_parses_the_hyphenated_cli_alias() {
+    // The CLI's `--space-kind new-workspace` and the wire's `new_workspace`
+    // must resolve to the same variant; the canonical string stays snake_case.
+    assert_eq!(
+        SpaceKind::parse_str("new_workspace"),
+        Some(SpaceKind::NewWorkspace)
+    );
+    assert_eq!(
+        SpaceKind::parse_str("new-workspace"),
+        Some(SpaceKind::NewWorkspace)
+    );
+    assert_eq!(
+        SpaceKind::parse_str("workspace"),
+        Some(SpaceKind::Workspace)
+    );
+    assert_eq!(SpaceKind::NewWorkspace.as_str(), "new_workspace");
+    assert_eq!(SpaceKind::parse_str("bogus"), None);
+}
+
+#[test]
+fn patch_constructors_separate_clear_flag_from_end_state() {
+    // `--clear-x` wins over a supplied value; an absent value stays unchanged.
+    assert_eq!(Patch::from_flags(true, Some("v")), Patch::Clear);
+    assert_eq!(Patch::from_flags(true, None::<&str>), Patch::Clear);
+    assert_eq!(Patch::from_flags(false, Some("v")), Patch::Set("v"));
+    assert_eq!(Patch::from_flags(false, None::<&str>), Patch::Unchanged);
+
+    // A form field always states the end state: emptied means clear.
+    assert_eq!(Patch::from_option(Some("v")), Patch::Set("v"));
+    assert_eq!(Patch::from_option(None::<&str>), Patch::Clear);
+    assert!(Patch::from_flags(false, None::<&str>).is_unchanged());
+    assert!(!Patch::from_option(None::<&str>).is_unchanged());
+}
+
+#[test]
+fn parse_timestamp_round_trips_wire_datetimes_and_rejects_junk() {
+    assert_eq!(parse_timestamp("1970-01-01 00:00:00"), Some(0));
+    assert_eq!(parse_timestamp("1970-01-01 00:00:01"), Some(1));
+    assert_eq!(parse_timestamp("1969-12-31 23:59:59"), Some(-1));
+    assert_eq!(parse_timestamp("2026-07-14 11:58:00"), Some(1_784_030_280));
+    // Seconds may be omitted; a leap day is a real day.
+    assert_eq!(
+        parse_timestamp("2024-02-29 12:00"),
+        parse_timestamp("2024-02-29 12:00:00")
+    );
+    assert_eq!(
+        parse_timestamp("2024-03-01 00:00:00").unwrap()
+            - parse_timestamp("2024-02-29 00:00:00").unwrap(),
+        86_400
+    );
+    // One day apart in wall time is exactly 86400s (UTC, no DST).
+    assert_eq!(
+        parse_timestamp("2026-07-15 11:58:00").unwrap()
+            - parse_timestamp("2026-07-14 11:58:00").unwrap(),
+        86_400
+    );
+
+    for junk in [
+        "",
+        "2026-07-14",
+        "2026-07-14T11:58:00",
+        "2026-07 11:58:00",
+        "not-a-date 11:58:00",
+        "2026-07-14 11",
+        "2026-07-14 11:xx:00",
+    ] {
+        assert_eq!(parse_timestamp(junk), None, "expected {junk:?} to fail");
+    }
 }

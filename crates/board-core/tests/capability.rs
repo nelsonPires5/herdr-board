@@ -1,9 +1,9 @@
 //! Harness capability catalog + run-pane naming.
 
 use board_core::capability::{
-    available_harnesses, capabilities_for, claude_capabilities, efforts_for, meta_for,
-    pi_capabilities, resume_support_for, run_pane_name, run_pane_name_unique, HarnessCapabilities,
-    ResumeSupport,
+    available_harnesses, capabilities_for, claude_capabilities, default_capabilities, efforts_for,
+    meta_for, pi_capabilities, resume_support_for, run_pane_name, run_pane_name_unique,
+    HarnessCapabilities, ResumeSupport,
 };
 use board_core::config::Config;
 use board_core::protocol::Effort;
@@ -109,6 +109,18 @@ fn pi_capabilities_expose_default_thinking_levels() {
             Effort::Max,
         ]
     );
+}
+
+#[test]
+fn harness_efforts_pi_freeform_model_includes_low() {
+    // A model Pi has never heard of is still accepted, and its effort ladder
+    // falls back to Pi's defaults rather than to nothing.
+    let caps = pi_capabilities();
+    assert!(!caps
+        .models
+        .iter()
+        .any(|model| model.id == "openai-codex/example"));
+    assert!(efforts_for(&caps, Some("openai-codex/example")).contains(&Effort::Low));
 }
 
 #[test]
@@ -349,4 +361,28 @@ fn unknown_harness_and_legacy_payloads_fail_closed_on_resume() {
     .unwrap();
     assert_eq!(legacy.resume, ResumeSupport::Unsupported);
     assert!(!legacy.resume.is_supported());
+}
+
+#[test]
+fn default_capabilities_match_builtins_and_fail_closed_for_unknown() {
+    assert_eq!(default_capabilities("pi"), pi_capabilities());
+    assert_eq!(default_capabilities("claude"), claude_capabilities());
+
+    // An unknown harness: permissive about models/efforts we cannot validate,
+    // silent about permission modes and resuming, which we must not invent.
+    let unknown = default_capabilities("mystery");
+    assert_eq!(unknown.harness, "mystery");
+    assert!(unknown.models.is_empty());
+    assert!(unknown.model_freeform);
+    assert_eq!(unknown.default_efforts.len(), 7);
+    assert_eq!(
+        efforts_for(&unknown, Some("anything")),
+        unknown.default_efforts
+    );
+    assert!(unknown.permission_modes.is_empty());
+    assert_eq!(unknown.resume, ResumeSupport::Unsupported);
+    assert_eq!(
+        unknown.resume,
+        resume_support_for("mystery", &Config::default())
+    );
 }

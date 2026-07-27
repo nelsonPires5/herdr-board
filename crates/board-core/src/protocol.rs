@@ -28,6 +28,35 @@ impl<T> Patch<T> {
     pub fn is_unchanged(&self) -> bool {
         matches!(self, Self::Unchanged)
     }
+
+    /// Build a patch from a CLI-style `--clear-x` / `--x <value>` pair, where an
+    /// absent value means "leave the stored value alone".
+    ///
+    /// `clear` wins over `value`: `Clear`, else `Some(v)` → `Set(v)`, else
+    /// `Unchanged`. Contrast [`Patch::from_option`], where `None` clears.
+    pub fn from_flags(clear: bool, value: Option<T>) -> Patch<T> {
+        if clear {
+            Self::Clear
+        } else {
+            match value {
+                Some(value) => Self::Set(value),
+                None => Self::Unchanged,
+            }
+        }
+    }
+
+    /// Build a patch from a form-style optional field that always states the
+    /// desired end state: `Some(v)` → `Set(v)`, `None` → `Clear`.
+    ///
+    /// This never yields `Unchanged` — an emptied field is an intentional
+    /// clear. Contrast [`Patch::from_flags`], where a missing value means
+    /// "unchanged".
+    pub fn from_option(value: Option<T>) -> Patch<T> {
+        match value {
+            Some(value) => Self::Set(value),
+            None => Self::Clear,
+        }
+    }
 }
 
 impl<T: Serialize> Serialize for Patch<T> {
@@ -160,16 +189,20 @@ pub enum Effort {
     Max,
 }
 
+/// Declare a variant's canonical wire/DB string, plus any accepted aliases
+/// (`Variant => "canonical" | "alias"`). Only the canonical string is ever
+/// emitted; aliases exist so a second vocabulary (e.g. the CLI's hyphenated
+/// flag values) parses into the same variant.
 macro_rules! str_enum {
-    ($ty:ty { $($variant:ident => $s:literal),+ $(,)? }) => {
+    ($ty:ty { $($variant:ident => $s:literal $(| $alias:literal)*),+ $(,)? }) => {
         impl $ty {
             /// Canonical wire/DB string.
             pub fn as_str(&self) -> &'static str {
                 match self { $( <$ty>::$variant => $s ),+ }
             }
-            /// Parse from a wire/DB string.
+            /// Parse from a wire/DB string (canonical form or a declared alias).
             pub fn parse_str(s: &str) -> Option<Self> {
-                match s { $( $s => Some(<$ty>::$variant), )+ _ => None }
+                match s { $( $s $(| $alias)* => Some(<$ty>::$variant), )+ _ => None }
             }
         }
         impl std::fmt::Display for $ty {
@@ -181,7 +214,7 @@ macro_rules! str_enum {
 }
 
 str_enum!(Trigger { Manual => "manual", Auto => "auto" });
-str_enum!(SpaceKind { Workspace => "workspace", NewWorkspace => "new_workspace" });
+str_enum!(SpaceKind { Workspace => "workspace", NewWorkspace => "new_workspace" | "new-workspace" });
 str_enum!(CardStatus {
     Idle => "idle", Queued => "queued", Running => "running",
     Blocked => "blocked", Failed => "failed",
@@ -793,4 +826,83 @@ pub struct SessionInfo {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionListResult {
     pub sessions: Vec<SessionInfo>,
+}
+
+// ---------------------------------------------------------------------------
+// pane methods
+// ---------------------------------------------------------------------------
+
+/// `pane.set_title` params: set the Herdr border label of one pane in the
+/// **caller's own** herdr session.
+///
+/// `origin_socket` identifies that session exactly as it does for
+/// [`RunFocusParams`] — the daemon owns every Herdr call, so a client that
+/// wants its own pane renamed says which pane, in which session, and what to
+/// call it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneSetTitleParams {
+    pub pane_id: String,
+    pub title: String,
+    pub origin_socket: String,
+}
+
+/// `pane.set_title` result: `{renamed:true}`, the same pure acknowledgement
+/// shape as [`DeletedResult`] and [`StopResult`]. A rename that did not happen
+/// is an error, never a `false` here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneSetTitleResult {
+    pub renamed: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Timestamps
+// ---------------------------------------------------------------------------
+
+/// Parse a wire timestamp (`YYYY-MM-DD HH:MM:SS`, UTC) to epoch seconds.
+///
+/// Every timestamp the daemon persists and serializes comes from SQLite's
+/// `datetime('now')`, so this format is part of protocol v1 rather than a
+/// presentation detail. The seconds field may be omitted (treated as `0`);
+/// anything else that does not parse yields `None`.
+pub fn parse_timestamp(s: &str) -> Option<i64> {
+    let (date, time) = s.split_once(' ')?;
+    let mut d = date.split('-');
+    let year: i64 = d.next()?.parse().ok()?;
+    let month: i64 = d.next()?.parse().ok()?;
+    let day: i64 = d.next()?.parse().ok()?;
+    let mut t = time.split(':');
+    let hh: i64 = t.next()?.parse().ok()?;
+    let mm: i64 = t.next()?.parse().ok()?;
+    let ss: i64 = t.next().unwrap_or("0").parse().ok()?;
+    Some(days_from_civil(year, month, day) * 86400 + hh * 3600 + mm * 60 + ss)
+}
+
+/// Days since 1970-01-01 (Howard Hinnant's algorithm).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+#[cfg(test)]
+mod tests {
+    use super::days_from_civil;
+
+    #[test]
+    fn days_from_civil_anchors_epoch_and_leap_days() {
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        assert_eq!(days_from_civil(1969, 12, 31), -1);
+        // 2000 is a leap year, 1900 is not.
+        assert_eq!(
+            days_from_civil(2000, 3, 1) - days_from_civil(2000, 2, 28),
+            2
+        );
+        assert_eq!(
+            days_from_civil(1900, 3, 1) - days_from_civil(1900, 2, 28),
+            1
+        );
+    }
 }

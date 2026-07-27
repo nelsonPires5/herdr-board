@@ -1,10 +1,42 @@
-use super::mem;
+use super::{create_file_db, enqueue, mem};
 use board_core::db::{Db, EnqueueRun, FinalizeRun, BOARD_ID};
 use board_core::protocol::{
     AwaitingReason, CardCreateParams, CardStatus, ColumnCreateParams, Effort, RunOutcome,
     SpaceKind, Trigger,
 };
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{types::Value, Connection, OptionalExtension};
+
+const INDEX_SQL: &str =
+    "CREATE UNIQUE INDEX idx_runs_one_open_per_card ON runs(card_id) WHERE ended_at IS NULL";
+const QUEUED_INDEX_SQL: &str =
+    "CREATE INDEX idx_runs_queued_fifo ON runs(id) WHERE started_at IS NULL AND ended_at IS NULL";
+const ACTIVE_INDEX_SQL: &str =
+    "CREATE INDEX idx_runs_active_open ON runs(id) WHERE started_at IS NOT NULL AND ended_at IS NULL";
+
+fn raw_rows(conn: &Connection, table: &str) -> Vec<Vec<Value>> {
+    let mut statement = conn
+        .prepare(&format!("SELECT * FROM {table} ORDER BY id"))
+        .unwrap();
+    let columns = statement.column_count();
+    statement
+        .query_map([], |row| {
+            (0..columns)
+                .map(|column| row.get(column))
+                .collect::<rusqlite::Result<Vec<Value>>>()
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+}
+
+fn scheduler_index_sql(conn: &Connection, name: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND name=?1",
+        [name],
+        |row| row.get(0),
+    )
+    .ok()
+}
 
 #[test]
 fn migration_seeds_board_and_todo_column() {
@@ -351,8 +383,77 @@ fn migration_v4_preserves_claude_cards_and_accepts_pi_efforts() {
     assert_eq!(pi.effort, Some(Effort::Minimal));
 }
 
+/// A file stamped *above* the current schema version — one written by a newer
+/// board — must not be downgraded, re-seeded, or rewritten when an older binary
+/// opens it. `migrate()` only runs below `SCHEMA_VERSION`, so the open is a
+/// no-op today: it succeeds silently and leaves both the version and the rows
+/// exactly as found. There is deliberately no future-version *refusal* pinned
+/// here; this test records the behaviour that exists.
 #[test]
 fn migration_does_not_downgrade_future_schema_version() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    let card_id = {
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.user_version().unwrap(), 13);
+        db.create_card(&CardCreateParams {
+            title: "written by a newer board".into(),
+            ..Default::default()
+        })
+        .unwrap()
+        .id
+    };
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("PRAGMA user_version = 99;").unwrap();
+    }
+    let before = {
+        let conn = Connection::open(&path).unwrap();
+        (
+            raw_rows(&conn, "boards"),
+            raw_rows(&conn, "columns"),
+            raw_rows(&conn, "cards"),
+        )
+    };
+
+    let db = Db::open(&path).unwrap();
+    assert_eq!(
+        db.user_version().unwrap(),
+        99,
+        "a future user_version must never be stamped back down"
+    );
+    assert_eq!(
+        db.get_card(card_id).unwrap().unwrap().title,
+        "written by a newer board"
+    );
+    assert_eq!(
+        db.list_columns(BOARD_ID).unwrap().len(),
+        1,
+        "a future-version file must not be re-seeded"
+    );
+    drop(db);
+
+    let conn = Connection::open(&path).unwrap();
+    assert_eq!(
+        (
+            raw_rows(&conn, "boards"),
+            raw_rows(&conn, "columns"),
+            raw_rows(&conn, "cards"),
+        ),
+        before,
+        "opening a future-version file must not rewrite a single row"
+    );
+}
+
+/// Re-stamping a *past* version onto an otherwise current file replays
+/// migrations 8→13 over the shape they already produced. Every step must be
+/// guarded, so the replay is a no-op that lands back on the current version.
+/// (This is the behaviour `migration_does_not_downgrade_future_schema_version`
+/// used to exercise before it was rewritten into a genuine future-version test;
+/// `migration_idempotent_on_reopen` covers the reopen case, where `migrate()`
+/// is skipped entirely.)
+#[test]
+fn migration_replay_from_a_past_version_stamp_is_a_no_op() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let path = tmp.path().to_path_buf();
     {
@@ -365,6 +466,8 @@ fn migration_does_not_downgrade_future_schema_version() {
     }
     let db = Db::open(&path).unwrap();
     assert_eq!(db.user_version().unwrap(), 13);
+    assert_eq!(db.list_columns(BOARD_ID).unwrap().len(), 1);
+    assert_eq!(db.get_board(BOARD_ID).unwrap().name, "Global");
 }
 
 #[test]
@@ -828,4 +931,294 @@ fn v8_to_v9_derives_timeout_state_once_from_durable_history() {
             .timeout_deadline_at_ms,
         Some(123)
     );
+}
+
+// ---------------------------------------------------------------------------
+// Schema-v13 index shape and the migration paths that must not touch bytes.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fresh_v12_has_exact_partial_scheduler_indexes_and_query_plans() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("board.db");
+    let db = Db::open(&path).unwrap();
+    assert_eq!(db.user_version().unwrap(), 13);
+    drop(db);
+    let conn = Connection::open(path).unwrap();
+    for (name, expected) in [
+        ("idx_runs_queued_fifo", QUEUED_INDEX_SQL),
+        ("idx_runs_active_open", ACTIVE_INDEX_SQL),
+    ] {
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND name=?1",
+                [name],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(sql, expected);
+    }
+    for (sql, index) in [
+        (
+            "EXPLAIN QUERY PLAN SELECT id, card_id FROM runs WHERE started_at IS NULL AND ended_at IS NULL ORDER BY id",
+            "idx_runs_queued_fifo",
+        ),
+        (
+            "EXPLAIN QUERY PLAN SELECT id, card_id FROM runs WHERE started_at IS NOT NULL AND ended_at IS NULL ORDER BY id",
+            "idx_runs_active_open",
+        ),
+    ] {
+        let detail: String = conn.query_row(sql, [], |row| row.get(3)).unwrap();
+        assert!(detail.contains(index), "unexpected plan: {detail}");
+    }
+}
+
+#[test]
+fn v9_file_fixture_upgrades_through_v12_without_changing_existing_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v9.db");
+    let (card_id, run_id) = {
+        let db = Db::open(&path).unwrap();
+        let card = db
+            .create_card(&CardCreateParams {
+                title: "v9 exact \0 title  ".into(),
+                description: Some("line one\nline two  ".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        // Historical v9→v12 migration fixture: enqueue_run_uow writes a v12
+        // row; after manual downgrade to user_version=9 the migration path
+        // still re-adds indexes and must preserve every byte.
+        let run = db
+            .enqueue_run_uow(&EnqueueRun {
+                card_id: card.id,
+                column_id: card.column_id,
+                harness: "pi",
+                argv_json: r#"["pi","exact\\nargv"]"#,
+                prompt_snapshot: "prompt\nbytes\0  ",
+                system_prompt_snapshot: Some("system\nbytes  "),
+                launch_spec_json: None,
+                session_id: Some("session-id"),
+                session: Some("session-name"),
+            })
+            .unwrap();
+        (card.id, run.id)
+    };
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "DROP INDEX idx_runs_queued_fifo;
+         DROP INDEX idx_runs_active_open;
+         PRAGMA user_version=9;",
+    )
+    .unwrap();
+    let before_cards = raw_rows(&conn, "cards");
+    let before_runs = raw_rows(&conn, "runs");
+    drop(conn);
+
+    let db = Db::open(&path).unwrap();
+    assert_eq!(db.user_version().unwrap(), 13);
+    assert_eq!(db.get_card(card_id).unwrap().unwrap().id, card_id);
+    assert_eq!(db.get_run(run_id).unwrap().id, run_id);
+    drop(db);
+
+    for reopen in 0..2 {
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(raw_rows(&conn, "cards"), before_cards, "reopen {reopen}");
+        assert_eq!(raw_rows(&conn, "runs"), before_runs, "reopen {reopen}");
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            13
+        );
+        assert_eq!(
+            scheduler_index_sql(&conn, "idx_runs_queued_fifo").as_deref(),
+            Some(QUEUED_INDEX_SQL)
+        );
+        assert_eq!(
+            scheduler_index_sql(&conn, "idx_runs_active_open").as_deref(),
+            Some(ACTIVE_INDEX_SQL)
+        );
+        drop(conn);
+        drop(Db::open(&path).unwrap());
+    }
+}
+
+#[test]
+fn v10_to_v11_migration_failure_is_atomic_and_stable_on_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("malformed-v10.db");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch("CREATE VIEW runs AS SELECT 1 AS id; PRAGMA user_version=10;")
+        .unwrap();
+    drop(conn);
+
+    for attempt in 0..2 {
+        let error = match Db::open(&path) {
+            Ok(_) => panic!("attempt {attempt}: malformed v10 unexpectedly migrated"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("Cannot add a column to a view"), "{error}");
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            10
+        );
+        let has_column: i64 = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('runs') WHERE name='launch_spec_json')",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(has_column, 0);
+    }
+}
+
+#[test]
+fn v10_conflicting_index_failure_is_atomic_and_stable_on_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("conflict.db");
+    drop(Db::open(&path).unwrap());
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "DROP INDEX idx_runs_queued_fifo;
+         DROP INDEX idx_runs_active_open;
+         CREATE INDEX idx_runs_active_open ON runs(card_id);
+         PRAGMA user_version=9;",
+    )
+    .unwrap();
+    drop(conn);
+
+    for attempt in 0..2 {
+        let error = match Db::open(&path) {
+            Ok(_) => panic!("attempt {attempt}: conflicting migration unexpectedly succeeded"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("idx_runs_active_open"), "{error}");
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            9
+        );
+        assert_eq!(scheduler_index_sql(&conn, "idx_runs_queued_fifo"), None);
+        assert_eq!(
+            scheduler_index_sql(&conn, "idx_runs_active_open").as_deref(),
+            Some("CREATE INDEX idx_runs_active_open ON runs(card_id)")
+        );
+    }
+}
+
+#[test]
+fn v8_migration_rejects_duplicate_open_runs_without_advancing_version_or_index() {
+    let (_dir, path, card) = create_file_db("duplicate");
+    let db = Db::open(&path).unwrap();
+    let second_card = db
+        .create_card(&CardCreateParams {
+            title: "second duplicate".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    drop(db);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch("DROP INDEX idx_runs_one_open_per_card; PRAGMA user_version=7;")
+        .unwrap();
+    for (duplicate_card, prompt) in [
+        (&card, "first"),
+        (&card, "second"),
+        (&card, "third"),
+        (&second_card, "fourth"),
+        (&second_card, "fifth"),
+    ] {
+        conn.execute(
+            "INSERT INTO runs(card_id,column_id,harness,argv_json,prompt_snapshot)
+             VALUES(?1,?2,'pi','[]',?3)",
+            (duplicate_card.id, duplicate_card.column_id, prompt),
+        )
+        .unwrap();
+    }
+    let old_version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    let run_ids: Vec<i64> = conn
+        .prepare("SELECT id FROM runs ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    drop(conn);
+
+    let error = match Db::open(&path) {
+        Ok(_) => panic!("migration unexpectedly succeeded"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains(&format!("card {}", card.id)), "{error}");
+    assert!(
+        error.contains(&format!("card {}", second_card.id)),
+        "{error}"
+    );
+    for run_id in &run_ids {
+        assert!(error.contains(&run_id.to_string()), "{error}");
+    }
+    let conn = Connection::open(&path).unwrap();
+    assert_eq!(
+        conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        old_version
+    );
+    assert_eq!(old_version, 7);
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_runs_one_open_per_card'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn v8_upgrade_retains_a_single_open_run_byte_for_byte() {
+    let (_dir, path, card) = create_file_db("single open retained");
+    let db = Db::open(&path).unwrap();
+    let before = db
+        .enqueue_run_uow(&enqueue(card.id, card.column_id))
+        .unwrap();
+    drop(db);
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch("DROP INDEX idx_runs_one_open_per_card; PRAGMA user_version=7;")
+        .unwrap();
+
+    let db = Db::open(&path).unwrap();
+    assert_eq!(db.user_version().unwrap(), 13);
+    assert_eq!(db.get_run(before.id).unwrap(), before);
+}
+
+#[test]
+fn fresh_and_v7_upgrade_install_exact_partial_unique_index_sql() {
+    for from_v7 in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("board.db");
+        let db = Db::open(&path).unwrap();
+        drop(db);
+        if from_v7 {
+            Connection::open(&path)
+                .unwrap()
+                .execute_batch("DROP INDEX idx_runs_one_open_per_card; PRAGMA user_version=7;")
+                .unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.user_version().unwrap(), 13);
+        drop(db);
+        let sql: String = Connection::open(&path)
+            .unwrap()
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_runs_one_open_per_card'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(sql, INDEX_SQL);
+    }
 }
