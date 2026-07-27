@@ -4,16 +4,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::settings::DaemonSettings;
-use crate::spawner::LocalSpawner;
 use crate::spawner::RuntimeHandle;
 use crate::state::{ActiveRun, Daemon};
-use crate::store::Store;
+use crate::testkit;
 use board_core::config::Config;
 use board_core::db::{Db, EnqueueRun};
 use board_core::protocol::{CardCreateParams, Event};
 use board_herdr::{AgentStatus, HerdrEvent};
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::broadcast;
 
 fn active_daemon() -> (Arc<Daemon>, i64, i64, broadcast::Receiver<Event>) {
     let config = Config {
@@ -43,22 +41,13 @@ fn active_daemon() -> (Arc<Daemon>, i64, i64, broadcast::Receiver<Event>) {
     db.promote_run_uow(run.id, Some("w1"), Some("p1"), None)
         .unwrap();
 
-    let (events_tx, events_rx) = broadcast::channel(16);
-    let (dispatch_tx, _dispatch_rx) = mpsc::unbounded_channel();
-    let (shutdown_tx, _shutdown_rx) = watch::channel(false);
-    let d = Arc::new(Daemon::new(
-        Store::new(db),
-        config,
-        DaemonSettings::default(),
-        PathBuf::from("/tmp/board-watch.db"),
-        PathBuf::from("/tmp/board-watch.sock"),
-        Arc::new(LocalSpawner::new()),
-        None,
-        None,
-        events_tx,
-        dispatch_tx,
-        shutdown_tx,
-    ));
+    let built = testkit::daemon()
+        .db(db)
+        .config(config)
+        .db_path(PathBuf::from("/tmp/board-watch.db"))
+        .build();
+    let d = built.daemon;
+    let events_rx = built.events;
     d.sched.lock().unwrap().active.insert(
         run.id,
         ActiveRun {

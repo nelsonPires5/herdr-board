@@ -30,9 +30,7 @@ fn enqueue_run_inner(d: &Arc<Daemon>, card_id: i64, column_id: i64, is_retry: bo
     // its settings/prompt) before this run persists the stale value.
     let _sched = d.sched.lock().unwrap();
     let db = d.store.lock();
-    let card = db
-        .get_card(card_id)?
-        .ok_or_else(|| Error::NotFound(format!("card {card_id}")))?;
+    let card = db.require_card(card_id)?;
     if card.archived_at.is_some() {
         return Err(Error::InvalidState(
             "archived card must be restored before starting a run".into(),
@@ -61,9 +59,7 @@ pub(crate) fn prepare_enqueue_values(
     column_id: i64,
     is_retry: bool,
 ) -> Result<PreparedEnqueue> {
-    let column = db
-        .get_column(column_id)?
-        .ok_or_else(|| Error::NotFound(format!("column {column_id}")))?;
+    let column = db.require_column(column_id)?;
     let comments = db.list_comments(card.id)?;
     let session_used = matches!(
         decide_resumability(

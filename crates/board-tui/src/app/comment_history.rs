@@ -3,27 +3,23 @@
 
 use crossterm::event::{KeyCode, KeyEvent};
 
+use super::nav::{nav_delta, step_clamped};
 use super::{App, Effect, Screen};
 
 pub(super) fn comment_history_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
-    match k.code {
-        KeyCode::Up | KeyCode::Char('k') => {
+    if let Some(delta) = nav_delta(k.code) {
+        if app.comment_history.is_some() {
+            let rect = crate::view::comment_history_rect(app, app.last_area);
+            let width = rect.width.max(1);
+            let visible = rect.height.max(1) as usize;
             if let Some(state) = app.comment_history.as_mut() {
-                state.scroll = state.scroll.saturating_sub(1);
+                let total = crate::view::comment_history_wrapped_rows(&state.entries, width);
+                state.scroll = step_clamped(state.scroll, delta, total.saturating_sub(visible));
             }
         }
-        KeyCode::Down | KeyCode::Char('j') => {
-            if app.comment_history.is_some() {
-                let rect = crate::view::comment_history_rect(app, app.last_area);
-                let width = rect.width.max(1);
-                let visible = rect.height.max(1) as usize;
-                if let Some(state) = app.comment_history.as_mut() {
-                    let total = crate::view::comment_history_wrapped_rows(&state.entries, width);
-                    let max = total.saturating_sub(visible);
-                    state.scroll = (state.scroll + 1).min(max);
-                }
-            }
-        }
+        return vec![];
+    }
+    match k.code {
         KeyCode::Esc | KeyCode::Char('q') => {
             app.comment_history = None;
             app.screen = Screen::CardDetail;

@@ -1,5 +1,5 @@
-use board_core::engine::format_duration;
-use board_core::protocol::CardDetail;
+use board_core::engine::{format_duration, run_elapsed};
+use board_core::protocol::{parse_timestamp, CardDetail};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -8,9 +8,7 @@ use ratatui::Frame;
 
 use crate::app::{App, DetailScrollTarget};
 
-use super::{
-    main_area, parse_epoch, sheet_area, status_glyph, status_label, truncate, NARROW_DETAIL_WIDTH,
-};
+use super::{main_area, sheet_area, status_glyph, status_label, truncate, NARROW_DETAIL_WIDTH};
 
 // -- detail ------------------------------------------------------------------
 
@@ -619,12 +617,14 @@ fn run_row_text(app: &App, run: &board_core::model::Run) -> String {
     )
 }
 
+/// Formatting only: `run_elapsed` owns "open runs measure against `now`,
+/// closed runs against their own end, out-of-order clamps to 0", and a run
+/// that never started has no duration to show.
 fn run_duration(app: &App, run: &board_core::model::Run) -> String {
-    let start = run.started_at.as_deref().and_then(parse_epoch);
-    let end = run.ended_at.as_deref().and_then(parse_epoch);
-    match (start, end) {
-        (Some(s), Some(e)) => format_duration(Some((e - s).max(0))),
-        (Some(s), None) => format_duration(Some((app.now - s).max(0))),
-        _ => "-".to_string(),
+    let started = run.started_at.as_deref().and_then(parse_timestamp);
+    let ended = run.ended_at.as_deref().and_then(parse_timestamp);
+    match run_elapsed(started, ended, app.now) {
+        Some(secs) => format_duration(Some(secs)),
+        None => "-".to_string(),
     }
 }

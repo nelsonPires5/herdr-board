@@ -8,7 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+from _support import REPO_ROOT
+
 HELPER = REPO_ROOT / "scripts" / "stage_claude_config.py"
 REAL_CLAUDE_SMOKE = REPO_ROOT / "e2e" / "real-claude-haiku-smoke.sh"
 

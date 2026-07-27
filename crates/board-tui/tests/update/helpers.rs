@@ -3,18 +3,17 @@
 use board_core::capability::{HarnessCapabilities, ModelInfo};
 use board_core::client::BoardClient;
 use board_core::protocol::{CardStatus, Effort, Event};
-use board_tui::app::{App, Msg, Screen};
-use board_tui::editor::FakeEditor;
-use board_tui::forms::{FieldId, FieldKind, Form};
-pub use board_tui::testkit::demo_client;
+use board_tui::app::{App, Screen};
+pub use board_tui::testkit::{
+    choice_labels as opt_labels, demo_client, is_choice, key, mouse, rendered_rows, set_choice,
+};
 use board_tui::Driver;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 
-pub fn key(code: KeyCode) -> Msg {
-    Msg::Key(KeyEvent::new(code, KeyModifiers::empty()))
-}
+/// This suite's canned `$EDITOR` text — never asserted on here (see
+/// `update/editor.rs`, which picks its own per test).
+const EDITED: &str = "x";
 
 pub fn demo_app() -> App {
     let mut c = demo_client().unwrap();
@@ -22,7 +21,7 @@ pub fn demo_app() -> App {
 }
 
 pub fn driver_of<C: BoardClient + 'static>(client: C) -> Driver {
-    Driver::with_editor(Box::new(client), Box::new(FakeEditor::new("x"))).unwrap()
+    board_tui::testkit::driver_with_editor(client, EDITED)
 }
 
 pub struct RecordingClient<C> {
@@ -61,30 +60,6 @@ pub fn split_effort_caps() -> HarnessCapabilities {
         permission_modes: vec!["manual".to_string()],
         resume: Default::default(),
     }
-}
-
-/// Labels of a choice field's options.
-pub fn opt_labels(form: &Form, id: FieldId) -> Vec<String> {
-    match &form.fields.iter().find(|f| f.id == id).unwrap().kind {
-        FieldKind::Choice { opts, .. } => opts.iter().map(|o| o.label.clone()).collect(),
-        FieldKind::Text(_) => panic!("{id:?} is not a choice"),
-    }
-}
-
-pub fn set_choice(form: &mut Form, id: FieldId, label: &str) {
-    let f = form.fields.iter_mut().find(|f| f.id == id).unwrap();
-    if let FieldKind::Choice { opts, idx } = &mut f.kind {
-        *idx = opts.iter().position(|o| o.label == label).unwrap();
-    } else {
-        panic!("{id:?} is not a choice");
-    }
-}
-
-pub fn is_choice(form: &Form, id: FieldId) -> bool {
-    matches!(
-        form.fields.iter().find(|f| f.id == id).unwrap().kind,
-        FieldKind::Choice { .. }
-    )
 }
 
 /// Open the detail of the first card matching `status` in a fresh demo app.

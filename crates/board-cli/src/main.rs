@@ -2,8 +2,10 @@
 
 mod args;
 mod commands;
+mod context;
 mod daemon;
 mod helpers;
+mod render;
 mod scope;
 
 use std::io::Write;
@@ -13,25 +15,45 @@ use board_core::client::{BoardClient, RpcClientError, UnixClient};
 use clap::{error::ErrorKind, Parser};
 use serde_json::{json, Value};
 
-use args::{Cli, Cmd};
+use args::{Cli, Cmd, DaemonCmd};
 use commands::board::cmd_board;
 use commands::card::{cmd_card, cmd_move};
 use commands::column::cmd_column;
 use commands::discovery::{cmd_harness, cmd_session, cmd_space, cmd_status};
-use commands::run::{cmd_comment, cmd_done, cmd_pane_exited, cmd_run_action};
+use commands::run::{cmd_card_run, cmd_comment, cmd_pane_exited};
 use commands::template::cmd_template;
-use daemon::{connect_or_start, stop_daemon};
-use scope::open_selected_board;
+use context::Ctx;
+use daemon::stop_daemon;
+use render::emit_line;
+
+/// Exit code (and `--json` envelope `code`) for an error raised by the CLI
+/// itself rather than by boardd: bad usage, a refused confirmation, a bad
+/// environment. Deliberately outside the protocol's documented `1..=5` so it
+/// cannot be confused with "not found" (`2`), which is what this used to
+/// report. `64` is `EX_USAGE` from `sysexits.h`.
+const CLI_ERROR_CODE: i32 = 64;
+
+/// Exit code for an RPC error whose protocol code is outside `1..=5`. Protocol
+/// codes are not exit codes: they are unbounded, while a process exit status is
+/// taken modulo 256, so `256` would silently mean success. `70` is
+/// `EX_SOFTWARE`.
+const UNMAPPED_RPC_CODE: i32 = 70;
+
+/// An error plus the rendering mode that was in force when it happened.
+struct Failure {
+    error: anyhow::Error,
+    json: bool,
+}
 
 fn main() {
-    let json_requested = std::env::args().any(|arg| arg == "--json");
-    if let Err(error) = real_main() {
-        render_error(error, json_requested);
-        std::process::exit(1);
+    if let Err(failure) = real_main() {
+        let code = exit_code(&failure.error);
+        render_error(&failure.error, failure.json);
+        std::process::exit(code);
     }
 }
 
-fn real_main() -> Result<()> {
+fn real_main() -> Result<(), Failure> {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(error)
@@ -43,59 +65,81 @@ fn real_main() -> Result<()> {
             print!("{error}");
             return Ok(());
         }
-        Err(error) => return Err(anyhow!(error.to_string())),
+        Err(error) => {
+            return Err(Failure {
+                error: anyhow!(error.to_string()),
+                // The parse failed, so there is no parsed flag to consult. Only
+                // options can carry `--json` here, and everything after `--` is
+                // a value, so a scan bounded by that separator is exact for the
+                // arguments clap was still willing to interpret as flags.
+                json: json_flag_in_options(),
+            });
+        }
     };
+    let json = cli.json;
+    dispatch(cli).map_err(|error| Failure { error, json })
+}
+
+fn dispatch(cli: Cli) -> Result<()> {
     let selector = cli.board.as_deref();
+    let mut ctx = Ctx::new(selector, cli.json);
     match cli.cmd {
         Cmd::Daemon {
             foreground,
             stop,
             sub,
         } => match sub {
-            Some(args::DaemonCmd::Status { json }) => cmd_status(json),
-            None => {
-                if stop {
-                    stop_daemon()
-                } else {
-                    board_daemon::run(foreground).map_err(|e| anyhow!(e))
-                }
-            }
+            Some(DaemonCmd::Status) => cmd_status(&mut ctx),
+            Some(DaemonCmd::Stop) => stop_daemon(cli.json),
+            Some(DaemonCmd::Start { foreground }) => run_daemon(foreground),
+            // Bare `board daemon [--foreground|--stop]`: the pre-subcommand
+            // grammar, kept working exactly as before.
+            None if stop => stop_daemon(cli.json),
+            None => run_daemon(foreground),
         },
         Cmd::Tui => {
-            let mut client = connect_or_start()?;
-            let board = open_selected_board(&mut client, selector)?;
+            let board = ctx.board()?.clone();
+            let client = ctx.into_client()?;
             board_tui::run_with_board(Box::new(client), board)
         }
-        Cmd::Version { json } => cmd_version(json),
+        Cmd::Version => cmd_version(cli.json),
         Cmd::Skill => print_skill(),
-        Cmd::Board { sub } => cmd_board(sub, selector),
-        Cmd::Template { sub } => cmd_template(sub, selector),
-        Cmd::Card { sub } => cmd_card(sub, selector),
-        Cmd::Comment { first, body, json } => cmd_comment(first, body, json),
+        Cmd::Board { sub } => cmd_board(sub, &mut ctx),
+        Cmd::Template { sub } => cmd_template(sub, &mut ctx),
+        Cmd::Card { sub } => cmd_card(sub, &mut ctx),
+        Cmd::Column { sub } => cmd_column(sub, &mut ctx),
+        Cmd::Harness { sub } => cmd_harness(sub, &mut ctx),
+        Cmd::Space { sub } => cmd_space(sub, &mut ctx),
+        Cmd::Session { sub } => cmd_session(sub, &mut ctx),
+        // Legacy top-level spellings. They only reshape their arguments and
+        // then re-enter the canonical nested handler, so there is one
+        // implementation per operation.
+        Cmd::Comment { first, body } => cmd_comment(first, body, &mut ctx),
         Cmd::Done {
             card_id,
             outcome,
             summary,
-            json,
-        } => cmd_done(card_id, outcome, summary, json),
-        Cmd::PaneExited { card_id, run_id } => cmd_pane_exited(card_id, run_id),
+        } => cmd_card_run(
+            args::RunCmd::Done {
+                card_id,
+                outcome,
+                summary,
+            },
+            &mut ctx,
+        ),
+        Cmd::Cancel { card_id } => cmd_card_run(args::RunCmd::Cancel { card_id }, &mut ctx),
+        Cmd::Retry { card_id } => cmd_card_run(args::RunCmd::Retry { card_id }, &mut ctx),
         Cmd::Move {
             card_id,
             column,
             destination_board,
-            json,
-        } => {
-            let destination = destination_board.as_deref().or(selector);
-            let mut client = connect_or_start()?;
-            cmd_move(&mut client, card_id, &column, destination, json)
-        }
-        Cmd::Cancel { card_id, json } => cmd_run_action(card_id, json, false),
-        Cmd::Retry { card_id, json } => cmd_run_action(card_id, json, true),
-        Cmd::Column { sub } => cmd_column(sub, selector),
-        Cmd::Harness { sub } => cmd_harness(sub),
-        Cmd::Space { sub } => cmd_space(sub),
-        Cmd::Session { sub } => cmd_session(sub),
+        } => cmd_move(&mut ctx, card_id, &column, destination_board.as_deref()),
+        Cmd::PaneExited { card_id, run_id } => cmd_pane_exited(card_id, run_id, &mut ctx),
     }
+}
+
+fn run_daemon(foreground: bool) -> Result<()> {
+    board_daemon::run(foreground).map_err(|error| anyhow!(error))
 }
 
 fn cmd_version(json_output: bool) -> Result<()> {
@@ -103,19 +147,18 @@ fn cmd_version(json_output: bool) -> Result<()> {
         Ok(mut client) => client.daemon_status().ok().map(|status| status.version),
         Err(_) => None,
     };
-    if json_output {
-        print_json(&json!({
+    emit_line(
+        &json!({
             "cli_version": env!("CARGO_PKG_VERSION"),
             "daemon_version": daemon_version,
-        }))
-    } else {
-        println!("cli {}", env!("CARGO_PKG_VERSION"));
-        println!(
-            "daemon {}",
+        }),
+        json_output,
+        format!(
+            "cli {}\ndaemon {}",
+            env!("CARGO_PKG_VERSION"),
             daemon_version.as_deref().unwrap_or("unavailable")
-        );
-        Ok(())
-    }
+        ),
+    )
 }
 
 fn print_skill() -> Result<()> {
@@ -123,21 +166,44 @@ fn print_skill() -> Result<()> {
     Ok(())
 }
 
-fn print_json<T: serde::Serialize>(value: &T) -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(value)?);
-    Ok(())
+/// `--json` among the arguments clap would still treat as options: everything
+/// up to a `--` separator. Only consulted when parsing failed outright.
+fn json_flag_in_options() -> bool {
+    std::env::args()
+        .skip(1)
+        .take_while(|arg| arg != "--")
+        .any(|arg| arg == "--json")
 }
 
-fn render_error(error: anyhow::Error, json_requested: bool) {
+/// The process exit code for a failed command.
+///
+/// An RPC error reports the daemon's protocol code (`1` bad request, `2` not
+/// found, `3` invalid state, `4` herdr unavailable, `5` internal) so scripts can
+/// branch on `$?`; any other protocol code is clamped rather than passed
+/// through. Errors raised by the CLI itself use [`CLI_ERROR_CODE`].
+fn exit_code(error: &anyhow::Error) -> i32 {
+    match rpc_error(error) {
+        Some(rpc) => match rpc.code {
+            code @ 1..=5 => code,
+            _ => UNMAPPED_RPC_CODE,
+        },
+        None => CLI_ERROR_CODE,
+    }
+}
+
+fn rpc_error(error: &anyhow::Error) -> Option<&RpcClientError> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<RpcClientError>())
+}
+
+fn render_error(error: &anyhow::Error, json_requested: bool) {
     if !json_requested {
         eprintln!("board: {error:#}");
         return;
     }
 
-    let rpc = error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<RpcClientError>());
-    let payload = if let Some(rpc) = rpc {
+    let payload = if let Some(rpc) = rpc_error(error) {
         let mut error_object = serde_json::Map::new();
         error_object.insert("code".into(), json!(rpc.code));
         if let Some(kind) = &rpc.kind {
@@ -160,7 +226,7 @@ fn render_error(error: anyhow::Error, json_requested: bool) {
     } else {
         json!({
             "error": {
-                "code": 2,
+                "code": CLI_ERROR_CODE,
                 "kind": "cli",
                 "message": format!("{error:#}"),
             }
@@ -168,8 +234,8 @@ fn render_error(error: anyhow::Error, json_requested: bool) {
     };
     eprintln!(
         "{}",
-        serde_json::to_string(&payload).unwrap_or_else(|_| {
-            r#"{"error":{"code":2,"message":"board command failed"}}"#.into()
-        })
+        serde_json::to_string(&payload).unwrap_or_else(|_| format!(
+            r#"{{"error":{{"code":{CLI_ERROR_CODE},"kind":"cli","message":"board command failed"}}}}"#
+        ))
     );
 }

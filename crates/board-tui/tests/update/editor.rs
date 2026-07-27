@@ -6,16 +6,11 @@
 //! uses to force a `terminal.clear()` before the next draw.
 
 use super::helpers::key;
-use board_tui::editor::FakeEditor;
 use board_tui::forms::FieldId;
+use board_tui::testkit::demo_driver as driver_with_editor;
 use board_tui::Driver;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
-
-fn driver_with_editor(result: &str) -> Driver {
-    let client = super::helpers::demo_client().unwrap();
-    Driver::with_editor(Box::new(client), Box::new(FakeEditor::new(result))).unwrap()
-}
 
 /// Open the new-card form and focus its multiline Description field, so
 /// Ctrl+E dispatches `Effect::EditFocusedTextArea`.

@@ -11,7 +11,7 @@ The reference detail behind the [root README](../README.md). Start here to find 
 | CLI | canonical nested `board board/card/comment/run/column` taxonomy; `board-cli` wiring | [README CLI reference](../README.md#cli-reference), [skill](../skill/SKILL.md) |
 | Herdr client | 0.7.5 / socket protocol 17; `board-herdr` typed calls | [herdr.md](herdr.md) |
 | Runtime launch | daemon-owned `Spawner`, placement, process/pane handles | [implementation.md](implementation.md) |
-| Config | typed `RootConfig`, one parse, environment overrides after parse | [design.md](design.md) |
+| Config | typed `RootConfig`, one parse, environment overrides after parse | [configuration.md](configuration.md), [design.md](design.md) |
 | Live catalog | scenarios 01–27; provider-free fake/safe harness boundary | [e2e/README.md](../e2e/README.md) |
 
 Keep these links as navigation, not duplicate wire definitions: serde types and migrations are the
@@ -20,6 +20,9 @@ isolation is an agent prompt concern, not a board space primitive.
 
 | Doc | Covers | Read it if you… |
 |---|---|---|
+| [install.md](install.md) | Installation details beyond the README's one-liner: a custom CLI install directory and its managed-checksum marker, adding a Herdr keybinding, installing the harness integration (Pi/Claude) and the optional agent skill, and how named Herdr sessions register the plugin. | are installing or reinstalling herdr-board, or want the optional integration/keybinding/skill setup. |
+| [configuration.md](configuration.md) | `~/.config/herdr-board/config.toml`: top-level and typed `[daemon]` settings, config-defined `[harness.NAME]` adapters (argv placeholders, capability catalogs, `resume`), parse/override precedence, and every environment variable. | are tuning the daemon, adding a config-defined harness, or need what an environment variable does. |
+| [operations.md](operations.md) | Day-two operations: updating over an existing plugin (including the graceful `board daemon --stop` handshake), the safe uninstall sequence for the daemon/CLI/plugin, removing board data, and the local-development source install. | are updating, uninstalling, or setting up a checkout you plan to edit. |
 | [design.md](design.md) | Architecture, data model, column configuration, the full dispatch → run → transition data flow, pane placement, and the standing design decisions. | want to understand how the board works end to end, or are changing behavior. |
 | [protocol.md](protocol.md) | The boardd unix-socket protocol (v1) — transport (NDJSON), auto-start, every method and event, error codes. **The single source of truth** for the daemon⇄client contract; serde types live in `board-core::protocol`. | are writing a client, adding a method, or debugging the wire. |
 | [implementation.md](implementation.md) | The cargo workspace crate layout, crate ownership, shared dependencies, key traits (`BoardClient`, `Spawner`), and the build phases with their tests. | are navigating the codebase or picking up a build task. |
@@ -31,17 +34,42 @@ isolation is an agent prompt concern, not a board space primitive.
 The [`schema.sql`](../schema.sql) at the repo root is the fresh SQLite schema; migration behavior
 and upgrade tests live in `board-core::db`. Before handoff, check that docs still point to existing
 files, that the version matrix above says schema v13 / protocol v1 / Herdr 0.7.5-protocol 17, and that
-the scenario catalog lists every `e2e/NN-*.sh` from 01 through 27. The provider-free static safety gate is:
+the scenario catalog lists every `e2e/NN-*.sh` from 01 through 27.
+
+## Test gates (single source)
+
+This block is the **only** maintained copy of the gate list; `AGENTS.md`, `CONTRIBUTING.md`, and the
+root `README.md` link here instead of repeating it. Every command below is also a `run:` step in
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml), and
+`scripts/tests/test_docs.py` asserts the two lists match in both directions, so neither can drift.
 
 ```bash
 cargo fmt --all --check
-cargo clippy --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
-python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+python3 -m unittest discover -s scripts/tests -p 'test_docs.py'
+python3 -m unittest discover -s scripts/tests -p 'test_prepare_release.py'
+python3 -m unittest discover -s scripts/tests -p 'test_install_cli.py'
+python3 -m unittest discover -s scripts/tests -p 'test_stage_claude_config.py'
+python3 -m unittest discover -s scripts/tests -p 'test_e2e_*.py'
 bash e2e/test-harness.sh
 ```
 
-Run the whole Python tier, not just `test_docs` — that is what CI executes, and the release
-contracts in the same directory fail independently of the documentation ones.
+CI runs those as four independent jobs — `docs`, `scripts`, `e2e-safety`, `test` — split by what
+each protects rather than by language. Only `test` needs a Rust toolchain, so a stale doc or a
+regressed safety token reports in seconds instead of queueing behind a compile, and one failure no
+longer hides the other answers. `test_docs.py` asserts that every `scripts/tests/test_*.py` is
+matched by a pattern above, so a new module cannot land in no job at all.
 
-The full live suite is a separate gate and is intentionally not run by this cleanup task.
+Locally the whole Python tier is one command:
+
+```bash
+python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+```
+
+`e2e/test-harness.sh` is the provider-free **static** safety gate: it starts no Herdr and needs no
+provider, which is why it belongs in CI. It overlaps `test_e2e_safety.py` by design — they are two
+implementations of the same checks, which is why they share the `e2e-safety` job.
+
+The full live suite (`e2e/run-all.sh`) is a separate gate: it needs Herdr 0.7.5 to boot a real
+ephemeral protocol-17 server, so it is not part of CI and is run by a human/orchestrator.

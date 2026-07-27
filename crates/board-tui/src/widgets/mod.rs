@@ -9,8 +9,32 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{
+    Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+};
 use ratatui::Frame;
+
+/// The one vertical scrollbar every overflowing list in the TUI draws: board
+/// columns, the form's field list, and the Compact help sheet. Same track/thumb
+/// glyphs everywhere, so the three call sites cannot drift apart.
+///
+/// `total`/`visible` are content lengths in rows, `position` the current top
+/// offset; each is floored at 1 because `ScrollbarState` divides by them.
+pub fn vertical_scrollbar(
+    f: &mut Frame,
+    rect: Rect,
+    total: usize,
+    position: usize,
+    visible: usize,
+) {
+    let mut state = ScrollbarState::new(total.max(1))
+        .position(position)
+        .viewport_content_length(visible.max(1));
+    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+        .track_symbol(Some("│"))
+        .thumb_symbol("█");
+    f.render_stateful_widget(scrollbar, rect, &mut state);
+}
 
 /// Interactive zones registered by the new Compact-mode widgets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

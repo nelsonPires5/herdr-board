@@ -4,19 +4,17 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::super::herdr::{
-    handle_event_from_socket, HerdrSocketSupervisor, WatchConnector, WatchEventStream,
-    WatchSnapshot, WatchTiming,
+    handle_event_from_socket, HerdrSocketSupervisor, HerdrWatchConnector, WatchConnector,
+    WatchEventStream, WatchSnapshot, WatchTiming,
 };
 use super::active_daemon;
-use crate::settings::DaemonSettings;
-use crate::spawner::{LocalSpawner, RuntimeHandle};
+use crate::spawner::RuntimeHandle;
 use crate::state::{ActiveRun, Daemon};
-use crate::store::Store;
+use crate::testkit::{self, FakeHerdr};
 use board_core::config::Config;
 use board_core::db::{Db, EnqueueRun};
 use board_core::protocol::{CardCreateParams, CardStatus, RunOutcome};
 use board_herdr::{AgentStatus, HerdrError, HerdrEvent};
-use tokio::sync::{broadcast, mpsc, watch};
 
 /// Build two active herdr runs sharing a pane id but living on separate
 /// session sockets. The current pane-only matcher is deliberately used to
@@ -71,22 +69,11 @@ fn two_socket_daemon() -> (Arc<Daemon>, i64, i64, i64, i64, PathBuf) {
             .unwrap();
     }
 
-    let (events_tx, _events_rx) = broadcast::channel(16);
-    let (dispatch_tx, _dispatch_rx) = mpsc::unbounded_channel();
-    let (shutdown_tx, _shutdown_rx) = watch::channel(false);
-    let d = Arc::new(Daemon::new(
-        Store::new(db),
-        config,
-        DaemonSettings::default(),
-        PathBuf::from("/tmp/board-watch-two-sockets.db"),
-        PathBuf::from("/tmp/board-watch-two-sockets.sock"),
-        Arc::new(LocalSpawner::new()),
-        None,
-        None,
-        events_tx,
-        dispatch_tx,
-        shutdown_tx,
-    ));
+    let d = testkit::daemon()
+        .db(db)
+        .config(config)
+        .db_path(PathBuf::from("/tmp/board-watch-two-sockets.db"))
+        .build_daemon();
     for (run, card, workspace, socket) in [
         (
             &run_a,
@@ -542,4 +529,41 @@ fn socket_a_pane_exit_does_not_finalize_socket_b_duplicate_pane() {
         CardStatus::Running,
         "socket A's pane exit must not finalize socket B's run",
     );
+}
+
+/// A Herdr socket that answers the protocol gate with `protocol`, recording
+/// every method it is asked for.
+fn fake_herdr_socket(protocol: u32) -> FakeHerdr {
+    testkit::herdr_server()
+        .protocol(protocol)
+        .on("session.snapshot", |req| {
+            testkit::reply(
+                req,
+                serde_json::json!({"snapshot": {
+                    "version": "0.7.5", "protocol": 17,
+                    "workspaces": [], "tabs": [], "panes": [], "agents": []
+                }}),
+            )
+        })
+        .serve()
+}
+
+#[test]
+fn watch_snapshot_rejects_a_socket_with_the_wrong_protocol() {
+    let herdr = fake_herdr_socket(16);
+    let result = HerdrWatchConnector.snapshot(&herdr.socket);
+    assert!(result.is_err(), "an incompatible socket must not snapshot");
+    // A snapshot that answers is authoritative here — a watched pane missing
+    // from it is reported as `PaneExited` and finalizes the run. So the gate
+    // has to stop the request, not merely annotate it.
+    assert_eq!(herdr.methods(), vec!["ping"]);
+}
+
+#[test]
+fn watch_snapshot_accepts_the_pinned_protocol() {
+    let herdr = fake_herdr_socket(17);
+    HerdrWatchConnector
+        .snapshot(&herdr.socket)
+        .expect("protocol 17 must pass the gate");
+    assert_eq!(herdr.methods(), vec!["ping", "session.snapshot"]);
 }

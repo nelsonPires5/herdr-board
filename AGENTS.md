@@ -23,12 +23,8 @@ safety gate.
 
 ## Build / test gates (keep green)
 
-```bash
-cargo test --workspace --all-features       # unit + integration; no live herdr needed
-cargo clippy --all-targets -- -D warnings    # zero warnings
-cargo fmt --all --check                      # formatted
-python3 -m unittest discover -s scripts/tests -p 'test_*.py'   # docs/release contracts
-```
+The gate list has one maintained copy: **[`docs/README.md` → Test gates](docs/README.md#test-gates-single-source)**
+(mirrored by `.github/workflows/ci.yml`; `scripts/tests/test_docs.py` fails if the two drift).
 
 - The Python tier is a CI gate too (`ci.yml`'s `Python tests` step) and is easy to forget:
   `scripts/tests/test_docs.py` pins the version matrix (schema v13, protocol 17, Herdr 0.7.5)
@@ -36,20 +32,14 @@ python3 -m unittest discover -s scripts/tests -p 'test_*.py'   # docs/release co
   until the docs and that test are updated together.
 
 - `#[ignore]`'d tests hit a live herdr (run only when `HERDR_SOCK`/`HERDR_SOCKET_PATH` exists).
-- End-to-end: `e2e/run-all.sh` (compat: `scripts/e2e.sh`) drives a REAL Herdr with a scenario
-  suite, but checked-in fake Pi/Claude executables keep the standard suite provider-free and
-  zero-cost. Every scenario boots its own collision-resistant **ephemeral** Herdr session
-  (`hb-e2e-<scenario>-<pid>-<random64>`, bounded slug) and never touches or adopts
-  your real sessions; each uses a marker-gated mode-0700 short HOME with explicit AF_UNIX margin,
-  an isolated temp DB + socket, and **disposable**
-  marked workspaces, prefixes every Herdr mutation `HERDR MUTATION:`, and tears everything down on exit
-  (`--keep` leaves sessions/workspaces for review). The forced-build standard suite passes 01–27
-  provider-free under a mode-0700 root with controlled HOME/ZDOT/rc/PATH, never sourcing user rc;
-  Herdr and Bash >=4 are resolved absolutely before PATH narrowing. The standard suite supports Linux and macOS: process identity uses Linux `/proc` or Darwin `libproc` + `KERN_PROCARGS2`, and every token is HMAC-bound to a non-exported per-invocation key delivered to the verifier over an inherited file descriptor. Linux additionally rechecks the owner token in `/proc/environ`; Darwin requires a signed direct-child capability before the exact PID/start/executable/complete-argv transition can be adopted. Session mutation, board-daemon signals, workspace close, and session stop/delete are never authorized by PID liveness alone; scenario mutation wrappers freshly verify boardd and each primary/secondary target. Stop and post-stop delete have separate fail-closed
-  authorization, with delete requiring the exact private ownership marker. The opt-in real-Claude smoke retains its independent Linux-only identity implementation and is not part of the portable provider-free gate. Cleanup is limited to invocation-emitted exact names/roots/PIDs; marker and script-content digests are reverified immediately before destructive cleanup, and inherited roots always fail closed (reuse is process-local with exact path/mode/header/token/owner validation). A post-spawn server is provisionally ledgered by PID/start/exe/argv/owner token before full capture and is signalled only after a fresh match,
-  and failures propagate so a passing scenario cannot hide failed cleanup. Standard children use an
-  environment allowlist that excludes inherited provider configuration. See [`docs/testing.md`](docs/testing.md)
-  for the layers and how to add one.
+- End-to-end: `e2e/run-all.sh` (compat: `scripts/e2e.sh`) drives a REAL Herdr; checked-in fake
+  Pi/Claude executables keep the standard suite (scenarios 01–27) provider-free and zero-cost.
+  **Hard rules an agent must never violate:** run only against the scenario's own **ephemeral**
+  `hb-e2e-<slug>-<pid>-<random64>` session and **disposable** workspaces it created — never a user
+  session, workspace, or tab — and prefix every Herdr mutation with `HERDR MUTATION:`.
+  The full isolation, identity-token, and cleanup design is in
+  [`docs/testing.md`](docs/testing.md) ("How it stays isolated and safe") — read it before
+  touching the harness.
 
 ## Testing policy (pragmatic)
 
@@ -61,13 +51,33 @@ Full layering, test placement, harness details, and how to add tests live in
   `crates/<crate>/tests/`, where it is compiled as an external client. A test that deliberately
   checks a private invariant stays adjacent to its implementation under `src/` in a
   `#[cfg(test)]` module; do not make production internals public just to relocate such a test.
-- **Responsibility-oriented modules.** The current stable boundaries are `board-daemon/src/ops/`
-  for request operations, `board-daemon/src/watchers/` for timeout/liveness/Herdr observation,
-  `board-daemon/src/dispatch/` for queue lifecycle, `board-daemon/src/spawner/` for launch and
-  placement, `board-tui/src/app/`, `board-tui/src/forms/`, and `board-tui/src/view/` for TUI
-  behavior, `board-core/src/engine/` and `board-core/src/client/` for pure decisions and
-  board-client transports, and `board-herdr/src/events/` for event parsing and streams. Keep
-  private tests beside those boundaries; describe ownership rather than maintaining a
+- **Responsibility-oriented modules.** Put new code behind the boundary that already owns the
+  responsibility rather than growing an entry-point file. The current stable boundaries:
+
+  | Crate | Boundary | Owns |
+  |---|---|---|
+  | `board-daemon` | `ops/` | request operations; `ops/errors.rs` is the one place a domain failure becomes a protocol code, `ops/panes.rs` the caller's-own-session pane calls |
+  | | `dispatch/` | queue lifecycle; `launch_plan.rs` builds the launch spec, `ownership.rs` decides what this daemon may claim |
+  | | `spawner/` | launch and placement; `placement/` (alloc/geometry/race), `herdr/` (managed + configured), `error.rs` |
+  | | `watchers/` | timeout/liveness/Herdr observation |
+  | | `herdr_conn.rs` | the gated connect: normalize the socket path, connect, run the 0.7.5/protocol-17 check, in one place. New Herdr work goes through it. The two space-resolution sites that still connect directly (`ops/cards.rs`, `dispatch/launch_plan.rs`) run the same gate inside `dispatch/space.rs` — nothing reaches Herdr ungated |
+  | | `rescue.rs`, `recovery.rs`, `logging.rs`, `testkit.rs` | run rescue, per-session recovery, tracing setup, and the `cfg(test)` daemon/fake-Herdr builders |
+  | `board-tui` | `app/` | the pure reducer — `state`/`effect`/`nav`/`drag` plus one module per screen |
+  | | `driver/` | the effect loop (`dispatch`, `load`); `runtime.rs` owns terminal setup/teardown, `origin.rs` the Herdr-plugin origin context |
+  | | `forms/`, `view/`, `widgets/` | form model, rendering, hit-testing |
+  | `board-cli` | `args/` | the clap surface, split by domain; **backward compatibility is mandatory** — new spellings are additive, old ones become (sometimes hidden) aliases |
+  | | `render.rs` | the single output path. Handlers never branch on `--json`: they hand a value to `emit`/`emit_line`, and every text listing goes through one `table` helper |
+  | | `context.rs` | lazy client/board resolution and client-side column lookup |
+  | `board-core` | `engine/` | pure decisions — lifecycle, transitions, validation, signals, `columns.rs` |
+  | | `client/` | traits, Unix transport, fake client |
+  | `board-herdr` | `events/` | event parsing and streams |
+
+  Before adding a helper, check `board-core` for one: `Patch::from_flags`/`from_option`,
+  `protocol::parse_timestamp`, `capability::default_capabilities`, `engine::resolve_column`,
+  `engine::run_elapsed`, `Comment::is_system`, `paths::session_name_from_socket`, and
+  `Db::require_card`/`require_column` are shared primitives, not per-crate copies.
+
+  Keep private tests beside those boundaries; describe ownership rather than maintaining a
   file-by-file test manifest.
 - **New herdr-touching flow ⇒ e2e.** Any new user-visible flow that reaches herdr isn't done until
   it has a use case documented and a live scenario under `e2e/` (per `docs/testing.md` and
@@ -85,10 +95,10 @@ Full layering, test placement, harness details, and how to add tests live in
   (`BOARD_DB`, `BOARD_SOCKET`). No wall-clock flakiness in tests.
 - Commit style: **Conventional Commits** grouped by crate/intent, as in the git log —
   `feat(core): …`, `feat(daemon,cli): …`, `docs: …`.
-- The daemon opens a **fresh Herdr connection per operation** (`HerdrClient::connect` in the
-  `dispatch/`, `ops/`, and `spawner/` modules); one `HerdrClient` = one request/response
-  connection, event streaming lives on its own connection. Runtime launch ownership is
-  daemon-only: `board-core`
+- The daemon opens a **fresh Herdr connection per operation** — so the protocol gate lives at the
+  connect, not at a startup check; that is what `board-daemon/src/herdr_conn.rs` centralizes. One
+  `HerdrClient` = one request/response connection, event streaming lives on its own connection.
+  Runtime launch ownership is daemon-only: `board-core`
   persists the neutral schema-v11 launch spec, while `board-daemon` owns placement, pane/process
   handles, liveness, cleanup, and the Herdr supervisor.
 - `RootConfig` is parsed once at daemon startup; typed `[daemon]` settings are resolved before

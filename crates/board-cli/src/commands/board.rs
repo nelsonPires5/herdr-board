@@ -1,82 +1,56 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use board_core::client::BoardClient;
-
-use crate::args::BoardCmd;
-use crate::daemon::connect_or_start;
-use crate::helpers::print_json;
-use crate::scope::open_selected_board;
 use board_core::scope::resolve_scope_path;
 
-pub(crate) fn cmd_board(sub: BoardCmd, selector: Option<&str>) -> Result<()> {
-    let mut c = connect_or_start()?;
+use crate::args::BoardCmd;
+use crate::context::Ctx;
+use crate::render::{emit, emit_line};
+use crate::scope::open_selected_board;
+
+pub(crate) fn cmd_board(sub: BoardCmd, ctx: &mut Ctx) -> Result<()> {
+    let json = ctx.json();
     match sub {
-        BoardCmd::List { json } => {
-            let result = c.board_list()?;
-            if json {
-                print_json(&result.boards)?;
-            } else {
-                for board in result.boards {
-                    println!(
-                        "#{}\t{}{}",
-                        board.id,
-                        board.name,
-                        board
-                            .scope_path
-                            .map(|path| format!("\t{path}"))
-                            .unwrap_or_default()
-                    );
-                }
-            }
+        BoardCmd::List => {
+            let boards = ctx.client()?.board_list()?.boards;
+            emit(&boards, json)
         }
-        BoardCmd::Show {
-            selector: local,
-            json,
-        } => {
-            let board = open_selected_board(&mut c, local.as_deref().or(selector))?;
-            if json {
-                print_json(&board)?;
-            } else {
-                println!("#{}\t{}", board.board.id, board.board.name);
-                if let Some(path) = board.board.scope_path {
-                    println!("scope: {path}");
-                }
-                println!(
-                    "columns: {}\tcards: {}",
-                    board.columns.len(),
-                    board.cards.len()
-                );
-            }
+        BoardCmd::Show { selector: local } => {
+            let board = match local.as_deref() {
+                // A command-local selector overrides the memoized global one.
+                Some(local) => open_selected_board(ctx.client()?, Some(local))?,
+                None => ctx.board()?.clone(),
+            };
+            emit(&board, json)
         }
-        BoardCmd::Open { path, json } => {
+        BoardCmd::Open { path } => {
             let path = resolve_scope_path(std::path::Path::new(&path))?;
             let path = path
                 .to_str()
-                .ok_or_else(|| anyhow::anyhow!("board path is not valid UTF-8"))?;
-            let board = c.board_open(path)?;
-            if json {
-                print_json(&board)?;
-            } else {
-                println!("Opened board #{} {}", board.board.id, board.board.name);
-            }
+                .ok_or_else(|| anyhow!("board path is not valid UTF-8"))?
+                .to_string();
+            let board = ctx.client()?.board_open(&path)?;
+            emit_line(
+                &board,
+                json,
+                format!("Opened board #{} {}", board.board.id, board.board.name),
+            )
         }
-        BoardCmd::Rename { values, json } => {
+        BoardCmd::Rename { values } => {
             let (local_selector, name) = match values.as_slice() {
-                [name] => (None, name.as_str()),
-                [local_selector, name] => (Some(local_selector.as_str()), name.as_str()),
-                _ => {
-                    return Err(anyhow::anyhow!(
-                        "board rename expects <NAME> or <ID|PATH> <NAME>"
-                    ))
-                }
+                [name] => (None, name.clone()),
+                [local_selector, name] => (Some(local_selector.clone()), name.clone()),
+                _ => return Err(anyhow!("board rename expects <NAME> or <ID|PATH> <NAME>")),
             };
-            let board = open_selected_board(&mut c, local_selector.or(selector))?;
-            let renamed = c.board_rename(board.board.id, name)?;
-            if json {
-                print_json(&renamed)?;
-            } else {
-                println!("Renamed board #{} to {}", renamed.id, renamed.name);
-            }
+            let board_id = match local_selector.as_deref() {
+                Some(local) => open_selected_board(ctx.client()?, Some(local))?.board.id,
+                None => ctx.board_id()?,
+            };
+            let renamed = ctx.client()?.board_rename(board_id, &name)?;
+            emit_line(
+                &renamed,
+                json,
+                format!("Renamed board #{} to {}", renamed.id, renamed.name),
+            )
         }
     }
-    Ok(())
 }

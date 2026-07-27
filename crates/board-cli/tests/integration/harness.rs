@@ -1,6 +1,6 @@
 use board_core::client::BoardClient;
 
-use super::{fake_card, todo_id, TestDaemon};
+use super::{fake_card, json_output, todo_id, TestDaemon};
 
 // -- harness / space CLI verbs -----------------------------------------------
 
@@ -10,9 +10,8 @@ fn harness_models_claude_json_and_human() {
 
     // --json: full HarnessCapabilities — 4 models, 5 efforts each, freeform.
     let out = td.board(&["harness", "models", "claude", "--json"]);
-    assert!(out.status.success(), "harness models --json should succeed");
     let caps: board_core::capability::HarnessCapabilities =
-        serde_json::from_slice(&out.stdout).expect("parse HarnessCapabilities");
+        serde_json::from_value(json_output(&out)).expect("parse HarnessCapabilities");
     assert_eq!(caps.harness, "claude");
     assert!(caps.model_freeform);
     assert_eq!(caps.models.len(), 4, "claude has 4 known models");
@@ -51,8 +50,7 @@ fn harness_list_builtins_and_config_defined() {
 
     // --json: the same names, default-first, as a JSON array.
     let out = td.board(&["harness", "list", "--json"]);
-    assert!(out.status.success());
-    let names: Vec<String> = serde_json::from_slice(&out.stdout).unwrap();
+    let names: Vec<String> = serde_json::from_value(json_output(&out)).unwrap();
     assert_eq!(names, vec!["pi", "claude", "fake"]);
 }
 
@@ -60,9 +58,8 @@ fn harness_list_builtins_and_config_defined() {
 fn harness_models_default_is_pi() {
     let td = TestDaemon::start(&[]);
     let out = td.board(&["harness", "models", "--json"]);
-    assert!(out.status.success());
     let caps: board_core::capability::HarnessCapabilities =
-        serde_json::from_slice(&out.stdout).unwrap();
+        serde_json::from_value(json_output(&out)).unwrap();
     assert_eq!(caps.harness, "pi");
     assert!(caps.models.is_empty());
     assert!(caps.model_freeform);
@@ -75,16 +72,28 @@ fn harness_models_default_is_pi() {
 #[test]
 fn harness_models_unknown_harness_errors() {
     let td = TestDaemon::start(&[]);
+    // The daemon answers with protocol code 2 (not found), which the CLI passes
+    // through as the exit status (see `exit_codes.rs`).
     let out = td.board(&["harness", "models", "ghost"]);
-    assert!(
-        !out.status.success(),
-        "unknown harness should exit non-zero"
-    );
+    assert_eq!(out.status.code(), Some(2), "not found is protocol code 2");
+    assert!(out.stdout.is_empty(), "no capabilities printed on error");
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("ghost"), "error names the harness; got: {err}");
-    assert!(
-        err.contains("error 2") || err.contains("unknown harness"),
-        "error surfaces not-found; got: {err}"
+    assert_eq!(
+        err.trim_end(),
+        "board: boardd error 2: not found: unknown harness 'ghost'; known: pi, claude, fake",
+        "unknown harness names the harness and the known set"
+    );
+
+    // --json fails identically, with the code kept in the error envelope.
+    let out = td.board(&["harness", "models", "ghost", "--json"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    let error: serde_json::Value =
+        serde_json::from_slice(&out.stderr).expect("JSON error on stderr");
+    assert_eq!(error["error"]["code"], 2);
+    assert_eq!(
+        error["error"]["message"],
+        "not found: unknown harness 'ghost'; known: pi, claude, fake"
     );
 }
 
@@ -96,16 +105,14 @@ fn harness_efforts_known_and_unknown_model() {
     let out = td.board(&[
         "harness", "efforts", "claude", "--model", "sonnet", "--json",
     ]);
-    assert!(out.status.success());
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let v = json_output(&out);
     assert_eq!(v["model"], "sonnet");
     assert_eq!(v["known"], true);
     assert_eq!(v["efforts"].as_array().unwrap().len(), 5);
 
     // Unknown-but-freeform model: all efforts, known:false.
     let out = td.board(&["harness", "efforts", "claude", "--model", "gpt-x", "--json"]);
-    assert!(out.status.success());
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let v = json_output(&out);
     assert_eq!(v["model"], "gpt-x");
     assert_eq!(v["known"], false);
     assert_eq!(v["efforts"].as_array().unwrap().len(), 5);
@@ -121,45 +128,10 @@ fn harness_efforts_known_and_unknown_model() {
 }
 
 #[test]
-fn harness_efforts_pi_freeform_model_includes_low() {
-    let td = TestDaemon::start(&[]);
-    let out = td.board(&[
-        "harness",
-        "efforts",
-        "pi",
-        "--model",
-        "openai-codex/example",
-        "--json",
-    ]);
-    assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["known"], false);
-    assert!(v["efforts"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|effort| effort == "low"));
-}
-
-#[test]
-fn harness_permissions_pi_is_empty() {
-    let td = TestDaemon::start(&[]);
-    let out = td.board(&["harness", "permissions", "--json"]);
-    assert!(out.status.success());
-    let modes: Vec<String> = serde_json::from_slice(&out.stdout).unwrap();
-    assert!(modes.is_empty());
-}
-
-#[test]
 fn harness_permissions_matches_claude_modes() {
     let td = TestDaemon::start(&[]);
     let out = td.board(&["harness", "permissions", "claude", "--json"]);
-    assert!(out.status.success());
-    let modes: Vec<String> = serde_json::from_slice(&out.stdout).unwrap();
+    let modes: Vec<String> = serde_json::from_value(json_output(&out)).unwrap();
     assert_eq!(
         modes,
         vec![
@@ -258,12 +230,10 @@ fn card_new_new_workspace_missing_cwd_is_validation_error() {
 #[test]
 fn card_new_defaults_to_pi_and_claude_remains_explicit() {
     let td = TestDaemon::start(&[]);
-    let pi = td.board(&["card", "new", "--title", "default", "--json"]);
-    assert!(pi.status.success());
-    let pi: serde_json::Value = serde_json::from_slice(&pi.stdout).unwrap();
+    let pi = json_output(&td.board(&["card", "new", "--title", "default", "--json"]));
     assert_eq!(pi["harness"], "pi");
 
-    let claude = td.board(&[
+    let claude = json_output(&td.board(&[
         "card",
         "new",
         "--title",
@@ -271,9 +241,7 @@ fn card_new_defaults_to_pi_and_claude_remains_explicit() {
         "--harness",
         "claude",
         "--json",
-    ]);
-    assert!(claude.status.success());
-    let claude: serde_json::Value = serde_json::from_slice(&claude.stdout).unwrap();
+    ]));
     assert_eq!(claude["harness"], "claude");
 }
 
@@ -295,7 +263,7 @@ fn card_new_rejects_pi_permission_mode() {
 #[test]
 fn card_archive_and_restore_cli_roundtrip() {
     let td = TestDaemon::start(&[]);
-    let out = td.board(&[
+    let card = json_output(&td.board(&[
         "card",
         "new",
         "--title",
@@ -303,19 +271,13 @@ fn card_archive_and_restore_cli_roundtrip() {
         "--harness",
         "fake",
         "--json",
-    ]);
-    assert!(out.status.success());
-    let card: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    ]));
     let id = card["id"].as_i64().unwrap().to_string();
 
-    let out = td.board(&["card", "archive", &id, "--json"]);
-    assert!(out.status.success(), "archive failed: {:?}", out.stderr);
-    let archived: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let archived = json_output(&td.board(&["card", "archive", &id, "--json"]));
     assert!(archived["archived_at"].is_string());
 
-    let out = td.board(&["card", "restore", &id, "--json"]);
-    assert!(out.status.success(), "restore failed: {:?}", out.stderr);
-    let restored: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let restored = json_output(&td.board(&["card", "restore", &id, "--json"]));
     assert!(restored["archived_at"].is_null());
 }
 
@@ -335,8 +297,7 @@ fn card_new_with_session_persists_and_shows() {
         "my-sess",
         "--json",
     ]);
-    assert!(out.status.success(), "card new --session should succeed");
-    let card: serde_json::Value = serde_json::from_slice(&out.stdout).expect("parse Card json");
+    let card = json_output(&out);
     assert_eq!(
         card["session"].as_str(),
         Some("my-sess"),

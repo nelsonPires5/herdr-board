@@ -16,14 +16,9 @@ set -euo pipefail
 
 export E2E_FAKE_ENV="FAKE_AGENT_OUTCOME=fail"   # the run reports failure
 
-e2e_init
-e2e_build
-e2e_isolate
-e2e_daemon_start
+e2e_boot   # e2e_init + e2e_build + e2e_isolate + e2e_daemon_start (in that order)
 
-step "HERDR MUTATION: create disposable workspace"
-e2e_ws_create board-e2e; WS_ID="$E2E_WS"
-echo "  workspace: $WS_ID"
+e2e_ws_standard board-e2e   # step + e2e_ws_create + WS_ID + echo
 
 step "Create the on_fail target column 'Backlog' (manual) and 'Execute' (auto, on_fail->Backlog)"
 BACKLOG_ID="$(col_create '{"name":"Backlog","trigger":"manual"}')"

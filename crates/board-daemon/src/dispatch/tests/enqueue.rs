@@ -529,3 +529,151 @@ fn prepare_enqueue_values_is_deterministic_for_equivalent_inputs() {
         &spec.execution().argv
     );
 }
+
+#[test]
+fn board_env_carries_the_run_id_for_dispatch_and_withholds_it_for_a_rescue() {
+    let socket = std::path::Path::new("/tmp/boardd.sock");
+    let dispatched: Vec<String> = board_env(7, Some(42), socket)
+        .unwrap()
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
+    assert_eq!(
+        dispatched,
+        ["BOARD_CARD_ID", "BOARD_RUN_ID", "BOARD_SOCKET", "BOARD_BIN"]
+    );
+
+    // A rescued pane belongs to no run, so it must not receive the actor
+    // credential `board comment`/`board done` authenticate with.
+    let rescued = board_env(7, None, socket).unwrap();
+    assert!(rescued.iter().all(|(key, _)| key != "BOARD_RUN_ID"));
+    assert_eq!(
+        rescued
+            .iter()
+            .find(|(key, _)| key == "BOARD_SOCKET")
+            .map(|(_, value)| value.as_str()),
+        Some("/tmp/boardd.sock")
+    );
+    assert_eq!(
+        rescued
+            .iter()
+            .find(|(key, _)| key == "BOARD_CARD_ID")
+            .map(|(_, value)| value.as_str()),
+        Some("7")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Launch adapters: which session and system prompt a queued run actually uses
+// ---------------------------------------------------------------------------
+
+#[test]
+fn v11_placement_uses_run_session_while_legacy_uses_current_card_session() {
+    let d = test_daemon(Arc::new(MissingPiSpawner));
+    let card = d
+        .store
+        .lock()
+        .create_card(&CardCreateParams {
+            title: "session snapshot".into(),
+            session: Some("enqueue-session".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    let mut run = enqueue_run(&d, card.id, card.column_id, false).unwrap();
+    assert!(run.launch_spec.is_some());
+    assert_eq!(run.session.as_deref(), Some("enqueue-session"));
+
+    // Model a queued card edit in the dispatch snapshot: v11 ignores it.
+    let mut edited_card = card;
+    edited_card.session = Some("edited-session".into());
+    assert_eq!(launch_session(&run, &edited_card), Some("enqueue-session"));
+
+    // The same row shape without a v11 spec follows the documented legacy
+    // adapter and therefore observes the current card session.
+    run.launch_spec = None;
+    assert_eq!(launch_session(&run, &edited_card), Some("edited-session"));
+}
+
+#[tokio::test]
+async fn v7_and_pre_v7_launch_adapters_remain_explicit() {
+    let spawner = Arc::new(CapturingSpawner::default());
+    let mut config = Config::default();
+    config.harness.insert(
+        "custom".into(),
+        board_core::config::HarnessDef {
+            argv: vec!["custom".into()],
+            ..Default::default()
+        },
+    );
+    let (d, _, _) = test_daemon_with_config(spawner.clone(), config);
+    let (v7_card, legacy_card, column_id) = {
+        let db = d.store.lock();
+        let column = db
+            .create_column(&ColumnCreateParams {
+                name: "Adapters".into(),
+                system_prompt: Some("current".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let v7 = db
+            .create_card(&CardCreateParams {
+                title: "v7".into(),
+                column_id: Some(column.id),
+                harness: Some("custom".into()),
+                space_ref: Some("v7".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let legacy = db
+            .create_card(&CardCreateParams {
+                title: "legacy".into(),
+                column_id: Some(column.id),
+                harness: Some("custom".into()),
+                space_ref: Some("legacy".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        db.enqueue_run_uow(&EnqueueRun {
+            card_id: v7.id,
+            column_id: column.id,
+            harness: "custom",
+            argv_json: r#"["v7-command"]"#,
+            prompt_snapshot: "v7-prompt",
+            system_prompt_snapshot: Some("v7-system-exact"),
+            launch_spec_json: None,
+            session_id: None,
+            session: None,
+        })
+        .unwrap();
+        db.enqueue_run_uow(&EnqueueRun {
+            card_id: legacy.id,
+            column_id: column.id,
+            harness: "custom",
+            argv_json: r#"["legacy-command"]"#,
+            prompt_snapshot: "legacy-prompt",
+            system_prompt_snapshot: None,
+            launch_spec_json: None,
+            session_id: None,
+            session: None,
+        })
+        .unwrap();
+        (v7.id, legacy.id, column.id)
+    };
+    dispatch_pass(&d).await;
+    let requests = spawner.requests.lock().unwrap();
+    let v7 = requests.iter().find(|r| r.argv == ["v7-command"]).unwrap();
+    assert!(v7
+        .env
+        .contains(&("BOARD_SYSTEM_PROMPT".into(), "v7-system-exact".into())));
+    let legacy = requests
+        .iter()
+        .find(|r| r.argv == ["legacy-command"])
+        .unwrap();
+    assert_eq!(legacy.tab_label.as_deref(), Some("kanban"));
+    assert!(legacy.env.contains(&(
+        "BOARD_SYSTEM_PROMPT".into(),
+        board_core::harness::protocol_system_prompt(Some("current"))
+    )));
+    assert_ne!(v7_card, legacy_card);
+    assert!(column_id > 0);
+}

@@ -6,16 +6,26 @@
 mod support;
 pub(crate) use support::*;
 
-#[path = "integration/cli_contract.rs"]
-mod cli_contract;
+#[path = "integration/cards.rs"]
+mod cards;
+#[path = "integration/columns.rs"]
+mod columns;
+#[path = "integration/comments.rs"]
+mod comments;
 #[path = "integration/compat.rs"]
 mod compat;
 #[path = "integration/events.rs"]
 mod events;
+#[path = "integration/exit_codes.rs"]
+mod exit_codes;
 #[path = "integration/harness.rs"]
 mod harness;
 #[path = "integration/lifecycle.rs"]
 mod lifecycle;
+#[path = "integration/meta.rs"]
+mod meta;
+#[path = "integration/runs.rs"]
+mod runs;
 #[path = "integration/scope.rs"]
 mod scope;
 #[path = "integration/stop.rs"]

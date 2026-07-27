@@ -257,7 +257,11 @@ impl Daemon {
         if let Some(h) = &self.herdr {
             let mut c = h.clone();
             std::thread::spawn(move || {
-                let _ = c.notification_show(&title, body.as_deref(), sound);
+                // Cosmetic and detached, but a silently missing "ready for
+                // review" toast is otherwise unexplainable to the user.
+                if let Err(error) = c.notification_show(&title, body.as_deref(), sound) {
+                    tracing::debug!("herdr notification failed: {error}");
+                }
             });
         }
     }

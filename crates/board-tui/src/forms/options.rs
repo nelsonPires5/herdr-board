@@ -1,6 +1,8 @@
 //! Dynamic option rebuilding, cascading choices, focus, and visibility.
 
-use board_core::capability::HarnessCapabilities;
+use std::borrow::Cow;
+
+use board_core::capability::{default_capabilities, HarnessCapabilities};
 use board_core::harness::DEFAULT_HARNESS;
 use board_core::protocol::{SessionInfo, SpaceInfo};
 
@@ -260,15 +262,28 @@ impl Form {
             .unwrap_or(false)
     }
 
-    /// Whether any permission selector applies for the form's driving harness.
-    /// With a loaded catalog this is `!permission_modes.is_empty()`; without one
-    /// (fetch failed / pending) it falls back to "not pi" so the field stays
-    /// reachable for claude/config harnesses.
-    fn permission_is_applicable(&self) -> bool {
-        self.caps
-            .as_ref()
-            .map(|caps| !caps.permission_modes.is_empty())
-            .unwrap_or_else(|| self.current_harness() != "pi")
+    /// Whether any permission selector applies for the form's driving harness:
+    /// `!permission_modes.is_empty()` against [`Form::effective_caps`], so the
+    /// answer is capability data in both the fetched and the not-yet-fetched
+    /// case and never a harness-name comparison.
+    pub(super) fn permission_is_applicable(&self) -> bool {
+        !self.effective_caps().permission_modes.is_empty()
+    }
+
+    /// The capability snapshot driving the guided selectors: the live daemon
+    /// catalog whenever it has been fetched, else board-core's built-in
+    /// default for the selected harness.
+    ///
+    /// A harness board-core does not know answers with an *empty* permission
+    /// vocabulary — inventing another CLI's enum is never safe — so a
+    /// config-defined harness only gets its real permission modes once
+    /// `harness.capabilities` has answered. That is the daemon's call to make,
+    /// not the TUI's.
+    pub(super) fn effective_caps(&self) -> Cow<'_, HarnessCapabilities> {
+        match &self.caps {
+            Some(caps) => Cow::Borrowed(caps),
+            None => Cow::Owned(default_capabilities(&self.current_harness())),
+        }
     }
 
     pub(super) fn space_kind_is_new_workspace(&self) -> bool {

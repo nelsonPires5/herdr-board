@@ -13,10 +13,7 @@
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/lib.sh"
 
-e2e_init
-e2e_build
-e2e_isolate
-e2e_daemon_start
+e2e_boot   # e2e_init + e2e_build + e2e_isolate + e2e_daemon_start (in that order)
 
 step "Create a card in the default (only, focused) column"
 CARD_JSON="$($BOARD_BIN card new --title 'Compact Mobile Card' --json)"

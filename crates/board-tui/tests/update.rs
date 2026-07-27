@@ -10,6 +10,10 @@ mod detail;
 mod editor;
 #[path = "update/forms.rs"]
 mod forms;
+#[path = "update/modals.rs"]
+mod modals;
+#[path = "update/pane_title.rs"]
+mod pane_title;
 #[path = "update/scope.rs"]
 mod scope;
 #[path = "update/support_nav.rs"]

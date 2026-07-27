@@ -1,5 +1,11 @@
-//! Demo/seed helpers shared by the example binary and the snapshot tests.
+//! Demo/seed helpers plus the shared test harness (drivers, synthetic input,
+//! rendering) used by the example binary and by every `tests/` binary.
 //! Only compiled with the `fake-client` feature.
+//!
+//! Each `tests/*.rs` file is its own crate and its own link step, so anything
+//! defined per-file gets built and linked once per binary. Everything reusable
+//! lives here instead: it is compiled once into the library and the test
+//! binaries just call it.
 
 use board_core::capability::{claude_capabilities, pi_capabilities};
 use board_core::client::{BoardClient, FakeBoardClient};
@@ -10,7 +16,157 @@ use board_core::protocol::{
     HarnessListResult, RunOutcome, SessionInfo, SessionListResult, SpaceInfo, SpaceKind,
     SpaceListResult, Trigger,
 };
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::backend::TestBackend;
+use ratatui::layout::Rect;
+use ratatui::Terminal;
 use serde_json::{json, Value};
+
+use crate::app::{App, Msg};
+use crate::editor::FakeEditor;
+use crate::forms::{Field, FieldId, FieldKind, Form};
+use crate::view::view;
+use crate::{Driver, OriginContext};
+
+// -- form introspection ------------------------------------------------------
+
+/// The field with `id`. Panics with the id when the form has no such field,
+/// which is always a test bug rather than a condition to handle.
+pub fn field(form: &Form, id: FieldId) -> &Field {
+    form.fields
+        .iter()
+        .find(|f| f.id == id)
+        .unwrap_or_else(|| panic!("field {id:?} present"))
+}
+
+/// Position of `id` in the flat field list (what `field_visible` indexes by).
+pub fn field_index(form: &Form, id: FieldId) -> usize {
+    form.fields
+        .iter()
+        .position(|f| f.id == id)
+        .unwrap_or_else(|| panic!("field {id:?} present"))
+}
+
+/// Labels of a choice field's options, in menu order.
+pub fn choice_labels(form: &Form, id: FieldId) -> Vec<String> {
+    match &field(form, id).kind {
+        FieldKind::Choice { opts, .. } => opts.iter().map(|o| o.label.clone()).collect(),
+        FieldKind::Text(_) => panic!("field {id:?} is not a choice"),
+    }
+}
+
+/// Whether `id` currently renders as a choice selector rather than free text.
+pub fn is_choice(form: &Form, id: FieldId) -> bool {
+    matches!(field(form, id).kind, FieldKind::Choice { .. })
+}
+
+/// Select the option of `id` whose label is `label`.
+pub fn set_choice(form: &mut Form, id: FieldId, label: &str) {
+    let f = form
+        .fields
+        .iter_mut()
+        .find(|f| f.id == id)
+        .unwrap_or_else(|| panic!("field {id:?} present"));
+    match &mut f.kind {
+        FieldKind::Choice { opts, idx } => {
+            *idx = opts
+                .iter()
+                .position(|o| o.label == label)
+                .unwrap_or_else(|| panic!("option {label:?} in {id:?}"));
+        }
+        FieldKind::Text(_) => panic!("field {id:?} is not a choice"),
+    }
+}
+
+// -- drivers -----------------------------------------------------------------
+
+/// A [`Driver`] over `client` with a [`FakeEditor`] that always returns
+/// `edited`. The one place the `Box`/`Box`/`unwrap` boilerplate lives.
+pub fn driver_with_editor<C: BoardClient + 'static>(client: C, edited: &str) -> Driver {
+    Driver::with_editor(Box::new(client), Box::new(FakeEditor::new(edited))).unwrap()
+}
+
+/// Same, with an explicit [`OriginContext`] instead of the default one.
+pub fn driver_with_origin<C: BoardClient + 'static>(
+    client: C,
+    edited: &str,
+    origin: OriginContext,
+) -> Driver {
+    Driver::with_editor_and_origin(Box::new(client), Box::new(FakeEditor::new(edited)), origin)
+        .unwrap()
+}
+
+/// A driver over the seeded [`demo_client`].
+pub fn demo_driver(edited: &str) -> Driver {
+    driver_with_editor(demo_client().unwrap(), edited)
+}
+
+/// An origin context with every field set to an obviously-fake sentinel, for
+/// the tests asserting that ambient Herdr/plugin variables can never change
+/// what is rendered.
+pub fn hostile_origin() -> OriginContext {
+    OriginContext {
+        origin_socket: Some("/hostile/socket".into()),
+        session: Some("hostile-session".into()),
+        plugin_id: Some("hostile-plugin-sentinel".into()),
+        pane_id: Some("hostile-pane-sentinel".into()),
+    }
+}
+
+// -- synthetic input ---------------------------------------------------------
+
+/// A plain (no-modifier) key press event.
+pub fn key_event(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::empty())
+}
+
+/// A plain key press as a [`Msg`].
+pub fn key(code: KeyCode) -> Msg {
+    Msg::Key(key_event(code))
+}
+
+/// A mouse event of `kind` at `(column, row)` as a [`Msg`] — the injector the
+/// wheel/click suites need; mouse input has no real terminal loop in tests.
+pub fn mouse(kind: MouseEventKind, column: u16, row: u16) -> Msg {
+    Msg::Mouse(MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::empty(),
+    })
+}
+
+/// Left mouse button pressed at `(column, row)`.
+pub fn left_down(column: u16, row: u16) -> Msg {
+    mouse(MouseEventKind::Down(MouseButton::Left), column, row)
+}
+
+// -- rendering ---------------------------------------------------------------
+
+/// Draw one `w`×`h` frame of `app` through a `TestBackend` and return it as
+/// text. Does **not** touch `app.last_area` — see [`render_at`] for the
+/// variant that syncs it first.
+pub fn draw(app: &App, w: u16, h: u16) -> String {
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    term.draw(|f| view(app, f)).unwrap();
+    term.backend().to_string()
+}
+
+/// The frame `app.last_area` describes, as one string per row.
+pub fn rendered_rows(app: &App) -> Vec<String> {
+    draw(app, app.last_area.width, app.last_area.height)
+        .lines()
+        .map(|l| l.to_string())
+        .collect()
+}
+
+/// Draw at `(w, h)`, syncing `app.last_area` first so the `HitMap` the draw
+/// registers agrees with what mouse handling will look up — mirroring what
+/// `runtime::event_loop` does every iteration.
+pub fn render_at(d: &mut Driver, w: u16, h: u16) -> String {
+    d.app.last_area = Rect::new(0, 0, w, h);
+    draw(&d.app, w, h)
+}
 
 /// A [`FakeBoardClient`] wrapper that also answers the catalog RPCs
 /// (`harness.capabilities` / `session.list` / `space.list`) which the real

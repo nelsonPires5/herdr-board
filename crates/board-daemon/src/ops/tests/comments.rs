@@ -240,7 +240,7 @@ fn comment_routes_authorize_agents_and_hide_soft_deleted_comments() {
     )
     .unwrap_err();
     assert_eq!(denied.code(), 3);
-    assert!(events.try_recv().is_err());
+    crate::testkit::assert_no_events(&mut events);
 
     // Human callers may edit an agent comment, and deletion is soft.
     handle_request(

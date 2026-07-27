@@ -5,8 +5,12 @@
 //! spawner) to launch agents.
 
 mod dispatch;
+mod herdr_conn;
 mod herdr_snapshot;
+mod logging;
 mod ops;
+mod recovery;
+mod rescue;
 mod server;
 mod session;
 mod settings;
@@ -15,15 +19,17 @@ mod spawner;
 mod state;
 mod store;
 mod supervisor;
-mod template;
+#[cfg(test)]
+mod testkit;
 mod watchers;
 
-use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::spawner::{RuntimeHandle, Spawner};
+use anyhow::Context;
+
+use crate::spawner::Spawner;
 use board_core::config::{Config, RootConfig};
 use board_core::db::Db;
 use board_core::paths;
@@ -32,8 +38,12 @@ use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::settings::{DaemonSettings, ProcessEnv, SpawnerKind};
 use crate::spawner::{HerdrSpawner, LocalSpawner};
-use crate::state::{ActiveRun, Daemon};
+use crate::state::Daemon;
 use crate::store::Store;
+
+/// The board protocol method names boardd routes, generated from the dispatch
+/// table itself so it cannot drift from routing.
+pub use ops::ROUTED_METHODS;
 
 /// The herdr protocol version the daemon requires.
 pub(crate) const HERDR_PROTOCOL: u32 = 17;
@@ -51,7 +61,7 @@ pub fn run(foreground: bool) -> anyhow::Result<()> {
         None => return Ok(()),
     };
 
-    init_logging(foreground);
+    logging::init_logging(foreground);
     tracing::info!("boardd starting: db={:?} socket={:?}", db_path, socket_path);
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -60,50 +70,6 @@ pub fn run(foreground: bool) -> anyhow::Result<()> {
     rt.block_on(async_main(db_path, socket_path))?;
     tracing::info!("boardd stopped");
     Ok(())
-}
-
-fn init_logging(foreground: bool) {
-    use tracing_subscriber::fmt::writer::MakeWriterExt;
-    use tracing_subscriber::EnvFilter;
-
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let log_path = paths::log_path();
-    if let Some(parent) = log_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let file = OpenOptions::new().create(true).append(true).open(&log_path);
-
-    match file {
-        Ok(f) => {
-            let f = Arc::new(f);
-            if foreground {
-                let _ = tracing_subscriber::fmt()
-                    .with_env_filter(filter)
-                    .with_writer(FileWriter(f).and(std::io::stderr))
-                    .try_init();
-            } else {
-                let _ = tracing_subscriber::fmt()
-                    .with_env_filter(filter)
-                    .with_writer(FileWriter(f))
-                    .try_init();
-            }
-        }
-        Err(_) => {
-            let _ = tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .with_writer(std::io::stderr)
-                .try_init();
-        }
-    }
-}
-
-/// A `MakeWriter` over a shared append-mode log file.
-struct FileWriter(Arc<std::fs::File>);
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for FileWriter {
-    type Writer = &'a std::fs::File;
-    fn make_writer(&'a self) -> Self::Writer {
-        &self.0
-    }
 }
 
 async fn async_main(db_path: PathBuf, socket_path: PathBuf) -> anyhow::Result<()> {
@@ -210,15 +176,19 @@ async fn async_main(db_path: PathBuf, socket_path: PathBuf) -> anyhow::Result<()
     // Startup recovery is independent of the best-effort initial Herdr
     // connection. The always-on supervisor subsequently repeats conservative
     // reconciliation after every connection and at a slow interval.
-    startup_recovery(&daemon).await;
+    recovery::startup_recovery(&daemon).await;
     daemon.wake_dispatch();
 
     // Bind the socket (removing any stale file first) and serve.
     let _ = std::fs::remove_file(&socket_path);
     if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent)?;
+        // Name the directory: without it the failure resurfaces below as an
+        // opaque `bind` error about the socket path instead.
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create the boardd socket directory {parent:?}"))?;
     }
-    let listener = tokio::net::UnixListener::bind(&socket_path)?;
+    let listener = tokio::net::UnixListener::bind(&socket_path)
+        .with_context(|| format!("cannot bind the boardd socket {socket_path:?}"))?;
     tracing::info!("listening on {:?}", socket_path);
 
     server::serve(daemon.clone(), listener).await;
@@ -226,122 +196,6 @@ async fn async_main(db_path: PathBuf, socket_path: PathBuf) -> anyhow::Result<()
     // Graceful: leave running panes alone; just clean up the socket.
     let _ = std::fs::remove_file(&socket_path);
     Ok(())
-}
-
-async fn startup_recovery(d: &Arc<Daemon>) {
-    if matches!(d.settings.spawner, SpawnerKind::Herdr) {
-        if let Some(registry) = &d.session_registry {
-            startup_recovery_with(
-                d,
-                Arc::new(crate::session::SessionRegistry::new(
-                    registry.default_socket().to_path_buf(),
-                )),
-                Arc::new(supervisor::HerdrRuntime),
-                Arc::new(supervisor::SystemClock),
-            )
-            .await;
-        }
-    } else {
-        adopt_runs(d).await;
-    }
-}
-
-/// Injectable startup branch used to prove that Herdr reconciliation runs even
-/// when the daemon's initial best-effort client connection failed.
-async fn startup_recovery_with(
-    d: &Arc<Daemon>,
-    resolver: Arc<dyn supervisor::SessionResolver>,
-    runtime: Arc<dyn supervisor::Runtime>,
-    clock: Arc<dyn supervisor::ReconcileClock>,
-) {
-    if matches!(d.settings.spawner, SpawnerKind::Herdr) {
-        supervisor::reconcile_once(d, resolver, runtime, clock).await;
-    } else {
-        adopt_runs(d).await;
-    }
-}
-
-/// On startup, reconcile runs that were started but never ended.
-async fn adopt_runs(d: &Arc<Daemon>) {
-    let active = match d.store.active_runs() {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!("adoption: active_runs failed: {e}");
-            return;
-        }
-    };
-    for (run, card) in active {
-        // Resolve the run's session socket so kill/liveness target the right
-        // session after a restart (default session → None handle socket).
-        let herdr_socket = d.session_registry.as_ref().and_then(|reg| {
-            reg.resolve(run.session.as_deref())
-                .ok()
-                .filter(|r| Some(r.socket.as_path()) != Some(reg.default_socket()))
-                .map(|r| r.socket)
-        });
-        let handle = RuntimeHandle {
-            pane_id: run.herdr_pane_id.clone(),
-            workspace_id: run.herdr_workspace_id.clone(),
-            anchor_pane_id: run.herdr_anchor_pane_id.clone(),
-            pid: None,
-            herdr_socket,
-        };
-        let alive = if handle.pane_id.is_some() {
-            let spawner = d.spawner.clone();
-            let h = handle.clone();
-            tokio::task::spawn_blocking(move || spawner.is_alive(&h))
-                .await
-                .ok()
-                .and_then(|r| r.ok())
-                .unwrap_or(false)
-        } else {
-            false
-        };
-
-        if alive {
-            tracing::info!("adopting live run {} (card {})", run.id, card.id);
-            let adopted_at = std::time::Instant::now();
-            let wall_now_ms = d.wall_now_ms();
-            // v9 deadlines are authoritative: restart never grants a fresh budget.
-            let deadline = ActiveRun::reconstruct_deadline(
-                adopted_at,
-                wall_now_ms,
-                run.timeout_deadline_at_ms,
-            );
-            let mut sched = d.sched.lock().unwrap();
-            sched.active.insert(
-                run.id,
-                ActiveRun {
-                    card_id: card.id,
-                    handle,
-                    started: adopted_at,
-                    timeout_deadline: deadline,
-                    idle_since: None,
-                    awaiting_since: ActiveRun::reconstruct_awaiting_since(
-                        adopted_at,
-                        wall_now_ms,
-                        run.timeout_paused_at_ms,
-                    ),
-                    is_local: false,
-                    pane_id: run.herdr_pane_id.clone(),
-                },
-            );
-            drop(sched);
-            d.refresh_watch();
-        } else {
-            tracing::info!("run {} (card {}) lost across restart", run.id, card.id);
-            let msg = "daemon restart: run lost".to_string();
-            let _ = dispatch::finalize_run(
-                d,
-                run.id,
-                board_core::protocol::RunOutcome::Fail,
-                Some(msg.clone()),
-                Some(msg),
-                false,
-                false,
-            );
-        }
-    }
 }
 
 fn spawn_signal_handler(d: Arc<Daemon>) {
@@ -368,6 +222,3 @@ fn spawn_signal_handler(d: Arc<Daemon>) {
         d.trigger_shutdown();
     });
 }
-
-#[cfg(test)]
-mod tests;

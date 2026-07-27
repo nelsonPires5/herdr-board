@@ -96,6 +96,14 @@ pub struct Comment {
     pub created_at: String,
 }
 
+impl Comment {
+    /// Whether the board itself wrote this comment (author `system`), as
+    /// opposed to a human (`user`) or an agent run (`agent:<run_id>`).
+    pub fn is_system(&self) -> bool {
+        self.author == "system"
+    }
+}
+
 /// The current comment row, including its soft-deletion marker. This separate
 /// projection keeps the original `Comment` struct source-compatible for prompt
 /// builders while exposing deletion state at management/audit boundaries.

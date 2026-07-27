@@ -1,18 +1,13 @@
 use super::*;
-use crate::session::SessionRegistry;
-use crate::settings::DaemonSettings;
-use crate::spawner::LocalSpawner;
-use crate::store::Store;
+use crate::session::{SessionEntry, SessionRegistry};
+use crate::testkit::{self, FakeHerdr};
 use board_core::config::{Config, HarnessDef};
 use board_core::db::{Db, EnqueueRun, FinalizeRun, LifecycleFaultPoint, BOARD_ID};
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use std::thread;
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::broadcast;
 
 fn test_daemon(config: Config) -> Arc<Daemon> {
     test_daemon_with_registry(config, None)
@@ -22,43 +17,20 @@ fn test_daemon(config: Config) -> Arc<Daemon> {
 /// its per-card-tab allocation lock and tab memory from the spawner, so any test
 /// that exercises those must not use the local spawner.
 fn test_daemon_with_herdr_spawner(config: Config, socket: PathBuf) -> Arc<Daemon> {
-    test_daemon_inner(
-        config,
-        Some(SessionRegistry::new(socket.clone())),
-        Arc::new(crate::spawner::HerdrSpawner::new(socket)),
-    )
+    testkit::daemon()
+        .config(config)
+        .herdr_spawner(socket)
+        .build_daemon()
 }
 
 fn test_daemon_with_registry(
     config: Config,
     session_registry: Option<SessionRegistry>,
 ) -> Arc<Daemon> {
-    test_daemon_inner(config, session_registry, Arc::new(LocalSpawner::new()))
-}
-
-fn test_daemon_inner(
-    config: Config,
-    session_registry: Option<SessionRegistry>,
-    spawner: Arc<dyn crate::spawner::Spawner>,
-) -> Arc<Daemon> {
-    let db = Db::open_in_memory().unwrap();
-    let store = Store::new(db);
-    let (events_tx, _events_rx) = broadcast::channel(16);
-    let (dispatch_tx, _dispatch_rx) = mpsc::unbounded_channel();
-    let (shutdown_tx, _shutdown_rx) = watch::channel(false);
-    Arc::new(Daemon::new(
-        store,
-        config,
-        DaemonSettings::default(),
-        PathBuf::from("/tmp/board-test.db"),
-        PathBuf::from("/tmp/board-test.sock"),
-        spawner,
-        None, // no herdr
-        session_registry,
-        events_tx,
-        dispatch_tx,
-        shutdown_tx,
-    ))
+    testkit::daemon()
+        .config(config)
+        .registry(session_registry)
+        .build_daemon()
 }
 
 /// Create a card with one promoted run and return `(card_id, run_id)`.
@@ -90,51 +62,55 @@ fn add_run_with_pane(d: &Arc<Daemon>, pane: Option<&str>) -> (i64, i64) {
 /// A fake Herdr for `run.focus`: `pane.get` reports the recorded pane as still
 /// existing, and `pane.focus` answers with `reply` (a raw `"result":…` or
 /// `"error":…` fragment). One reply per connection, like real herdr.
-fn fake_herdr(reply: &'static str) -> (tempfile::TempDir, PathBuf) {
+fn fake_herdr(reply: &'static str) -> FakeHerdr {
     fake_herdr_with_pane(reply, true)
 }
 
 /// `pane_exists == false` makes `pane.get` answer `pane_not_found`, i.e. the
 /// run's recorded pane id is stale (its terminal was closed).
-fn fake_herdr_with_pane(
-    focus_reply: &'static str,
-    pane_exists: bool,
-) -> (tempfile::TempDir, PathBuf) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("herdr.sock");
-    let listener = UnixListener::bind(&path).unwrap();
-    thread::spawn(move || {
-        for incoming in listener.incoming() {
-            let stream = incoming.unwrap();
-            let mut writer = stream.try_clone().unwrap();
-            let mut reader = BufReader::new(stream);
-            let mut line = String::new();
-            if reader.read_line(&mut line).unwrap() == 0 {
-                // `HerdrClient::connect`'s liveness probe sends no request.
-                continue;
+fn fake_herdr_with_pane(focus_reply: &'static str, pane_exists: bool) -> FakeHerdr {
+    fake_herdr_inner(focus_reply, pane_exists, crate::HERDR_PROTOCOL)
+}
+
+/// A fake Herdr that answers the protocol gate with `protocol` and records
+/// every method it is asked for, so a test can prove that a socket speaking the
+/// wrong protocol is rejected *before* any other request reaches it.
+fn fake_herdr_with_protocol(protocol: u32) -> FakeHerdr {
+    fake_herdr_inner("\"result\":{\"type\":\"ok\"}", true, protocol)
+}
+
+fn fake_herdr_inner(focus_reply: &'static str, pane_exists: bool, protocol: u32) -> FakeHerdr {
+    testkit::herdr_server()
+        .protocol(protocol)
+        .on("workspace.list", |req| {
+            testkit::reply(req, json!({"workspaces": []}))
+        })
+        .on("pane.get", move |req| {
+            if !pane_exists {
+                return testkit::error(req, "pane_not_found", "pane not found");
             }
-            let request: Value = serde_json::from_str(line.trim()).unwrap();
-            let id = request["id"].as_str().unwrap();
-            let reply = match request["method"].as_str().unwrap() {
-                "pane.get" if pane_exists => {
-                    let pane_id = request["params"]["pane_id"].as_str().unwrap();
-                    format!(
-                        "\"result\":{{\"type\":\"pane_info\",\"pane\":{{\"pane_id\":\"{pane_id}\",\
-                         \"terminal_id\":\"t1\",\"workspace_id\":\"w1\",\"tab_id\":\"w1:t1\",\
-                         \"focused\":false,\"agent_status\":\"unknown\",\"revision\":0}}}}"
-                    )
-                }
-                "pane.get" => {
-                    "\"error\":{\"code\":\"pane_not_found\",\"message\":\"pane not found\"}"
-                        .to_string()
-                }
-                "pane.focus" => focus_reply.to_string(),
-                other => panic!("unexpected herdr method {other}"),
-            };
-            writeln!(writer, "{{\"id\":\"{id}\",{reply}}}").unwrap();
-        }
-    });
-    (dir, path)
+            let pane_id = req["params"]["pane_id"].as_str().unwrap();
+            testkit::reply(
+                req,
+                json!({"type": "pane_info", "pane": {
+                    "pane_id": pane_id, "terminal_id": "t1", "workspace_id": "w1",
+                    "tab_id": "w1:t1", "focused": false, "agent_status": "unknown",
+                    "revision": 0
+                }}),
+            )
+        })
+        .on("pane.focus", move |req| {
+            // `focus_reply` is a raw `"result":…` / `"error":…` fragment, so a
+            // test can hand-write an exact herdr answer.
+            let fragment: Value = serde_json::from_str(&format!("{{{focus_reply}}}")).unwrap();
+            let mut response = json!({"id": req["id"].clone()});
+            match fragment.get("result") {
+                Some(result) => response["result"] = result.clone(),
+                None => response["error"] = fragment["error"].clone(),
+            }
+            response
+        })
+        .serve()
 }
 
 // ---------------------------------------------------------------------------
@@ -233,27 +209,20 @@ struct RescueFakeFaults {
 
 /// Observable, pokeable state of the rescue fake.
 struct RescueFake {
-    _dir: tempfile::TempDir,
+    herdr: FakeHerdr,
     socket: PathBuf,
-    /// Every request method, in order.
-    methods: Arc<Mutex<Vec<String>>>,
-    /// Every `agent.start` request, so tests can assert the resume argv.
-    agent_starts: Arc<Mutex<Vec<Value>>>,
-    /// Every `pane.split` request. Protocol-17 placement is pane-first, so the
-    /// run environment arrives here, NOT on `agent.start`.
-    pane_splits: Arc<Mutex<Vec<Value>>>,
     /// Live panes, so tests can simulate a harness exiting inside one.
     panes: Arc<Mutex<Vec<FakePane>>>,
 }
 
 impl RescueFake {
     fn count(&self, method: &str) -> usize {
-        self.methods
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|m| m.as_str() == method)
-            .count()
+        self.herdr.count(method)
+    }
+
+    /// Every `agent.start` request, so tests can assert the resume argv.
+    fn agent_starts(&self) -> Vec<Value> {
+        self.herdr.requests_for("agent.start")
     }
 
     fn pane_ids(&self) -> Vec<String> {
@@ -277,8 +246,10 @@ impl RescueFake {
     }
 
     /// The env of the last `pane.split`, i.e. what the rescued pane received.
+    /// Protocol-17 placement is pane-first, so the run environment arrives on
+    /// `pane.split`, NOT on `agent.start`.
     fn last_split_env(&self) -> BTreeMap<String, String> {
-        let splits = self.pane_splits.lock().unwrap();
+        let splits = self.herdr.requests_for("pane.split");
         let last = splits.last().expect("a pane.split happened");
         serde_json::from_value(last["params"]["env"].clone()).unwrap_or_default()
     }
@@ -294,15 +265,6 @@ impl RescueFake {
 /// resolved from the exact `tab_id` reconstructed from durable pane identity,
 /// never from a label, so a fixture label cannot accidentally satisfy it.
 fn fake_rescue_herdr(faults: RescueFakeFaults) -> RescueFake {
-    let dir = tempfile::tempdir().unwrap();
-    let socket = dir.path().join("herdr.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
-    let methods = Arc::new(Mutex::new(Vec::new()));
-    let agent_starts = Arc::new(Mutex::new(Vec::new()));
-    let pane_splits = Arc::new(Mutex::new(Vec::new()));
-    let methods2 = Arc::clone(&methods);
-    let agent_starts2 = Arc::clone(&agent_starts);
-    let pane_splits2 = Arc::clone(&pane_splits);
     let tab_label = "card-fixture".to_string();
 
     // (pane_id, tab_id, label, agent). The anchor survives its run's pane,
@@ -328,35 +290,23 @@ fn fake_rescue_herdr(faults: RescueFakeFaults) -> RescueFake {
     let next_pane = Arc::new(Mutex::new(0_usize));
     let next_tab = Arc::new(Mutex::new(0_usize));
 
-    thread::spawn(move || {
-        let pane_json = |pane: &FakePane| {
-            json!({
-                "pane_id": pane.0, "terminal_id": format!("term-{}", pane.0),
-                "workspace_id": "w1", "tab_id": pane.1,
-                "label": pane.2, "agent": pane.3,
-                "cwd": "/tmp/rescue-cwd",
-                "focused": false, "agent_status": "idle", "revision": 1
-            })
-        };
-        let tab_json = |tab_id: &str, label: &str| {
-            json!({
-                "tab_id": tab_id, "workspace_id": "w1", "number": 1, "label": label,
-                "focused": true, "pane_count": 1, "agent_status": "idle"
-            })
-        };
-        for incoming in listener.incoming() {
-            let Ok(stream) = incoming else { break };
-            let mut writer = stream.try_clone().unwrap();
-            let mut reader = BufReader::new(stream);
-            let mut line = String::new();
-            if reader.read_line(&mut line).unwrap_or(0) == 0 {
-                // `HerdrClient::connect`'s liveness probe sends no request.
-                continue;
-            }
-            let request: Value = serde_json::from_str(line.trim()).unwrap();
-            let id = request["id"].as_str().unwrap().to_string();
-            let method = request["method"].as_str().unwrap().to_string();
-            methods2.lock().unwrap().push(method.clone());
+    let herdr = testkit::herdr_server()
+        .handler(move |request, _index| {
+            let pane_json = |pane: &FakePane| {
+                json!({
+                    "pane_id": pane.0, "terminal_id": format!("term-{}", pane.0),
+                    "workspace_id": "w1", "tab_id": pane.1,
+                    "label": pane.2, "agent": pane.3,
+                    "cwd": "/tmp/rescue-cwd",
+                    "focused": false, "agent_status": "idle", "revision": 1
+                })
+            };
+            let tab_json = |tab_id: &str, label: &str| {
+                json!({
+                    "tab_id": tab_id, "workspace_id": "w1", "number": 1, "label": label,
+                    "focused": true, "pane_count": 1, "agent_status": "idle"
+                })
+            };
             let params = request["params"].clone();
             let snapshot = || panes.lock().unwrap().clone();
             let tabs = || {
@@ -369,36 +319,39 @@ fn fake_rescue_herdr(faults: RescueFakeFaults) -> RescueFake {
                 ids
             };
 
-            let body = match method.as_str() {
-                "ping" => json!({"type":"pong","version":"0.7.5","protocol":17,"capabilities":{}}),
+            match request["method"].as_str().unwrap() {
                 "pane.get" => {
                     let wanted = params["pane_id"].as_str().unwrap();
                     match snapshot().iter().find(|pane| pane.0 == wanted) {
-                        Some(pane) => json!({"type":"pane_info","pane":pane_json(pane)}),
-                        None => {
-                            json!({"__error":{"code":"pane_not_found","message":"pane not found"}})
-                        }
+                        Some(pane) => testkit::reply(
+                            request,
+                            json!({"type":"pane_info","pane":pane_json(pane)}),
+                        ),
+                        None => testkit::error(request, "pane_not_found", "pane not found"),
                     }
                 }
                 "pane.list" => {
                     let list: Vec<Value> = snapshot().iter().map(pane_json).collect();
-                    json!({"type":"pane_list","panes":list})
+                    testkit::reply(request, json!({"type":"pane_list","panes":list}))
                 }
                 "session.snapshot" => {
                     let list: Vec<Value> = snapshot().iter().map(pane_json).collect();
                     let tab_list: Vec<Value> =
                         tabs().iter().map(|tab| tab_json(tab, &tab_label)).collect();
-                    json!({"type":"session_snapshot","snapshot":{
-                        "version":"0.7.5","protocol":17,
-                        "workspaces":[{"workspace_id":"w1","label":"ws","focused":true,
-                                       "tab_count":1,"pane_count":1,"agent_status":"idle"}],
-                        "tabs":tab_list,"panes":list,"agents":[]
-                    }})
+                    testkit::reply(
+                        request,
+                        json!({"type":"session_snapshot","snapshot":{
+                            "version":"0.7.5","protocol":17,
+                            "workspaces":[{"workspace_id":"w1","label":"ws","focused":true,
+                                           "tab_count":1,"pane_count":1,"agent_status":"idle"}],
+                            "tabs":tab_list,"panes":list,"agents":[]
+                        }}),
+                    )
                 }
                 "tab.list" => {
                     let tab_list: Vec<Value> =
                         tabs().iter().map(|tab| tab_json(tab, &tab_label)).collect();
-                    json!({"type":"tab_list","tabs":tab_list})
+                    testkit::reply(request, json!({"type":"tab_list","tabs":tab_list}))
                 }
                 "tab.create" => {
                     let mut counter = next_tab.lock().unwrap();
@@ -412,8 +365,11 @@ fn fake_rescue_herdr(faults: RescueFakeFaults) -> RescueFake {
                         None,
                     );
                     panes.lock().unwrap().push(root.clone());
-                    json!({"type":"tab_created","tab":tab_json(&tab_id,&label),
-                           "root_pane":pane_json(&root)})
+                    testkit::reply(
+                        request,
+                        json!({"type":"tab_created","tab":tab_json(&tab_id,&label),
+                               "root_pane":pane_json(&root)}),
+                    )
                 }
                 "pane.layout" => {
                     // Every pane in the target's tab, so a split target resolves.
@@ -434,17 +390,19 @@ fn fake_rescue_herdr(faults: RescueFakeFaults) -> RescueFake {
                             })
                         })
                         .collect();
-                    json!({"type":"pane_layout","layout":{
-                        "workspace_id":"w1","tab_id":tab,"zoomed":false,
-                        "area":{"x":0,"y":0,"width":120,"height":40},
-                        "focused_pane_id":target,"panes":list,"splits":[]
-                    }})
+                    testkit::reply(
+                        request,
+                        json!({"type":"pane_layout","layout":{
+                            "workspace_id":"w1","tab_id":tab,"zoomed":false,
+                            "area":{"x":0,"y":0,"width":120,"height":40},
+                            "focused_pane_id":target,"panes":list,"splits":[]
+                        }}),
+                    )
                 }
-                "pane.split" if faults.split_fails => json!({"__error":{
-                    "code":"pane_split_failed","message":"no room for another pane"
-                }}),
+                "pane.split" if faults.split_fails => {
+                    testkit::error(request, "pane_split_failed", "no room for another pane")
+                }
                 "pane.split" => {
-                    pane_splits2.lock().unwrap().push(request.clone());
                     let target = params["target_pane_id"]
                         .as_str()
                         .unwrap_or_default()
@@ -459,7 +417,10 @@ fn fake_rescue_herdr(faults: RescueFakeFaults) -> RescueFake {
                         .unwrap_or_else(|| "w1:t1".to_string());
                     let child = (format!("w1:rescued{counter}"), tab, None, None);
                     guard.push(child.clone());
-                    json!({"type":"pane_info","pane":pane_json(&child)})
+                    testkit::reply(
+                        request,
+                        json!({"type":"pane_info","pane":pane_json(&child)}),
+                    )
                 }
                 "pane.rename" => {
                     let target = params["pane_id"].as_str().unwrap().to_string();
@@ -468,28 +429,33 @@ fn fake_rescue_herdr(faults: RescueFakeFaults) -> RescueFake {
                     match guard.iter_mut().find(|pane| pane.0 == target) {
                         Some(pane) => {
                             pane.2 = label;
-                            json!({"type":"pane_info","pane":pane_json(pane)})
+                            testkit::reply(
+                                request,
+                                json!({"type":"pane_info","pane":pane_json(pane)}),
+                            )
                         }
-                        None => json!({"__error":{"code":"pane_not_found","message":"gone"}}),
+                        None => testkit::error(request, "pane_not_found", "gone"),
                     }
                 }
                 "pane.close" => {
                     let target = params["pane_id"].as_str().unwrap().to_string();
                     panes.lock().unwrap().retain(|pane| pane.0 != target);
-                    json!({"type":"ok"})
+                    testkit::reply(request, json!({"type":"ok"}))
                 }
                 "pane.focus" => {
                     let target = params["pane_id"].as_str().unwrap().to_string();
                     match snapshot().iter().find(|pane| pane.0 == target) {
-                        Some(pane) => json!({"type":"pane_info","pane":pane_json(pane)}),
-                        None => json!({"__error":{"code":"pane_not_found","message":"gone"}}),
+                        Some(pane) => testkit::reply(
+                            request,
+                            json!({"type":"pane_info","pane":pane_json(pane)}),
+                        ),
+                        None => testkit::error(request, "pane_not_found", "gone"),
                     }
                 }
-                "agent.start" if faults.agent_start_fails => json!({"__error":{
-                    "code":"agent_start_failed","message":"harness refused to start"
-                }}),
+                "agent.start" if faults.agent_start_fails => {
+                    testkit::error(request, "agent_start_failed", "harness refused to start")
+                }
                 "agent.start" => {
-                    agent_starts2.lock().unwrap().push(request.clone());
                     let target = params["pane_id"].as_str().unwrap().to_string();
                     let name = params["name"].as_str().unwrap().to_string();
                     let mut guard = panes.lock().unwrap();
@@ -507,26 +473,20 @@ fn fake_rescue_herdr(faults: RescueFakeFaults) -> RescueFake {
                     agent["name"] = Value::String(name);
                     agent["launch_pending"] = Value::Bool(false);
                     agent["interactive_ready"] = Value::Bool(true);
-                    json!({"type":"agent_started","agent":agent,"argv":[]})
+                    testkit::reply(
+                        request,
+                        json!({"type":"agent_started","agent":agent,"argv":[]}),
+                    )
                 }
                 other => panic!("unexpected herdr method {other}"),
-            };
+            }
+        })
+        .serve();
 
-            let response = match body.get("__error") {
-                Some(error) => json!({"id": id, "error": error}),
-                None => json!({"id": id, "result": body}),
-            };
-            writeln!(writer, "{response}").unwrap();
-            let _ = writer.flush();
-        }
-    });
-
+    let socket = herdr.socket.clone();
     RescueFake {
-        _dir: dir,
+        herdr,
         socket,
-        methods,
-        agent_starts,
-        pane_splits,
         panes: panes2,
     }
 }
@@ -536,4 +496,7 @@ mod cards;
 mod comments;
 mod discovery;
 mod lifecycle;
+mod panes;
+mod parity;
+mod rollback;
 mod validation;

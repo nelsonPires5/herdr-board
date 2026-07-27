@@ -5,23 +5,20 @@
 
 use board_core::client::{BoardClient, FakeBoardClient};
 use board_core::db::{EnqueueRun, FinalizeRun};
+use board_core::protocol::parse_timestamp;
 use board_core::protocol::{AwaitingReason, CardCreateParams, CardStatus, RunOutcome};
 use board_tui::app::{App, Msg, Screen, SwitcherLevel, SwitcherState};
-use board_tui::editor::FakeEditor;
 use board_tui::forms::{FieldId, FieldKind};
-use board_tui::testkit::{demo_client, DemoClient};
-use board_tui::view::{parse_epoch, view};
-use board_tui::{Driver, OriginContext};
+use board_tui::testkit::{demo_client, driver_with_origin, hostile_origin, DemoClient};
+use board_tui::Driver;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
-use ratatui::Terminal;
 
 const NOW_STR: &str = "2026-07-14 12:00:00";
 const RUN_START: &str = "2026-07-14 11:58:00"; // 2m before NOW
 
 fn now() -> i64 {
-    parse_epoch(NOW_STR).unwrap()
+    parse_timestamp(NOW_STR).unwrap()
 }
 
 /// Pin `now` and rewrite active-run starts so timers are stable (a board fetch
@@ -47,12 +44,11 @@ fn pin(app: &mut App) {
     }
 }
 
+/// This suite's canned `$EDITOR` text; asserted on in the editor snapshots.
+const EDITED: &str = "edited via $EDITOR";
+
 fn driver<C: BoardClient + 'static>(client: C) -> Driver {
-    Driver::with_editor(
-        Box::new(client),
-        Box::new(FakeEditor::new("edited via $EDITOR")),
-    )
-    .unwrap()
+    board_tui::testkit::driver_with_editor(client, EDITED)
 }
 
 fn key(d: &mut Driver, code: KeyCode) {
@@ -61,9 +57,7 @@ fn key(d: &mut Driver, code: KeyCode) {
 
 fn render(d: &mut Driver, w: u16, h: u16) -> String {
     pin(&mut d.app);
-    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
-    term.draw(|f| view(&d.app, f)).unwrap();
-    term.backend().to_string()
+    board_tui::testkit::draw(&d.app, w, h)
 }
 
 #[test]
@@ -99,18 +93,7 @@ fn default_context_ignores_ambient_herdr_session() {
 #[test]
 fn explicit_hostile_origin_context_keeps_default_rendering_byte_identical() {
     let mut default = driver(FakeBoardClient::new().unwrap());
-    let mut hostile = Driver::with_editor_and_origin(
-        Box::new(FakeBoardClient::new().unwrap()),
-        Box::new(FakeEditor::new("edited via $EDITOR")),
-        OriginContext {
-            origin_socket: Some("/hostile/socket".into()),
-            session: Some("hostile-session".into()),
-            plugin_id: Some("hostile-plugin-sentinel".into()),
-            pane_id: Some("hostile-pane-sentinel".into()),
-            herdr_bin_path: Some("/hostile/herdr-sentinel".into()),
-        },
-    )
-    .unwrap();
+    let mut hostile = driver_with_origin(FakeBoardClient::new().unwrap(), EDITED, hostile_origin());
 
     let default_output = render(&mut default, 80, 24);
     let hostile_output = render(&mut hostile, 80, 24);
@@ -281,18 +264,7 @@ fn column_form_hostile_origin_is_metadata_only() {
     key(&mut baseline, KeyCode::Char('N'));
     let baseline_output = render(&mut baseline, 80, 24);
 
-    let mut hostile = Driver::with_editor_and_origin(
-        Box::new(demo_client().unwrap()),
-        Box::new(FakeEditor::new("edited via $EDITOR")),
-        OriginContext {
-            origin_socket: Some("/hostile/socket".into()),
-            session: Some("hostile-session".into()),
-            plugin_id: Some("hostile-plugin-sentinel".into()),
-            pane_id: Some("hostile-pane-sentinel".into()),
-            herdr_bin_path: Some("/hostile/herdr-sentinel".into()),
-        },
-    )
-    .unwrap();
+    let mut hostile = driver_with_origin(demo_client().unwrap(), EDITED, hostile_origin());
     key(&mut hostile, KeyCode::Char('N'));
     let hostile_output = render(&mut hostile, 80, 24);
     assert_eq!(hostile_output, baseline_output);
@@ -512,9 +484,27 @@ fn help_overlay() {
 #[test]
 fn delete_column_with_cards_picker() {
     let mut d = driver(demo_client().unwrap());
-    key(&mut d, KeyCode::Right); // Plan (has the running card)
+    // Todo: has cards, but none of them has an open run — so `D` asks where
+    // the cards should go. (A column WITH an open run is refused outright; see
+    // `delete_column_with_an_open_run_is_refused_before_the_picker`.)
     key(&mut d, KeyCode::Char('D'));
     insta::assert_snapshot!("delete_column_picker", render(&mut d, 80, 24));
+}
+
+/// A10: the daemon refuses `column.delete` while any card in the column has an
+/// open run, so the TUI must not first collect a "move cards where?" answer it
+/// is going to throw away.
+#[test]
+fn delete_column_with_an_open_run_is_refused_before_the_picker() {
+    let mut d = driver(demo_client().unwrap());
+    key(&mut d, KeyCode::Right); // Plan (has the running card)
+    key(&mut d, KeyCode::Char('D'));
+    assert_eq!(d.app.screen, Screen::Board);
+    assert!(d.app.picker.is_none(), "no destination picker is opened");
+    assert!(d.app.confirm.is_none());
+    let toast = d.app.toast.as_ref().expect("refusal is explained");
+    assert!(toast.is_error);
+    assert_eq!(toast.text, "column has a card with an open run");
 }
 
 #[test]
@@ -622,6 +612,9 @@ fn toast_on_client_error() {
     key(&mut d, KeyCode::Right);
     key(&mut d, KeyCode::Enter);
     key(&mut d, KeyCode::Char('r'));
+    // Retry confirms first (it relaunches a real agent); `y` fires the RPC.
+    assert_eq!(d.app.screen, Screen::Confirm);
+    key(&mut d, KeyCode::Char('y'));
     assert!(d.app.toast.as_ref().is_some_and(|t| t.is_error));
     insta::assert_snapshot!("toast_error", render(&mut d, 80, 24));
 }
@@ -915,6 +908,7 @@ size_matrix_test!(size_matrix_switcher_columns_and_boards, |w, h| {
         columns_sel: d.app.sel_col,
         boards: Vec::new(),
         entered_at_boards: false,
+        return_to: Screen::Board,
     });
     d.app.screen = Screen::Switcher;
     assert_eq!(d.app.screen, Screen::Switcher);

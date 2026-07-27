@@ -10,9 +10,10 @@ use crate::protocol::{
     CardUpdateParams, CardVisibility, ColumnCreateParams, ColumnDeleteParams, ColumnReorderParams,
     ColumnUpdateParams, CommentAddParams, CommentDeleteParams, CommentGetParams,
     CommentHistoryParams, CommentUpdateParams, DaemonStatus, DeletedResult, Event,
-    HarnessCapabilitiesParams, HarnessListResult, RunActionResult, RunCardParams, RunDoneParams,
-    RunFocusParams, RunFocusResult, RunOutcome, RunPaneExitedParams, SessionListResult,
-    SpaceListParams, SpaceListResult, StopResult, TemplateApplyParams,
+    HarnessCapabilitiesParams, HarnessListResult, PaneSetTitleParams, PaneSetTitleResult,
+    RunActionResult, RunCardParams, RunDoneParams, RunFocusParams, RunFocusResult, RunOutcome,
+    RunPaneExitedParams, SessionListResult, SpaceListParams, SpaceListResult, StopResult,
+    TemplateApplyParams,
 };
 
 /// Blocking client to boardd. Object-safe so the TUI can hold `Box<dyn BoardClient>`.
@@ -345,6 +346,25 @@ pub trait BoardClient {
         };
         Ok(serde_json::from_value(
             self.call("run.focus", serde_json::to_value(p)?)?,
+        )?)
+    }
+
+    /// Set the Herdr border title of `pane_id` in the caller's own session
+    /// (`origin_socket`). The daemon owns every Herdr call, so this is the only
+    /// way a client renames its own pane.
+    fn pane_set_title(
+        &mut self,
+        pane_id: &str,
+        title: &str,
+        origin_socket: &str,
+    ) -> anyhow::Result<PaneSetTitleResult> {
+        let p = PaneSetTitleParams {
+            pane_id: pane_id.to_string(),
+            title: title.to_string(),
+            origin_socket: origin_socket.to_string(),
+        };
+        Ok(serde_json::from_value(
+            self.call("pane.set_title", serde_json::to_value(p)?)?,
         )?)
     }
 }

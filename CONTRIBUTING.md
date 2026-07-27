@@ -19,14 +19,9 @@ cargo run -p board-cli -- tui   # run the board locally
 
 ## Gates that must pass
 
-Keep this tier green before opening a PR:
-
-```bash
-cargo test --workspace --all-features        # unit + integration (LocalSpawner + fake harness; no herdr)
-cargo clippy --all-targets -- -D warnings     # zero warnings
-cargo fmt --all --check                       # formatted
-python3 -m unittest discover -s scripts/tests -p 'test_*.py'   # docs/release contracts
-```
+Keep this tier green before opening a PR. The gate list has one maintained copy:
+**[`docs/README.md` → Test gates](docs/README.md#test-gates-single-source)** — the same commands
+CI runs, kept in sync by `scripts/tests/test_docs.py`.
 
 - No `unwrap()` outside tests; `anyhow` at edges, `thiserror` in core.
 - Tests must be hermetic and deterministic — inject clocks/paths, no wall-clock timing.

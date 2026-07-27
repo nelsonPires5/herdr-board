@@ -88,9 +88,7 @@ fn finalize_run_inner(
         let db = d.store.lock();
         let existing = db.get_run(run_id)?;
         if existing.ended_at.is_some() {
-            let card = db
-                .get_card(existing.card_id)?
-                .ok_or_else(|| Error::NotFound(format!("card {}", existing.card_id)))?;
+            let card = db.require_card(existing.card_id)?;
             return Ok(Some((existing, card)));
         }
         if let Some(classified_at) = timeout_at {
@@ -111,9 +109,7 @@ fn finalize_run_inner(
             .active
             .get(&run_id)
             .map(|active| active.started.elapsed().as_secs() as i64);
-        let mut card = db
-            .get_card(existing.card_id)?
-            .ok_or_else(|| Error::NotFound(format!("card {}", existing.card_id)))?;
+        let mut card = db.require_card(existing.card_id)?;
         let mut comments = Vec::<String>::new();
         if let Some(comment) = extra_comment.as_ref() {
             comments.push(comment.clone());
@@ -127,9 +123,7 @@ fn finalize_run_inner(
         let mut next_hops = None;
         let mut notify = None;
         if transition {
-            let current = db
-                .get_column(existing.column_id)?
-                .ok_or_else(|| Error::NotFound(format!("column {}", existing.column_id)))?;
+            let current = db.require_column(existing.column_id)?;
             let cols = db.list_columns(card.board_id)?;
             let dec = decide_transition(&current, &cols, outcome, elapsed);
             comments.push(dec.system_comment.clone());
@@ -148,14 +142,21 @@ fn finalize_run_inner(
                             comments.push(message);
                             final_status = CardStatus::Failed;
                         }
-                        AutoHopDecision::Reset => unreachable!(),
+                        // `decide_auto_hop` only resets when `dec.enqueue` is
+                        // false, which this branch already excludes. The variant
+                        // lives in another crate, so a future one must not
+                        // panic the daemon.
+                        AutoHopDecision::Reset => {
+                            return Err(Error::InvalidState(format!(
+                                "run {run_id}: auto-hop decision reset an enqueueing transition"
+                            )))
+                        }
                     }
-                } else if cols
+                } else if let Some(target) = cols
                     .iter()
                     .find(|c| c.id == target_id)
-                    .is_some_and(|c| c.trigger == board_core::protocol::Trigger::Manual)
+                    .filter(|c| c.trigger == board_core::protocol::Trigger::Manual)
                 {
-                    let target = cols.iter().find(|c| c.id == target_id).unwrap();
                     notify = Some((
                         format!("Card #{} ready for review", card.id),
                         format!("Entered {}", target.name),
@@ -201,6 +202,16 @@ fn finalize_run_inner(
     if let Some((title, body)) = notify {
         d.notify(title, Some(body), NotificationSound::Request);
     }
+    // The closing half of the `launch` span's story: one event per run end,
+    // never in a loop.
+    tracing::info!(
+        run_id,
+        card_id = effects.card.id,
+        outcome = ?outcome,
+        transitioned = transition,
+        killed = kill,
+        "run finalized"
+    );
     d.emit_run_ended(effects.card.id, run_id, outcome);
     d.wake_dispatch();
     Ok(Some((effects.finished_run, effects.card)))

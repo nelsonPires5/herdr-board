@@ -1,5 +1,8 @@
 //! Submit conversion and value extraction helpers.
 
+use board_core::engine::{
+    validate_card_space, validate_column_permission_override, ValidationError,
+};
 use board_core::protocol::{
     CardCreateParams, CardUpdateParams, ColumnCreateParams, ColumnUpdateParams, Effort, Patch,
     SpaceKind, Trigger,
@@ -7,11 +10,23 @@ use board_core::protocol::{
 
 use super::{ChoiceVal, FieldId, FieldKind, Form, FormKind, Submit};
 
+/// Render a core validation failure as the toast text a submit returns.
+fn err(e: ValidationError) -> String {
+    e.to_string()
+}
+
 impl Form {
     // -- submit --------------------------------------------------------------
 
     /// Turn the current field values into params, or an error message to toast.
+    ///
+    /// Before building params this runs the **core** validators the daemon
+    /// would run (`validate_card_space`, `validate_column_permission_override`)
+    /// as a pre-flight, so a doomed request is caught in the open form instead
+    /// of after a failed round-trip. The daemon stays authoritative — this
+    /// never approves anything, it only declines earlier.
     pub fn submit(&self) -> Result<Submit, String> {
+        self.preflight().map_err(err)?;
         match self.kind {
             FormKind::CardCreate { column_id } => {
                 let title = self.trim(FieldId::Title);
@@ -26,7 +41,8 @@ impl Form {
                     harness: self.opt_choice_str(FieldId::Harness),
                     model: self.card_model(),
                     effort: self.opt_effort(FieldId::Effort),
-                    permission_mode: (self.current_harness() != "pi")
+                    permission_mode: self
+                        .permission_is_applicable()
                         .then(|| self.opt_choice_str(FieldId::Permission))
                         .flatten(),
                     session: self.current_session(),
@@ -46,17 +62,17 @@ impl Form {
                     title: Some(title),
                     description: Some(self.trim(FieldId::Description)),
                     harness: self.opt_choice_str(FieldId::Harness),
-                    model: patch(self.card_model()),
-                    effort: patch(self.opt_effort(FieldId::Effort)),
-                    permission_mode: patch(
-                        (self.current_harness() != "pi")
+                    model: Patch::from_option(self.card_model()),
+                    effort: Patch::from_option(self.opt_effort(FieldId::Effort)),
+                    permission_mode: Patch::from_option(
+                        self.permission_is_applicable()
                             .then(|| self.opt_choice_str(FieldId::Permission))
                             .flatten(),
                     ),
-                    session: patch(self.current_session()),
+                    session: Patch::from_option(self.current_session()),
                     space_kind: self.opt_space_kind(),
-                    space_ref: patch(self.card_space_ref()),
-                    space_cwd: patch(self.new_workspace_cwd()),
+                    space_ref: Patch::from_option(self.card_space_ref()),
+                    space_cwd: Patch::from_option(self.new_workspace_cwd()),
                 }))
             }
             FormKind::ColumnCreate => {
@@ -89,16 +105,22 @@ impl Form {
                     id: column_id,
                     name: Some(name),
                     position: None,
-                    system_prompt: patch(self.opt_text(FieldId::SystemPrompt)),
+                    system_prompt: Patch::from_option(self.opt_text(FieldId::SystemPrompt)),
                     trigger: self.opt_trigger(),
-                    on_success_column_id: patch(self.opt_col(FieldId::OnSuccess)),
-                    on_fail_column_id: patch(self.opt_col(FieldId::OnFail)),
+                    on_success_column_id: Patch::from_option(self.opt_col(FieldId::OnSuccess)),
+                    on_fail_column_id: Patch::from_option(self.opt_col(FieldId::OnFail)),
                     fresh_session: self.opt_bool(FieldId::FreshSession),
-                    harness_override: patch(self.opt_str_field(FieldId::HarnessOverride)),
-                    model_override: patch(self.opt_text(FieldId::ModelOverride)),
-                    effort_override: patch(self.opt_str_field(FieldId::EffortOverride)),
-                    permission_override: patch(self.opt_str_field(FieldId::PermissionOverride)),
-                    timeout_minutes: patch(self.opt_int(FieldId::Timeout)),
+                    harness_override: Patch::from_option(
+                        self.opt_str_field(FieldId::HarnessOverride),
+                    ),
+                    model_override: Patch::from_option(self.opt_text(FieldId::ModelOverride)),
+                    effort_override: Patch::from_option(
+                        self.opt_str_field(FieldId::EffortOverride),
+                    ),
+                    permission_override: Patch::from_option(
+                        self.opt_str_field(FieldId::PermissionOverride),
+                    ),
+                    timeout_minutes: Patch::from_option(self.opt_int(FieldId::Timeout)),
                 }))
             }
             FormKind::Comment { card_id } => {
@@ -115,6 +137,26 @@ impl Form {
                 }
                 Ok(Submit::CommentEdit { comment_id, body })
             }
+        }
+    }
+
+    /// The core validators that apply to this form's shape. Deliberately a
+    /// subset: only rules that are *decidable* from the form's own values.
+    /// Anything needing board/daemon state (busy cards, orphaned overrides)
+    /// stays the daemon's job.
+    fn preflight(&self) -> Result<(), ValidationError> {
+        match self.kind {
+            FormKind::CardCreate { .. } | FormKind::CardEdit { .. } => validate_card_space(
+                self.opt_space_kind().unwrap_or(SpaceKind::Workspace),
+                self.card_space_ref().as_deref(),
+                self.new_workspace_cwd().as_deref(),
+            ),
+            FormKind::ColumnCreate | FormKind::ColumnEdit { .. } => {
+                validate_column_permission_override(
+                    self.opt_str_field(FieldId::PermissionOverride).as_deref(),
+                )
+            }
+            FormKind::Comment { .. } | FormKind::CommentEdit { .. } => Ok(()),
         }
     }
 
@@ -184,22 +226,4 @@ impl Form {
     pub(super) fn opt_int(&self, id: FieldId) -> Option<i64> {
         self.opt_text(id).and_then(|s| s.parse().ok())
     }
-}
-
-fn patch<T>(value: Option<T>) -> Patch<T> {
-    value.map(Patch::Set).unwrap_or(Patch::Clear)
-}
-
-/// Parse a herdr session name from a `HERDR_SOCKET_PATH` value.
-///
-/// A named session's socket lives at `…/sessions/<name>/herdr.sock`; anything
-/// else (unset, or the plain default `…/herdr.sock`) means the daemon's default
-/// session, represented as `None`. This function is pure so production
-/// composition can inject its result without test-time environment reads.
-pub fn session_name_from_socket(path: Option<&str>) -> Option<String> {
-    // Expect the tail `sessions/<name>/herdr.sock`.
-    let rest = path?.strip_suffix("/herdr.sock")?;
-    let (parent, name) = rest.rsplit_once('/')?;
-    let last_seg = parent.rsplit('/').next().unwrap_or(parent);
-    (last_seg == "sessions" && !name.is_empty()).then(|| name.to_string())
 }

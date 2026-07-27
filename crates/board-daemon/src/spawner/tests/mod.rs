@@ -1,8 +1,9 @@
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::thread;
+
+use crate::testkit::{
+    self, agent_info, agent_started, error, pane_info, reply, tab_created, FakeHerdr,
+};
 
 use super::herdr::{
     configured_script, posix_quote, remove_file_if_exists, HerdrCliPaneRunner, PaneRunner,
@@ -30,12 +31,6 @@ fn pane(id: &str, width: u64, height: u64) -> LayoutPane {
 // -----------------------------------------------------------------------
 // Protocol-17 pane-first launch contracts
 // -----------------------------------------------------------------------
-
-struct RecordingHerdr {
-    _dir: tempfile::TempDir,
-    socket: PathBuf,
-    requests: Arc<Mutex<Vec<Value>>>,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PaneRunCall {
@@ -100,96 +95,22 @@ impl Drop for RecordingPaneRunner {
     }
 }
 
-fn serve_recording_herdr<F>(handler: F) -> RecordingHerdr
+fn serve_recording_herdr<F>(handler: F) -> FakeHerdr
 where
     F: Fn(&Value, usize) -> Value + Send + Sync + 'static,
 {
-    serve_recording_herdr_with_ping(handler, "0.7.5", 17)
+    testkit::herdr_server().handler(handler).serve()
 }
 
-fn serve_recording_herdr_with_ping<F>(handler: F, version: &str, protocol: u32) -> RecordingHerdr
+fn serve_recording_herdr_with_ping<F>(handler: F, version: &str, protocol: u32) -> FakeHerdr
 where
     F: Fn(&Value, usize) -> Value + Send + Sync + 'static,
 {
-    let dir = tempfile::tempdir().unwrap();
-    let socket = dir.path().join("herdr.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
-    let requests = Arc::new(Mutex::new(Vec::new()));
-    let requests2 = Arc::clone(&requests);
-    let handler = Arc::new(handler);
-    let version = version.to_string();
-    thread::spawn(move || {
-        let mut handler_index = 0;
-        for conn in listener.incoming() {
-            let Ok(stream) = conn else { break };
-            let mut writer = stream.try_clone().unwrap();
-            let mut reader = BufReader::new(stream);
-            let mut line = String::new();
-            if reader
-                .read_line(&mut line)
-                .ok()
-                .filter(|n| *n > 0)
-                .is_none()
-            {
-                continue;
-            }
-            let request: Value = serde_json::from_str(line.trim()).unwrap();
-            {
-                let mut seen = requests2.lock().unwrap();
-                seen.push(request.clone());
-            }
-            let response = if request["method"] == "ping" {
-                serde_json::json!({
-                    "id": request["id"].clone(),
-                    "result": {"type": "pong", "version": version.clone(), "protocol": protocol, "capabilities": {}}
-                })
-            } else {
-                let response = handler(&request, handler_index);
-                handler_index += 1;
-                response
-            };
-            writeln!(writer, "{}", response).unwrap();
-            writer.flush().unwrap();
-        }
-    });
-    RecordingHerdr {
-        _dir: dir,
-        socket,
-        requests,
-    }
-}
-
-fn reply(req: &Value, result: Value) -> Value {
-    serde_json::json!({"id": req["id"].clone(), "result": result})
-}
-
-fn error(req: &Value, code: &str, message: &str) -> Value {
-    serde_json::json!({
-        "id": req["id"].clone(),
-        "error": {"code": code, "message": message}
-    })
-}
-
-/// Minimal schema-valid protocol-17 `PaneInfo` fixture. In particular,
-/// `focused` and `revision` are required by the authoritative schema.
-fn pane_info(id: &str) -> Value {
-    serde_json::json!({
-        "pane_id": id,
-        "terminal_id": format!("term-{id}"),
-        "workspace_id": "w1",
-        "tab_id": "w1:t1",
-        "focused": false,
-        "agent_status": "unknown",
-        "revision": 1
-    })
-}
-
-fn agent_info(pane_id: &str, name: &str, pending: bool, ready: bool) -> Value {
-    let mut agent = pane_info(pane_id);
-    agent["name"] = Value::String(name.into());
-    agent["launch_pending"] = Value::Bool(pending);
-    agent["interactive_ready"] = Value::Bool(ready);
-    agent
+    testkit::herdr_server()
+        .version(version)
+        .protocol(protocol)
+        .handler(handler)
+        .serve()
 }
 
 fn empty_tab_list(req: &Value) -> Value {
@@ -207,41 +128,10 @@ fn existing_tab_list(req: &Value) -> Value {
     )
 }
 
-fn tab_created(req: &Value, root_pane: &str) -> Value {
-    reply(
-        req,
-        serde_json::json!({
-            "type": "tab_created",
-            "tab": {
-                "tab_id": "w1:t1", "workspace_id": "w1", "number": 1,
-                "label": "kanban", "focused": false, "pane_count": 1,
-                "agent_status": "unknown"
-            },
-            "root_pane": pane_info(root_pane)
-        }),
-    )
-}
-
 fn pane_result(req: &Value, pane_id: &str) -> Value {
     reply(
         req,
         serde_json::json!({"type": "pane_info", "pane": pane_info(pane_id)}),
-    )
-}
-
-fn agent_started(req: &Value, pane_id: &str, pending: bool, ready: bool) -> Value {
-    let name = req["params"]["name"].as_str().unwrap();
-    let mut argv = vec![Value::String(
-        req["params"]["kind"].as_str().unwrap().into(),
-    )];
-    argv.extend(req["params"]["args"].as_array().unwrap().iter().cloned());
-    reply(
-        req,
-        serde_json::json!({
-            "type": "agent_started",
-            "agent": agent_info(pane_id, name, pending, ready),
-            "argv": argv
-        }),
     )
 }
 
@@ -419,8 +309,125 @@ fn managed_req(kind: &str) -> HerdrLaunchPlan {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Composed managed-retry budget assertion
+// ---------------------------------------------------------------------------
+
+fn assert_composed_busy_name_sequence(sequence: &[&str], expected_names: &[&str]) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let starts = Arc::new(AtomicUsize::new(0));
+    let starts2 = Arc::clone(&starts);
+    let prompt_paths = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
+    let prompt_paths2 = Arc::clone(&prompt_paths);
+    let sequence = sequence
+        .iter()
+        .map(|outcome| (*outcome).to_string())
+        .collect::<Vec<_>>();
+    let sequence2 = sequence.clone();
+    let fake = serve_recording_herdr(move |req, _| match req["method"].as_str().unwrap() {
+        "tab.list" => existing_tab_list(req),
+        "pane.list" => reply(
+            req,
+            serde_json::json!({"type": "pane_list", "panes": [pane_info("w1:p1")]}),
+        ),
+        "pane.layout" => reply(
+            req,
+            serde_json::json!({"type": "pane_layout", "layout": {
+                "workspace_id": "w1", "tab_id": "w1:t1", "zoomed": false,
+                "area": {"x": 0, "y": 0, "width": 200, "height": 40},
+                "focused_pane_id": "w1:p1",
+                "panes": [{"pane_id": "w1:p1", "focused": true,
+                    "rect": {"x": 0, "y": 0, "width": 200, "height": 40}}],
+                "splits": []
+            }}),
+        ),
+        "pane.split" => pane_result(req, "w1:p3"),
+        "agent.start" => {
+            let path = assert_startup_prompt_file(
+                req,
+                &[
+                    "--model",
+                    "provider/model with space",
+                    "--session-id",
+                    "session-42",
+                ],
+                "--append-system-prompt",
+                "system instructions\nwith an exact second line",
+            );
+            prompt_paths2.lock().unwrap().push(path);
+            let call = starts2.fetch_add(1, Ordering::SeqCst);
+            match sequence2[call].as_str() {
+                "busy" => error(req, "agent_pane_busy", "pane is still busy"),
+                "name_taken" => error(req, "agent_name_taken", "agent name is taken"),
+                "success" => agent_started(req, "w1:p3", false, true),
+                outcome => panic!("unexpected test outcome {outcome}"),
+            }
+        }
+        "pane.close" => pane_result(req, "w1:p3"),
+        method => panic!("unexpected composed retry method {method}"),
+    });
+    let delays = Arc::new(Mutex::new(Vec::new()));
+    let delays2 = Arc::clone(&delays);
+    let spawner = HerdrSpawner::with_pane_runner_and_delay(
+        fake.socket.clone(),
+        Arc::new(RecordingPaneRunner {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            behavior: Box::new(|_, _| unreachable!("managed launch must not use pane runner")),
+        }),
+        Arc::new(move |delay| delays2.lock().unwrap().push(delay)),
+    );
+
+    let err = spawner.spawn(&pi_req(None)).unwrap_err();
+    assert!(err.to_string().contains("pane is still busy"));
+    assert_eq!(starts.load(Ordering::SeqCst), sequence.len());
+    assert_eq!(expected_names.len(), sequence.len());
+    assert_eq!(
+        delays.lock().unwrap().as_slice(),
+        &[
+            super::AGENT_START_BUSY_BACKOFF,
+            super::AGENT_START_BUSY_BACKOFF.saturating_mul(2),
+        ],
+        "busy delays must be globally bounded across the name fallback",
+    );
+
+    let requests = fake.requests.lock().unwrap();
+    let starts: Vec<_> = requests
+        .iter()
+        .filter(|request| request["method"] == "agent.start")
+        .collect();
+    assert_eq!(starts.len(), sequence.len());
+    for (request, expected_name) in starts.iter().zip(expected_names) {
+        assert_eq!(request["params"]["name"], *expected_name);
+        assert_eq!(request["params"]["pane_id"], "w1:p3");
+        assert_eq!(request["params"]["kind"], "pi");
+        assert_eq!(request["params"]["timeout_ms"], 30_000);
+        assert_eq!(request["params"]["args"], starts[0]["params"]["args"]);
+    }
+    let prompt_paths = prompt_paths.lock().unwrap();
+    assert!(prompt_paths.windows(2).all(|paths| paths[0] == paths[1]));
+    assert!(!prompt_paths[0].exists());
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request["method"] == "pane.split")
+            .count(),
+        1,
+        "the name fallback must reuse the one owned pane",
+    );
+    let closes: Vec<_> = requests
+        .iter()
+        .filter(|request| request["method"] == "pane.close")
+        .map(|request| request["params"]["pane_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(closes, ["w1:p3"]);
+    assert!(!closes.contains(&"w1:p1"));
+}
+
+mod card_tabs;
 mod configured;
 mod failures;
 mod local;
 mod managed;
 mod placement;
+mod races;

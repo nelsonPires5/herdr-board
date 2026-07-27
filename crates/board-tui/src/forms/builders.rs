@@ -1,30 +1,45 @@
 //! Form construction and field builders.
 
-use board_core::capability::{efforts_for, HarnessCapabilities};
+use board_core::capability::{default_capabilities, efforts_for, HarnessCapabilities};
+use board_core::engine::validate_column_permission_override;
 use board_core::harness::{BUILTIN_HARNESSES, DEFAULT_HARNESS};
 use board_core::model::{Card, Column, Comment};
 use board_core::protocol::{Effort, SessionInfo, SpaceInfo};
 
+use crate::app::Screen;
+
 use super::{ChoiceOpt, ChoiceVal, Field, FieldId, Form, FormKind};
 
-const EFFORT_ORDER: [Effort; 7] = [
-    Effort::Off,
-    Effort::Minimal,
-    Effort::Low,
-    Effort::Medium,
-    Effort::High,
-    Effort::Xhigh,
-    Effort::Max,
-];
+/// Capability data for the guided selectors when the daemon catalog has not
+/// arrived (or the fetch failed): the built-in snapshot for a harness
+/// board-core knows, and its deliberately fail-closed fallback otherwise.
+///
+/// This is the only source of the effort ladder and permission vocabulary, so
+/// no harness name is ever hardcoded here. An *unknown* harness answers "no
+/// permission modes" rather than guessing another CLI's enum — exactly what
+/// the daemon would enforce.
+fn caps_or_default<'a>(
+    caps: Option<&'a HarnessCapabilities>,
+    fallback: &'a mut Option<HarnessCapabilities>,
+    harness: &str,
+) -> &'a HarnessCapabilities {
+    match caps {
+        Some(caps) => caps,
+        None => fallback.insert(default_capabilities(harness)),
+    }
+}
 
-const FALLBACK_PERMISSION_MODES: [&str; 6] = [
-    "acceptEdits",
-    "auto",
-    "bypassPermissions",
-    "manual",
-    "dontAsk",
-    "plan",
-];
+/// Permission modes offered for a *column override*. `bypassPermissions` is a
+/// deliberate per-card opt-in that `validate_column_permission_override`
+/// rejects as a column override, so the selector must never offer it — the
+/// validator itself is the filter, so the two cannot drift.
+fn column_override_permission_modes(caps: &HarnessCapabilities) -> Vec<String> {
+    caps.permission_modes
+        .iter()
+        .filter(|mode| validate_column_permission_override(Some(mode)).is_ok())
+        .cloned()
+        .collect()
+}
 
 impl Form {
     // -- construction --------------------------------------------------------
@@ -39,6 +54,7 @@ impl Form {
             kind: FormKind::CardCreate { column_id },
             fields: build_card_fields(&values, None, &default_harnesses(), &[], &[]),
             focus: 0,
+            return_to: Screen::Board,
             caps: None,
             harnesses: default_harnesses(),
             columns: Vec::new(),
@@ -53,6 +69,7 @@ impl Form {
             kind: FormKind::CardEdit { card_id: card.id },
             fields: build_card_fields(&values, None, &default_harnesses(), &[], &[]),
             focus: 0,
+            return_to: Screen::Board,
             caps: None,
             harnesses: default_harnesses(),
             columns: Vec::new(),
@@ -66,6 +83,7 @@ impl Form {
             kind: FormKind::ColumnCreate,
             fields: column_fields(None, columns, None, &default_harnesses()),
             focus: 0,
+            return_to: Screen::Board,
             caps: None,
             harnesses: default_harnesses(),
             columns: columns.to_vec(),
@@ -79,6 +97,7 @@ impl Form {
             kind: FormKind::ColumnEdit { column_id: col.id },
             fields: column_fields(Some(col), columns, None, &default_harnesses()),
             focus: 0,
+            return_to: Screen::Board,
             caps: None,
             harnesses: default_harnesses(),
             columns: columns.to_vec(),
@@ -92,6 +111,7 @@ impl Form {
             kind: FormKind::Comment { card_id },
             fields: vec![Field::text(FieldId::CommentBody, "comment", "", true)],
             focus: 0,
+            return_to: Screen::Board,
             caps: None,
             harnesses: default_harnesses(),
             columns: Vec::new(),
@@ -112,12 +132,20 @@ impl Form {
                 true,
             )],
             focus: 0,
+            return_to: Screen::Board,
             caps: None,
             harnesses: default_harnesses(),
             columns: Vec::new(),
             spaces: Vec::new(),
             sessions: Vec::new(),
         }
+    }
+
+    /// Record the screen this form was opened from, so save/cancel lands back
+    /// there instead of unconditionally on the board.
+    pub fn returning_to(mut self, screen: Screen) -> Form {
+        self.return_to = screen;
+        self
     }
 
     pub fn title(&self) -> &'static str {
@@ -316,29 +344,21 @@ pub(super) fn build_card_fields(
     );
 
     // -- effort (options follow the selected model) --------------------------
-    let efforts: Vec<Effort> = match caps {
-        Some(caps) => {
-            let selected_id = if !use_custom_model && model_in_catalog {
-                Some(v.model.clone())
-            } else {
-                None
-            };
-            efforts_for(caps, selected_id.as_deref())
-        }
-        None if v.harness == "pi" => EFFORT_ORDER.to_vec(),
-        None => EFFORT_ORDER[2..].to_vec(),
+    // Effort and permission vocabularies come from capability data, live or
+    // built-in — never from a harness-name comparison.
+    let mut fallback = None;
+    let effective = caps_or_default(caps, &mut fallback, &v.harness);
+    let selected_id = if caps.is_some() && !use_custom_model && model_in_catalog {
+        Some(v.model.clone())
+    } else {
+        None
     };
+    let efforts: Vec<Effort> = efforts_for(effective, selected_id.as_deref());
     let (eff_opts, eff_idx) = effort_choice_opts(&efforts, v.effort.as_deref());
     let effort_field = Field::choice(FieldId::Effort, "effort", eff_opts, eff_idx);
 
     // -- permission ----------------------------------------------------------
-    let modes: Vec<String> = match caps {
-        Some(caps) => caps.permission_modes.clone(),
-        None => FALLBACK_PERMISSION_MODES
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    };
+    let modes: Vec<String> = effective.permission_modes.clone();
     let (perm_opts, perm_idx) = permission_choice_opts(&modes, v.permission.as_deref());
     let permission_field = Field::choice(FieldId::Permission, "permission", perm_opts, perm_idx);
 
@@ -583,12 +603,15 @@ pub(super) fn column_fields_from_values(
         false,
     );
 
-    // Efforts for the override harness (its default/free-form set); fallback
-    // to the canonical ladder when caps aren't loaded yet.
-    let efforts: Vec<Effort> = match caps {
-        Some(c) => efforts_for(c, None),
-        None => EFFORT_ORDER.to_vec(),
-    };
+    // Efforts for the override harness (its default/free-form set); the
+    // built-in capability snapshot stands in until the catalog arrives.
+    let mut fallback = None;
+    let effective = caps_or_default(
+        caps,
+        &mut fallback,
+        v.harness_override.as_deref().unwrap_or(DEFAULT_HARNESS),
+    );
+    let efforts: Vec<Effort> = efforts_for(effective, None);
     let (eff_opts, eff_idx) = effort_choice_opts(&efforts, v.effort_override.as_deref());
     let effort_override_field = Field::choice(
         FieldId::EffortOverride,
@@ -607,15 +630,10 @@ pub(super) fn column_fields_from_values(
         ho_idx,
     );
 
-    // permission_override mirrors the card Permission selector and is hidden
-    // (via field_visible) when the harness has no permission modes (Pi).
-    let modes: Vec<String> = match caps {
-        Some(c) => c.permission_modes.clone(),
-        None => FALLBACK_PERMISSION_MODES
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    };
+    // permission_override mirrors the card Permission selector, minus the
+    // values the column-override validator rejects, and is hidden (via
+    // field_visible) when the harness has no permission modes (Pi).
+    let modes: Vec<String> = column_override_permission_modes(effective);
     let (po_opts, po_idx) = permission_choice_opts(&modes, v.permission_override.as_deref());
     let permission_override_field = Field::choice(
         FieldId::PermissionOverride,

@@ -8,6 +8,9 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use board_core::client::{BoardClient, UnixClient};
 use board_core::paths;
+use serde_json::json;
+
+use crate::render::emit_line;
 
 /// Connect to the daemon socket, auto-starting the daemon if absent.
 pub(crate) fn connect_or_start() -> Result<UnixClient> {
@@ -117,10 +120,12 @@ fn check_listener_after_connect_failure(
     }
 }
 
-/// `board daemon --stop`: request a graceful shutdown over the socket, then
-/// wait for its listener to vanish. Cleanup is deliberately fail-closed: RPC
-/// errors, live listeners, and path replacements are never unlinked.
-pub(crate) fn stop_daemon() -> Result<()> {
+/// `board daemon stop` (and the retained `board daemon --stop`): request a
+/// graceful shutdown over the socket, then wait for its listener to vanish.
+/// Cleanup is deliberately fail-closed: RPC errors, live listeners, and path
+/// replacements are never unlinked. Like every other command, the report goes
+/// through the shared output path and honors `--json`.
+pub(crate) fn stop_daemon(json: bool) -> Result<()> {
     let path = paths::socket_path();
     let original = file_identity(&path);
 
@@ -128,8 +133,11 @@ pub(crate) fn stop_daemon() -> Result<()> {
         Ok(c) => c,
         Err(_) => match check_listener_after_connect_failure(&path, original) {
             ListenerCheck::Gone => {
-                println!("boardd not running");
-                return Ok(());
+                return emit_line(
+                    &json!({ "stopped": true, "was_running": false }),
+                    json,
+                    "boardd not running",
+                );
             }
             ListenerCheck::Live | ListenerCheck::Replaced => {
                 bail!(
@@ -153,8 +161,11 @@ pub(crate) fn stop_daemon() -> Result<()> {
         if UnixClient::connect(&path).is_err() {
             match check_listener_after_connect_failure(&path, original) {
                 ListenerCheck::Gone => {
-                    println!("boardd stopped");
-                    return Ok(());
+                    return emit_line(
+                        &json!({ "stopped": true, "was_running": true }),
+                        json,
+                        "boardd stopped",
+                    );
                 }
                 ListenerCheck::Replaced => {
                     bail!("boardd socket identity changed; socket preserved");

@@ -10,54 +10,23 @@
 //! a test-only accessor to production code.
 
 use board_core::client::BoardClient;
-use board_tui::app::{Msg, Screen, SwitcherLevel};
-use board_tui::editor::FakeEditor;
+use board_tui::app::{Screen, SwitcherLevel};
 use board_tui::forms::FieldId;
-use board_tui::testkit::demo_client;
-use board_tui::view::view;
+use board_tui::testkit::{
+    demo_client, demo_driver, driver_with_editor, key as key_msg, left_down, mouse, render_at,
+};
 use board_tui::widgets::Zone;
 use board_tui::Driver;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::backend::TestBackend;
+use crossterm::event::{KeyCode, MouseEventKind};
 use ratatui::layout::Rect;
-use ratatui::Terminal;
 
 // -- helpers ------------------------------------------------------------------
 
+/// This suite's canned `$EDITOR` text.
+const EDITED: &str = "edited";
+
 fn driver() -> Driver {
-    Driver::with_editor(
-        Box::new(demo_client().unwrap()),
-        Box::new(FakeEditor::new("edited")),
-    )
-    .unwrap()
-}
-
-fn key_msg(code: KeyCode) -> Msg {
-    Msg::Key(KeyEvent::new(code, KeyModifiers::empty()))
-}
-
-/// The `Msg::Mouse` injector this suite needs; none existed before (mouse
-/// input was only ever exercised through the `Driver`'s real terminal loop).
-fn mouse(kind: MouseEventKind, column: u16, row: u16) -> Msg {
-    Msg::Mouse(MouseEvent {
-        kind,
-        column,
-        row,
-        modifiers: KeyModifiers::NONE,
-    })
-}
-
-fn left_down(column: u16, row: u16) -> Msg {
-    mouse(MouseEventKind::Down(MouseButton::Left), column, row)
-}
-
-/// Draw one frame at `(w, h)`, syncing `app.last_area` first so the HitMap
-/// the draw registers agrees with what mouse handling will look up (mirrors
-/// what `event_loop` does every iteration in `lib.rs`).
-fn render_at(d: &mut Driver, w: u16, h: u16) {
-    d.app.last_area = Rect::new(0, 0, w, h);
-    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
-    term.draw(|f| view(&d.app, f)).unwrap();
+    demo_driver(EDITED)
 }
 
 /// Scan the whole frame and return one representative `(x, y)` per distinct
@@ -698,7 +667,7 @@ fn driver_with_overflowing_column(column_name: &str, n: usize) -> Driver {
             })
             .unwrap();
     }
-    Driver::with_editor(Box::new(client), Box::new(FakeEditor::new("edited"))).unwrap()
+    driver_with_editor(client, EDITED)
 }
 
 /// Wheel-scrolling an overflowing column that is NOT the selected one: the
@@ -821,9 +790,7 @@ fn wheel_scrolls_the_selected_column_and_moves_selection_with_the_viewport() {
 #[test]
 fn wheel_over_a_column_with_zero_visible_slots_does_not_panic() {
     let mut d = driver_with_overflowing_column("Todo", 4);
-    d.app.last_area = Rect::new(0, 0, 40, 4); // Compact; inner_h < card_h
-    let mut term = Terminal::new(TestBackend::new(40, 4)).unwrap();
-    term.draw(|f| view(&d.app, f)).unwrap();
+    render_at(&mut d, 40, 4); // Compact; inner_h < card_h
     let layout = board_tui::view::board_layout(&d.app, d.app.last_area);
     assert_eq!(layout.cols[0].scroll.visible, 0);
     assert!(layout.cols[0].cards.is_empty());

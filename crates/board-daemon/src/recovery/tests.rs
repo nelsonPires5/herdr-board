@@ -1,8 +1,11 @@
 use super::*;
+use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::spawner::{HerdrLaunchPlan, Spawner};
-use board_core::db::EnqueueRun;
+use crate::spawner::{HerdrLaunchPlan, SpawnError, Spawner};
+use crate::testkit;
+use crate::watchers;
+use board_core::db::{Db, EnqueueRun};
 use board_core::engine::AgentSignal;
 use board_core::protocol::{
     AwaitingReason, CardCreateParams, CardStatus, ColumnUpdateParams, Patch,
@@ -11,7 +14,7 @@ use board_core::protocol::{
 struct AliveSpawner;
 
 impl Spawner for AliveSpawner {
-    fn spawn(&self, _req: &HerdrLaunchPlan) -> anyhow::Result<RuntimeHandle> {
+    fn spawn(&self, _req: &HerdrLaunchPlan) -> std::result::Result<RuntimeHandle, SpawnError> {
         unreachable!("adoption test does not spawn")
     }
 
@@ -61,22 +64,11 @@ async fn adopted_awaiting_run_keeps_timeout_paused_until_work_resumes() {
     db.pause_run_timeout_uow(card.id, AwaitingReason::AgentDone, now_ms)
         .unwrap();
 
-    let (events_tx, _events_rx) = broadcast::channel(16);
-    let (dispatch_tx, _dispatch_rx) = mpsc::unbounded_channel();
-    let (shutdown_tx, _shutdown_rx) = watch::channel(false);
-    let d = Arc::new(Daemon::new(
-        Store::new(db),
-        Config::default(),
-        DaemonSettings::default(),
-        PathBuf::from("/tmp/board-adopt.db"),
-        PathBuf::from("/tmp/board-adopt.sock"),
-        Arc::new(AliveSpawner),
-        None,
-        None,
-        events_tx,
-        dispatch_tx,
-        shutdown_tx,
-    ));
+    let d = testkit::daemon()
+        .db(db)
+        .db_path(PathBuf::from("/tmp/board-adopt.db"))
+        .spawner(Arc::new(AliveSpawner))
+        .build_daemon();
 
     adopt_runs(&d).await;
     let original_deadline = {

@@ -1,234 +1,150 @@
 use anyhow::{Context, Result};
 use board_core::client::BoardClient;
-use board_core::protocol::{RunFocusAction, RunOutcome};
+use board_core::protocol::RunFocusAction;
 
 use crate::args::{CommentCmd, RunCmd};
-use crate::daemon::connect_or_start;
+use crate::context::Ctx;
 use crate::helpers::{
     actor_author, actor_run_id, env_card_id, origin_socket as resolve_origin_socket, parse_outcome,
-    print_json,
 };
+use crate::render::{emit, emit_line};
 
-/// Legacy top-level comment command.
-pub(crate) fn cmd_comment(first: String, body: Option<String>, json: bool) -> Result<()> {
+/// The legacy top-level `board comment [CARD_ID] BODY`. It only resolves the
+/// two accepted shapes and then re-enters the canonical nested handler; there is
+/// exactly one comment-add code path.
+pub(crate) fn cmd_comment(first: String, body: Option<String>, ctx: &mut Ctx) -> Result<()> {
     let (card_id, body) = match body {
         Some(body) => (first.parse::<i64>().context("card id")?, body),
         None => (env_card_id()?, first),
     };
-    let mut c = connect_or_start()?;
-    let run_id = actor_run_id()?;
-    let author = actor_author(run_id);
-    let comment = c.comment_add_for_run(card_id, &body, author.as_deref(), run_id)?;
-    if json {
-        print_json(&comment)?;
-    } else {
-        println!("Commented on card #{card_id} (comment #{})", comment.id);
-    }
-    Ok(())
+    cmd_card_comment(CommentCmd::Add { card_id, body }, ctx)
 }
 
-pub(crate) fn cmd_card_comment(sub: CommentCmd) -> Result<()> {
-    let mut c = connect_or_start()?;
+pub(crate) fn cmd_card_comment(sub: CommentCmd, ctx: &mut Ctx) -> Result<()> {
+    let json = ctx.json();
     let actor = actor_run_id()?;
-    let result: Result<()> = (|| {
-        match sub {
-            CommentCmd::Add {
-                card_id,
-                body,
+    let result: Result<()> = (|| match sub {
+        CommentCmd::Add { card_id, body } => {
+            let author = actor_author(actor);
+            let comment =
+                ctx.client()?
+                    .comment_add_for_run(card_id, &body, author.as_deref(), actor)?;
+            emit_line(
+                &comment,
                 json,
-            } => {
-                let author = actor_author(actor);
-                let comment = c.comment_add_for_run(card_id, &body, author.as_deref(), actor)?;
-                if json {
-                    print_json(&comment)?;
-                } else {
-                    println!("Commented on card #{card_id} (comment #{})", comment.id);
-                }
-            }
-            CommentCmd::Show { comment_id, json } => {
-                let comment = c.comment_get(comment_id)?;
-                if json {
-                    print_json(&comment)?;
-                } else {
-                    print_comment(&comment);
-                }
-            }
-            CommentCmd::Edit {
-                comment_id,
-                body,
-                json,
-            } => {
-                let comment = c.comment_update(comment_id, &body, actor)?;
-                if json {
-                    print_json(&comment)?;
-                } else {
-                    println!("Updated comment #{}", comment.id);
-                }
-            }
-            CommentCmd::Delete {
-                comment_id, json, ..
-            } => {
-                let result = c.comment_delete(comment_id, actor)?;
-                if json {
-                    print_json(&result)?;
-                } else {
-                    println!("Deleted comment #{comment_id}");
-                }
-            }
-            CommentCmd::History { comment_id, json } => {
-                let history = c.comment_history(comment_id)?;
-                if json {
-                    print_json(&history)?;
-                } else {
-                    for entry in history {
-                        println!(
-                            "#{} comment=#{} {} ({}): {}{}",
-                            entry.id,
-                            entry.comment_id,
-                            entry.author,
-                            entry.created_at,
-                            entry.body,
-                            if entry.deleted_at.is_some() {
-                                " [deleted]"
-                            } else {
-                                ""
-                            }
-                        );
-                    }
-                }
-            }
+                format!("Commented on card #{card_id} (comment #{})", comment.id),
+            )
         }
-        Ok(())
+        CommentCmd::Show { comment_id } => {
+            let comment = ctx.client()?.comment_get(comment_id)?;
+            emit(&comment, json)
+        }
+        CommentCmd::Edit { comment_id, body } => {
+            let comment = ctx.client()?.comment_update(comment_id, &body, actor)?;
+            emit_line(&comment, json, format!("Updated comment #{}", comment.id))
+        }
+        CommentCmd::Delete { comment_id, .. } => {
+            let result = ctx.client()?.comment_delete(comment_id, actor)?;
+            emit_line(&result, json, format!("Deleted comment #{comment_id}"))
+        }
+        CommentCmd::History { comment_id } => {
+            let history = ctx.client()?.comment_history(comment_id)?;
+            emit(&history, json)
+        }
     })();
     result.context("comment operation")
-}
-
-fn print_comment(comment: &board_core::model::CommentRecord) {
-    println!(
-        "#{} card={} {} ({}): {}{}",
-        comment.id,
-        comment.card_id,
-        comment.author,
-        comment.created_at,
-        comment.body,
-        if comment.deleted_at.is_some() {
-            " [deleted]"
-        } else {
-            ""
-        }
-    );
 }
 
 pub(crate) fn cmd_done(
     card_id: Option<i64>,
     outcome: String,
     summary: Option<String>,
-    json: bool,
+    ctx: &mut Ctx,
 ) -> Result<()> {
+    let json = ctx.json();
     let card_id = match card_id {
         Some(card_id) => card_id,
         None => env_card_id()?,
     };
     let outcome = parse_outcome(&outcome)?;
     let run_id = actor_run_id()?;
-    let mut c = connect_or_start()?;
-    let result = c.run_done_for_run(card_id, outcome, summary.as_deref(), run_id)?;
-    print_run_result(&result, outcome, json)
+    let result = ctx
+        .client()?
+        .run_done_for_run(card_id, outcome, summary.as_deref(), run_id)?;
+    emit_line(
+        &result,
+        json,
+        format!(
+            "Run #{} closed ({}); card #{} now [{}] in column {}",
+            result.run.id, outcome, result.card.id, result.card.status, result.card.column_id
+        ),
+    )
 }
 
-pub(crate) fn cmd_card_run(sub: RunCmd) -> Result<()> {
+pub(crate) fn cmd_card_run(sub: RunCmd, ctx: &mut Ctx) -> Result<()> {
     match sub {
         RunCmd::Done {
             card_id,
             outcome,
             summary,
-            json,
-        } => cmd_done(card_id, outcome, summary, json),
-        RunCmd::Confirm {
-            card_id,
-            summary,
-            json,
-        } => cmd_done(card_id, "ok".into(), summary, json),
-        RunCmd::Cancel { card_id, json } => cmd_run_action(card_id, json, false),
-        RunCmd::Retry { card_id, json } => cmd_run_action(card_id, json, true),
+        } => cmd_done(card_id, outcome, summary, ctx),
+        RunCmd::Confirm { card_id, summary } => cmd_done(card_id, "ok".into(), summary, ctx),
+        RunCmd::Cancel { card_id } => cmd_run_action(card_id, ctx, false),
+        RunCmd::Retry { card_id } => cmd_run_action(card_id, ctx, true),
         RunCmd::Focus {
             card_id,
             run_id,
             origin_socket,
-            json,
         } => {
+            let json = ctx.json();
             let socket = resolve_origin_socket(origin_socket)?;
-            let result = connect_or_start()?.run_focus(card_id, run_id, &socket)?;
-            if json {
-                print_json(&result)?;
-            } else {
-                match result.action {
-                    RunFocusAction::FocusedRecordedPane => println!(
-                        "Focused run #{} of card #{} ({}) pane {}",
-                        result.run_id, result.card_id, result.harness, result.pane_id
-                    ),
-                    RunFocusAction::FocusedRescuedPane => println!(
-                        "Focused the already-reopened pane {} of run #{} of card #{} ({})",
-                        result.pane_id, result.run_id, result.card_id, result.harness
-                    ),
-                    // Say plainly that this pane is not a run: it has no runs
-                    // row, so the daemon does not watch or time it out.
-                    RunFocusAction::Rescued => {
-                        println!(
-                        "Reopened run #{} of card #{}: resumed the {} conversation in new pane {} \
-                         (the previous pane {} is gone; this pane is ephemeral and not tracked \
-                         as a run)",
-                        result.run_id,
-                        result.card_id,
-                        result.harness,
-                        result.pane_id,
-                        result.recorded_pane_id.as_deref().unwrap_or("(none recorded)")
-                    )
-                    }
-                }
-            }
-            Ok(())
+            let result = ctx.client()?.run_focus(card_id, run_id, &socket)?;
+            let text = match result.action {
+                RunFocusAction::FocusedRecordedPane => format!(
+                    "Focused run #{} of card #{} ({}) pane {}",
+                    result.run_id, result.card_id, result.harness, result.pane_id
+                ),
+                RunFocusAction::FocusedRescuedPane => format!(
+                    "Focused the already-reopened pane {} of run #{} of card #{} ({})",
+                    result.pane_id, result.run_id, result.card_id, result.harness
+                ),
+                // Say plainly that this pane is not a run: it has no runs
+                // row, so the daemon does not watch or time it out.
+                RunFocusAction::Rescued => format!(
+                    "Reopened run #{} of card #{}: resumed the {} conversation in new pane {} \
+                     (the previous pane {} is gone; this pane is ephemeral and not tracked \
+                     as a run)",
+                    result.run_id,
+                    result.card_id,
+                    result.harness,
+                    result.pane_id,
+                    result
+                        .recorded_pane_id
+                        .as_deref()
+                        .unwrap_or("(none recorded)")
+                ),
+            };
+            emit_line(&result, json, text)
         }
     }
 }
 
-pub(crate) fn cmd_pane_exited(card_id: Option<i64>, run_id: i64) -> Result<()> {
+pub(crate) fn cmd_pane_exited(card_id: Option<i64>, run_id: i64, ctx: &mut Ctx) -> Result<()> {
     let card_id = match card_id {
         Some(card_id) => card_id,
         None => env_card_id()?,
     };
-    connect_or_start()?.run_pane_exited(card_id, run_id)?;
+    ctx.client()?.run_pane_exited(card_id, run_id)?;
     Ok(())
 }
 
-pub(crate) fn cmd_run_action(card_id: i64, json: bool, retry: bool) -> Result<()> {
-    let mut c = connect_or_start()?;
+pub(crate) fn cmd_run_action(card_id: i64, ctx: &mut Ctx, retry: bool) -> Result<()> {
+    let json = ctx.json();
     let result = if retry {
-        c.run_retry(card_id)?
+        ctx.client()?.run_retry(card_id)?
     } else {
-        c.run_cancel(card_id)?
+        ctx.client()?.run_cancel(card_id)?
     };
-    if json {
-        print_json(&result)?;
-    } else {
-        let action = if retry { "Retried" } else { "Cancelled" };
-        println!("{action} card #{card_id}");
-    }
-    Ok(())
-}
-
-fn print_run_result(
-    result: &board_core::protocol::RunActionResult,
-    outcome: RunOutcome,
-    json: bool,
-) -> Result<()> {
-    if json {
-        print_json(result)?;
-    } else {
-        println!(
-            "Run #{} closed ({}); card #{} now [{}] in column {}",
-            result.run.id, outcome, result.card.id, result.card.status, result.card.column_id
-        );
-    }
-    Ok(())
+    let action = if retry { "Retried" } else { "Cancelled" };
+    emit_line(&result, json, format!("{action} card #{card_id}"))
 }

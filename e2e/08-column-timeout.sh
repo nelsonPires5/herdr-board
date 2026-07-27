@@ -25,9 +25,7 @@ e2e_build
 e2e_isolate     # config bakes timeout_unit_secs = 1
 e2e_daemon_start
 
-step "HERDR MUTATION: create disposable workspace"
-e2e_ws_create board-e2e; WS_ID="$E2E_WS"
-echo "  workspace: $WS_ID"
+e2e_ws_standard board-e2e   # step + e2e_ws_create + WS_ID + echo
 
 step "Create 'Backlog' (manual) and 'Execute' (auto, timeout_minutes=1 -> 1s, on_fail->Backlog)"
 BACKLOG_ID="$(col_create '{"name":"Backlog","trigger":"manual"}')"

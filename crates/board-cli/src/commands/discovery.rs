@@ -3,133 +3,71 @@ use board_core::client::BoardClient;
 use serde_json::json;
 
 use crate::args::{HarnessCmd, SessionCmd, SpaceCmd};
-use crate::daemon::connect_or_start;
-use crate::helpers::{efforts_str, harness_capabilities, print_json, union_efforts};
+use crate::context::Ctx;
+use crate::helpers::{efforts_str, harness_capabilities, union_efforts};
+use crate::render::{emit, emit_line};
 
-pub(crate) fn cmd_status(json: bool) -> Result<()> {
-    let mut c = connect_or_start()?;
-    let s = c.daemon_status()?;
-    if json {
-        print_json(&s)?;
-    } else {
-        println!(
-            "boardd {}  db={}  herdr={}  active={}  queued={}",
-            s.version,
-            s.db_path,
-            if s.herdr_connected {
-                "connected"
-            } else {
-                "absent"
-            },
-            s.active_runs,
-            s.queued_runs
-        );
-    }
-    Ok(())
+pub(crate) fn cmd_status(ctx: &mut Ctx) -> Result<()> {
+    let json = ctx.json();
+    let status = ctx.client()?.daemon_status()?;
+    emit(&status, json)
 }
 
-pub(crate) fn cmd_harness(sub: HarnessCmd) -> Result<()> {
-    let mut c = connect_or_start()?;
+pub(crate) fn cmd_harness(sub: HarnessCmd, ctx: &mut Ctx) -> Result<()> {
+    let json = ctx.json();
     match sub {
-        HarnessCmd::List { json } => {
-            let names = c.harness_list()?.harnesses;
-            if json {
-                print_json(&names)?;
-            } else {
-                for h in &names {
-                    println!("{h}");
-                }
-            }
+        HarnessCmd::List => {
+            let names = ctx.client()?.harness_list()?.harnesses;
+            emit(&names, json)
         }
-        HarnessCmd::Models { harness, json } => {
-            let caps = harness_capabilities(&mut c, &harness)?;
-            if json {
-                print_json(&caps)?;
-            } else {
-                for m in &caps.models {
-                    println!("{}  {}", m.id, efforts_str(&m.efforts));
-                }
-                if caps.model_freeform {
-                    if caps.models.is_empty() {
-                        println!("(any model string accepted; catalog comes from harness config)");
-                    } else {
-                        println!("\n(any model string accepted; these are known aliases)");
-                    }
-                }
-            }
+        HarnessCmd::Models { harness } => {
+            let caps = harness_capabilities(ctx.client()?, &harness)?;
+            emit(&caps, json)
         }
-        HarnessCmd::Efforts {
-            harness,
-            model,
-            json,
-        } => {
-            let caps = harness_capabilities(&mut c, &harness)?;
+        HarnessCmd::Efforts { harness, model } => {
+            let caps = harness_capabilities(ctx.client()?, &harness)?;
             let (efforts, known) = match caps.models.iter().find(|m| m.id == model) {
                 Some(m) => (m.efforts.clone(), true),
                 None if caps.model_freeform => (union_efforts(&caps), false),
                 None => bail!("model '{model}' not known to harness '{harness}'"),
             };
-            if json {
-                let efforts: Vec<&str> = efforts.iter().map(|e| e.as_str()).collect();
-                print_json(&json!({ "model": model, "efforts": efforts, "known": known }))?;
-            } else {
-                println!("{}", efforts_str(&efforts));
-                if !known {
-                    println!(
-                        "\n(model '{model}' unknown to {harness} but accepted; \
-                         showing all known efforts)"
-                    );
-                }
+            let mut text = efforts_str(&efforts);
+            if !known {
+                text.push_str(&format!(
+                    "\n\n(model '{model}' unknown to {harness} but accepted; \
+                     showing all known efforts)"
+                ));
             }
+            let efforts: Vec<&str> = efforts.iter().map(|e| e.as_str()).collect();
+            emit_line(
+                &json!({ "model": model, "efforts": efforts, "known": known }),
+                json,
+                text,
+            )
         }
-        HarnessCmd::Permissions { harness, json } => {
-            let caps = harness_capabilities(&mut c, &harness)?;
-            if json {
-                print_json(&caps.permission_modes)?;
-            } else {
-                for p in &caps.permission_modes {
-                    println!("{p}");
-                }
-            }
+        HarnessCmd::Permissions { harness } => {
+            let caps = harness_capabilities(ctx.client()?, &harness)?;
+            emit(&caps.permission_modes, json)
         }
     }
-    Ok(())
 }
 
-pub(crate) fn cmd_space(sub: SpaceCmd) -> Result<()> {
-    let mut c = connect_or_start()?;
+pub(crate) fn cmd_space(sub: SpaceCmd, ctx: &mut Ctx) -> Result<()> {
+    let json = ctx.json();
     match sub {
-        SpaceCmd::List { session, json } => {
-            let res = c.space_list(session.as_deref())?;
-            if json {
-                print_json(&res)?;
-            } else {
-                let width = res.spaces.iter().map(|s| s.id.len()).max().unwrap_or(0);
-                for s in &res.spaces {
-                    println!("{:<width$}  {}", s.id, s.label);
-                }
-            }
+        SpaceCmd::List { session } => {
+            let spaces = ctx.client()?.space_list(session.as_deref())?;
+            emit(&spaces, json)
         }
     }
-    Ok(())
 }
 
-pub(crate) fn cmd_session(sub: SessionCmd) -> Result<()> {
-    let mut c = connect_or_start()?;
+pub(crate) fn cmd_session(sub: SessionCmd, ctx: &mut Ctx) -> Result<()> {
+    let json = ctx.json();
     match sub {
-        SessionCmd::List { json } => {
-            let res = c.session_list()?;
-            if json {
-                print_json(&res)?;
-            } else {
-                let width = res.sessions.iter().map(|s| s.name.len()).max().unwrap_or(0);
-                for s in &res.sessions {
-                    let running = if s.running { "running" } else { "stopped" };
-                    let marker = if s.default { "  (default)" } else { "" };
-                    println!("{:<width$}  {:<8}{}", s.name, running, marker);
-                }
-            }
+        SessionCmd::List => {
+            let sessions = ctx.client()?.session_list()?;
+            emit(&sessions, json)
         }
     }
-    Ok(())
 }

@@ -1,7 +1,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap};
+use ratatui::widgets::{Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::App;
@@ -106,13 +106,13 @@ pub(super) fn draw_form(app: &App, form: &Form, f: &mut Frame, area: Rect) {
             1,
             fields_area.height,
         );
-        let mut state = ScrollbarState::new(visible.len())
-            .position(win_start)
-            .viewport_content_length((win_end - win_start).max(1));
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .track_symbol(Some("│"))
-            .thumb_symbol("█");
-        f.render_stateful_widget(scrollbar, sb_rect, &mut state);
+        crate::widgets::vertical_scrollbar(
+            f,
+            sb_rect,
+            visible.len(),
+            win_start,
+            win_end - win_start,
+        );
     }
     drop(hit_map);
 

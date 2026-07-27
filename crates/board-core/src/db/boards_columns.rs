@@ -1,6 +1,6 @@
 use rusqlite::{params, OptionalExtension};
 
-use super::rows;
+use super::{constraints, rows};
 use super::{ColumnTarget, ColumnWiring, Db, BOARD_ID};
 use crate::model::{Board, Column};
 use crate::protocol::{ColumnCreateParams, ColumnUpdateParams, Patch, Trigger};
@@ -24,14 +24,18 @@ impl Db {
 
     /// Rename a board without changing its id, scope identity, columns, or
     /// cards. SQLite's existing UNIQUE constraint remains the final guard
-    /// against duplicate names.
+    /// against duplicate names; [`constraints::reject_duplicate`] reports that
+    /// refusal as a bad request rather than as an internal storage failure.
     pub fn rename_board(&self, id: i64, name: &str) -> Result<Board> {
         if name.trim().is_empty() {
             return Err(Error::BadRequest("board name must not be empty".into()));
         }
         self.get_board(id)?;
-        self.conn
-            .execute("UPDATE boards SET name=?1 WHERE id=?2", params![name, id])?;
+        constraints::reject_duplicate(
+            self.conn
+                .execute("UPDATE boards SET name=?1 WHERE id=?2", params![name, id]),
+            || constraints::duplicate_board(name),
+        )?;
         self.get_board(id)
     }
 
@@ -48,20 +52,42 @@ impl Db {
 
     /// Get or create the independent board for an already-canonical scope path.
     /// New boards contain exactly one manual `Todo` column.
+    ///
+    /// Opening a known scope is idempotent, so the lookup comes first and only
+    /// a genuinely new scope inserts. A new board is named after its path, and
+    /// `boards.name` is unique: an insert can therefore still be refused
+    /// because some *other* board was renamed onto that path, which is a bad
+    /// request rather than an internal failure. Doing the lookup and the insert
+    /// in one transaction keeps that decision atomic.
     pub fn open_board(&self, scope_path: &str) -> Result<Board> {
         if scope_path.trim().is_empty() {
             return Err(Error::BadRequest("scope_path must not be empty".into()));
         }
         let tx = self.conn.unchecked_transaction()?;
-        tx.execute(
-            "INSERT OR IGNORE INTO boards(name,scope_path) VALUES(?1,?1)",
-            params![scope_path],
-        )?;
-        let board = tx.query_row(
-            "SELECT id,name,scope_path FROM boards WHERE scope_path=?1",
-            params![scope_path],
-            rows::row_to_board,
-        )?;
+        let existing = tx
+            .query_row(
+                "SELECT id,name,scope_path FROM boards WHERE scope_path=?1",
+                params![scope_path],
+                rows::row_to_board,
+            )
+            .optional()?;
+        let board = match existing {
+            Some(board) => board,
+            None => {
+                constraints::reject_duplicate(
+                    tx.execute(
+                        "INSERT INTO boards(name,scope_path) VALUES(?1,?1)",
+                        params![scope_path],
+                    ),
+                    || constraints::duplicate_board_for_scope(scope_path),
+                )?;
+                tx.query_row(
+                    "SELECT id,name,scope_path FROM boards WHERE scope_path=?1",
+                    params![scope_path],
+                    rows::row_to_board,
+                )?
+            }
+        };
         tx.execute(
             "INSERT INTO columns(board_id,name,position,trigger,fresh_session)
              SELECT ?1,'Todo',0,'manual',0
@@ -92,7 +118,9 @@ impl Db {
         ))
     }
 
-    pub(super) fn require_column(&self, id: i64) -> Result<Column> {
+    /// [`Db::get_column`] with the missing-row case already mapped onto
+    /// [`Error::NotFound`], so callers stop open-coding that lookup.
+    pub fn require_column(&self, id: i64) -> Result<Column> {
         self.get_column(id)?
             .ok_or_else(|| Error::NotFound(format!("column {id}")))
     }
@@ -122,26 +150,31 @@ impl Db {
         )?;
         let trigger = p.trigger.unwrap_or(Trigger::Manual).as_str();
         let fresh = i64::from(p.fresh_session.unwrap_or(false));
-        self.conn.execute(
-            "INSERT INTO columns
+        // `UNIQUE (board_id, name)` is the guard against a duplicate column
+        // name, and it is reachable from an ordinary `column.create`.
+        constraints::reject_duplicate(
+            self.conn.execute(
+                "INSERT INTO columns
              (board_id,name,position,system_prompt,trigger,on_success_column_id,on_fail_column_id,
               fresh_session,harness_override,model_override,effort_override,permission_override,timeout_minutes)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
-            params![
-                board_id,
-                p.name,
-                end,
-                p.system_prompt,
-                trigger,
-                p.on_success_column_id,
-                p.on_fail_column_id,
-                fresh,
-                p.harness_override,
-                p.model_override,
-                p.effort_override,
-                p.permission_override,
-                p.timeout_minutes,
-            ],
+                params![
+                    board_id,
+                    p.name,
+                    end,
+                    p.system_prompt,
+                    trigger,
+                    p.on_success_column_id,
+                    p.on_fail_column_id,
+                    fresh,
+                    p.harness_override,
+                    p.model_override,
+                    p.effort_override,
+                    p.permission_override,
+                    p.timeout_minutes,
+                ],
+            ),
+            || constraints::duplicate_column(&p.name),
         )?;
         let id = self.conn.last_insert_rowid();
         if let Some(pos) = p.position {
@@ -202,24 +235,29 @@ impl Db {
             Patch::Set(v) => c.timeout_minutes = Some(v),
         }
         self.validate_column_targets(c.board_id, c.on_success_column_id, c.on_fail_column_id)?;
-        self.conn.execute(
-            "UPDATE columns SET name=?1,system_prompt=?2,trigger=?3,on_success_column_id=?4,
+        // Renaming a column onto a sibling's name hits the same per-board
+        // UNIQUE index as creating one, and is just as much a bad request.
+        constraints::reject_duplicate(
+            self.conn.execute(
+                "UPDATE columns SET name=?1,system_prompt=?2,trigger=?3,on_success_column_id=?4,
              on_fail_column_id=?5,fresh_session=?6,harness_override=?7,model_override=?8,
              effort_override=?9,permission_override=?10,timeout_minutes=?11 WHERE id=?12",
-            params![
-                c.name,
-                c.system_prompt,
-                c.trigger.as_str(),
-                c.on_success_column_id,
-                c.on_fail_column_id,
-                i64::from(c.fresh_session),
-                c.harness_override,
-                c.model_override,
-                c.effort_override,
-                c.permission_override,
-                c.timeout_minutes,
-                c.id,
-            ],
+                params![
+                    c.name,
+                    c.system_prompt,
+                    c.trigger.as_str(),
+                    c.on_success_column_id,
+                    c.on_fail_column_id,
+                    i64::from(c.fresh_session),
+                    c.harness_override,
+                    c.model_override,
+                    c.effort_override,
+                    c.permission_override,
+                    c.timeout_minutes,
+                    c.id,
+                ],
+            ),
+            || constraints::duplicate_column(&c.name),
         )?;
         if let Some(pos) = p.position {
             self.reorder_column(c.id, pos)?;
@@ -279,24 +317,31 @@ impl Db {
             )?;
             let trigger = spec.trigger.unwrap_or(Trigger::Manual).as_str();
             let fresh = i64::from(spec.fresh_session.unwrap_or(false));
-            tx.execute(
-                "INSERT INTO columns
+            // Callers apply templates only to an otherwise-empty board, so a
+            // clash here should be unreachable; classify it the same way
+            // anyway, since it is the same index refusing the same user-chosen
+            // name, and the whole batch rolls back with the transaction.
+            constraints::reject_duplicate(
+                tx.execute(
+                    "INSERT INTO columns
                  (board_id,name,position,system_prompt,trigger,on_success_column_id,on_fail_column_id,
                   fresh_session,harness_override,model_override,effort_override,permission_override,timeout_minutes)
                  VALUES (?1,?2,?3,?4,?5,NULL,NULL,?6,?7,?8,?9,?10,?11)",
-                params![
-                    board_id,
-                    spec.name,
-                    position,
-                    spec.system_prompt,
-                    trigger,
-                    fresh,
-                    spec.harness_override,
-                    spec.model_override,
-                    spec.effort_override,
-                    spec.permission_override,
-                    spec.timeout_minutes,
-                ],
+                    params![
+                        board_id,
+                        spec.name,
+                        position,
+                        spec.system_prompt,
+                        trigger,
+                        fresh,
+                        spec.harness_override,
+                        spec.model_override,
+                        spec.effort_override,
+                        spec.permission_override,
+                        spec.timeout_minutes,
+                    ],
+                ),
+                || constraints::duplicate_column(&spec.name),
             )?;
             ids.push(tx.last_insert_rowid());
         }

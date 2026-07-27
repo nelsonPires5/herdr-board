@@ -59,36 +59,64 @@ pub(crate) fn actor_author(run_id: Option<i64>) -> Option<String> {
     run_id.map(|id| format!("agent:{id}"))
 }
 
-/// Parse a `--space-kind` CLI value.
+/// One shape for every enum-valued option: `invalid <kind> '<value>' (expected:
+/// a, b, c)`. Parsing itself always belongs to `board-core`'s `parse_str`; only
+/// the message and the advertised value list are the CLI's business (the CLI
+/// deliberately advertises fewer outcomes than the wire enum accepts).
+fn parse_enum<T>(
+    kind: &str,
+    value: &str,
+    expected: &str,
+    parse: impl Fn(&str) -> Option<T>,
+) -> Result<T> {
+    parse(value).ok_or_else(|| anyhow!("invalid {kind} '{value}' (expected: {expected})"))
+}
+
+/// Parse a `--space-kind` CLI value. `new_workspace` is also accepted, but the
+/// hyphenated spelling is the documented one.
 pub(crate) fn parse_space_kind(s: &str) -> Result<SpaceKind> {
-    match s {
-        "workspace" => Ok(SpaceKind::Workspace),
-        "new-workspace" | "new_workspace" => Ok(SpaceKind::NewWorkspace),
-        other => bail!("invalid space-kind '{other}' (expected: workspace, new-workspace)"),
-    }
+    parse_enum(
+        "space-kind",
+        s,
+        "workspace, new-workspace",
+        SpaceKind::parse_str,
+    )
 }
 
 pub(crate) fn parse_effort(s: Option<String>) -> Result<Option<Effort>> {
-    s.map(|value| Effort::parse_str(&value).ok_or_else(|| anyhow!("invalid effort: {value}")))
+    s.as_deref()
+        .map(|value| {
+            parse_enum(
+                "effort",
+                value,
+                "off, minimal, low, medium, high, xhigh, max",
+                Effort::parse_str,
+            )
+        })
         .transpose()
 }
 
 pub(crate) fn parse_trigger(s: Option<String>) -> Result<Option<Trigger>> {
-    s.map(|value| Trigger::parse_str(&value).ok_or_else(|| anyhow!("invalid trigger: {value}")))
+    s.as_deref()
+        .map(|value| parse_enum("trigger", value, "manual, auto", Trigger::parse_str))
         .transpose()
 }
 
 pub(crate) fn parse_outcome(s: &str) -> Result<RunOutcome> {
-    RunOutcome::parse_str(s).ok_or_else(|| anyhow!("invalid outcome '{s}' (expected: ok or fail)"))
+    parse_enum("outcome", s, "ok, fail", RunOutcome::parse_str)
 }
 
 pub(crate) fn parse_visibility(s: Option<String>) -> Result<Option<CardVisibility>> {
-    s.map(|value| {
-        CardVisibility::parse_str(&value).ok_or_else(|| {
-            anyhow!("invalid visibility '{value}' (expected: active, all, archived)")
+    s.as_deref()
+        .map(|value| {
+            parse_enum(
+                "visibility",
+                value,
+                "active, all, archived",
+                CardVisibility::parse_str,
+            )
         })
-    })
-    .transpose()
+        .transpose()
 }
 
 /// Require `--yes` in automation, while retaining a normal TTY prompt for
@@ -118,9 +146,4 @@ pub(crate) fn origin_socket(explicit: Option<String>) -> Result<String> {
     std::env::var("HERDR_SOCKET_PATH")
         .or_else(|_| std::env::var("HERDR_SOCK"))
         .map_err(|_| anyhow!("--origin-socket is required outside a Herdr session"))
-}
-
-pub(crate) fn print_json<T: serde::Serialize>(v: &T) -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(v)?);
-    Ok(())
 }

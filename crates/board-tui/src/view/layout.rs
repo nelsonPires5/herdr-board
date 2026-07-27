@@ -181,7 +181,21 @@ fn col_layout_with_header(
     reserve_bottom: u16,
     compact: bool,
 ) -> ColLayout {
-    let column = &app.board.columns[idx];
+    // Display order, not snapshot order: a staged `M` reorder is a permutation
+    // applied at read time (see `App::display_column`).
+    let Some(column) = app.display_column(idx) else {
+        return ColLayout {
+            idx,
+            rect,
+            cards: Vec::new(),
+            scroll: ScrollInfo {
+                offset: 0,
+                total: 0,
+                visible: 0,
+            },
+            scrollbar_rect: None,
+        };
+    };
     let cards = app.cards_of(column.id);
     let total = cards.len();
     let inner_y = rect.y + header_h;

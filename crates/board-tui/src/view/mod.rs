@@ -17,6 +17,9 @@ const MAX_SCOPE_LABEL: usize = 32;
 const NARROW_DETAIL_WIDTH: u16 = 100;
 const HELP_GUTTER_WIDTH: u16 = 2;
 const HELP_KEY_WIDTH: u16 = 13;
+/// Characters a help key label may occupy. `HELP_KEY_WIDTH` minus the two-space
+/// indent every key row carries, so key text and description never collide.
+const HELP_KEY_TEXT: usize = HELP_KEY_WIDTH as usize - 2;
 
 /// Responsive breakpoint, derived from terminal width only. Compact drives a
 /// single-column mobile-first board + fullscreen sheets; Regular/Wide keep the
@@ -83,52 +86,79 @@ fn main_area(area: Rect) -> Rect {
 mod board;
 mod detail;
 mod form;
-/// The single source of the `?` overlay contents (Phase E copies this table).
-pub const HELP_KEYS: &[(&str, &str)] = &[
-    ("←/→ h/l", "focus column"),
-    ("↑/↓ k/j", "focus card"),
-    ("b", "switch board"),
-    ("n", "new card"),
-    ("N", "new column"),
-    ("e", "edit card"),
-    ("E", "edit focused column"),
-    ("a", "archive / restore card"),
-    ("v", "cycle active/all/archived"),
-    ("d", "delete card"),
-    ("D", "delete/move column cards"),
-    ("m", "move card (board→column)"),
-    ("M", "move focused column"),
-    ("H / L", "shove card left / right"),
-    ("Enter", "card detail"),
-    ("T", "apply template (empty)"),
-    ("r", "refresh board"),
-    ("?", "this help"),
-    ("q / Esc", "back / quit"),
-    ("--", "-- card detail --"),
-    ("Enter", "confirm done (awaiting)"),
-    ("e", "edit card / comment"),
-    ("a", "archive / restore card"),
-    ("c", "add comment"),
-    ("d", "delete focused comment"),
-    ("h", "comment history"),
-    ("Tab", "focus comments / runs"),
-    ("↑/↓ k/j", "select comment / run"),
-    ("f / click", "toggle popup / fullscreen"),
-    ("o", "jump to selected run pane"),
-    ("x", "cancel run"),
-    ("r", "retry run"),
-    ("--", "-- forms --"),
-    ("Tab", "next field"),
-    ("Shift+Tab", "previous field"),
-    ("←/→ Space", "cycle a picker field"),
-    ("Ctrl+E", "edit textarea in $EDITOR"),
-    ("Enter", "submit"),
-    ("Esc", "cancel"),
-    ("--", "-- mouse --"),
-    ("click", "focus card/column"),
-    ("dbl-click", "open card detail"),
-    ("drag", "move card/reorder column"),
-    ("wheel", "scroll cards"),
+/// The single source of the `?` overlay contents: `(screen, key, description)`.
+///
+/// Tagging every row with the [`Screen`] whose handler owns the binding is
+/// what lets `tests/help.rs` check the table against the real key handlers in
+/// `src/app/*.rs` instead of trusting it to be hand-maintained — a row that
+/// documents a key nobody handles, or a handled key nobody documents, is a
+/// test failure rather than a slow drift.
+///
+/// Rows whose key is `"--"` are section separators; their description is the
+/// heading text and their screen is the section they introduce.
+pub const HELP_KEYS: &[(Screen, &str, &str)] = &[
+    (Screen::Board, "←/→ h/l", "focus column"),
+    (Screen::Board, "↑/↓ k/j", "focus card"),
+    (Screen::Board, "b", "switch board"),
+    (Screen::Board, "n", "new card"),
+    (Screen::Board, "N", "new column"),
+    (Screen::Board, "e", "edit card"),
+    (Screen::Board, "E", "edit focused column"),
+    (Screen::Board, "a", "archive / restore card"),
+    (Screen::Board, "v", "cycle active/all/archived"),
+    (Screen::Board, "d", "delete card"),
+    (Screen::Board, "D", "delete/move column cards"),
+    (Screen::Board, "m", "move card (board→column)"),
+    (Screen::Board, "M", "move focused column"),
+    (Screen::Board, "H / L", "shove card left / right"),
+    (Screen::Board, "Enter", "card detail"),
+    (Screen::Board, "T", "apply template (empty)"),
+    (Screen::Board, "r / R", "refresh board"),
+    (Screen::Board, "?", "this help (any screen)"),
+    (Screen::Board, "q / Esc", "back / quit"),
+    (Screen::CardDetail, "--", "-- card detail --"),
+    (Screen::CardDetail, "Enter", "confirm done (awaiting)"),
+    (Screen::CardDetail, "e", "edit card / comment"),
+    (Screen::CardDetail, "a", "archive / restore card"),
+    (Screen::CardDetail, "c", "add comment"),
+    (Screen::CardDetail, "d", "delete focused comment"),
+    (Screen::CardDetail, "h", "comment history"),
+    (Screen::CardDetail, "Tab", "focus comments / runs"),
+    (Screen::CardDetail, "↑/↓ k/j", "select comment / run"),
+    (Screen::CardDetail, "f / click", "toggle popup / fullscreen"),
+    (Screen::CardDetail, "o", "jump to selected run pane"),
+    (Screen::CardDetail, "x", "cancel run (asks first)"),
+    (Screen::CardDetail, "r", "retry run (asks first)"),
+    (Screen::CardDetail, "q / Esc", "back to board"),
+    (Screen::CardForm, "--", "-- forms --"),
+    (Screen::CardForm, "Tab", "next field"),
+    (Screen::CardForm, "Shift+Tab", "previous field"),
+    (Screen::CardForm, "←/→ Space", "cycle a picker field"),
+    (Screen::CardForm, "Ctrl+E", "edit textarea in $EDITOR"),
+    (Screen::CardForm, "Enter", "submit"),
+    (Screen::CardForm, "Esc", "cancel"),
+    (Screen::Picker, "--", "-- picker / confirm --"),
+    (Screen::Picker, "↑/↓ k/j", "move selection"),
+    (Screen::Picker, "Enter", "choose"),
+    (Screen::Picker, "b", "other board (moving)"),
+    (Screen::Confirm, "y / n", "confirm / decline"),
+    (Screen::Picker, "q / Esc", "cancel"),
+    (Screen::MoveColumn, "--", "-- move column (M) --"),
+    (Screen::MoveColumn, "←/→ h/l", "stage the reorder"),
+    (Screen::MoveColumn, "Enter", "commit the reorder"),
+    (Screen::MoveColumn, "q / Esc", "discard"),
+    (Screen::Switcher, "--", "-- sheets --"),
+    (Screen::Switcher, "k/j Enter", "switcher: move / open"),
+    (Screen::Switcher, "q / Esc", "switcher: close / back"),
+    (Screen::CommentHistory, "↑/↓ k/j", "history: scroll"),
+    (Screen::CommentHistory, "q / Esc", "history: back to card"),
+    (Screen::Help, "↑/↓ k/j", "help: scroll (compact)"),
+    (Screen::Help, "q/Esc/any", "help: close"),
+    (Screen::Board, "--", "-- mouse --"),
+    (Screen::Board, "click", "focus card/column"),
+    (Screen::Board, "dbl-click", "open card detail"),
+    (Screen::Board, "drag", "move card/reorder column"),
+    (Screen::Board, "wheel", "scroll cards"),
 ];
 
 mod layout;
@@ -141,7 +171,7 @@ pub use detail::{
 pub use layout::{board_layout, BoardLayout, ColLayout, CompactHeader, ScrollInfo};
 pub use overlays::{
     comment_history_rect, comment_history_wrapped_rows, help_content_width, help_list_rect,
-    help_wrapped_rows,
+    help_regular_max_scroll, help_wrapped_rows,
 };
 
 // -- glyphs ------------------------------------------------------------------
@@ -238,33 +268,6 @@ pub fn sheet_area(mode: LayoutMode, pref_w: u16, pref_h: u16, area: Rect) -> Rec
         LayoutMode::Compact => base,
         LayoutMode::Regular | LayoutMode::Wide => centered_rect_abs(pref_w, pref_h, base),
     }
-}
-
-// -- time --------------------------------------------------------------------
-
-/// Parse a SQLite `datetime('now')` string (`YYYY-MM-DD HH:MM:SS`, UTC) to epoch
-/// seconds. Returns `None` on any parse failure.
-pub fn parse_epoch(s: &str) -> Option<i64> {
-    let (date, time) = s.split_once(' ')?;
-    let mut d = date.split('-');
-    let year: i64 = d.next()?.parse().ok()?;
-    let month: i64 = d.next()?.parse().ok()?;
-    let day: i64 = d.next()?.parse().ok()?;
-    let mut t = time.split(':');
-    let hh: i64 = t.next()?.parse().ok()?;
-    let mm: i64 = t.next()?.parse().ok()?;
-    let ss: i64 = t.next().unwrap_or("0").parse().ok()?;
-    Some(days_from_civil(year, month, day) * 86400 + hh * 3600 + mm * 60 + ss)
-}
-
-/// Days since 1970-01-01 (Howard Hinnant's algorithm).
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = (if y >= 0 { y } else { y - 399 }) / 400;
-    let yoe = y - era * 400;
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe - 719468
 }
 
 #[cfg(test)]

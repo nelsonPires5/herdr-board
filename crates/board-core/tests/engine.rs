@@ -3,10 +3,11 @@
 use board_core::config::{Config, HarnessDef};
 use board_core::engine::{
     decide_auto_hop, decide_entry, decide_lifecycle, decide_resumability, decide_signal,
-    decide_transition, format_duration, validate_card_archive, validate_card_edit,
-    validate_card_space, validate_column_delete, validate_column_permission_override, AgentSignal,
-    AutoHopDecision, FinalizePlan, LifecycleAction, LifecycleDecision, LifecycleFacts,
-    LifecycleHarness, LifecycleRejection, ResumabilityDecision, SignalDecision, ValidationError,
+    decide_transition, format_duration, resolve_column, run_elapsed, validate_card_archive,
+    validate_card_edit, validate_card_space, validate_column_delete,
+    validate_column_permission_override, AgentSignal, AutoHopDecision, FinalizePlan,
+    LifecycleAction, LifecycleDecision, LifecycleFacts, LifecycleHarness, LifecycleRejection,
+    ResumabilityDecision, SignalDecision, ValidationError,
 };
 use board_core::engine::{
     merge_card_update, merge_column_update, validate_card_settings, validate_column_settings,
@@ -688,4 +689,42 @@ fn resumability_requires_started_run_and_matching_agent_comment() {
         decide_resumability(None, &[], &[]),
         ResumabilityDecision::Fresh
     );
+}
+
+#[test]
+fn resolve_column_prefers_ids_then_case_insensitive_names() {
+    let cols = pipeline();
+    assert_eq!(resolve_column(&cols, "3"), Some(3));
+    assert_eq!(resolve_column(&cols, "Human Review"), Some(4));
+    assert_eq!(resolve_column(&cols, "human review"), Some(4));
+    assert_eq!(resolve_column(&cols, "EXECUTE"), Some(3));
+    // A number that is not an id on this board falls through to name matching.
+    assert_eq!(resolve_column(&cols, "99"), None);
+    assert_eq!(
+        resolve_column(&[col(7, "42", Trigger::Manual, None, None)], "42"),
+        Some(7)
+    );
+    // Ambiguous names resolve to the first column in the supplied order.
+    let dupes = vec![
+        col(5, "Review", Trigger::Manual, None, None),
+        col(6, "review", Trigger::Manual, None, None),
+    ];
+    assert_eq!(resolve_column(&dupes, "review"), Some(5));
+    assert_eq!(resolve_column(&cols, "nope"), None);
+    assert_eq!(resolve_column(&[], "Todo"), None);
+}
+
+#[test]
+fn run_elapsed_measures_open_runs_against_now_and_clamps() {
+    // Open run: measured against the injected clock.
+    assert_eq!(run_elapsed(Some(100), None, 160), Some(60));
+    // Closed run: frozen at its own end, whatever `now` says.
+    assert_eq!(run_elapsed(Some(100), Some(130), 9_999), Some(30));
+    // Never started: no elapsed time at all.
+    assert_eq!(run_elapsed(None, Some(130), 200), None);
+    assert_eq!(run_elapsed(None, None, 200), None);
+    // Out-of-order timestamps clamp to zero rather than going negative.
+    assert_eq!(run_elapsed(Some(100), None, 40), Some(0));
+    assert_eq!(run_elapsed(Some(100), Some(40), 200), Some(0));
+    assert_eq!(format_duration(run_elapsed(Some(100), None, 352)), "4m12s");
 }

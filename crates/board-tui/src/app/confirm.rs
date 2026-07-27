@@ -1,3 +1,10 @@
+//! Yes/no confirmation sheet.
+//!
+//! Both answers land on `Confirm::return_to`, the screen recorded when the
+//! sheet was opened. Nothing here re-derives a destination from `purpose`:
+//! the same confirmation can be raised from more than one screen, and only
+//! the opener knows where "back" is.
+
 use crossterm::event::{KeyCode, KeyEvent};
 
 use super::{App, ConfirmPurpose, Effect, Screen};
@@ -7,43 +14,25 @@ pub(super) fn confirm_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
         app.screen = Screen::Board;
         return vec![];
     };
+    let return_to = confirm.return_to;
     match k.code {
         KeyCode::Char('y') | KeyCode::Enter => {
             let purpose = confirm.purpose;
             app.confirm = None;
+            app.screen = return_to;
             match purpose {
-                ConfirmPurpose::DeleteCard(id) => {
-                    app.screen = Screen::Board;
-                    vec![Effect::CardDelete(id)]
+                ConfirmPurpose::DeleteCard(id) => vec![Effect::CardDelete(id)],
+                ConfirmPurpose::DeleteColumn { id, move_cards_to } => {
+                    vec![Effect::ColumnDelete { id, move_cards_to }]
                 }
-                ConfirmPurpose::DeleteColumn(id) => {
-                    app.screen = Screen::Board;
-                    vec![Effect::ColumnDelete {
-                        id,
-                        move_cards_to: None,
-                    }]
-                }
-                ConfirmPurpose::CancelRun(id) => {
-                    app.screen = Screen::CardDetail;
-                    vec![Effect::RunCancel(id)]
-                }
-                ConfirmPurpose::DeleteComment(id) => {
-                    app.screen = Screen::CardDetail;
-                    vec![Effect::CommentDelete { id }]
-                }
+                ConfirmPurpose::CancelRun(id) => vec![Effect::RunCancel(id)],
+                ConfirmPurpose::RetryRun(id) => vec![Effect::RunRetry(id)],
+                ConfirmPurpose::DeleteComment(id) => vec![Effect::CommentDelete { id }],
             }
         }
         KeyCode::Char('n') | KeyCode::Esc => {
-            let back_detail = matches!(
-                confirm.purpose,
-                ConfirmPurpose::CancelRun(_) | ConfirmPurpose::DeleteComment(_)
-            );
             app.confirm = None;
-            app.screen = if back_detail {
-                Screen::CardDetail
-            } else {
-                Screen::Board
-            };
+            app.screen = return_to;
             vec![]
         }
         _ => vec![],

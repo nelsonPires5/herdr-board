@@ -13,10 +13,7 @@ resolved_pi="$(type -P pi)"
 [ "$resolved_pi" = "$E2E_FAKE_PI_BIN_DIR/pi" ] \
   || fail "fake Pi shadowing failed: resolved $resolved_pi"
 
-e2e_init
-e2e_build
-e2e_isolate
-e2e_daemon_start
+e2e_boot   # e2e_init + e2e_build + e2e_isolate + e2e_daemon_start (in that order)
 
 step "HERDR MUTATION: create disposable workspace for built-in Pi"
 e2e_ws_create board-pi-e2e; WS_ID="$E2E_WS"

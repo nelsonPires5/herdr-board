@@ -3,18 +3,16 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use crate::spawner::{HerdrLaunchPlan, Spawner};
-use board_core::config::Config;
+use crate::spawner::{HerdrLaunchPlan, SpawnError, Spawner};
 use board_core::db::{Db, EnqueueRun};
 use board_core::protocol::{AwaitingReason, CardCreateParams, CardStatus};
-use tokio::sync::{broadcast, mpsc, watch};
 
-use crate::settings::{DaemonSettings, SpawnerKind};
-use crate::store::Store;
+use crate::settings::SpawnerKind;
+use crate::testkit::{self, FakeHerdr};
 
 struct NoSpawn;
 impl Spawner for NoSpawn {
-    fn spawn(&self, _: &HerdrLaunchPlan) -> anyhow::Result<RuntimeHandle> {
+    fn spawn(&self, _: &HerdrLaunchPlan) -> std::result::Result<RuntimeHandle, SpawnError> {
         panic!("reconciliation test must not spawn")
     }
     fn kill(&self, _: &RuntimeHandle) -> anyhow::Result<()> {
@@ -127,24 +125,14 @@ fn fixture(session: Option<&str>, pane: Option<&str>) -> Fixture {
         .unwrap();
     let run = db.get_run(run.id).unwrap();
     let card = db.get_card(card.id).unwrap().unwrap();
-    let (events_tx, _) = broadcast::channel(16);
-    let (dispatch_tx, _) = mpsc::unbounded_channel();
-    let (shutdown_tx, _) = watch::channel(false);
-    let d = Arc::new(Daemon::new(
-        Store::new(db),
-        Config::default(),
-        DaemonSettings::default(),
-        PathBuf::from("/tmp/t09.db"),
-        PathBuf::from("/tmp/t09.sock"),
-        Arc::new(NoSpawn),
-        None,
-        Some(crate::session::SessionRegistry::new(PathBuf::from(
+    let d = testkit::daemon()
+        .db(db)
+        .db_path(PathBuf::from("/tmp/t09.db"))
+        .spawner(Arc::new(NoSpawn))
+        .registry(Some(crate::session::SessionRegistry::new(PathBuf::from(
             "/exact-default.sock",
-        ))),
-        events_tx,
-        dispatch_tx,
-        shutdown_tx,
-    ));
+        ))))
+        .build_daemon();
     Fixture {
         d,
         run,
@@ -432,7 +420,7 @@ async fn herdr_startup_invokes_reconciliation_even_without_initial_client() {
     assert!(f.d.herdr.is_none(), "simulates initial connect failure");
     assert_eq!(f.d.settings.spawner, SpawnerKind::Herdr);
     let runtime = runtime(Script::Failure(ProbeFailure::Transport));
-    crate::startup_recovery_with(
+    crate::recovery::startup_recovery_with(
         &f.d,
         resolver(None, SessionTarget::Default(PathBuf::from("/default.sock"))),
         runtime.clone(),
@@ -441,4 +429,39 @@ async fn herdr_startup_invokes_reconciliation_even_without_initial_client() {
     .await;
     assert_eq!(runtime.calls.lock().unwrap().len(), 1);
     assert_open_unchanged(&f);
+}
+
+/// A Herdr socket that answers the protocol gate with `protocol` and records
+/// every method asked for, so a test can prove nothing follows a rejected gate.
+fn fake_herdr_socket(protocol: u32) -> FakeHerdr {
+    testkit::herdr_server()
+        .protocol(protocol)
+        .on("session.snapshot", |req| {
+            testkit::reply(
+                req,
+                serde_json::json!({"snapshot": {
+                    "version": "0.7.5", "protocol": 17,
+                    "workspaces": [], "tabs": [], "panes": [], "agents": []
+                }}),
+            )
+        })
+        .serve()
+}
+
+#[test]
+fn herdr_runtime_snapshot_rejects_a_socket_with_the_wrong_protocol() {
+    let herdr = fake_herdr_socket(16);
+    let probe = HerdrRuntime.snapshot(&SessionTarget::Default(herdr.socket.clone()));
+    assert_eq!(probe, Err(ProbeFailure::Transport));
+    // An incompatible socket must never yield a snapshot: a "valid snapshot
+    // omitting the pane" is what reconciliation treats as `Gone` and finalizes.
+    assert_eq!(herdr.methods(), vec!["ping"]);
+}
+
+#[test]
+fn herdr_runtime_snapshot_accepts_the_pinned_protocol() {
+    let herdr = fake_herdr_socket(17);
+    let probe = HerdrRuntime.snapshot(&SessionTarget::Default(herdr.socket.clone()));
+    assert!(probe.is_ok(), "protocol 17 must pass the gate: {probe:?}");
+    assert_eq!(herdr.methods(), vec!["ping", "session.snapshot"]);
 }

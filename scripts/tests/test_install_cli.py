@@ -12,14 +12,11 @@ import tomllib
 import unittest
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+from _support import PYTHON3 as _PYTHON3, REPO_ROOT, PYTHON_SHEBANG, write_executable
+
 SCRIPT = REPO_ROOT / "scripts" / "install-cli.sh"
 MARKER_NAME = ".herdr-board-cli-managed"
 MARKER_PREFIX = "herdr-board install-cli.sh managed board sha256:"
-
-# Absolute path to the Python interpreter running this test suite, used
-# in stub shebangs so stubs work inside isolated PATHs that lack /usr/bin.
-_PYTHON3 = sys.executable
 
 
 def marker_bytes(content: bytes) -> bytes:
@@ -30,14 +27,9 @@ def marker_bytes(content: bytes) -> bytes:
 def _write_stub(dir_path: Path, name: str, body: str) -> Path:
     """Write an executable stub with a hardcoded python3 shebang.
     Unlinks any existing entry first so we can replace a symlink."""
-    stub = dir_path / name
-    try:
-        stub.unlink()
-    except FileNotFoundError:
-        pass
-    stub.write_text(f"#!{_PYTHON3}\n{body}", encoding="utf-8")
-    stub.chmod(0o755)
-    return stub
+    return write_executable(
+        dir_path, name, body, shebang=PYTHON_SHEBANG, replace=True
+    )
 
 
 # ---------------------------------------------------------------------------

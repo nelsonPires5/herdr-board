@@ -2,6 +2,7 @@
 //! and `events.subscribe` fan-out.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use board_core::protocol::{BoardChangedReason, Event, Request, Response, SubscribeResult};
@@ -15,6 +16,14 @@ use crate::ops;
 use crate::state::Daemon;
 
 const OUTBOUND_CAPACITY: usize = 64;
+
+/// Protocol code 5 ("internal"), the same bucket `docs/protocol.md` gives
+/// sqlite/json/io failures. Used when the blocking handler task itself dies.
+const CODE_INTERNAL: i32 = 5;
+
+/// Monotonic per-process connection id. Only used to correlate a request span
+/// with its connection in the log; never persisted or sent on the wire.
+static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
 
 fn to_line<T: Serialize>(v: &T) -> String {
     serde_json::to_string(v)
@@ -159,7 +168,10 @@ pub async fn serve(d: Arc<Daemon>, listener: UnixListener) {
     loop {
         tokio::select! {
             accepted = listener.accept() => match accepted {
-                Ok((stream, _)) => { tokio::spawn(handle_conn(d.clone(), stream)); }
+                Ok((stream, _)) => {
+                    let conn_id = NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed);
+                    tokio::spawn(handle_conn(d.clone(), stream, conn_id));
+                }
                 Err(e) => tracing::warn!("accept failed: {e}"),
             },
             _ = rx.changed() => break,
@@ -171,7 +183,13 @@ pub async fn serve(d: Arc<Daemon>, listener: UnixListener) {
     tracing::info!("server: shutting down accept loop");
 }
 
-async fn handle_conn(d: Arc<Daemon>, stream: UnixStream) {
+/// Serve one client connection.
+///
+/// Response ordering is structural: the read loop handles exactly one request
+/// at a time and only pushes the next response after awaiting the previous
+/// one, so a client always sees one response per request, in request order —
+/// even though every handler now runs on the blocking pool.
+async fn handle_conn(d: Arc<Daemon>, stream: UnixStream, conn_id: u64) {
     let (read_half, write_half) = stream.into_split();
     let outbox = Arc::new(Outbox::new(OUTBOUND_CAPACITY));
     let writer_outbox = outbox.clone();
@@ -226,10 +244,7 @@ async fn handle_conn(d: Arc<Daemon>, stream: UnixStream) {
                     }
                     continue;
                 }
-                let resp = match ops::handle_request(&d, &req.method, req.params) {
-                    Ok(v) => Response::ok(req.id, v),
-                    Err(e) => Response::err(req.id, e.code(), e.to_string()),
-                };
+                let resp = dispatch_request(&d, conn_id, req).await;
                 if !outbox.response(to_line(&resp)).await {
                     break;
                 }
@@ -243,6 +258,53 @@ async fn handle_conn(d: Arc<Daemon>, stream: UnixStream) {
         let _ = forwarder.await;
     }
     let _ = writer.await;
+}
+
+/// Run one request handler off the async runtime.
+///
+/// `ops::handle_request` is fully blocking: it takes the SQLite mutex, makes
+/// blocking AF_UNIX Herdr RPCs whose transport deadlines stack into tens of
+/// seconds, and shells out to `herdr session list`. Running that inline in the
+/// per-connection task pinned a tokio worker thread for the whole call, so
+/// enough concurrent requests starved the accept loop, the dispatcher, and
+/// shutdown. `spawn_blocking` moves it to the blocking pool; the caller still
+/// awaits it, which is what keeps per-connection ordering intact.
+async fn dispatch_request(d: &Arc<Daemon>, conn_id: u64, req: Request) -> Response {
+    let Request { id, method, params } = req;
+    let span = tracing::info_span!("request", conn = conn_id, method = %method, req_id = %id);
+    let handler_d = d.clone();
+    let handler_method = method.clone();
+    let handled = tokio::task::spawn_blocking(move || {
+        let _entered = span.enter();
+        ops::handle_request(&handler_d, &handler_method, params)
+    })
+    .await;
+    match handled {
+        Ok(Ok(value)) => Response::ok(id, value),
+        Ok(Err(e)) => Response::err(id, e.code(), e.to_string()),
+        Err(join_error) => join_error_response(id, &method, conn_id, join_error),
+    }
+}
+
+/// A panicked (or cancelled) handler must still answer: dropping the request
+/// would leave the client waiting on a response that never comes, and killing
+/// the connection would lose every other in-flight request on it.
+fn join_error_response(
+    id: String,
+    method: &str,
+    conn_id: u64,
+    join_error: tokio::task::JoinError,
+) -> Response {
+    tracing::error!(
+        conn = conn_id,
+        method = %method,
+        "request handler task failed: {join_error}"
+    );
+    Response::err(
+        id,
+        CODE_INTERNAL,
+        format!("internal error: request handler failed: {join_error}"),
+    )
 }
 
 fn spawn_event_forwarder(d: &Arc<Daemon>, outbox: Arc<Outbox>) -> tokio::task::JoinHandle<()> {

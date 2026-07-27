@@ -84,6 +84,57 @@ fn daemon_stop_preserves_inode_replacement_after_ack() {
     );
 }
 
+/// D1: `board daemon stop` is the spelled-out form of the retained
+/// `board daemon --stop` flag and behaves identically.
+#[test]
+fn daemon_stop_subcommand_matches_the_retained_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = FakeListener::bind(dir.path(), FakeStop::Disappear);
+
+    let out = Command::new(super::BOARD_BIN)
+        .args(["daemon", "stop"])
+        .env("BOARD_SOCKET", fake.path())
+        .output()
+        .expect("run board daemon stop");
+    assert!(out.status.success(), "{:?}", out.stderr);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "boardd stopped"
+    );
+    assert!(!fake.path().exists());
+}
+
+/// C3: the daemon commands use the same output path as everything else, so
+/// `--json` is honored instead of printing prose to stdout.
+#[test]
+fn daemon_stop_honors_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = FakeListener::bind(dir.path(), FakeStop::Disappear);
+
+    let out = Command::new(super::BOARD_BIN)
+        .args(["daemon", "stop", "--json"])
+        .env("BOARD_SOCKET", fake.path())
+        .output()
+        .expect("run board daemon stop --json");
+    assert!(out.status.success(), "{:?}", out.stderr);
+    let report: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("daemon stop emits JSON");
+    assert_eq!(report["stopped"], true);
+    assert_eq!(report["was_running"], true);
+
+    // Stopping an absent daemon is still a success, reported the same way.
+    let absent = Command::new(super::BOARD_BIN)
+        .args(["daemon", "--stop", "--json"])
+        .env("BOARD_SOCKET", dir.path().join("nothing-here.sock"))
+        .output()
+        .expect("run board daemon --stop --json");
+    assert!(absent.status.success());
+    let report: serde_json::Value =
+        serde_json::from_slice(&absent.stdout).expect("daemon stop emits JSON");
+    assert_eq!(report["stopped"], true);
+    assert_eq!(report["was_running"], false);
+}
+
 #[test]
 fn single_instance_second_exits_zero() {
     let td = TestDaemon::start(&[]);

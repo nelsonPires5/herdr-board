@@ -14,6 +14,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent};
 
+use super::nav::{nav_delta, step_clamped};
 use super::{App, Effect, Screen, SwitcherLevel, SwitcherState};
 
 /// Rows in the level-1 (columns) list: one per column plus the two trailing
@@ -31,20 +32,17 @@ pub(super) fn switcher_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
         SwitcherLevel::Columns => columns_row_count(app),
         SwitcherLevel::Boards => state.boards.len(),
     };
+    if let Some(delta) = nav_delta(k.code) {
+        let state = app.switcher.as_mut().unwrap();
+        state.sel = step_clamped(state.sel, delta, row_count.saturating_sub(1));
+        return vec![];
+    }
     match k.code {
-        KeyCode::Up | KeyCode::Char('k') => {
-            let state = app.switcher.as_mut().unwrap();
-            if state.sel > 0 {
-                state.sel -= 1;
-            }
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            let state = app.switcher.as_mut().unwrap();
-            if state.sel + 1 < row_count {
-                state.sel += 1;
-            }
-        }
         KeyCode::Enter => return activate(app),
+        // `q` closes the sheet outright from either level — it is the "get me
+        // out of here" key every other screen already honours, and unlike
+        // `Esc` it never means "step back one level".
+        KeyCode::Char('q') => close(app),
         KeyCode::Esc => {
             let state = app.switcher.as_mut().unwrap();
             match state.level {
@@ -52,8 +50,7 @@ pub(super) fn switcher_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
                     // Opened directly at Boards via `b`; there is no
                     // Columns view to back out to, so `Esc` closes the
                     // sheet outright.
-                    app.switcher = None;
-                    app.screen = Screen::Board;
+                    close(app);
                 }
                 SwitcherLevel::Boards => {
                     state.level = SwitcherLevel::Columns;
@@ -62,15 +59,22 @@ pub(super) fn switcher_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
                     // to the top row.
                     state.sel = state.columns_sel;
                 }
-                SwitcherLevel::Columns => {
-                    app.switcher = None;
-                    app.screen = Screen::Board;
-                }
+                SwitcherLevel::Columns => close(app),
             }
         }
         _ => {}
     }
     vec![]
+}
+
+/// Dismiss the sheet, landing on the screen it was opened from.
+fn close(app: &mut App) {
+    let return_to = app
+        .switcher
+        .take()
+        .map(|state| state.return_to)
+        .unwrap_or(Screen::Board);
+    app.screen = return_to;
 }
 
 fn activate(app: &mut App) -> Vec<Effect> {
@@ -96,23 +100,20 @@ fn activate(app: &mut App) -> Vec<Effect> {
                 // the board `T` key, via the shared helper.
                 let effects = super::apply_template(app);
                 if !effects.is_empty() {
-                    app.switcher = None;
-                    app.screen = Screen::Board;
+                    close(app);
                 }
                 return effects;
             }
             app.sel_col = sel;
             app.clamp_card();
-            app.switcher = None;
-            app.screen = Screen::Board;
+            close(app);
             vec![]
         }
         SwitcherLevel::Boards => {
             let Some(board_id) = state.boards.get(sel).map(|(_, id)| *id) else {
                 return vec![];
             };
-            app.switcher = None;
-            app.screen = Screen::Board;
+            close(app);
             vec![Effect::SwitchBoard(board_id)]
         }
     }

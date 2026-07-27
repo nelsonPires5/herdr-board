@@ -42,7 +42,7 @@ pub(super) fn space_list(d: &Arc<Daemon>, p: SpaceListParams) -> Result<Value> {
     let resolved = reg
         .resolve(p.session.as_deref())
         .map_err(|e| Error::HerdrUnavailable(format!("session '{:?}': {e:#}", p.session)))?;
-    let mut client = board_herdr::HerdrClient::connect(&resolved.socket)
+    let mut client = crate::herdr_conn::connect_checked(&resolved.socket)
         .map_err(|e| Error::HerdrUnavailable(format!("herdr unavailable: {e}")))?;
     let workspaces = client
         .workspace_list()

@@ -188,6 +188,19 @@ fn outcome_word(outcome: RunOutcome) -> &'static str {
     }
 }
 
+/// Seconds a run has been (or was) alive, with the clock injected.
+///
+/// An open run (`ended_at = None`) is measured against `now`; a closed run is
+/// measured against its own end, so a finished run's duration never grows. A
+/// run that has not started has no elapsed time (`None`). Timestamps out of
+/// order — a clock step, or an end recorded before the start — clamp to `0`
+/// rather than reporting negative time.
+pub fn run_elapsed(started_at: Option<i64>, ended_at: Option<i64>, now: i64) -> Option<i64> {
+    let started = started_at?;
+    let end = ended_at.unwrap_or(now);
+    Some((end - started).max(0))
+}
+
 /// Human-readable elapsed time, e.g. `4m12s`, `42s`, `1h3m`.
 pub fn format_duration(secs: Option<i64>) -> String {
     match secs {

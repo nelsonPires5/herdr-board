@@ -1700,6 +1700,25 @@ e2e_scenario_temp_remove_owned() {
   e2e_root_resource_release scenario-temp
 }
 
+# --- standard scenario boot -------------------------------------------------
+# e2e_boot — the four-step preamble most scenarios run verbatim, in this exact
+# order:
+#   e2e_init          # cleanup trap + private root/ephemeral session (FIRST)
+#   e2e_build         # idempotent release build
+#   e2e_isolate       # temp db/socket/config with the fake harness
+#   e2e_daemon_start  # isolated boardd, stopped on cleanup
+# Ordering is a safety property, not a convenience: e2e_init installs the
+# cleanup trap before anything is created. Scenarios that must interleave their
+# own setup — export an env var between two steps, boot a proxy before the
+# daemon, or write extra config before e2e_daemon_start — deliberately keep the
+# long form rather than bending this helper.
+e2e_boot() {
+  e2e_init
+  e2e_build
+  e2e_isolate
+  e2e_daemon_start
+}
+
 # --- disposable workspace ---------------------------------------------------
 # e2e_ws_create <label> [session_socket [session_pid [session_identity]]] — create
 # a disposable workspace and register its identity-gated close. Omitted identity
@@ -1734,6 +1753,18 @@ e2e_ws_create() {
   chmod 600 "$E2E_SCENARIO_ROOT/workspaces/$E2E_WS.owned"
   e2e_manifest_event workspace_create "$E2E_WS" owned
   e2e_ws_defer_close "$E2E_WS" "$sock" "$pid" "$identity"
+}
+
+# e2e_ws_standard [label] — the disposable-workspace preamble repeated verbatim
+# by the plain single-workspace scenarios: announce the mutation, create the
+# workspace in the primary ephemeral session, and publish it as $WS_ID. Like
+# e2e_ws_create it must be CALLED, never captured with $(...): a subshell would
+# lose the cleanup registration.
+e2e_ws_standard() {
+  step "HERDR MUTATION: create disposable workspace"
+  e2e_ws_create "${1:-board-e2e}"
+  WS_ID="$E2E_WS"
+  echo "  workspace: $WS_ID"
 }
 
 # e2e_ws_close_owned <workspace_id> <session_socket> <session_pid>

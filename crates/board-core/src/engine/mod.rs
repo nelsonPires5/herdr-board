@@ -2,11 +2,13 @@
 //! returns *decisions* (target column, new statuses, system-comment text,
 //! validation verdicts). The daemon executes the resulting effects.
 
+mod columns;
 mod lifecycle;
 mod signals;
 mod transitions;
 mod validation;
 
+pub use columns::resolve_column;
 pub use lifecycle::{
     decide_lifecycle, FinalizePlan, LifecycleAction, LifecycleDecision, LifecycleFacts,
     LifecycleHarness, LifecycleRejection,
@@ -14,7 +16,8 @@ pub use lifecycle::{
 pub use signals::{decide_signal, AgentSignal, SignalDecision};
 pub use transitions::{
     decide_auto_hop, decide_entry, decide_resumability, decide_transition, format_duration,
-    AutoHopDecision, EntryDecision, ResumabilityDecision, TransitionDecision, MAX_AUTO_HOPS,
+    run_elapsed, AutoHopDecision, EntryDecision, ResumabilityDecision, TransitionDecision,
+    MAX_AUTO_HOPS,
 };
 pub use validation::{
     merge_card_update, merge_column_update, validate_card_archive, validate_card_edit,

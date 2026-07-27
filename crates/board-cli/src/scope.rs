@@ -40,17 +40,9 @@ pub(crate) fn open_selected_board(
     }
 }
 
-/// Resolve a column reference within one board snapshot.
+/// Resolve a column reference within one board snapshot. The matching rule is
+/// `board_core::engine::resolve_column`; only the error message is the CLI's.
 pub(crate) fn resolve_column_in(snap: &BoardSnapshot, s: &str) -> Result<i64> {
-    if let Ok(id) = s.parse::<i64>() {
-        if snap.columns.iter().any(|col| col.id == id) {
-            return Ok(id);
-        }
-    }
-    let lower = s.to_lowercase();
-    snap.columns
-        .iter()
-        .find(|col| col.name.to_lowercase() == lower)
-        .map(|col| col.id)
+    board_core::engine::resolve_column(&snap.columns, s)
         .ok_or_else(|| anyhow!("no column matching \"{s}\""))
 }

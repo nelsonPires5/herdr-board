@@ -96,7 +96,9 @@ impl Db {
         ))
     }
 
-    pub(super) fn require_card(&self, id: i64) -> Result<Card> {
+    /// [`Db::get_card`] with the missing-row case already mapped onto
+    /// [`Error::NotFound`], so callers stop open-coding that lookup.
+    pub fn require_card(&self, id: i64) -> Result<Card> {
         self.get_card(id)?
             .ok_or_else(|| Error::NotFound(format!("card {id}")))
     }

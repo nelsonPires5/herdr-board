@@ -4,6 +4,7 @@
 
 mod boards_columns;
 mod cards_comments;
+mod constraints;
 mod migrations;
 mod rows;
 mod runs;

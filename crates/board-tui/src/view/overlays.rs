@@ -2,17 +2,15 @@ use board_core::model::CommentHistory;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{
-    Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
-};
+use ratatui::widgets::{Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::App;
+use crate::app::{App, Screen};
 use crate::widgets::{render_sheet_frame, windowed_rows};
 
 use super::{
     detail::wrapped_row_count, sheet_area, truncate, LayoutMode, HELP_GUTTER_WIDTH, HELP_KEYS,
-    HELP_KEY_WIDTH,
+    HELP_KEY_TEXT, HELP_KEY_WIDTH,
 };
 
 // -- picker / confirm / help / footer ---------------------------------------
@@ -189,7 +187,7 @@ pub fn help_content_width(list_rect: Rect) -> u16 {
 pub fn help_wrapped_rows(width: u16) -> usize {
     HELP_KEYS
         .iter()
-        .map(|(k, d)| {
+        .map(|(_, k, d)| {
             if *k == "--" {
                 1
             } else {
@@ -197,6 +195,19 @@ pub fn help_wrapped_rows(width: u16) -> usize {
             }
         })
         .sum()
+}
+
+/// How far the Regular/Wide two-column help can scroll.
+///
+/// The table documents every screen's bindings, which no longer fits a fixed
+/// two-column sheet on a short terminal — so the sheet scrolls (`j`/`k`) like
+/// the Compact one rather than silently hiding its tail. Shared by `draw_help`
+/// and `app::help::help_key` so clamping always agrees with what got drawn.
+pub fn help_regular_max_scroll(app: &App, area: Rect) -> usize {
+    let content_h = HELP_KEYS.len().div_ceil(2) as u16 + 2;
+    let box_area = sheet_area(app.layout_mode(), 110, content_h, area);
+    let visible = box_area.height.saturating_sub(2) as usize;
+    HELP_KEYS.len().div_ceil(2).saturating_sub(visible)
 }
 
 pub(super) fn draw_help(app: &App, f: &mut Frame, area: Rect) {
@@ -214,13 +225,14 @@ pub(super) fn draw_help(app: &App, f: &mut Frame, area: Rect) {
         f,
         box_area,
         false,
-        "Help — all keybindings (any key to close)",
+        "Help — all keybindings (j/k scroll · any key closes)",
         "Help",
         Style::default().fg(Color::Blue),
         &mut hit_map,
     );
     drop(hit_map);
 
+    let scroll = app.help_scroll.min(help_regular_max_scroll(app, area)) as u16;
     let mid = HELP_KEYS.len().div_ceil(2);
     let gutter = HELP_GUTTER_WIDTH.min(inner.width.saturating_sub(2));
     let columns_width = inner.width.saturating_sub(gutter);
@@ -233,8 +245,8 @@ pub(super) fn draw_help(app: &App, f: &mut Frame, area: Rect) {
         right_width,
         inner.height,
     );
-    render_help_column(f, left, &HELP_KEYS[..mid]);
-    render_help_column(f, right, &HELP_KEYS[mid..]);
+    render_help_column(f, left, &HELP_KEYS[..mid], scroll);
+    render_help_column(f, right, &HELP_KEYS[mid..], scroll);
 }
 
 /// Defect 4 fix: Compact help as a single column, one entry per row (wrapping
@@ -273,7 +285,7 @@ fn draw_help_compact(app: &App, f: &mut Frame, area: Rect) {
 
     let lines: Vec<Line> = HELP_KEYS
         .iter()
-        .map(|(k, d)| {
+        .map(|(_, k, d)| {
             if *k == "--" {
                 Line::from(Span::styled(
                     format!(" {} ", d.trim_matches(|c| c == '-' || c == ' ')),
@@ -310,13 +322,7 @@ fn draw_help_compact(app: &App, f: &mut Frame, area: Rect) {
             1,
             list_rect.height,
         );
-        let mut state = ScrollbarState::new(total_rows.max(1))
-            .position(scroll)
-            .viewport_content_length(visible_rows.max(1));
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .track_symbol(Some("│"))
-            .thumb_symbol("█");
-        f.render_stateful_widget(scrollbar, sb_rect, &mut state);
+        crate::widgets::vertical_scrollbar(f, sb_rect, total_rows, scroll, visible_rows);
     }
 
     f.render_widget(
@@ -328,10 +334,10 @@ fn draw_help_compact(app: &App, f: &mut Frame, area: Rect) {
     );
 }
 
-fn render_help_column(f: &mut Frame, area: Rect, keys: &[(&str, &str)]) {
+fn render_help_column(f: &mut Frame, area: Rect, keys: &[(Screen, &str, &str)], scroll: u16) {
     let lines: Vec<Line> = keys
         .iter()
-        .map(|(k, d)| {
+        .map(|(_, k, d)| {
             if *k == "--" {
                 Line::from(Span::styled(
                     format!(" {} ", d.trim_matches(|c| c == '-' || c == ' ')),
@@ -341,14 +347,25 @@ fn render_help_column(f: &mut Frame, area: Rect, keys: &[(&str, &str)]) {
                 ))
             } else {
                 let description_width = area.width.saturating_sub(HELP_KEY_WIDTH) as usize;
+                // Truncate as well as pad: `{:<n}` only ever grows a longer key,
+                // which would run straight into the description with no gap
+                // (`description_width` already assumes HELP_KEY_WIDTH). A test
+                // keeps every key short enough that this never actually fires.
                 Line::from(vec![
-                    Span::styled(format!("  {:<11}", k), Style::default().fg(Color::Yellow)),
+                    Span::styled(
+                        format!(
+                            "  {:<width$}",
+                            truncate(k, HELP_KEY_TEXT),
+                            width = HELP_KEY_TEXT
+                        ),
+                        Style::default().fg(Color::Yellow),
+                    ),
                     Span::raw(truncate(d, description_width)),
                 ])
             }
         })
         .collect();
-    f.render_widget(Paragraph::new(lines), area);
+    f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), area);
 }
 
 // -- comment history sheet ---------------------------------------------------

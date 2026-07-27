@@ -209,6 +209,10 @@ pub struct Form {
     pub kind: FormKind,
     pub fields: Vec<Field>,
     pub focus: usize,
+    /// Where saving or cancelling this form lands — the screen it was opened
+    /// from. See `app::Screen`'s `return_to` note; set with
+    /// [`Form::returning_to`] at the open site.
+    pub return_to: crate::app::Screen,
     /// Live capability catalog for the form's driving harness — the card
     /// `Harness` field for card forms, the column `HarnessOverride` field for
     /// column forms. `None` = not yet fetched, or the fetch failed → guided

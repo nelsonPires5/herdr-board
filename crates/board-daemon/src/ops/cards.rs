@@ -1,86 +1,17 @@
 use super::*;
-use crate::dispatch::{map_harness_err, PreparedEnqueue};
+use crate::dispatch::prepare_enqueue_values;
 use board_core::db::{Db, BOARD_ID};
 use board_core::engine::{
-    decide_entry, decide_resumability, merge_card_update, validate_card_archive,
-    validate_card_edit, validate_card_settings, validate_card_values, validate_effective_settings,
-    ResumabilityDecision,
+    decide_entry, merge_card_update, validate_card_archive, validate_card_edit,
+    validate_card_settings, validate_card_values, validate_effective_settings,
 };
-use board_core::harness::{build_invocation, plan_session, SessionPlan, DEFAULT_HARNESS};
-use board_core::launch::{ExecutionSpec, RunLaunchSpec};
+use board_core::harness::DEFAULT_HARNESS;
 use board_core::model::Card;
-use board_core::prompt::{assemble_prompt, effective_settings};
-use uuid::Uuid;
-
-fn prepare_enqueue_values(
-    d: &Daemon,
-    db: &Db,
-    card: &Card,
-    column_id: i64,
-    is_retry: bool,
-) -> Result<PreparedEnqueue> {
-    let column = db
-        .get_column(column_id)?
-        .ok_or_else(|| Error::NotFound(format!("column {column_id}")))?;
-    let comments = db.list_comments(card.id)?;
-    let session_used = matches!(
-        decide_resumability(
-            card.session_id.as_deref(),
-            &db.list_runs(card.id)?,
-            &comments,
-        ),
-        ResumabilityDecision::Resumable
-    );
-    validate_effective_settings(card, &column, &d.config)?;
-    let settings = effective_settings(card, &column)?;
-    let prompt = assemble_prompt(&card.description, &comments);
-    let existing_session = card.session_id.as_deref().filter(|_| session_used);
-    let plan = plan_session(existing_session, settings.fresh_session, is_retry);
-    let target_session = matches!(plan, SessionPlan::Mint | SessionPlan::Fork(_))
-        .then(|| Uuid::new_v4().to_string());
-    let invocation = build_invocation(
-        &settings.harness,
-        &d.config,
-        &settings,
-        &plan,
-        target_session.as_deref(),
-        &prompt,
-    )
-    .map_err(map_harness_err)?;
-    let session_id = invocation
-        .resulting_session_id
-        .clone()
-        .or_else(|| match &plan {
-            SessionPlan::Mint => target_session.clone(),
-            SessionPlan::Resume(id) | SessionPlan::Fork(id) => Some(id.clone()),
-        });
-    Ok(PreparedEnqueue {
-        card_id: card.id,
-        column_id,
-        harness: settings.harness.clone(),
-        argv_json: serde_json::to_string(&invocation.argv)?,
-        prompt: prompt.clone(),
-        system_prompt: invocation.system_prompt.clone().unwrap_or_else(|| {
-            board_core::harness::protocol_system_prompt(settings.system_prompt.as_deref())
-        }),
-        launch_spec_json: serde_json::to_string(&RunLaunchSpec::v1(ExecutionSpec {
-            argv: invocation.argv,
-            env: invocation.env,
-            agent_kind: invocation.agent_kind,
-            initial_prompt: invocation.initial_prompt,
-            system_prompt: invocation.system_prompt,
-        }))?,
-        session_id,
-        session: card.session.clone(),
-    })
-}
 
 fn pending_create_card(db: &Db, p: &CardCreateParams) -> Result<Card> {
     let board_id = p.board_id.unwrap_or(BOARD_ID);
     let column_id = p.column_id.unwrap_or(db.default_column_id(board_id)?);
-    let column = db
-        .get_column(column_id)?
-        .ok_or_else(|| Error::NotFound(format!("column {column_id}")))?;
+    let column = db.require_column(column_id)?;
     if column.board_id != board_id {
         return Err(Error::InvalidState(format!(
             "column {column_id} belongs to board {}, expected {board_id}",
@@ -132,9 +63,7 @@ pub(super) fn card_create(d: &Arc<Daemon>, p: CardCreateParams) -> Result<Value>
         let mut _sched = d.sched.lock().unwrap();
         let db = d.store.lock();
         let pending = pending_create_card(&db, &p)?;
-        let column = db
-            .get_column(pending.column_id)?
-            .ok_or_else(|| Error::NotFound(format!("column {}", pending.column_id)))?;
+        let column = db.require_column(pending.column_id)?;
         let entry = decide_entry(&column, pending.status, false);
         if entry.enqueue {
             let prepared = prepare_enqueue_values(d, &db, &pending, pending.column_id, false)?;
@@ -169,9 +98,7 @@ pub(super) fn card_update(d: &Arc<Daemon>, p: CardUpdateParams) -> Result<Value>
     let card = {
         let _sched = d.sched.lock().unwrap();
         let db = d.store.lock();
-        let card = db
-            .get_card(p.id)?
-            .ok_or_else(|| Error::NotFound(format!("card {}", p.id)))?;
+        let card = db.require_card(p.id)?;
         // The scheduler→store critical section serializes this validation and
         // update with an entire finalization transaction.
         validate_card_edit(card.status, edits_locked)?;
@@ -192,8 +119,7 @@ pub(super) fn card_delete(d: &Arc<Daemon>, p: CardIdParams) -> Result<Value> {
     {
         let _sched = d.sched.lock().unwrap();
         let db = d.store.lock();
-        db.get_card(p.id)?
-            .ok_or_else(|| Error::NotFound(format!("card {}", p.id)))?;
+        db.require_card(p.id)?;
         if db.open_run_for_card(p.id)?.is_some() {
             return Err(Error::InvalidState(
                 "card has an open run; cancel it first".into(),
@@ -209,9 +135,7 @@ pub(super) fn card_archive(d: &Arc<Daemon>, p: CardArchiveParams) -> Result<Valu
     let card = {
         let _sched = d.sched.lock().unwrap();
         let db = d.store.lock();
-        let card = db
-            .get_card(p.id)?
-            .ok_or_else(|| Error::NotFound(format!("card {}", p.id)))?;
+        let card = db.require_card(p.id)?;
         if p.archived {
             validate_card_archive(card.status)?;
             if db.open_run_for_card(p.id)?.is_some() {
@@ -230,17 +154,13 @@ pub(super) fn card_move(d: &Arc<Daemon>, p: CardMoveParams) -> Result<Value> {
     let (card, target, source_board_id, source_column_id, enqueue) = {
         let mut _sched = d.sched.lock().unwrap();
         let db = d.store.lock();
-        let current = db
-            .get_card(p.id)?
-            .ok_or_else(|| Error::NotFound(format!("card {}", p.id)))?;
+        let current = db.require_card(p.id)?;
         if current.archived_at.is_some() {
             return Err(Error::InvalidState(
                 "archived card must be restored before moving".into(),
             ));
         }
-        let target = db
-            .get_column(p.column_id)?
-            .ok_or_else(|| Error::NotFound(format!("column {}", p.column_id)))?;
+        let target = db.require_column(p.column_id)?;
         let cross = p.board_id.is_some_and(|bid| bid != current.board_id);
         if cross {
             // The destination board must actually exist; the declared board
@@ -358,9 +278,7 @@ pub(super) fn card_move(d: &Arc<Daemon>, p: CardMoveParams) -> Result<Value> {
 
 pub(super) fn card_get(d: &Arc<Daemon>, p: CardIdParams) -> Result<Value> {
     let db = d.store.lock();
-    let card = db
-        .get_card(p.id)?
-        .ok_or_else(|| Error::NotFound(format!("card {}", p.id)))?;
+    let card = db.require_card(p.id)?;
     Ok(json!(CardDetail {
         comments: db.list_comments(p.id)?,
         runs: db.list_runs(p.id)?,
@@ -374,9 +292,7 @@ pub(super) fn card_list(d: &Arc<Daemon>, p: CardListParams) -> Result<Value> {
     let visibility = p.visibility.unwrap_or(CardVisibility::Active);
     let cards = match p.column_id {
         Some(c) => {
-            let column = db
-                .get_column(c)?
-                .ok_or_else(|| Error::NotFound(format!("column {c}")))?;
+            let column = db.require_column(c)?;
             if column.board_id != board_id {
                 return Err(Error::InvalidState(format!(
                     "column {c} belongs to board {}, expected {board_id}",
