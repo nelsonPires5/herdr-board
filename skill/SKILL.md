@@ -141,13 +141,29 @@ board card run done [CARD_ID] --outcome ok|fail [--summary SUMMARY] [--json]
 board card run confirm [CARD_ID] [--summary SUMMARY] [--json]
 board card run cancel CARD_ID [--json]
 board card run retry CARD_ID [--json]
-board card run focus CARD_ID [--origin-socket SOCKET] [--json]
+board card run focus CARD_ID RUN_ID [--origin-socket SOCKET] [--json]
 ```
 
 `card run confirm` is the `done --outcome ok` channel for an `awaiting` card. `card run focus`
-returns `{run_id, pane_id}` and requires the newest run pane to belong to the current Herdr session;
-without `--origin-socket` it uses `HERDR_SOCKET_PATH` or `HERDR_SOCK`. Done/cancel/retry return
-`{run, card}` in JSON. Retry creates a new run while preserving history.
+takes an explicit `RUN_ID` (there is no implicit "latest run"; read it from `card show --json`
+`runs[]`), returns
+`{action, recorded_pane_id?, run_id, card_id, column_id, harness, session, session_id, pane_id}`,
+and requires that run's pane to belong to the current Herdr session; `session` is the herdr session
+name while `session_id` is the harness conversation id. Without `--origin-socket` it uses
+`HERDR_SOCKET_PATH` or `HERDR_SOCK`.
+
+`action` tells you what happened: `focused_recorded_pane` (the run's pane was alive),
+`focused_rescued_pane` (its pane is gone but an earlier reopen's pane is still alive), or `rescued`
+(its pane is gone, so the harness conversation was **resumed in a new pane** in the card's tab). A
+rescue never re-sends the card task and never writes to the database, so the reopened pane is
+ephemeral: it has no run row and is not watched or timed out. It gets `BOARD_CARD_ID`/`BOARD_SOCKET`
+but deliberately **no** `BOARD_RUN_ID`, so from inside it `board comment` still records on the card
+(as a human comment) while `board done` does not apply — the run stays closed. Closing the pane is up
+to you. Resuming requires an explicit per-harness capability (`pi` and
+`claude` have it; a `[harness.NAME]` harness needs `resume = true`) and a recorded conversation id;
+without either, focus is refused explicitly — use `card run retry` for a new run instead.
+
+Done/cancel/retry return `{run, card}` in JSON. Retry creates a new run while preserving history.
 
 ### Columns and discovery
 

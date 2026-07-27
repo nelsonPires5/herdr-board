@@ -531,8 +531,8 @@ sys.exit(1)
 }
 
 # card_field <card_id> <dotted.path> — print a scalar from `card card show --json`.
-# Supports card.* (e.g. status, column_id) and runs[-1].* (last run). Returns
-# non-zero if absent.
+# Supports card.* (e.g. status, column_id) and runs[N].* with any index,
+# negative from the end (runs[-1].* is the last run). Returns non-zero if absent.
 e2e_card_failure_diag() {
   local card="$1"
   "$BOARD_BIN" card show "$card" --json 2>/dev/null | python3 -c '
@@ -548,13 +548,16 @@ print("card diagnostic: id=%s status=%s column_id=%s run_id=%s outcome=%s prompt
 
 card_field() {
   "$BOARD_BIN" card show "$1" --json 2>/dev/null | python3 -c '
-import json, sys
+import json, re, sys
 d = json.load(sys.stdin)
 path = sys.argv[1]
-if path.startswith("runs[-1]."):
+# runs[N]. with any (possibly negative) index; runs[-1]. is the last run.
+m = re.match(r"^runs\[(-?\d+)\]\.(.+)$", path)
+if m:
     runs = d.get("runs", [])
-    if not runs: sys.exit(1)
-    v = runs[-1].get(path.split(".",1)[1])
+    idx = int(m.group(1))
+    if not runs or not (-len(runs) <= idx < len(runs)): sys.exit(1)
+    v = runs[idx].get(m.group(2))
 elif path.startswith("card."):
     v = d.get("card", {}).get(path.split(".",1)[1])
 else:

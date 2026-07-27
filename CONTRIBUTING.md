@@ -25,6 +25,7 @@ Keep this tier green before opening a PR:
 cargo test --workspace --all-features        # unit + integration (LocalSpawner + fake harness; no herdr)
 cargo clippy --all-targets -- -D warnings     # zero warnings
 cargo fmt --all --check                       # formatted
+python3 -m unittest discover -s scripts/tests -p 'test_*.py'   # docs/release contracts
 ```
 
 - No `unwrap()` outside tests; `anyhow` at edges, `thiserror` in core.

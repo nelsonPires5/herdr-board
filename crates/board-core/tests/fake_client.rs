@@ -2,10 +2,12 @@
 #![cfg(feature = "fake-client")]
 
 use board_core::client::{BoardClient, FakeBoardClient};
+use board_core::config::{Config, HarnessDef};
 use board_core::db::{EnqueueRun, FinalizeRun};
+use board_core::launch::{ExecutionSpec, RunLaunchSpec};
 use board_core::protocol::{
-    AwaitingReason, CardCreateParams, CardMoveParams, CardStatus, ColumnCreateParams, RunOutcome,
-    Trigger,
+    AwaitingReason, CardCreateParams, CardMoveParams, CardStatus, ColumnCreateParams,
+    RunFocusAction, RunOutcome, Trigger,
 };
 
 #[test]
@@ -76,7 +78,7 @@ fn fake_supports_scoped_board_open_list_and_get() {
 }
 
 #[test]
-fn fake_run_focus_uses_latest_recorded_pane() {
+fn fake_run_focus_targets_the_exact_requested_run() {
     let mut c = FakeBoardClient::new().unwrap();
     let card = c
         .card_create(&CardCreateParams {
@@ -131,9 +133,19 @@ fn fake_run_focus_uses_latest_recorded_pane() {
         .promote_run_uow(latest.id, Some("w"), Some("p-new"), None)
         .unwrap();
 
-    let focused = c.run_focus(card.id, "/tmp/herdr.sock").unwrap();
+    // The requested run is focused — including the older, already-ended one.
+    let focused = c.run_focus(card.id, latest.id, "/tmp/herdr.sock").unwrap();
     assert_eq!(focused.run_id, latest.id);
     assert_eq!(focused.pane_id, "p-new");
+    assert_eq!(focused.card_id, card.id);
+    assert_eq!(focused.column_id, card.column_id);
+    assert_eq!(focused.harness, "pi");
+    assert_eq!(focused.session, None);
+    assert_eq!(focused.session_id, None);
+
+    let historical = c.run_focus(card.id, older.id, "/tmp/herdr.sock").unwrap();
+    assert_eq!(historical.run_id, older.id);
+    assert_eq!(historical.pane_id, "p-old");
 
     let no_pane = c
         .card_create(&CardCreateParams {
@@ -141,7 +153,153 @@ fn fake_run_focus_uses_latest_recorded_pane() {
             ..Default::default()
         })
         .unwrap();
-    assert!(c.run_focus(no_pane.id, "/tmp/herdr.sock").is_err());
+    // Unknown run id for a card with no runs at all.
+    assert!(c.run_focus(no_pane.id, 1234, "/tmp/herdr.sock").is_err());
+    // A real run id that belongs to a *different* card is rejected.
+    assert!(c
+        .run_focus(no_pane.id, latest.id, "/tmp/herdr.sock")
+        .is_err());
+    // A run with no recorded pane and no conversation id has nothing to focus
+    // and nothing to resume.
+    let queued = c
+        .db()
+        .enqueue_run_uow(&EnqueueRun {
+            card_id: no_pane.id,
+            column_id: no_pane.column_id,
+            harness: "pi",
+            argv_json: "[]",
+            prompt_snapshot: "p",
+            system_prompt_snapshot: None,
+            launch_spec_json: None,
+            session_id: None,
+            session: None,
+        })
+        .unwrap();
+    assert!(c
+        .run_focus(no_pane.id, queued.id, "/tmp/herdr.sock")
+        .is_err());
+    // A focused recorded pane is reported as exactly that.
+    assert_eq!(focused.action, RunFocusAction::FocusedRecordedPane);
+    assert_eq!(focused.recorded_pane_id.as_deref(), Some("p-new"));
+}
+
+/// The fake has no Herdr, so it cannot create a pane. What it *can* model
+/// honestly is the rescue **decision**, which depends only on the run row and
+/// the harness config.
+#[test]
+fn fake_run_focus_models_the_rescue_decision_without_faking_herdr() {
+    /// `workspace` / `spec` are separately controllable so the fake's refusals
+    /// can be compared against the daemon's one precondition at a time.
+    fn seed_full(
+        c: &FakeBoardClient,
+        harness: &str,
+        session_id: Option<&str>,
+        spec: bool,
+        workspace: Option<&str>,
+    ) -> (i64, i64) {
+        let card = c
+            .db()
+            .create_card(&CardCreateParams {
+                title: "rescue".into(),
+                harness: Some(harness.into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let launch_spec = spec.then(|| {
+            serde_json::to_string(&RunLaunchSpec::v1(ExecutionSpec {
+                argv: vec![harness.to_string(), "--model".into(), "m".into()],
+                env: vec![],
+                agent_kind: None,
+                initial_prompt: Some("p".into()),
+                system_prompt: Some("s".into()),
+            }))
+            .unwrap()
+        });
+        let run = c
+            .db()
+            .enqueue_run_uow(&EnqueueRun {
+                card_id: card.id,
+                column_id: card.column_id,
+                harness,
+                argv_json: "[]",
+                prompt_snapshot: "p",
+                system_prompt_snapshot: None,
+                launch_spec_json: launch_spec.as_deref(),
+                session_id,
+                session: None,
+            })
+            .unwrap();
+        // Promoted with a workspace but NO pane: the dead-pane shape.
+        c.db()
+            .promote_run_uow(run.id, workspace, None, None)
+            .unwrap();
+        (card.id, run.id)
+    }
+
+    fn seed(c: &FakeBoardClient, harness: &str, session_id: Option<&str>) -> (i64, i64) {
+        seed_full(c, harness, session_id, true, Some("w"))
+    }
+
+    let mut c = FakeBoardClient::new().unwrap();
+    // pi/claude can resume, so a run with a conversation id would be rescued.
+    let (card_id, run_id) = seed(&c, "pi", Some("conv-1"));
+    let result = c.run_focus(card_id, run_id, "/tmp/herdr.sock").unwrap();
+    assert_eq!(result.action, RunFocusAction::Rescued);
+    assert_eq!(result.recorded_pane_id, None);
+    assert_eq!(result.session_id.as_deref(), Some("conv-1"));
+    // No invented pane id: the fake never pretends to have talked to Herdr.
+    assert_eq!(result.pane_id, "(would-rescue)");
+
+    // No conversation id ⇒ refused, not rescued.
+    let (card_id, run_id) = seed(&c, "pi", None);
+    let err = c
+        .run_focus(card_id, run_id, "/tmp/herdr.sock")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("conversation id"), "message: {err}");
+
+    // A config-defined harness that did not opt in ⇒ refused, naming it.
+    let mut config = Config::default();
+    config
+        .harness
+        .insert("custom".into(), HarnessDef::default());
+    let mut c = FakeBoardClient::new().unwrap().with_config(config.clone());
+    let (card_id, run_id) = seed(&c, "custom", Some("conv-1"));
+    let err = c
+        .run_focus(card_id, run_id, "/tmp/herdr.sock")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("custom"), "message: {err}");
+    assert!(err.contains("resum"), "message: {err}");
+
+    // Mirrors the daemon exactly: a pre-v11 row has no execution to resume...
+    let mut c = FakeBoardClient::new().unwrap();
+    let (card_id, run_id) = seed_full(&c, "pi", Some("conv-1"), false, Some("w"));
+    let err = c
+        .run_focus(card_id, run_id, "/tmp/herdr.sock")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("durable launch specs"), "message: {err}");
+    // ...and a run with no recorded workspace has nowhere to put a pane.
+    let (card_id, run_id) = seed_full(&c, "pi", Some("conv-1"), true, None);
+    let err = c
+        .run_focus(card_id, run_id, "/tmp/herdr.sock")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("no Herdr workspace"), "message: {err}");
+
+    // The same harness with `resume = true` is accepted.
+    config.harness.insert(
+        "custom".into(),
+        HarnessDef {
+            resume: true,
+            ..Default::default()
+        },
+    );
+    let mut c = FakeBoardClient::new().unwrap().with_config(config);
+    let (card_id, run_id) = seed(&c, "custom", Some("conv-1"));
+    let result = c.run_focus(card_id, run_id, "/tmp/herdr.sock").unwrap();
+    assert_eq!(result.action, RunFocusAction::Rescued);
 }
 
 #[test]

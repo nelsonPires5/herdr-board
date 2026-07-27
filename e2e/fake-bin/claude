@@ -5,9 +5,21 @@
 set -euo pipefail
 
 : "${BOARD_CARD_ID:?BOARD_CARD_ID required}"
-: "${BOARD_RUN_ID:?BOARD_RUN_ID required}"
 : "${BOARD_SOCKET:?BOARD_SOCKET required}"
 : "${HERDR_SOCKET_PATH:?HERDR_SOCKET_PATH required}"
+
+# A *rescued* pane never receives BOARD_RUN_ID (the actor credential): it may not
+# write to the immutable historical run row. The inert BOARD_RESCUED_RUN_ID label
+# names its artifacts instead.
+if [ "${BOARD_RESCUE:-0}" = "1" ]; then
+  [ -z "${BOARD_RUN_ID:-}" ] \
+    || { echo 'fake claude: a rescued pane must NOT receive BOARD_RUN_ID' >&2; exit 2; }
+  : "${BOARD_RESCUED_RUN_ID:?BOARD_RESCUED_RUN_ID required on a rescued pane}"
+  RUN_LABEL="$BOARD_RESCUED_RUN_ID"
+else
+  : "${BOARD_RUN_ID:?BOARD_RUN_ID required}"
+  RUN_LABEL="$BOARD_RUN_ID"
+fi
 
 argv=("$@")
 model=""; effort=""; permission=""; allowed_tools=""; session_id=""
@@ -48,8 +60,19 @@ done
 [ -n "$system_file" ] || { echo 'fake claude: --append-system-prompt-file PATH required' >&2; exit 2; }
 [ -f "$system_file" ] || { echo "fake claude: system-prompt file absent at startup: $system_file" >&2; exit 2; }
 
-record="$(dirname "$BOARD_SOCKET")/fake-claude-run-$BOARD_RUN_ID.json"
-python3 - "$record" "$BOARD_RUN_ID" "$PWD" "$BOARD_CARD_ID" "$BOARD_SOCKET" \
+# A rescued pane resumes an ALREADY FINISHED run, so its run label repeats the
+# original run's; keep its artifacts on separate paths so both launches stay
+# independently assertable.
+suffix=""
+if [ "${BOARD_RESCUE:-0}" = "1" ]; then
+  suffix="-rescue"
+  [ -n "${BOARD_RESUME_SESSION_ID:-}" ] \
+    || { echo 'fake claude: BOARD_RESCUE=1 without BOARD_RESUME_SESSION_ID' >&2; exit 2; }
+  [ "$BOARD_RESUME_SESSION_ID" = "$resume_id" ] \
+    || { echo "fake claude: resume id '$BOARD_RESUME_SESSION_ID' != --resume '$resume_id'" >&2; exit 2; }
+fi
+record="$(dirname "$BOARD_SOCKET")/fake-claude-run-$RUN_LABEL$suffix.json"
+python3 - "$record" "$RUN_LABEL" "$PWD" "$BOARD_CARD_ID" "$BOARD_SOCKET" \
   "$HERDR_SOCKET_PATH" "$model" "$effort" "$permission" "$allowed_tools" \
   "$session_id" "$resume_id" "$fork_session" "$system_file" "${argv[@]}" <<'PY'
 import json, os, stat, sys
@@ -84,8 +107,9 @@ PY
 reported_session_id="${session_id:-$resume_id}"
 session_dir="$(dirname "$BOARD_SOCKET")/fake-claude-sessions"
 mkdir -p "$session_dir"
-session_path="$session_dir/${reported_session_id}-${BOARD_RUN_ID}.jsonl"
-python3 - "$session_path" "$reported_session_id" "$BOARD_RUN_ID" <<'PY'
+# Unique per process; see the note in `e2e/fake-bin/pi`.
+session_path="$session_dir/${reported_session_id}-${RUN_LABEL}${suffix}-$$.jsonl"
+python3 - "$session_path" "$reported_session_id" "$RUN_LABEL" <<'PY'
 import json, os, sys
 path, session_id, run_id = sys.argv[1:]
 with open(path, "x", encoding="utf-8") as target:
@@ -97,6 +121,13 @@ printf '\033]0;✳ Claude Code\007'
 printf '\n──────────────────────────────────────────────────────\n❯ \n──────────────────────────────────────────────────────\n'
 python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/managed-agent-report.py" \
   "$record" claude "$reported_session_id" "$session_path" startup
+
+# A rescued pane resumes an existing conversation, so the daemon deliberately
+# sends NO agent.prompt. Skip the prompt shim and stay interactive.
+if [ "${BOARD_RESCUE:-0}" = "1" ]; then
+  sleep "${FAKE_MANAGED_HOLD:-60}"
+  exit 0
+fi
 
 FAKE_MANAGED_KIND=claude \
   python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/managed-terminal-shim.py" "$record"

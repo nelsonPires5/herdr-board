@@ -432,7 +432,7 @@ fn scoped_crud_rejects_cross_board_references() {
 }
 
 #[test]
-fn all_cards_and_latest_run_with_pane_include_scoped_boards() {
+fn all_cards_and_run_lookup_include_scoped_boards() {
     let db = mem();
     let board = db.open_board("/scoped").unwrap();
     let card = db
@@ -485,14 +485,23 @@ fn all_cards_and_latest_run_with_pane_include_scoped_boards() {
     db.promote_run_uow(newest_without_pane.id, Some("w"), None, None)
         .unwrap();
 
+    // Board scoping: a scoped board's cards are part of `list_all_cards`.
     assert!(db.list_all_cards().unwrap().iter().any(|c| c.id == card.id));
+    // A scoped board's runs are addressable one exact run at a time
+    // (`latest_run_with_pane` is gone — no caller ever wants "some latest run"
+    // now that `run.focus` names its run).
     assert_eq!(
-        db.latest_run_with_pane(card.id)
-            .unwrap()
+        db.run_for_card(card.id, latest.id)
             .unwrap()
             .herdr_pane_id
             .as_deref(),
         Some("p-new")
+    );
+    assert_eq!(
+        db.run_for_card(card.id, newest_without_pane.id)
+            .unwrap()
+            .herdr_pane_id,
+        None
     );
 }
 

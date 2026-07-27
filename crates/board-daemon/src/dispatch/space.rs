@@ -69,7 +69,10 @@ pub(crate) fn resolve_space(
 /// Protocol 17 placement is pane-first and never inherits a workspace cwd, so
 /// failure to read this value must stop dispatch rather than launch from an
 /// implicit daemon/Herdr fallback directory.
-fn workspace_cwd(client: &mut HerdrClient, workspace_id: &str) -> anyhow::Result<String> {
+pub(crate) fn workspace_cwd(
+    client: &mut HerdrClient,
+    workspace_id: &str,
+) -> anyhow::Result<String> {
     let snapshot = client.session_snapshot().map_err(|error| {
         // `anyhow::Error`'s Display shows only the outermost context. Include
         // the rendered cause in that context so a dispatch failure tells the

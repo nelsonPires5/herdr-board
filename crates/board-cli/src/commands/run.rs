@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use board_core::client::BoardClient;
-use board_core::protocol::RunOutcome;
+use board_core::protocol::{RunFocusAction, RunOutcome};
 
 use crate::args::{CommentCmd, RunCmd};
 use crate::daemon::connect_or_start;
@@ -153,15 +153,39 @@ pub(crate) fn cmd_card_run(sub: RunCmd) -> Result<()> {
         RunCmd::Retry { card_id, json } => cmd_run_action(card_id, json, true),
         RunCmd::Focus {
             card_id,
+            run_id,
             origin_socket,
             json,
         } => {
             let socket = resolve_origin_socket(origin_socket)?;
-            let result = connect_or_start()?.run_focus(card_id, &socket)?;
+            let result = connect_or_start()?.run_focus(card_id, run_id, &socket)?;
             if json {
                 print_json(&result)?;
             } else {
-                println!("Focused run #{} pane {}", result.run_id, result.pane_id);
+                match result.action {
+                    RunFocusAction::FocusedRecordedPane => println!(
+                        "Focused run #{} of card #{} ({}) pane {}",
+                        result.run_id, result.card_id, result.harness, result.pane_id
+                    ),
+                    RunFocusAction::FocusedRescuedPane => println!(
+                        "Focused the already-reopened pane {} of run #{} of card #{} ({})",
+                        result.pane_id, result.run_id, result.card_id, result.harness
+                    ),
+                    // Say plainly that this pane is not a run: it has no runs
+                    // row, so the daemon does not watch or time it out.
+                    RunFocusAction::Rescued => {
+                        println!(
+                        "Reopened run #{} of card #{}: resumed the {} conversation in new pane {} \
+                         (the previous pane {} is gone; this pane is ephemeral and not tracked \
+                         as a run)",
+                        result.run_id,
+                        result.card_id,
+                        result.harness,
+                        result.pane_id,
+                        result.recorded_pane_id.as_deref().unwrap_or("(none recorded)")
+                    )
+                    }
+                }
             }
             Ok(())
         }

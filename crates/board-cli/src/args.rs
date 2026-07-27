@@ -359,9 +359,10 @@ pub(crate) enum RunCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Focus the newest run pane.
+    /// Focus one exact run's pane (the run id is required).
     Focus {
         card_id: i64,
+        run_id: i64,
         #[arg(long)]
         origin_socket: Option<String>,
         #[arg(long)]

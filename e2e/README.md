@@ -9,7 +9,7 @@ exercises the herdr wire integration end to end.
 For the layers below this one (unit, daemon+CLI integration, TUI snapshots), the
 isolation/safety design, and the **how-to-write-a-scenario** guide, see
 [`../docs/testing.md`](../docs/testing.md). This file is the authoritative use-case catalog for board protocol v1 / SQLite schema v13:
-every numbered scenario from **01 through 26** must appear here and in `run-all.sh`. The provider-free
+every numbered scenario from **01 through 27** must appear here and in `run-all.sh`. The provider-free
 safe boundary is `fake-agent.sh`,
 `fake-bin/{pi,claude}`, and `test-harness.sh`; prompt/system-prompt contents are never logged.
 Scenario 21 is the active-run timer/event-refresh characterization. The catalog describes the live
@@ -31,7 +31,7 @@ gate, but this cleanup task runs only the static harness—not the full live sui
 | Archive filter cycles scoped `ACTIVE/ALL/ARCHIVED` Herdr pane titles and keeps the footer minimal | `10-archive-filter-title.sh` | live |
 | Built-in Pi mint/retry argv, session fork, protocol prompt, and agent comment through real Herdr | `11-pi-harness.sh` | live, checked-in fake `pi`, zero provider cost |
 | Git-root/CWD board identity, independent pipelines/cards, scoped TUI title, and Global picker entry | `12-cwd-boards.sh` | live |
-| Canonical CLI `card run focus` and card-detail `o` focus a held same-session run pane; `o` closes the real plugin overlay | `13-jump-to-pane.sh` | live |
+| Canonical CLI `card run focus` and card-detail `o` focus one **selected** run of a two-run card: `o` on the older run (whose pane was reclaimed) is refused without closing the overlay, `o` on the newest one focuses its held pane and closes the real plugin overlay | `13-jump-to-pane.sh` | live |
 | A column `harness_override` (TUI select) drives a run via a config-defined harness; `harness.list` advertises config harnesses; effort/permission overrides flow into the run argv | `14-column-config.sh` | live |
 | Integration-style status reports on a live managed pane: blocked → working → end-of-turn idle (Herdr derives `done`) → `awaiting` (`agent_done`), timeout paused; `board done ok` → `done` in the same column | `15-awaiting.sh` | live |
 | Managed protocol-17 Pi + Claude: pane-first placement, exact 0600 system file, readiness/session reports, exact `agent.prompt` task delivery, and held layout | `16-managed-p17.sh` | live, checked-in fake `pi` + `claude`, zero provider cost |
@@ -45,6 +45,7 @@ gate, but this cleanup task runs only the static harness—not the full live sui
 | A card moves to a column of another board via `card.move` with `board_id` (atomic transfer, both columns recompacted); a board/column mismatch is rejected with nothing written | `24-cross-board-move.sh` | live, zero provider cost |
 | Exact per-card tab/anchor ownership: duplicate labels are ignored, restart reuses the durable tab and shell anchor, and closed tabs/anchors are recreated safely | `25-card-tabs.sh` | live, zero provider cost |
 | `LayoutMode::Compact` (< 60 cols) against the real TUI forced to a 40-col pane: compact header (`⇄` + focused column + `n/N`), a focused-column card title, `b` opening the switcher directly at the board list, the `[×]` close affordance, and `Esc` closing the sheet outright | `26-compact-mobile.sh` | live, zero provider cost |
+| A run whose pane was closed is reopened by resuming its harness conversation in a new ephemeral pane in the card tab (`action=rescued`), a second focus reuses that pane (`action=focused_rescued_pane`) without creating a second one, the `runs` row stays byte-for-byte unchanged, and a run that cannot be resumed is refused non-destructively | `27-rescue-dead-pane.sh` | live, zero provider cost |
 
 ### How the live scenario produces Herdr `done`
 
@@ -117,7 +118,7 @@ unmarked, or out-of-root paths. Named-session sockets must be at most 92 bytes, 
 short `/tmp/hb-e2e.XXXXXX` isolated root. `TMPDIR` is pinned to that exact marker-owned root, so
 generated configured-harness scripts remain contained even if asynchronous `pane run` never opens
 their normal self-removing script. The forced-build standard suite passes
-scenarios 01–26 without provider calls. Scenarios 18–26 use only the configured or managed
+scenarios 01–27 without provider calls. Scenarios 18–27 use only the configured or managed
 fake harnesses and never record prompt or system-prompt bodies.
 
 ## Running
@@ -168,13 +169,14 @@ personal Claude state. Its intended contract is one authorized attempt with no r
 | `24-cross-board-move.sh` | Cross-board `card.move` transfer with source/destination recompaction and mismatch rejection; provider-free. |
 | `25-card-tabs.sh` | Exact per-card tab and shell-anchor ownership across duplicate labels, daemon restart, anchor reuse, and closed-tab recreation; provider-free. |
 | `26-compact-mobile.sh` | Real TUI forced to a 40-col `LayoutMode::Compact` pane: compact header, focused-column card title, `b` opening the switcher directly at the board list, the `[×]` close affordance, and `Esc` closing the sheet outright; provider-free. |
+| `27-rescue-dead-pane.sh` | `run.focus` rescue of a run whose pane is gone: resume-mode relaunch of the managed fixture with the recorded conversation id (no re-sent task), idempotent second focus, a byte-for-byte unchanged `runs` row, and an explicit non-destructive refusal for an unresumable run; provider-free. |
 | `real-pi-smoke.sh` | Fail-closed real-provider poem smoke. Detects Pi's runtime default model, passes low thinking, isolates board/Pi session output under `/tmp`, verifies integration/WezTerm, poem/comments/argv/git/settings, and supports keep mode for visual audit. Not in `run-all.sh`. |
 | `real-claude-haiku-smoke.sh` | Fail-closed intended-contract smoke. Requires exact opt-in, authorizes one Claude Haiku/low attempt with no retry/fallback, stages only completed onboarding/theme, exact workspace trust, the installed Herdr hook, credentials, and approved remote-settings bytes under `/tmp` so startup dialogs cannot consume `agent.prompt`; no broad personal Claude state is copied. Independently identity-gates the daemon and Herdr server and cleans exact resources. Not in `run-all.sh`. |
 | `hrpc.py` | One-shot raw **herdr** socket RPC (honours `HERDR_SOCKET_PATH`) for structural asserts (`tab.list`/`pane.list`/`pane.layout`). |
 | `12-cwd-boards.sh` | Scoped board identity/isolation plus real TUI title/picker. |
-| `13-jump-to-pane.sh` | Canonical CLI and same-session TUI pane focus through a real plugin overlay. |
+| `13-jump-to-pane.sh` | Canonical CLI and same-session TUI focus of a deliberately selected run through a real plugin overlay. |
 | `NN-*.sh` | The scenarios above. |
-| `run-all.sh` | Builds once, runs scenarios 01–26 as environment-scrubbed children with their own sessions, captures artifacts, and prints the summary (`--require-all` forbids skips). |
+| `run-all.sh` | Builds once, runs scenarios 01–27 as environment-scrubbed children with their own sessions, captures artifacts, and prints the summary (`--require-all` forbids skips). |
 
 Columns have no `board` CLI verb, so scenarios configure them over the boardd
 socket via `scripts/board-rpc.py` (wrapped by `lib.sh`'s `col_create` / `brpc`). The

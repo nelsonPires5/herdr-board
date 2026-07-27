@@ -12,7 +12,10 @@ mod tests;
 pub(crate) use enqueue::enqueue_run;
 pub(crate) use finalize::{finalize_run, finalize_run_timeout};
 pub(crate) use pass::dispatch_pass;
-pub(crate) use space::validate_space_resolvable;
+pub(crate) use pass::{
+    durable_owned_anchor_pane_ids, durable_owned_pane_ids, reconstruct_owned_tab_id,
+};
+pub(crate) use space::{validate_space_resolvable, workspace_cwd};
 
 use board_core::db::EnqueueRun;
 use board_core::harness::HarnessError;
@@ -58,5 +61,23 @@ pub(crate) fn map_harness_err(e: HarnessError) -> Error {
         HarnessError::PiPermissionModeUnsupported => {
             Error::BadRequest("pi does not support permission modes".into())
         }
+        // Both are refusals about an existing run, not malformed requests: the
+        // run exists and is valid, it just cannot be reopened. Code 3.
+        HarnessError::ResumeUnsupported(harness) => Error::InvalidState(format!(
+            "harness '{harness}' cannot resume a recorded conversation, so this run's \
+             closed pane cannot be reopened; retry the card instead to start a new run"
+        )),
+        // A legacy all-in-one command line cannot be re-threaded onto a resume
+        // without re-sending the task, so refuse rather than corrupt the argv.
+        HarnessError::ResumeLegacyArgv(harness) => Error::InvalidState(format!(
+            "harness '{harness}' recorded a legacy all-in-one command line that embeds the \
+             task text, so this run cannot be reopened without re-running it; retry the card \
+             to start a new run instead"
+        )),
+        HarnessError::MissingResumeSession => Error::InvalidState(
+            "this run recorded no harness conversation id, so there is nothing to resume; \
+             retry the card instead to start a new run"
+                .into(),
+        ),
     }
 }

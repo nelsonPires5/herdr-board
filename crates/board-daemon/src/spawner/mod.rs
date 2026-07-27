@@ -4,14 +4,19 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+mod card_tabs;
 mod herdr;
 mod local;
 mod placement;
+mod rescue;
 #[cfg(test)]
 mod tests;
 
+pub use card_tabs::CardTabRegistry;
 pub use herdr::HerdrSpawner;
 pub use local::LocalSpawner;
+pub(crate) use placement::CardOwnership;
+pub(crate) use rescue::{rescue_run_pane, RescueOutcome, RescuePlan};
 
 /// A request to launch one agent process.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +85,15 @@ pub trait Spawner: Send + Sync {
     fn spawn(&self, req: &HerdrLaunchPlan) -> anyhow::Result<RuntimeHandle>;
     fn kill(&self, h: &RuntimeHandle) -> anyhow::Result<()>;
     fn is_alive(&self, h: &RuntimeHandle) -> anyhow::Result<bool>;
+    /// The shared card-tab allocation registry, when this spawner places panes
+    /// into Herdr card tabs. The `run.focus` rescue takes the same per-card lock
+    /// through it, so a rescue and a dispatch cannot both create a `card-<id>`
+    /// tab or both split a pane into one. `None` for spawners with no Herdr
+    /// placement (`LocalSpawner`), which simply means there is nothing to
+    /// serialize against.
+    fn card_tabs(&self) -> Option<std::sync::Arc<CardTabRegistry>> {
+        None
+    }
 }
 
 pub(crate) const AGENT_START_TIMEOUT_MS: u64 = 30_000;

@@ -77,6 +77,7 @@ SCENARIOS=(
   19-daemon-before-herdr.sh 20-herdr-recovery.sh 21-active-run-timer.sh
   22-move-column-tui.sh 23-agent-pane-busy-retry.sh
   24-cross-board-move.sh 25-card-tabs.sh 26-compact-mobile.sh
+  27-rescue-dead-pane.sh
 )
 run_this() {
   [ "${#FILTERS[@]}" -eq 0 ] && return 0

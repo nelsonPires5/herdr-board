@@ -66,6 +66,721 @@ fn detail_comment_scroll_clamps_to_wrapped_rows() {
     assert_eq!(app.detail_comments_scroll, latest);
 }
 
+/// Give `card_id` `n` extra finished runs, each recording pane `p-<i>` unless
+/// `panes` says otherwise. Returns the new run ids, oldest → newest.
+fn seed_runs(
+    client: &board_tui::testkit::DemoClient,
+    card: &board_core::model::Card,
+    n: usize,
+    panes: bool,
+) -> Vec<i64> {
+    (0..n)
+        .map(|i| {
+            let run = client
+                .db()
+                .enqueue_run_uow(&EnqueueRun {
+                    card_id: card.id,
+                    column_id: card.column_id,
+                    harness: "claude",
+                    argv_json: "[]",
+                    prompt_snapshot: "p",
+                    system_prompt_snapshot: None,
+                    // A durable launch spec is part of what makes a run
+                    // reopenable, so seed one: the fake mirrors the daemon's
+                    // preconditions.
+                    launch_spec_json: Some(
+                        &serde_json::to_string(&board_core::launch::RunLaunchSpec::v1(
+                            board_core::launch::ExecutionSpec {
+                                argv: vec!["claude".into(), "--model".into(), "m".into()],
+                                env: vec![],
+                                agent_kind: Some("claude".into()),
+                                initial_prompt: Some("p".into()),
+                                system_prompt: Some("s".into()),
+                            },
+                        ))
+                        .unwrap(),
+                    ),
+                    session_id: Some(&format!("conv-{i}-0123456789abcdef")),
+                    session: None,
+                })
+                .unwrap();
+            let pane = format!("w1:p-{i}");
+            client
+                .db()
+                .promote_run_uow(run.id, Some("w1"), panes.then_some(pane.as_str()), None)
+                .unwrap();
+            client
+                .db()
+                .finalize_run_uow(&FinalizeRun {
+                    run_id: run.id,
+                    outcome: RunOutcome::Ok,
+                    summary: Some("done"),
+                    comments: &[],
+                    target_column_id: None,
+                    final_status: CardStatus::Done,
+                    final_awaiting_reason: None,
+                    next: None,
+                })
+                .unwrap();
+            run.id
+        })
+        .collect()
+}
+
+/// A driver with the given card's detail open (opened through the real
+/// `Enter` → `LoadDetail` path, so the selection sentinels apply).
+fn driver_with_detail_open(
+    client: board_tui::testkit::DemoClient,
+    card_id: i64,
+) -> board_tui::Driver {
+    let mut d = driver_of(client);
+    let col = d
+        .app
+        .board
+        .cards
+        .iter()
+        .find(|c| c.id == card_id)
+        .unwrap()
+        .column_id;
+    d.app.sel_col = d
+        .app
+        .board
+        .columns
+        .iter()
+        .position(|c| c.id == col)
+        .unwrap();
+    d.app.sel_card = d
+        .app
+        .cards_of(col)
+        .iter()
+        .position(|c| c.id == card_id)
+        .unwrap();
+    d.handle(key(KeyCode::Enter));
+    assert_eq!(d.app.screen, Screen::CardDetail);
+    d
+}
+
+fn failed_card(client: &mut board_tui::testkit::DemoClient) -> board_core::model::Card {
+    client
+        .board_get()
+        .unwrap()
+        .cards
+        .iter()
+        .find(|card| card.status == CardStatus::Failed)
+        .unwrap()
+        .clone()
+}
+
+#[test]
+fn detail_run_selection_defaults_to_newest_and_survives_a_refresh() {
+    let mut client = super::helpers::demo_client().unwrap();
+    let card = failed_card(&mut client);
+    let seeded = seed_runs(&client, &card, 3, true);
+    let mut d = driver_with_detail_open(client, card.id);
+
+    // Default selection is the newest run — today's `o` semantics.
+    let runs = d.app.detail.as_ref().unwrap().runs.len();
+    assert_eq!(d.app.detail_run_sel, runs - 1);
+    assert_eq!(d.app.focused_run().unwrap().id, *seeded.last().unwrap());
+
+    // Move the cursor onto an older run, then refresh the open detail: an
+    // in-range cursor is preserved, exactly like `detail_comment_sel`.
+    d.app.detail_scroll_target = DetailScrollTarget::Runs;
+    d.handle(key(KeyCode::Up));
+    d.handle(key(KeyCode::Up));
+    let picked = d.app.focused_run().unwrap().id;
+    assert_ne!(picked, *seeded.last().unwrap());
+
+    // Deleting a comment reloads the open detail (`reload_open_detail`), the
+    // same refresh path `detail_comment_sel` survives.
+    d.app.detail_scroll_target = DetailScrollTarget::Comments;
+    let comments = d.app.detail.as_ref().unwrap().comments.len();
+    d.handle(key(KeyCode::Up)); // off the immutable system comment
+    d.handle(key(KeyCode::Char('d')));
+    d.handle(key(KeyCode::Char('y')));
+    assert_eq!(d.app.screen, Screen::CardDetail);
+    assert_eq!(
+        d.app.detail.as_ref().unwrap().comments.len(),
+        comments - 1,
+        "the delete must actually have reloaded the detail"
+    );
+    assert_eq!(
+        d.app.focused_run().unwrap().id,
+        picked,
+        "a detail refresh must not yank the run cursor"
+    );
+}
+
+#[test]
+fn detail_run_selection_clamps_when_the_run_list_shrinks() {
+    let mut client = super::helpers::demo_client().unwrap();
+    let card = failed_card(&mut client);
+    seed_runs(&client, &card, 4, true);
+    let mut d = driver_with_detail_open(client, card.id);
+    d.app.detail_scroll_target = DetailScrollTarget::Runs;
+    let last = d.app.detail.as_ref().unwrap().runs.len() - 1;
+    assert_eq!(d.app.detail_run_sel, last);
+
+    // A detail whose run list came back shorter must not leave the cursor out
+    // of bounds (nor panic on the next render/`o`).
+    let mut detail = d.app.detail.clone().unwrap();
+    detail.runs.truncate(2);
+    d.app.detail = Some(detail);
+    d.app.detail_run_sel = last;
+    let effects = update(&mut d.app, key(KeyCode::Char('o')));
+    let kept = d.app.detail.as_ref().unwrap().runs[1].id;
+    assert!(matches!(effects.as_slice(),
+            [Effect::FocusRun(c, r)] if *c == card.id && *r == kept));
+    update(&mut d.app, key(KeyCode::Tab));
+    update(&mut d.app, key(KeyCode::Tab));
+    assert_eq!(d.app.detail_run_sel, 1);
+}
+
+#[test]
+fn detail_runs_selection_moves_with_arrows_and_jk_and_saturates() {
+    let mut client = super::helpers::demo_client().unwrap();
+    let card = failed_card(&mut client);
+    seed_runs(&client, &card, 12, true);
+    let mut d = driver_with_detail_open(client, card.id);
+    d.app.detail_scroll_target = DetailScrollTarget::Runs;
+    let len = d.app.detail.as_ref().unwrap().runs.len();
+    let visible = {
+        let layout = board_tui::view::detail_layout(&d.app, d.app.last_area);
+        (layout.runs.height.saturating_sub(1) as usize).max(1)
+    };
+    assert!(len > visible, "fixture must overflow the runs viewport");
+
+    // `k` and `Up` both move the selection up one row; the offset follows.
+    for expected in (0..len - 1).rev() {
+        let msg = if expected % 2 == 0 {
+            key(KeyCode::Char('k'))
+        } else {
+            key(KeyCode::Up)
+        };
+        update(&mut d.app, msg);
+        assert_eq!(d.app.detail_run_sel, expected);
+        assert!(
+            d.app.detail_run_sel >= d.app.detail_runs_scroll
+                && d.app.detail_run_sel < d.app.detail_runs_scroll + visible,
+            "selected row {} outside viewport [{}, {})",
+            d.app.detail_run_sel,
+            d.app.detail_runs_scroll,
+            d.app.detail_runs_scroll + visible
+        );
+    }
+    // Saturates at the top: no wrap-around to the newest run.
+    update(&mut d.app, key(KeyCode::Up));
+    update(&mut d.app, key(KeyCode::Char('k')));
+    assert_eq!(d.app.detail_run_sel, 0);
+    assert_eq!(d.app.detail_runs_scroll, 0);
+
+    // `j`/`Down` back to the bottom, then saturate there.
+    for expected in 1..len {
+        let msg = if expected % 2 == 0 {
+            key(KeyCode::Char('j'))
+        } else {
+            key(KeyCode::Down)
+        };
+        update(&mut d.app, msg);
+        assert_eq!(d.app.detail_run_sel, expected);
+        assert!(
+            d.app.detail_run_sel >= d.app.detail_runs_scroll
+                && d.app.detail_run_sel < d.app.detail_runs_scroll + visible
+        );
+    }
+    update(&mut d.app, key(KeyCode::Down));
+    update(&mut d.app, key(KeyCode::Char('j')));
+    assert_eq!(d.app.detail_run_sel, len - 1);
+    assert_eq!(d.app.detail_runs_scroll, len - visible);
+}
+
+/// One mouse-wheel notch over `(x, y)`.
+fn wheel(kind: MouseEventKind, x: u16, y: u16) -> Msg {
+    Msg::Mouse(MouseEvent {
+        kind,
+        column: x,
+        row: y,
+        modifiers: KeyModifiers::empty(),
+    })
+}
+
+/// The rendered frame as one string per row.
+fn rendered_rows(app: &board_tui::app::App) -> Vec<String> {
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(
+        app.last_area.width,
+        app.last_area.height,
+    ))
+    .unwrap();
+    term.draw(|f| board_tui::view::view(app, f)).unwrap();
+    term.backend()
+        .to_string()
+        .lines()
+        .map(|l| l.to_string())
+        .collect()
+}
+
+/// The run row is deliberately minimal: **run number, harness, status, and how
+/// long it ran**, and nothing else. The column, the harness conversation id
+/// (`conv`) and the `pane ✓|-` marker are not in the row — the identity fields
+/// are already elsewhere in the detail, and since a run whose pane is gone is
+/// reopened automatically, `pane -` no longer predicts whether `o` works.
+#[test]
+fn run_rows_show_only_id_harness_status_and_duration() {
+    let mut client = super::helpers::demo_client().unwrap();
+    let card = failed_card(&mut client);
+    let seeded = seed_runs(&client, &card, 2, true);
+    let column = client
+        .board_get()
+        .unwrap()
+        .columns
+        .iter()
+        .find(|c| c.id == card.column_id)
+        .unwrap()
+        .name
+        .clone();
+    let d = driver_with_detail_open(client, card.id);
+    let newest = *seeded.last().unwrap();
+    let rows = rendered_rows(&d.app);
+    let row = rows
+        .iter()
+        .find(|r| r.contains(&format!("#{newest} ")))
+        .unwrap_or_else(|| panic!("no rendered row for run #{newest}: {rows:#?}"));
+
+    let prefix = format!("#{newest} claude · ok · ");
+    assert!(
+        row.contains(&prefix),
+        "row must read `#<id> <harness> · <status> · <duration>`: {row}"
+    );
+    // The trailing field is the duration and the row ends there: exactly two
+    // ` · ` separators, so no dropped field can creep back in.
+    let duration = row
+        .split(&prefix)
+        .nth(1)
+        .unwrap()
+        .trim_end_matches(['"', '│', ' ']);
+    assert!(
+        duration.ends_with('s') && duration.starts_with(|c: char| c.is_ascii_digit()),
+        "last field must be the duration, got {duration:?}: {row}"
+    );
+    assert_eq!(
+        row.matches(" · ").count(),
+        2,
+        "the row carries exactly id+harness, status and duration: {row}"
+    );
+    // The explicitly dropped fields.
+    assert!(!row.contains("conv"), "conversation id dropped: {row}");
+    assert!(!row.contains("pane"), "pane marker dropped: {row}");
+    assert!(
+        !row.contains(&column),
+        "column name dropped (column is {column:?}): {row}"
+    );
+}
+
+/// A run that has not ended yet reads `active` and reports how long it has been
+/// running, measured from the injected `app.now` — not `-` and not a frozen 0s.
+#[test]
+fn an_active_run_row_reports_how_long_it_has_been_running() {
+    let mut client = super::helpers::demo_client().unwrap();
+    let card = failed_card(&mut client);
+    let run = client
+        .db()
+        .enqueue_run_uow(&EnqueueRun {
+            card_id: card.id,
+            column_id: card.column_id,
+            harness: "claude",
+            argv_json: "[]",
+            prompt_snapshot: "p",
+            system_prompt_snapshot: None,
+            launch_spec_json: None,
+            session_id: Some("conv-active-0123456789"),
+            session: None,
+        })
+        .unwrap();
+    // Promoted but never finalized: started, still open.
+    client
+        .db()
+        .promote_run_uow(run.id, Some("w1"), Some("w1:p-active"), None)
+        .unwrap();
+    let mut d = driver_with_detail_open(client, card.id);
+    let started = d
+        .app
+        .detail
+        .as_ref()
+        .unwrap()
+        .runs
+        .iter()
+        .find(|r| r.id == run.id)
+        .and_then(|r| r.started_at.as_deref())
+        .and_then(board_tui::view::parse_epoch)
+        .expect("a promoted run records started_at");
+    d.app.now = started + 95;
+
+    let rows = rendered_rows(&d.app);
+    let want = format!("#{} claude · active · 1m35s", run.id);
+    assert!(
+        rows.iter().any(|r| r.contains(&want)),
+        "expected {want:?} in: {rows:#?}"
+    );
+}
+
+#[test]
+fn wheel_scrolling_the_runs_section_carries_the_selection_into_the_window() {
+    let mut client = super::helpers::demo_client().unwrap();
+    let card = failed_card(&mut client);
+    seed_runs(&client, &card, 20, true);
+    let mut d = driver_with_detail_open(client, card.id);
+    d.app.detail_scroll_target = DetailScrollTarget::Runs;
+    let ids: Vec<i64> = d
+        .app
+        .detail
+        .as_ref()
+        .unwrap()
+        .runs
+        .iter()
+        .map(|r| r.id)
+        .collect();
+    let layout = board_tui::view::detail_layout(&d.app, d.app.last_area);
+    let visible = (layout.runs.height.saturating_sub(1) as usize).max(1);
+    assert!(
+        ids.len() > visible,
+        "fixture must overflow the runs viewport"
+    );
+    assert_eq!(
+        d.app.detail_run_sel,
+        ids.len() - 1,
+        "opens on the newest run"
+    );
+
+    // Wheel far up over the runs section: the offset moves, and the cursor is
+    // carried into the rows the wheel brought into view (it must not stay on an
+    // off-screen run).
+    for _ in 0..10 {
+        update(
+            &mut d.app,
+            wheel(
+                MouseEventKind::ScrollUp,
+                layout.runs.x + 1,
+                layout.runs.y + 1,
+            ),
+        );
+    }
+    let offset = d.app.detail_runs_scroll;
+    assert!(
+        offset + visible < ids.len(),
+        "the wheel must have scrolled away from the bottom"
+    );
+    assert!(
+        d.app.detail_run_sel >= offset && d.app.detail_run_sel < offset + visible,
+        "selected run {} outside the wheel-scrolled window [{}, {})",
+        d.app.detail_run_sel,
+        offset,
+        offset + visible
+    );
+
+    // The marker is really on screen, on the selected run's row.
+    let selected_id = d.app.focused_run().unwrap().id;
+    let rows = rendered_rows(&d.app);
+    let marked: Vec<&String> = rows.iter().filter(|r| r.contains('▸')).collect();
+    assert_eq!(marked.len(), 1, "exactly one focus marker: {rows:#?}");
+    assert!(
+        marked[0].contains(&format!("#{selected_id} ")),
+        "the marker must sit on the selected run #{selected_id}: {}",
+        marked[0]
+    );
+
+    // And `o` targets that visible run, never the now-off-screen newest one.
+    let effects = update(&mut d.app, key(KeyCode::Char('o')));
+    assert!(matches!(effects.as_slice(),
+            [Effect::FocusRun(c, r)] if *c == card.id && *r == selected_id));
+    assert_ne!(selected_id, *ids.last().unwrap());
+
+    // Wheeling back down keeps the invariant from the other direction.
+    let selected_run_before_scroll_down = d.app.detail_run_sel;
+    for _ in 0..40 {
+        update(
+            &mut d.app,
+            wheel(
+                MouseEventKind::ScrollDown,
+                layout.runs.x + 1,
+                layout.runs.y + 1,
+            ),
+        );
+    }
+    // Scrolling *past* the cursor drags it along by the nearest edge, so it is
+    // still inside the window and has moved forward — never stranded above it.
+    let offset = d.app.detail_runs_scroll;
+    assert_eq!(offset, ids.len() - visible, "wheel clamps at the bottom");
+    assert!(
+        d.app.detail_run_sel >= offset && d.app.detail_run_sel < offset + visible,
+        "selected run {} outside [{}, {})",
+        d.app.detail_run_sel,
+        offset,
+        offset + visible
+    );
+    // The cursor never moves backwards under a downward wheel: it stays where
+    // it is while still visible, and is dragged forward by the window's top
+    // edge otherwise.
+    assert!(d.app.detail_run_sel >= selected_run_before_scroll_down);
+    assert_eq!(
+        rendered_rows(&d.app)
+            .iter()
+            .filter(|r| r.contains('▸'))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn wheel_scrolling_the_comments_section_carries_the_comment_focus_the_same_way() {
+    // The comments list is the convention runs follow: a wheel notch is a raw
+    // offset move, and the cursor is pulled into the new window afterwards.
+    let mut client = super::helpers::demo_client().unwrap();
+    let card = failed_card(&mut client);
+    for i in 0..25 {
+        client
+            .comment_add(card.id, &format!("wheel comment {i}"), Some("test"))
+            .unwrap();
+    }
+    let mut d = driver_with_detail_open(client, card.id);
+    assert_eq!(d.app.detail_scroll_target, DetailScrollTarget::Comments);
+    let layout = board_tui::view::detail_layout(&d.app, d.app.last_area);
+    let (_, visible) = board_tui::view::comments_viewport(&d.app, &layout);
+
+    for _ in 0..12 {
+        update(
+            &mut d.app,
+            wheel(
+                MouseEventKind::ScrollUp,
+                layout.comments.x + 1,
+                layout.comments.y + 1,
+            ),
+        );
+    }
+    let spans =
+        board_tui::view::comment_row_spans(d.app.detail.as_ref().unwrap(), layout.comments.width);
+    let (start, len) = spans[d.app.detail_comment_sel];
+    let lo = d.app.detail_comments_scroll;
+    assert!(
+        start < lo + visible && start + len > lo,
+        "focused comment rows [{start}, {}) outside the window [{lo}, {})",
+        start + len,
+        lo + visible
+    );
+    let rows = rendered_rows(&d.app);
+    assert_eq!(
+        rows.iter().filter(|r| r.contains('▸')).count(),
+        1,
+        "the focused-comment marker must stay on screen: {rows:#?}"
+    );
+}
+
+#[test]
+fn o_without_a_loaded_detail_toasts_instead_of_doing_nothing() {
+    let mut app = demo_app();
+    app.screen = Screen::CardDetail;
+    app.detail = None;
+    let effects = update(&mut app, key(KeyCode::Char('o')));
+    assert!(effects.is_empty(), "no run can be named without a detail");
+    let toast = app.toast.as_ref().expect("o must explain itself");
+    assert!(toast.is_error);
+    assert!(
+        toast.text.contains("not loaded"),
+        "toast should say the detail has not loaded: {}",
+        toast.text
+    );
+}
+
+#[test]
+fn o_focuses_the_selected_older_run_not_the_newest() {
+    let mut client = super::helpers::demo_client().unwrap();
+    let card = failed_card(&mut client);
+    let seeded = seed_runs(&client, &card, 3, true);
+    let mut d = driver_with_detail_open(client, card.id);
+    d.app.detail_scroll_target = DetailScrollTarget::Runs;
+    let runs: Vec<i64> = d
+        .app
+        .detail
+        .as_ref()
+        .unwrap()
+        .runs
+        .iter()
+        .map(|r| r.id)
+        .collect();
+
+    // Walk the cursor onto the *oldest* run and jump to it.
+    for _ in 0..runs.len() {
+        update(&mut d.app, key(KeyCode::Up));
+    }
+    let effects = update(&mut d.app, key(KeyCode::Char('o')));
+    assert!(matches!(effects.as_slice(),
+            [Effect::FocusRun(c, r)] if *c == card.id && *r == runs[0]));
+    assert_ne!(runs[0], *seeded.last().unwrap());
+
+    // One row down: the emitted run id tracks the highlighted row exactly.
+    update(&mut d.app, key(KeyCode::Down));
+    let effects = update(&mut d.app, key(KeyCode::Char('o')));
+    assert!(matches!(effects.as_slice(),
+            [Effect::FocusRun(_, r)] if *r == runs[1]));
+
+    // `o` also works while the comments section holds key focus, still on the
+    // selected run.
+    update(&mut d.app, key(KeyCode::Tab));
+    assert_eq!(d.app.detail_scroll_target, DetailScrollTarget::Comments);
+    let effects = update(&mut d.app, key(KeyCode::Char('o')));
+    assert!(matches!(effects.as_slice(),
+            [Effect::FocusRun(_, r)] if *r == runs[1]));
+}
+
+#[test]
+fn o_on_a_run_whose_pane_is_gone_toasts_the_rescue_and_keeps_the_board_usable() {
+    let mut client = super::helpers::demo_client().unwrap();
+    let card = failed_card(&mut client);
+    // The newest run records no pane but does record a claude conversation id,
+    // so the daemon (here the fake client) reopens it. The TUI must explain
+    // that instead of silently exiting to a pane the user never asked for.
+    let paneless = *seed_runs(&client, &card, 1, false).last().unwrap();
+    let mut d = driver_with_detail_open(client, card.id);
+    d.set_origin_socket(Some("/tmp/herdr.sock".into()));
+    assert_eq!(d.app.focused_run().unwrap().id, paneless);
+
+    d.handle(key(KeyCode::Char('o')));
+    assert!(
+        !d.app.should_quit,
+        "a rescue must keep the board up so its explanation is readable"
+    );
+    let toast = d.app.toast.as_ref().expect("rescue toast");
+    assert!(!toast.is_error, "a successful rescue is not an error");
+    assert!(
+        toast.text.contains(&format!("#{paneless}")),
+        "toast must name the run: {}",
+        toast.text
+    );
+    assert!(
+        toast.text.contains("resumed"),
+        "toast must say the session was resumed: {}",
+        toast.text
+    );
+    assert!(
+        toast.text.contains("ephemeral"),
+        "toast must say the new pane is not tracked as a run: {}",
+        toast.text
+    );
+    assert_eq!(d.app.screen, Screen::CardDetail);
+}
+
+#[test]
+fn o_on_a_run_that_cannot_be_reopened_toasts_an_error_without_quitting() {
+    let mut client = super::helpers::demo_client().unwrap();
+    let card = failed_card(&mut client);
+    // No pane and no conversation id: nothing to focus, nothing to resume.
+    let run = client
+        .db()
+        .enqueue_run_uow(&EnqueueRun {
+            card_id: card.id,
+            column_id: card.column_id,
+            harness: "claude",
+            argv_json: "[]",
+            prompt_snapshot: "p",
+            system_prompt_snapshot: None,
+            launch_spec_json: None,
+            session_id: None,
+            session: None,
+        })
+        .unwrap();
+    client
+        .db()
+        .promote_run_uow(run.id, Some("w1"), None, None)
+        .unwrap();
+    client
+        .db()
+        .finalize_run_uow(&FinalizeRun {
+            run_id: run.id,
+            outcome: RunOutcome::Ok,
+            summary: Some("done"),
+            comments: &[],
+            target_column_id: None,
+            final_status: CardStatus::Done,
+            final_awaiting_reason: None,
+            next: None,
+        })
+        .unwrap();
+    let mut d = driver_with_detail_open(client, card.id);
+    d.set_origin_socket(Some("/tmp/herdr.sock".into()));
+
+    d.handle(key(KeyCode::Char('o')));
+    assert!(!d.app.should_quit, "a refusal must not exit the board");
+    let toast = d.app.toast.as_ref().expect("error toast");
+    assert!(toast.is_error);
+    assert!(
+        toast.text.contains(&format!("#{}", run.id)),
+        "toast must name the run: {}",
+        toast.text
+    );
+    // The daemon owns the diagnosis; the TUI renders it verbatim and never adds
+    // a stale "not available yet" disclaimer.
+    assert!(
+        toast.text.contains("conversation id"),
+        "toast must carry the daemon's reason: {}",
+        toast.text
+    );
+    assert!(
+        !toast.text.contains("not available yet"),
+        "the pre-rescue wording must be gone: {}",
+        toast.text
+    );
+    assert_eq!(d.app.screen, Screen::CardDetail);
+}
+
+#[test]
+fn o_on_a_run_whose_harness_cannot_resume_names_the_harness() {
+    let mut client = super::helpers::demo_client().unwrap();
+    let card = failed_card(&mut client);
+    let run = client
+        .db()
+        .enqueue_run_uow(&EnqueueRun {
+            card_id: card.id,
+            column_id: card.column_id,
+            // Not a built-in and not declared in config ⇒ resume unsupported.
+            harness: "ghost",
+            argv_json: "[]",
+            prompt_snapshot: "p",
+            system_prompt_snapshot: None,
+            launch_spec_json: None,
+            session_id: Some("conv-ghost"),
+            session: None,
+        })
+        .unwrap();
+    client
+        .db()
+        .promote_run_uow(run.id, Some("w1"), None, None)
+        .unwrap();
+    client
+        .db()
+        .finalize_run_uow(&FinalizeRun {
+            run_id: run.id,
+            outcome: RunOutcome::Ok,
+            summary: Some("done"),
+            comments: &[],
+            target_column_id: None,
+            final_status: CardStatus::Done,
+            final_awaiting_reason: None,
+            next: None,
+        })
+        .unwrap();
+    let mut d = driver_with_detail_open(client, card.id);
+    d.set_origin_socket(Some("/tmp/herdr.sock".into()));
+
+    d.handle(key(KeyCode::Char('o')));
+    assert!(!d.app.should_quit);
+    let toast = d.app.toast.as_ref().expect("error toast");
+    assert!(toast.is_error);
+    assert!(
+        toast.text.contains("ghost"),
+        "toast must name the harness that cannot resume: {}",
+        toast.text
+    );
+}
+
 #[test]
 fn card_detail_o_emits_focus_and_driver_quits_only_on_success() {
     let mut client = super::helpers::demo_client().unwrap();
@@ -79,8 +794,12 @@ fn card_detail_o_emits_focus_and_driver_quits_only_on_success() {
     let mut app = board_tui::app::App::new(board);
     app.screen = Screen::CardDetail;
     app.detail = Some(client.card_get(running.id).unwrap());
+    // `o` emits exactly the selected run — never a re-derived "latest with a
+    // pane" (see `o_focuses_the_selected_older_run_not_the_newest`).
+    let expected_run = app.focused_run().expect("running card has a run").id;
     let effects = update(&mut app, key(KeyCode::Char('o')));
-    assert!(matches!(effects.as_slice(), [Effect::FocusRun(id)] if *id == running.id));
+    assert!(matches!(effects.as_slice(),
+            [Effect::FocusRun(card, run)] if *card == running.id && *run == expected_run));
 
     let mut success = driver_of(super::helpers::demo_client().unwrap());
     success.set_origin_socket(Some("/tmp/herdr.sock".into()));
@@ -199,12 +918,19 @@ fn card_detail_scrolls_comments_and_runs_independently() {
     assert_eq!(app.detail_comment_sel, 1);
     assert_eq!(app.detail_runs_scroll, 0);
 
+    // Runs focused: `Down` moves the *run* cursor and leaves the comment
+    // cursor alone; the two sections keep independent state.
     let comment_sel = app.detail_comment_sel;
     update(&mut app, key(KeyCode::Tab));
     assert_eq!(app.detail_scroll_target, DetailScrollTarget::Runs);
+    let run_sel = app.detail_run_sel;
     update(&mut app, key(KeyCode::Down));
     assert_eq!(app.detail_comment_sel, comment_sel);
-    assert!(app.detail_runs_scroll > 0);
+    assert_eq!(app.detail_run_sel, run_sel + 1);
+    assert_eq!(
+        app.detail_comments_scroll, 0,
+        "the runs cursor must not scroll the comments section"
+    );
 }
 
 #[test]

@@ -1,10 +1,12 @@
 //! Harness argv/env building + session planning tests.
 
+use board_core::capability::ResumeSupport;
 use board_core::config::{Config, HarnessDef};
 use board_core::harness::{
-    build_invocation, claude_argv, is_builtin_harness, pi_argv, plan_session, HarnessError,
-    SessionPlan, BOARD_PROTOCOL_TRAILER, DEFAULT_HARNESS,
+    build_invocation, claude_argv, is_builtin_harness, pi_argv, plan_session, resume_invocation,
+    session_argv, HarnessError, SessionPlan, BOARD_PROTOCOL_TRAILER, DEFAULT_HARNESS,
 };
+use board_core::launch::ExecutionSpec;
 use board_core::prompt::EffectiveSettings;
 use board_core::protocol::Effort;
 
@@ -352,4 +354,206 @@ fn unknown_harness_errors() {
     )
     .unwrap_err();
     assert_eq!(err, HarnessError::UnknownHarness("nope".into()));
+}
+
+// ---------------------------------------------------------------------------
+// Resume launches (the dead-pane rescue)
+// ---------------------------------------------------------------------------
+
+fn persisted(harness: &str, session_flag: &str) -> ExecutionSpec {
+    ExecutionSpec {
+        argv: vec![
+            harness.into(),
+            "--model".into(),
+            "recorded-model".into(),
+            session_flag.into(),
+            "old-conversation".into(),
+        ],
+        env: vec![
+            ("BOARD_PROMPT".into(), "the original task".into()),
+            ("RECORDED_ENV".into(), "recorded-value".into()),
+        ],
+        agent_kind: Some(harness.into()),
+        initial_prompt: Some("the original task".into()),
+        system_prompt: Some("recorded system prompt".into()),
+    }
+}
+
+#[test]
+fn session_argv_owns_each_harness_resume_syntax() {
+    // Resume is spelled differently per harness and there is exactly one place
+    // that knows how.
+    assert_eq!(
+        session_argv("claude", &SessionPlan::Resume("c1".into()), None).unwrap(),
+        (
+            vec!["--resume".to_string(), "c1".to_string()],
+            Some("c1".to_string())
+        )
+    );
+    assert_eq!(
+        session_argv("pi", &SessionPlan::Resume("c1".into()), None).unwrap(),
+        (
+            vec!["--session-id".to_string(), "c1".to_string()],
+            Some("c1".to_string())
+        )
+    );
+    assert_eq!(
+        session_argv("nope", &SessionPlan::Resume("c1".into()), None).unwrap_err(),
+        HarnessError::UnknownHarness("nope".into())
+    );
+}
+
+#[test]
+fn resume_invocation_rethreads_the_persisted_argv_per_harness() {
+    // claude: the persisted `--resume <old>` is replaced, not duplicated.
+    let spec = resume_invocation(
+        "claude",
+        ResumeSupport::ByConversationId,
+        &persisted("claude", "--resume"),
+        "conv-9",
+    )
+    .unwrap();
+    assert_eq!(
+        spec.argv,
+        vec!["claude", "--model", "recorded-model", "--resume", "conv-9"]
+    );
+    assert!(!spec.argv.contains(&"old-conversation".to_string()));
+
+    // pi re-uses `--session-id` for resuming, and the persisted one is replaced.
+    let spec = resume_invocation(
+        "pi",
+        ResumeSupport::ByConversationId,
+        &persisted("pi", "--session-id"),
+        "conv-9",
+    )
+    .unwrap();
+    assert_eq!(
+        spec.argv,
+        vec!["pi", "--model", "recorded-model", "--session-id", "conv-9"]
+    );
+
+    // A persisted fork is also re-threaded to a plain resume.
+    let mut forked = persisted("claude", "--resume");
+    forked.argv.push("--fork-session".into());
+    let spec =
+        resume_invocation("claude", ResumeSupport::ByConversationId, &forked, "conv-9").unwrap();
+    assert_eq!(
+        spec.argv,
+        vec!["claude", "--model", "recorded-model", "--resume", "conv-9"]
+    );
+}
+
+#[test]
+fn resume_invocation_never_re_sends_the_original_prompt() {
+    let spec = resume_invocation(
+        "claude",
+        ResumeSupport::ByConversationId,
+        &persisted("claude", "--resume"),
+        "conv-9",
+    )
+    .unwrap();
+    // Both prompt channels are silenced: the managed prompt submission and the
+    // configured `BOARD_PROMPT` env. Resuming must continue the conversation,
+    // never re-run the task.
+    assert_eq!(spec.initial_prompt, None);
+    assert!(!spec.env.iter().any(|(k, _)| k == "BOARD_PROMPT"));
+    assert!(!spec.argv.iter().any(|a| a.contains("the original task")));
+    // The rest of the recorded execution environment is preserved verbatim, so
+    // a rescue cannot silently switch model/effort/env after a config edit.
+    assert!(spec
+        .env
+        .contains(&("RECORDED_ENV".to_string(), "recorded-value".to_string())));
+    assert_eq!(
+        spec.system_prompt.as_deref(),
+        Some("recorded system prompt")
+    );
+    assert_eq!(spec.agent_kind.as_deref(), Some("claude"));
+    // The pane is marked as a rescue and carries the conversation id for
+    // configured harnesses that opted in.
+    assert!(spec
+        .env
+        .contains(&("BOARD_RESCUE".to_string(), "1".to_string())));
+    assert!(spec
+        .env
+        .contains(&("BOARD_RESUME_SESSION_ID".to_string(), "conv-9".to_string())));
+}
+
+#[test]
+fn resume_invocation_runs_a_configured_harness_argv_unchanged() {
+    // A configured argv is persisted fully materialized, so there is nothing to
+    // re-thread: the id travels in the environment instead.
+    let mut spec = persisted("custom", "--whatever");
+    spec.agent_kind = None;
+    let resumed =
+        resume_invocation("custom", ResumeSupport::ByConversationId, &spec, "conv-9").unwrap();
+    assert_eq!(resumed.argv, spec.argv);
+    assert_eq!(resumed.agent_kind, None);
+    assert!(resumed
+        .env
+        .contains(&("BOARD_RESUME_SESSION_ID".to_string(), "conv-9".to_string())));
+}
+
+#[test]
+fn resume_invocation_refuses_a_legacy_all_in_one_command_line() {
+    // The legacy helpers end in `-- "<prompt>"` (claude) or a bare positional
+    // (pi). Appending resume flags to that would emit
+    // `… -- "<prompt>" --resume <id>` — re-running the task AND feeding
+    // `--resume` to the harness as prompt text. Refuse instead of rewriting.
+    let legacy = ExecutionSpec {
+        argv: claude_argv(
+            &settings(),
+            &SessionPlan::Resume("old".into()),
+            None,
+            "the original task",
+        )
+        .unwrap(),
+        env: vec![],
+        agent_kind: Some("claude".into()),
+        initial_prompt: Some("the original task".into()),
+        system_prompt: Some("s".into()),
+    };
+    assert!(legacy.argv.contains(&"--".to_string()));
+    assert_eq!(
+        resume_invocation("claude", ResumeSupport::ByConversationId, &legacy, "conv-9")
+            .unwrap_err(),
+        HarnessError::ResumeLegacyArgv("claude".into())
+    );
+    // The protocol-17 form `build_invocation` actually persists is accepted.
+    let managed = build_invocation(
+        "claude",
+        &Config::default(),
+        &settings(),
+        &SessionPlan::Mint,
+        Some("minted"),
+        "the original task",
+    )
+    .unwrap();
+    let spec = ExecutionSpec {
+        argv: managed.argv,
+        env: managed.env,
+        agent_kind: managed.agent_kind,
+        initial_prompt: managed.initial_prompt,
+        system_prompt: managed.system_prompt,
+    };
+    let resumed =
+        resume_invocation("claude", ResumeSupport::ByConversationId, &spec, "conv-9").unwrap();
+    assert!(resumed
+        .argv
+        .ends_with(&["--resume".to_string(), "conv-9".to_string()]));
+    assert!(!resumed.argv.contains(&"minted".to_string()));
+}
+
+#[test]
+fn resume_invocation_refuses_without_capability_or_conversation_id() {
+    let spec = persisted("custom", "--whatever");
+    assert_eq!(
+        resume_invocation("custom", ResumeSupport::Unsupported, &spec, "conv-9").unwrap_err(),
+        HarnessError::ResumeUnsupported("custom".into())
+    );
+    for blank in ["", "   "] {
+        assert_eq!(
+            resume_invocation("claude", ResumeSupport::ByConversationId, &spec, blank).unwrap_err(),
+            HarnessError::MissingResumeSession
+        );
+    }
 }

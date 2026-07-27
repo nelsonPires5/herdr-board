@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 13-jump-to-pane.sh — CLI focus and detail `o` reach the latest same-session run pane.
+# 13-jump-to-pane.sh — CLI focus and detail `o` reach the SELECTED same-session run pane.
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/lib.sh"
 
@@ -18,11 +18,45 @@ CARD_ID="$(printf '%s' "$card_json" | jget id)"
 e2e_board_herdr_mutate -- move "$CARD_ID" "$EXEC_ID" --json >/dev/null
 outcome="$(wait_ok "$CARD_ID")" || fail "run did not finish (outcome '$outcome')"
 [ "$outcome" = "ok" ] || fail "run outcome '$outcome' (expected ok)"
+
+step "HERDR MUTATION: board retry $CARD_ID -> a SECOND run, so the card has a run history"
+# Run selection in the TUI is only observable with more than one run: the
+# scenario deliberately picks a NON-newest row below.
+mut "board retry $CARD_ID"
+e2e_board_herdr_mutate -- retry "$CARD_ID" --json >/dev/null || fail "board retry failed"
+outcome2="$(wait_runs "$CARD_ID" 2)" || fail "retry did not spawn/finish a 2nd run"
+[ "$outcome2" = "ok" ] || fail "retry run outcome '$outcome2' (expected ok)"
+
+OLD_RUN="$(card_field "$CARD_ID" 'runs[-2].id')"
+OLD_PANE="$(card_field "$CARD_ID" 'runs[-2].herdr_pane_id')"
 TARGET_PANE="$(card_field "$CARD_ID" 'runs[-1].herdr_pane_id')"
+# `run.focus` requires an explicit run id: read it from the same card detail.
+TARGET_RUN="$(card_field "$CARD_ID" 'runs[-1].id')"
 [ -n "$TARGET_PANE" ] || fail "run did not record a pane"
+[ -n "$TARGET_RUN" ] || fail "card detail did not expose the run id"
+[ -n "$OLD_RUN" ] && [ -n "$OLD_PANE" ] || fail "first run did not keep its identity"
+[ "$OLD_RUN" != "$TARGET_RUN" ] || fail "retry did not create a distinct run"
+[ "$OLD_PANE" != "$TARGET_PANE" ] || fail "retry reused the first run's pane"
 hrpc pane.get "{\"pane_id\":\"$TARGET_PANE\"}" >/dev/null \
   || fail "held fake-agent pane is not accessible"
 ok "target pane $TARGET_PANE remains alive after board done"
+
+# The retry reclaims the first run's ended child pane (see
+# spawner/placement.rs::reclaim_prior_children), so run $OLD_RUN keeps a
+# recorded pane id that no longer exists. Make that premise deterministic
+# instead of assuming the reclaim order: closing an already-closed disposable
+# board-owned pane is a no-op.
+if hrpc pane.get "{\"pane_id\":\"$OLD_PANE\"}" >/dev/null 2>&1; then
+  mut "pane.close $OLD_PANE (disposable board-owned pane of the retried run)"
+  e2e_hrpc_mutate -- pane.close "{\"pane_id\":\"$OLD_PANE\"}" >/dev/null 2>&1 || true
+fi
+for _ in $(seq 1 30); do
+  hrpc pane.get "{\"pane_id\":\"$OLD_PANE\"}" >/dev/null 2>&1 || break
+  sleep .1
+done
+! hrpc pane.get "{\"pane_id\":\"$OLD_PANE\"}" >/dev/null 2>&1 \
+  || fail "older run's pane $OLD_PANE is still alive; the dead-pane case cannot be exercised"
+ok "run $OLD_RUN still records the now-dead pane $OLD_PANE"
 
 step "HERDR MUTATION: launch the real plugin overlay in the target workspace"
 e2e_herdr_mutate -- --session "$E2E_SESSION" plugin link "$REPO_ROOT" >/dev/null
@@ -76,10 +110,13 @@ if ! printf '%s\n' "$screen" | grep -q 'jump-target'; then
 fi
 
 step "Focus the same run through the canonical CLI"
-cli_focus_json="$(e2e_board_herdr_mutate -- card run focus "$CARD_ID" --json)"
+cli_focus_json="$(e2e_board_herdr_mutate -- card run focus "$CARD_ID" "$TARGET_RUN" --json)"
 cli_focus_pane="$(printf '%s' "$cli_focus_json" | jget pane_id)"
 [ "$cli_focus_pane" = "$TARGET_PANE" ] \
   || fail "CLI focus returned pane '$cli_focus_pane' (expected owned pane '$TARGET_PANE')"
+cli_focus_run="$(printf '%s' "$cli_focus_json" | jget run_id)"
+[ "$cli_focus_run" = "$TARGET_RUN" ] \
+  || fail "CLI focus returned run '$cli_focus_run' (expected requested run '$TARGET_RUN')"
 cli_focused=""
 for _ in $(seq 1 60); do
   panes="$(hrpc pane.list "{\"workspace_id\":\"$WS_ID\"}" 2>/dev/null || true)"
@@ -96,13 +133,13 @@ for p in ps:
 done
 [ "$cli_focused" = "$TARGET_PANE" ] \
   || fail "CLI focus left pane '$cli_focused' focused (expected '$TARGET_PANE')"
-ok "board card run focus reached owned pane $TARGET_PANE"
+ok "board card run focus reached run $TARGET_RUN on owned pane $TARGET_PANE"
 
 # The CLI focus intentionally leaves the plugin overlay open. Restore its focus
 # so the existing detail `o` flow below remains an independent TUI assertion.
 e2e_hrpc_mutate -- pane.focus "{\"pane_id\":\"$BOARD_PANE\"}" >/dev/null
 
-step "Open card detail and press o"
+step "Open card detail (the runs section now lists two runs)"
 e2e_herdr_mutate -- pane send-keys "$BOARD_PANE" enter
 detail_ready=0
 for _ in $(seq 1 50); do
@@ -122,6 +159,38 @@ done
 # `o` asks boardd to focus/close Herdr panes, so gate daemon and session too.
 e2e_process_identity_verify "$E2E_DAEMON_PID" "$E2E_DAEMON_IDENTITY" \
   || fail "refusing jump action: daemon identity does not match"
+
+step "Select the OLDER run in the Runs section and press o (dead pane, must not jump)"
+# Tab focuses the runs section; the cursor starts on the newest run, so one `up`
+# lands on run $OLD_RUN — whose recorded pane was reclaimed. `o` must therefore
+# refuse (proving it used the SELECTED row, not the newest one, which would have
+# succeeded and closed this pane).
+e2e_herdr_mutate -- pane send-keys "$BOARD_PANE" tab
+e2e_herdr_mutate -- pane send-keys "$BOARD_PANE" up
+e2e_herdr_mutate -- pane send-keys "$BOARD_PANE" o
+sleep 1
+panes="$(hrpc pane.list "{\"workspace_id\":\"$WS_ID\"}" 2>/dev/null || true)"
+still_focused="$(printf '%s' "$panes" | python3 -c '
+import json,sys
+try: ps=json.load(sys.stdin).get("panes",[])
+except Exception: sys.exit(0)
+for p in ps:
+    if p.get("focused"):
+        print(p.get("pane_id", "")); break
+' 2>/dev/null || true)"
+[ "$still_focused" = "$BOARD_PANE" ] \
+  || fail "selecting the dead-pane run left pane '$still_focused' focused (expected the board overlay $BOARD_PANE)"
+printf '%s' "$panes" | python3 -c '
+import json,sys
+pid=sys.argv[1]
+try: ps=json.load(sys.stdin).get("panes",[])
+except Exception: sys.exit(1)
+sys.exit(0 if any(p.get("pane_id")==pid for p in ps) else 1)
+' "$BOARD_PANE" || fail "board overlay exited on a refused jump (it must stay usable)"
+ok "o on the selected run $OLD_RUN refused the dead pane $OLD_PANE without quitting"
+
+step "Move the cursor back to the newest run and press o"
+e2e_herdr_mutate -- pane send-keys "$BOARD_PANE" down
 e2e_herdr_mutate -- pane send-keys "$BOARD_PANE" o
 
 step "Assert target pane focused and board pane exited"

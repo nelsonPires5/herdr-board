@@ -15,6 +15,7 @@ pub(super) fn detail_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
             app.detail_comments_scroll = 0;
             app.detail_runs_scroll = 0;
             app.detail_comment_sel = 0;
+            app.detail_run_sel = 0;
             app.comment_history = None;
         }
         KeyCode::Char('f') => app.toggle_detail_fullscreen(),
@@ -27,6 +28,9 @@ pub(super) fn detail_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
                 if !detail.comments.is_empty() {
                     app.detail_comment_sel = app.detail_comment_sel.min(detail.comments.len() - 1);
                 }
+                if !detail.runs.is_empty() {
+                    app.detail_run_sel = app.detail_run_sel.min(detail.runs.len() - 1);
+                }
             }
         }
         KeyCode::Up | KeyCode::Char('k') => {
@@ -35,6 +39,13 @@ pub(super) fn detail_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
             {
                 app.detail_comment_sel = app.detail_comment_sel.saturating_sub(1);
                 app.follow_comment_focus();
+            } else if app.detail_scroll_target == DetailScrollTarget::Runs
+                && app.detail.as_ref().is_some_and(|d| !d.runs.is_empty())
+            {
+                // Selection, not raw scroll: saturating, never wrapping, with
+                // the viewport following the cursor.
+                app.detail_run_sel = app.detail_run_sel.saturating_sub(1);
+                app.follow_run_focus();
             } else {
                 app.scroll_detail(-1);
             }
@@ -46,6 +57,12 @@ pub(super) fn detail_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
                 let len = app.detail.as_ref().unwrap().comments.len();
                 app.detail_comment_sel = (app.detail_comment_sel + 1).min(len - 1);
                 app.follow_comment_focus();
+            } else if app.detail_scroll_target == DetailScrollTarget::Runs
+                && app.detail.as_ref().is_some_and(|d| !d.runs.is_empty())
+            {
+                let len = app.detail.as_ref().unwrap().runs.len();
+                app.detail_run_sel = app.detail_run_sel.saturating_add(1).min(len - 1);
+                app.follow_run_focus();
             } else {
                 app.scroll_detail(1);
             }
@@ -114,8 +131,18 @@ pub(super) fn detail_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
             }
         }
         KeyCode::Char('o') => {
-            if let Some(id) = card_id {
-                return vec![Effect::FocusRun(id)];
+            // Jump to the *selected* run (the highlighted row in the Runs
+            // section, the newest run until the user moves the cursor). Never
+            // re-derive a "latest run with a pane" here: whether that run's
+            // pane is recorded and still exists is the daemon's call, so its
+            // error stays the single source of the diagnosis.
+            match (card_id, app.focused_run().map(|run| run.id)) {
+                (Some(id), Some(run_id)) => return vec![Effect::FocusRun(id, run_id)],
+                // A loaded card that has never run: nothing to jump to.
+                (Some(_), None) => app.set_toast("this card has no run to jump to", true),
+                // `card.get` has not come back yet (or failed): there is no run
+                // list to select from, so say so instead of doing nothing.
+                (None, _) => app.set_toast("card detail has not loaded yet", true),
             }
         }
         // Enter on an `awaiting` card confirms completion: the same `run.done`

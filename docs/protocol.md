@@ -190,10 +190,102 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
 - `run.cancel {card_id}` → `{run, card}` — kills the pane (herdr `pane.close`), outcome `cancelled`, card status `failed`, no transition.
 - `run.retry {card_id}` → `{run, card}` — re-enqueue in the current column as a fresh run. Claude
   resumes with `--fork-session`; Pi uses `--fork <old-id> --session-id <new-id>` and persists it.
-- `run.focus {card_id, origin_socket}` → `{run_id,pane_id}` — chooses the newest run with a
-  recorded pane, resolves its Herdr session, and calls socket `pane.focus`. `origin_socket` and the
-  target socket are canonicalized and must match; cross-session focus is error 3, unavailable/stale
-  Herdr is error 4. The CLI resolves it from `--origin-socket`, `$HERDR_SOCKET_PATH`, or `$HERDR_SOCK`.
+- `run.focus {card_id, run_id, origin_socket}` →
+  `{action, recorded_pane_id?, run_id, card_id, column_id, harness, session, session_id, pane_id}`
+  — focuses **one exact run's** pane, reopening it if necessary. `run_id` is required: the daemon
+  never implicitly picks the latest run, so a caller that wants "newest run with a pane" resolves
+  that itself from the card's `runs[]`. The run must belong to `card_id`; an unknown card, an
+  unknown run, and a run owned by another card are error 2 (the message names the requested card
+  and run and never discloses another card's identity). The result echoes the focused run's full
+  identity, where `session` is the **herdr session name** (`None` = default session) and
+  `session_id` is the **harness conversation id** — the two are distinct and never interchangeable.
+  `pane_id` is always the pane that now has focus; `recorded_pane_id` is what the run row stores
+  (absent when it stores none), which on a rescue is the **dead** pane, kept for diagnostics.
+
+  Liveness is checked explicitly with one targeted `pane.get` before focusing, so a stale
+  `herdr_pane_id` never produces an opaque `pane.focus` failure. `action` says what happened:
+
+  | `action` | meaning |
+  |---|---|
+  | `focused_recorded_pane` | the recorded pane was alive and got focus (the default for payloads serialized before this field existed) |
+  | `focused_rescued_pane` | the recorded pane is gone, but a pane from an **earlier rescue of this run** was still alive in the card tab, so that one got focus; nothing was created |
+  | `rescued` | the recorded pane is gone; a **new** pane was created in the `card-<id>` tab and the harness conversation was resumed in it |
+
+  **Rescue.** When the run has no live pane (nothing recorded, or the recorded pane no longer
+  exists), the daemon reopens the run by resuming its harness conversation in a fresh pane. It never
+  reuses or revives the dead pane id and never falls back to another run's pane. The rescue
+  **writes nothing to the database**: no new `runs` row, no updated `herdr_pane_id`, no cleared
+  `ended_at`/`outcome`; the historical row stays immutable and `SCHEMA_VERSION` is unaffected. The
+  rescued pane is therefore *ephemeral and unmanaged* — it has no run row, so the daemon does not
+  own, watch, or time it out (see `docs/design.md` → Limitations). Its launch is derived from the
+  run's persisted `launch_spec_json`, so model/effort/permission mode/env match the original
+  execution, with the initial prompt removed and `BOARD_PROMPT` stripped so the card task is never
+  re-sent (resuming continues the conversation, it does not re-run the work). A persisted *legacy
+  all-in-one* command line (one containing `--`, i.e. with the task embedded positionally) cannot be
+  re-threaded onto a resume without re-sending that task, so it is refused (error 3) rather than
+  rewritten.
+
+  **Environment of a rescued pane.** Protocol-17 placement is pane-first, so the environment is
+  established by the `pane.split` that creates the pane. A rescued pane receives the persisted run
+  environment plus `BOARD_CARD_ID`, `BOARD_SOCKET`, `BOARD_BIN`, `BOARD_RESCUE=1`,
+  `BOARD_RESUME_SESSION_ID=<conversation id>`, and `BOARD_RESCUED_RUN_ID=<run id>`.
+  **`BOARD_RUN_ID` is deliberately withheld.** It is not a label but the *actor credential*:
+  `board comment` authenticates as `agent:$BOARD_RUN_ID`, `board done` forwards it as the run to
+  finalize, and the configured-harness wrapper hands it to `run.pane_exited`. A rescued pane belongs
+  to no run and the historical row is immutable, so granting it the closed run's id would either be
+  rejected anyway (`agent run N is no longer open`) or — for a still-open run whose pane died — let
+  an unwatched pane finalize that run while racing the liveness watcher. Withholding it fails closed:
+  `board comment` degrades to an ordinary human comment on the card, `board done` answers "no active
+  run" (or is rejected on run-id mismatch), and the configured wrapper's `__pane-exited` call fails
+  argument parsing and is swallowed. `BOARD_RESCUED_RUN_ID` carries the id for humans and fixtures
+  and is consumed by no board command.
+
+  Resume support is an **explicit per-harness capability** (`harness.capabilities.resume`:
+  `by_conversation_id` | `unsupported`), never an assumption about flag syntax. `pi` and `claude`
+  declare it; a `[harness.NAME]` harness declares it with `resume = true` and otherwise fails
+  closed. Note that a recorded `session_id` is **not** evidence that a harness can resume it:
+  enqueue mints a uuid and persists it even for a configured harness that never receives one, so the
+  capability gate is the only sound signal (verified live in `e2e/27-rescue-dead-pane.sh`).
+
+  Rescue is **idempotent**: before creating anything the daemon scans the workspace for a pane left
+  by an earlier rescue of this exact run, identified by its pane label / agent name
+  `card-<id>-r<run>-rescue`. That name depends only on **stable identity** — deliberately not on the
+  column name, because renaming a column would otherwise change the marker and resume the same
+  conversation a second time. Because no database write is permitted, the name is the only correlator
+  available and it is a *diagnostic hint*, not an authoritative record: it is deterministic for panes
+  the daemon creates, but a user who renames the pane or its agent can defeat it (for a managed
+  harness a second attempt then usually fails closed on `agent_name_taken`, since Herdr agent names
+  are exclusive while the pane is open).
+
+  Matching is on the pane **label**, the one field the daemon both sets (`pane.rename`) and reads
+  back (`PaneInfo.label`); the same string is also used as the `agent.start` name purely for Herdr's
+  `agent_name_taken` exclusivity backstop. Verified live against Herdr 0.7.5: `agent.start` leaves a
+  board-set label untouched, so labelling once before the launch is sufficient. A matching pane only counts as *live* if its harness is
+  still there: a Herdr pane label outlives the process, so for a managed harness the pane must still
+  have a registered `agent` (a *presence* test — `PaneInfo.agent` is the agent kind, not the chosen
+  name), and in all cases a `done` agent status counts as dead. Otherwise focusing a leftover shell would make `o`
+  a permanent no-op after the resumed harness exited. Dead remains carrying this run's exact marker
+  are closed before the new pane is split, so repeated presses cannot pile up idle shells that no run
+  row could ever reclaim. For a **configured** harness Herdr exposes no `agent` field at all, so a
+  leftover shell cannot be distinguished from a live one — see `docs/design.md` → Limitations.
+
+  Rescue takes the same per-card-tab allocation lock as dispatch and registers the exact tab/anchor
+  it allocated in the same place, so two concurrent focus requests (or a focus racing a dispatch)
+  cannot each split a pane or each create a second `card-<id>` tab.
+
+  Error codes: nothing to focus **and** nothing to resume — no recorded conversation id, or a
+  pre-v11 run with no durable launch spec — is error 2 (the same code this dead end reported before
+  the rescue existed; the message names the dead pane and points at `run.retry`). A harness that
+  does not declare resume support is error 3 and names the harness. Cross-session focus is error 3.
+  Herdr/registry unavailable, a run with no recorded workspace, tab/pane creation failure, and a
+  harness that will not start in the new pane are error 4. A failed launch closes the pane it
+  created **and**, when placement had to create the `card-<id>` tab, that tab's shell anchor too
+  (which removes the empty tab), so a refused or failed rescue leaves nothing behind — a rescue has
+  neither a retry nor a run row, so anything orphaned here would be permanent. A `pane.focus` that
+  fails *after* a successful launch is logged as a warning and still reported as `rescued`: the pane
+  exists and the conversation is resumed, only the focus move was lost. The daemon resolves the run's
+  session socket and canonicalizes both it and `origin_socket` before any of this. The CLI resolves
+  `origin_socket` from `--origin-socket`, `$HERDR_SOCKET_PATH`, or `$HERDR_SOCK`.
 
 **Internal runner-only method (not public board API):**
 `run.pane_exited {card_id,run_id}` is sent only by the hidden `board __pane-exited` configured-harness
@@ -207,10 +299,10 @@ script removes itself when it starts; if `pane run` accepts scheduling but the p
 it, a residual configured-script orphan is an explicitly documented limitation.
 
 ### harness / spaces
-- `harness.capabilities {harness}` → `{harness, models:[{id, efforts:[…]}], model_freeform: bool, default_efforts:[…], permission_modes:[…]}`. `default_efforts` is serde-defaulted for backward-compatible clients and applies when model is omitted/free-form; a known model's own efforts remain authoritative.
+- `harness.capabilities {harness}` → `{harness, models:[{id, efforts:[…]}], model_freeform: bool, default_efforts:[…], permission_modes:[…], resume}`. `default_efforts` is serde-defaulted for backward-compatible clients and applies when model is omitted/free-form; a known model's own efforts remain authoritative. `resume` is `"by_conversation_id"` or `"unsupported"` and answers "can this harness re-attach to a conversation it recorded?" — the question `run.focus` must ask before reopening a run whose pane is gone. It is serde-defaulted to `"unsupported"`, so an older payload fails closed, and there is deliberately no universal-syntax assumption: each adapter declares it.
   - Built-in `pi`: static `models:[]`, `model_freeform:true`, `default_efforts:["off","minimal","low","medium","high","xhigh","max"]`, `permission_modes:[]`. Pi's catalog is user/provider-specific, so the daemon overlays a **live** catalog when it can resolve the pi agent dir (`$PI_CODING_AGENT_DIR`, else `~/.pi/agent`): it reads `auth.json` for the authenticated providers, then `models-store.json` and keeps only those providers' models as `provider/model` ids with per-model efforts from each model's `thinkingLevelMap` (the full thinking ladder when a model has none). This reproduces `pi --list-models` (provider-auth scoped) with richer per-model effort data. If the files are missing/unreadable it falls back to shelling out to `pi --list-models`, and finally to the static free-form catalog. `model_freeform` stays `true`, so arbitrary model strings remain valid. Tests leave the agent dir unset, so the catalog stays the static `models:[]`.
-  - Built-in `claude` (CLI 2.1.209): models `fable`/`opus`/`sonnet`/`haiku`, each with `low|medium|high|xhigh|max`; the same levels are `default_efforts`; `model_freeform:true`; permissions are `["acceptEdits","auto","bypassPermissions","manual","dontAsk","plan"]`.
-  - config-defined harnesses report `model_freeform:true` and the declared `models`/`efforts`/`permission_modes`; declared efforts also populate `default_efforts`. Known model aliases use their declared effort set; omitted or free-form models use `default_efforts` (with a model-union fallback for older payloads that omitted `default_efforts`).
+  - Built-in `claude` (CLI 2.1.209): models `fable`/`opus`/`sonnet`/`haiku`, each with `low|medium|high|xhigh|max`; the same levels are `default_efforts`; `model_freeform:true`; permissions are `["acceptEdits","auto","bypassPermissions","manual","dontAsk","plan"]`. Both built-ins report `resume:"by_conversation_id"` (`claude --resume <id>`; Pi re-uses `--session-id <id>`).
+  - config-defined harnesses report `model_freeform:true` and the declared `models`/`efforts`/`permission_modes`; declared efforts also populate `default_efforts`. `resume` is `"by_conversation_id"` only when `[harness.NAME] resume = true` is declared, otherwise `"unsupported"` — the fail-closed default. Declaring it promises that the harness re-attaches to `$BOARD_RESUME_SESSION_ID` (see `run.focus`). Known model aliases use their declared effort set; omitted or free-form models use `default_efforts` (with a model-union fallback for older payloads that omitted `default_efforts`).
   - error 2 (not found) for an unknown harness, listing the known harnesses.
 - `harness.list` (no params) → `{harnesses:[…]}` — every harness the daemon knows about: the built-ins `pi`/`claude` in their default order (pi first), then every config-defined `[harness.NAME]` sorted, de-duplicated. This is the single source for BOTH the card `harness` and column `harness_override` selects in the TUI, so every harness menu shares one list in one (default-first) order.
 - `space.list {session?}` → `{spaces:[{id, label}]}` — workspaces in the given session (`null` = default), filled from that session's herdr `workspace.list`. Unknown/not-running session → error 4 listing the known sessions.
@@ -327,8 +419,12 @@ Their persisted startup argv contains neither system nor card prompt:
   ```toml
   [harness.fake]
   argv = ["bash", "/path/to/fake-agent.sh"]   # exact argv; prompt via $BOARD_PROMPT
+  resume = false                              # default: cannot resume a conversation
   ```
-  `BOARD_PROMPT` and trailer-inclusive `BOARD_SYSTEM_PROMPT` are installed in the pane env. Template
+  `BOARD_PROMPT` and trailer-inclusive `BOARD_SYSTEM_PROMPT` are installed in the pane env.
+  `resume = true` opts the harness into the `run.focus` rescue and promises it re-attaches to
+  `$BOARD_RESUME_SESSION_ID` (set, together with `BOARD_RESCUE=1`, only on a reopened pane, which
+  never receives `BOARD_PROMPT`). Template
   elements support `{model}`, `{effort}`, `{permission_mode}` and are dropped if their value is unset.
   The 0700 script bridge described above preserves multiline/special-character argv boundaries that
   direct `herdr pane run` cannot preserve.

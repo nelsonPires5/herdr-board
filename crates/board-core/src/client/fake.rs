@@ -45,6 +45,9 @@ plan/execution comments. Be adversarial. Then:
 /// store — but there is no dispatch: moving into an auto column just moves.
 pub struct FakeBoardClient {
     db: Db,
+    /// Harness config, so the fake answers the same resume-capability question
+    /// the daemon answers (`run.focus`). Defaults mean built-ins only.
+    config: crate::config::Config,
 }
 
 /// Validate an agent actor exactly as the daemon does. The fake harness may
@@ -98,7 +101,15 @@ impl FakeBoardClient {
     pub fn new() -> anyhow::Result<FakeBoardClient> {
         Ok(FakeBoardClient {
             db: Db::open_in_memory()?,
+            config: crate::config::Config::default(),
         })
+    }
+
+    /// Declare config-defined harnesses (`[harness.NAME]`) so tests can exercise
+    /// the resume opt-in through the fake.
+    pub fn with_config(mut self, config: crate::config::Config) -> FakeBoardClient {
+        self.config = config;
+        self
     }
 
     /// Direct access to the underlying store (tests may seed runs/comments).
@@ -109,6 +120,7 @@ impl FakeBoardClient {
 
 impl BoardClient for FakeBoardClient {
     fn call(&mut self, method: &str, params: Value) -> anyhow::Result<Value> {
+        let config = self.config.clone();
         let db = &self.db;
         let v = match method {
             "board.get" => {
@@ -262,14 +274,91 @@ impl BoardClient for FakeBoardClient {
             }
             "run.focus" => {
                 let p: RunFocusParams = serde_json::from_value(params)?;
-                let run = db
-                    .latest_run_with_pane(p.card_id)?
-                    .ok_or_else(|| anyhow::anyhow!("no run with an accessible pane"))?;
+                // Ownership-validating lookup: a foreign run id is rejected
+                // here exactly as the daemon rejects it.
+                let run = db.run_for_card(p.card_id, p.run_id)?;
+                // This fake is DB-only: it has no Herdr, so it cannot know
+                // whether the recorded pane is still alive and must not pretend
+                // to create one. What it *can* model honestly is the rescue
+                // **decision**, which is entirely a function of the run row
+                // plus config: an unsupported harness and a missing conversation
+                // id are refused exactly as the daemon refuses them, and a
+                // rescue-eligible run is reported as `Rescued` with no pane id
+                // of its own — see `pane_id` below.
+                let recorded_pane_id = run.herdr_pane_id.clone();
+                let action = match &recorded_pane_id {
+                    Some(_) => crate::protocol::RunFocusAction::FocusedRecordedPane,
+                    None => {
+                        // Every precondition the daemon checks, in the same
+                        // order, so a fake-backed test cannot pass on input the
+                        // real daemon refuses.
+                        if run
+                            .session_id
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|id| !id.is_empty())
+                            .is_none()
+                        {
+                            anyhow::bail!(
+                                "run {} of card {} recorded no harness conversation id, so \
+                                 there is nothing to resume",
+                                run.id,
+                                run.card_id
+                            );
+                        }
+                        let support = crate::capability::resume_support_for(&run.harness, &config);
+                        if !support.is_supported() {
+                            anyhow::bail!(
+                                "run {} of card {} uses harness '{}', which does not support \
+                                 resuming a recorded conversation, so its closed pane cannot \
+                                 be reopened",
+                                run.id,
+                                run.card_id,
+                                run.harness
+                            );
+                        }
+                        // Pre-v11 rows persist no durable execution to resume.
+                        let Some(spec) = run.launch_spec.as_ref() else {
+                            anyhow::bail!(
+                                "run {} of card {} predates durable launch specs, so there is \
+                                 no recorded execution to resume",
+                                run.id,
+                                run.card_id
+                            );
+                        };
+                        // The same refusals `resume_invocation` raises (legacy
+                        // all-in-one argv, in particular) must not be invisible
+                        // to fake-backed callers either.
+                        crate::harness::resume_invocation(
+                            &run.harness,
+                            support,
+                            spec.execution(),
+                            run.session_id.as_deref().unwrap_or_default().trim(),
+                        )?;
+                        if run.herdr_workspace_id.is_none() {
+                            anyhow::bail!(
+                                "run {} of card {} recorded no Herdr workspace, so a reopened \
+                                 pane would have nowhere to go",
+                                run.id,
+                                run.card_id
+                            );
+                        }
+                        crate::protocol::RunFocusAction::Rescued
+                    }
+                };
                 serde_json::to_value(RunFocusResult {
+                    action,
+                    recorded_pane_id: recorded_pane_id.clone(),
                     run_id: run.id,
-                    pane_id: run
-                        .herdr_pane_id
-                        .ok_or_else(|| anyhow::anyhow!("run has no pane"))?,
+                    card_id: run.card_id,
+                    column_id: run.column_id,
+                    harness: run.harness,
+                    session: run.session,
+                    session_id: run.session_id,
+                    // A DB-only fake cannot mint a real Herdr pane. For a
+                    // would-be rescue it reports the sentinel below instead of
+                    // inventing an id that no pane answers to.
+                    pane_id: recorded_pane_id.unwrap_or_else(|| "(would-rescue)".to_string()),
                 })?
             }
             "comment.add" => {

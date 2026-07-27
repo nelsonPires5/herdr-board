@@ -1,6 +1,6 @@
 ---
 name: herdr-board-visual-validation
-description: Safely validate, visually audit, and prototype herdr-board TUI changes before modifying production code. Use for responsive layout, cards, status colors, popup/form/detail interactions, keyboard/mouse behavior, Herdr plugin integration, WezTerm screenshots, ratatui snapshots, disposable live sessions, current-vs-proposed comparisons, or pre-PR verification of herdr-board.
+description: Safely validate, visually audit, and prototype herdr-board TUI changes before modifying production code. Use for responsive layout, cards, status colors, popup/form/detail interactions, keyboard/mouse behavior, Herdr plugin integration, ratatui snapshots, disposable live sessions, current-vs-proposed comparisons, or pre-PR verification of herdr-board. Captures via WezTerm screenshots where the WezTerm CLI is reachable, or a PTY + pyte capture on WSL2 and other machines without it.
 ---
 
 # Herdr Board Visual Validation
@@ -19,7 +19,7 @@ Read [`references/playbook.md`](references/playbook.md) before executing live He
    - **Prototype mode:** prototype in a detached temporary worktree under `/tmp`; keep the implementation checkout unchanged until approval.
    - **Execution-validation mode:** validate an existing implementation worktree; do not create a second implementation worktree or copy production changes into another branch.
 6. Never dispatch a paid/real agent for visual fixtures. Use `FakeBoardClient`, the fake harness, CLI-created manual cards, or direct writes only to the isolated fixture database.
-7. Capture every PID/resource needed for cleanup. Never use broad `pkill` patterns.
+7. Capture every PID/resource needed for cleanup. Never use broad `pkill` patterns — `pkill -f "board.sock"` matches the invoking shell's own command line and kills the session. Nominate the PID with `lsof -t "$TMP/board.sock"`, confirm it via `/proc/<pid>/cmdline`, then signal that exact PID.
 
 ## Workflow
 
@@ -50,7 +50,7 @@ In either mode:
 - Start an ephemeral named Herdr server with isolated board env.
 - Link the selected source plugin only inside that session.
 - Create a disposable workspace and open the plugin through its real action/placement.
-- Attach the disposable session in a temporary WezTerm tab after unsetting nested-Herdr environment variables.
+- Attach the disposable session in a temporary WezTerm tab after unsetting nested-Herdr environment variables. Without a WezTerm CLI, skip the tab and drive the binary under a PTY instead (playbook section 5b); the same variables must still be unset.
 
 Use the exact sequence in the playbook.
 
@@ -74,13 +74,20 @@ Prefer CLI creation. Direct SQLite writes are permitted only against the isolate
 
 ### 4. Capture comparable evidence
 
+Pick the capture route with `command -v wezterm` — never with `TERM_PROGRAM`, which stays `WezTerm` in WSL2 even when no CLI exists:
+
+- **WezTerm CLI available** (macOS, native Linux): playbook sections 4–5. Save plain terminal text and attributed ANSI (`wezterm cli get-text --escapes`); on macOS also capture PNGs with `screencapture` after permission is granted.
+- **No WezTerm CLI** (WSL2 with WezTerm on the Windows host): playbook section 5b. Drive the release binary under a PTY at an exact size and read the final screen and per-cell attributes with `pyte`, via `references/pty-capture.py`. Do not try the host `wezterm.exe`; it cannot reach the Windows-namespace mux socket.
+
+In both routes:
+
 - Use identical viewport dimensions and fixture content for baseline and proposal.
-- Save plain terminal text and attributed ANSI (`wezterm cli get-text --escapes`).
-- On macOS, capture PNGs with `screencapture` after permission is granted.
 - Create a local side-by-side HTML page with clearly labeled current/proposed images.
 - Keep each feedback round focused: layout, cards, detail, overlays, then polish.
 
-Do not infer contrast from text snapshots alone; inspect attributed ANSI or a real screenshot under the user's terminal palette.
+Do not infer contrast from text snapshots alone; inspect attributed ANSI, PTY cell attributes, or a real screenshot under the user's terminal palette.
+
+The PTY route renders under a synthetic 256-color model: it proves emitted attributes and geometry, not the user's real palette or font. When the question is whether something *looks* right, hand the interactive board to the user instead of claiming visual approval.
 
 ### 5. Iterate without promoting
 
@@ -108,6 +115,7 @@ Required gates:
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test --workspace --all-features
+python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 e2e/run-all.sh
 ```
 
@@ -115,7 +123,7 @@ Use `~/.cargo/bin/cargo` or prepend it to `PATH` if non-login shells cannot find
 
 ### 7. Clean up and prove cleanup
 
-- Close the temporary WezTerm pane/tab.
+- Close the temporary WezTerm pane/tab, or in the PTY route remove the `pyte` venv and confirm no PTY child survives.
 - Close disposable workspaces.
 - Stop the isolated board daemon by its captured PID/socket owner.
 - Stop and delete the named Herdr session.

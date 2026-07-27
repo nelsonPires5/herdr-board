@@ -2,7 +2,8 @@
 
 use board_core::capability::{
     available_harnesses, capabilities_for, claude_capabilities, efforts_for, meta_for,
-    pi_capabilities, run_pane_name, run_pane_name_unique, HarnessCapabilities,
+    pi_capabilities, resume_support_for, run_pane_name, run_pane_name_unique, HarnessCapabilities,
+    ResumeSupport,
 };
 use board_core::config::Config;
 use board_core::protocol::Effort;
@@ -18,6 +19,7 @@ fn efforts_for_uses_model_policy_and_freeform_defaults() {
         model_freeform: true,
         default_efforts: vec![Effort::Low],
         permission_modes: vec![],
+        resume: Default::default(),
     };
     assert_eq!(efforts_for(&caps, Some("known")), vec![Effort::High]);
     assert_eq!(
@@ -284,4 +286,67 @@ fn capabilities_match_trait_snapshot() {
         };
         assert_eq!(via_fn, via_trait);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Resume capability (the dead-pane rescue asks before it tries)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn builtins_declare_resume_by_conversation_id() {
+    let cfg = Config::default();
+    for harness in ["pi", "claude"] {
+        let meta = meta_for(harness, &cfg).unwrap();
+        assert_eq!(meta.resume(), ResumeSupport::ByConversationId, "{harness}");
+        // The trait answer and the wire snapshot never disagree.
+        assert_eq!(
+            capabilities_for(harness, &cfg).unwrap().resume,
+            ResumeSupport::ByConversationId
+        );
+        assert!(resume_support_for(harness, &cfg).is_supported());
+    }
+}
+
+#[test]
+fn config_harness_defaults_to_no_resume_support() {
+    // A `[harness.NAME]` table that says nothing about resuming is treated as
+    // unable to resume: there is no universal syntax to guess at.
+    let cfg = Config::from_toml("[harness.custom]\nargv = [\"c\"]\n").unwrap();
+    assert_eq!(
+        meta_for("custom", &cfg).unwrap().resume(),
+        ResumeSupport::Unsupported
+    );
+    assert_eq!(
+        capabilities_for("custom", &cfg).unwrap().resume,
+        ResumeSupport::Unsupported
+    );
+    assert!(!resume_support_for("custom", &cfg).is_supported());
+}
+
+#[test]
+fn config_harness_opts_into_resume_explicitly() {
+    let cfg = Config::from_toml("[harness.custom]\nargv = [\"c\"]\nresume = true\n").unwrap();
+    assert_eq!(
+        meta_for("custom", &cfg).unwrap().resume(),
+        ResumeSupport::ByConversationId
+    );
+    assert!(resume_support_for("custom", &cfg).is_supported());
+    // `resume = false` is the same as omitting it.
+    let off = Config::from_toml("[harness.custom]\nargv = [\"c\"]\nresume = false\n").unwrap();
+    assert!(!resume_support_for("custom", &off).is_supported());
+}
+
+#[test]
+fn unknown_harness_and_legacy_payloads_fail_closed_on_resume() {
+    // An unknown harness answers "unsupported", not "unknown": for the rescue
+    // both mean refuse, and there must be no separate unknown-case fallback.
+    assert!(!resume_support_for("ghost", &Config::default()).is_supported());
+    // A capability payload serialized before the field existed reads as
+    // unsupported rather than defaulting to "sure, try it".
+    let legacy: HarnessCapabilities = serde_json::from_value(serde_json::json!({
+        "harness": "old", "models": [], "model_freeform": true, "permission_modes": []
+    }))
+    .unwrap();
+    assert_eq!(legacy.resume, ResumeSupport::Unsupported);
+    assert!(!legacy.resume.is_supported());
 }

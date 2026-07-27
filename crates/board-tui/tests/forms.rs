@@ -115,6 +115,7 @@ fn column_effort_override_follows_catalog() {
         model_freeform: true,
         default_efforts: vec![Effort::Low],
         permission_modes: vec![],
+        resume: Default::default(),
     };
     let mut form = Form::column_create(&[]);
     form.apply_options(Some(caps), None, None, None);
@@ -143,6 +144,7 @@ fn column_cascading_resets_invalid_effort_on_harness_change() {
         model_freeform: true,
         default_efforts: vec![Effort::Low],
         permission_modes: vec!["auto".into()],
+        resume: Default::default(),
     };
     form.apply_options(Some(caps), None, None, None);
     let after = choice_labels(&form, FieldId::EffortOverride);

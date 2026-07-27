@@ -100,6 +100,18 @@ pub struct HarnessDef {
     /// Permission modes this harness accepts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub permission_modes: Vec<String>,
+    /// Opt-in: this harness can resume a previously recorded conversation.
+    ///
+    /// **Defaults to `false`** — herdr-board never assumes a user-defined
+    /// harness understands resuming, because there is no universal syntax for
+    /// it. Declaring `resume = true` promises that the harness re-attaches to
+    /// the conversation named by the `BOARD_RESUME_SESSION_ID` environment
+    /// variable, which is the only channel the rescue flow can use for a
+    /// configured argv template (the run's argv is persisted fully
+    /// materialized, so no placeholder is left to substitute). See
+    /// [`crate::capability::ResumeSupport`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resume: bool,
 }
 
 impl Default for Config {

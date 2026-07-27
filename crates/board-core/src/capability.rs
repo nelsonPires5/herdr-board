@@ -42,6 +42,38 @@ pub trait HarnessMeta {
     fn permissions(&self) -> Vec<String>;
     /// Whether arbitrary model strings are accepted beyond [`models`].
     fn model_freeform(&self) -> bool;
+    /// Whether this harness can resume a previously recorded conversation by
+    /// id. Deliberately has **no default**: every adapter must answer for
+    /// itself, so a new harness can never inherit an assumed resume syntax.
+    fn resume(&self) -> ResumeSupport;
+}
+
+/// Whether a harness can re-attach to a conversation it recorded earlier.
+///
+/// This exists because "resume a conversation by id" has **no universal CLI
+/// syntax**: Claude spells it `--resume <id>`, Pi re-uses `--session-id <id>`,
+/// and an arbitrary user-defined harness may not support it at all. Callers
+/// (notably the daemon's dead-pane rescue) must ask before trying, and the
+/// answer is per-harness and explicit — never inferred from argv.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResumeSupport {
+    /// No verified way to resume; callers must refuse rather than guess. This
+    /// is the default for config-defined harnesses and for older serialized
+    /// capability payloads that predate this field.
+    #[default]
+    Unsupported,
+    /// Resuming is supported by conversation id. The launch is produced by
+    /// [`crate::harness::resume_invocation`] from
+    /// [`SessionPlan::Resume`](crate::harness::SessionPlan::Resume), so the
+    /// exact flag stays owned by the harness adapter.
+    ByConversationId,
+}
+
+impl ResumeSupport {
+    pub fn is_supported(self) -> bool {
+        matches!(self, ResumeSupport::ByConversationId)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -71,6 +103,11 @@ pub struct HarnessCapabilities {
     #[serde(default)]
     pub default_efforts: Vec<Effort>,
     pub permission_modes: Vec<String>,
+    /// Whether this harness can resume a recorded conversation by id (used by
+    /// the dead-pane rescue). Missing on older serialized payloads, which must
+    /// therefore read as [`ResumeSupport::Unsupported`] — failing closed.
+    #[serde(default)]
+    pub resume: ResumeSupport,
 }
 
 impl HarnessCapabilities {
@@ -82,6 +119,7 @@ impl HarnessCapabilities {
             model_freeform: m.model_freeform(),
             default_efforts: m.efforts(None),
             permission_modes: m.permissions(),
+            resume: m.resume(),
         }
     }
 }
@@ -173,6 +211,12 @@ impl HarnessMeta for Pi {
     fn model_freeform(&self) -> bool {
         true
     }
+    fn resume(&self) -> ResumeSupport {
+        // Pi threads a conversation with `--session-id <id>`: passing an id it
+        // already knows re-attaches to that transcript (verified against the
+        // fixture harness in `e2e/fake-bin/pi`, which requires the flag).
+        ResumeSupport::ByConversationId
+    }
 }
 
 /// Built-in `claude` harness adapter (zero-sized, claude CLI 2.1.209).
@@ -209,6 +253,10 @@ impl HarnessMeta for Claude {
     }
     fn model_freeform(&self) -> bool {
         true
+    }
+    fn resume(&self) -> ResumeSupport {
+        // claude CLI 2.1.209: `--resume <id>` re-opens a recorded session.
+        ResumeSupport::ByConversationId
     }
 }
 
@@ -249,6 +297,15 @@ impl HarnessMeta for ConfigHarness {
     fn model_freeform(&self) -> bool {
         // Config-defined harnesses always accept arbitrary model strings.
         true
+    }
+    fn resume(&self) -> ResumeSupport {
+        // Fail closed: a user-defined harness is assumed NOT to understand
+        // resuming unless `[harness.NAME] resume = true` says otherwise.
+        if self.def.resume {
+            ResumeSupport::ByConversationId
+        } else {
+            ResumeSupport::Unsupported
+        }
     }
 }
 
@@ -313,6 +370,18 @@ pub fn pi_capabilities() -> HarnessCapabilities {
 /// [`HarnessMeta`] adapter. Unknown harness → `None`.
 pub fn capabilities_for(harness: &str, config: &Config) -> Option<HarnessCapabilities> {
     meta_for(harness, config).map(|m| HarnessCapabilities::from_meta(m.as_ref()))
+}
+
+/// Ask one harness whether it can resume a recorded conversation by id.
+///
+/// An **unknown** harness answers [`ResumeSupport::Unsupported`] rather than
+/// `None`: for the rescue flow "we cannot resume this" and "we have never heard
+/// of this harness" both mean *refuse*, and collapsing them keeps callers from
+/// inventing a fallback for the unknown case.
+pub fn resume_support_for(harness: &str, config: &Config) -> ResumeSupport {
+    meta_for(harness, config)
+        .map(|m| m.resume())
+        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------

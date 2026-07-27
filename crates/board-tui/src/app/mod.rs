@@ -206,7 +206,9 @@ pub enum Effect {
     RunCancel(i64),
     RunRetry(i64),
     RunDone(i64, RunOutcome),
-    FocusRun(i64),
+    /// Focus one exact run's pane: `(card_id, run_id)`. The run is chosen by
+    /// the TUI (`run.focus` never picks one implicitly).
+    FocusRun(i64, i64),
     /// Hand the focused multiline text field to `$EDITOR`.
     EditFocusedTextArea,
     /// Fetch `harness.capabilities` + `session.list` + `space.list` for the open
@@ -301,6 +303,13 @@ pub struct App {
     /// history act on it). Only meaningful while `detail_scroll_target ==
     /// Comments` and `detail.comments` is non-empty — see `focused_comment`.
     pub detail_comment_sel: usize,
+    /// Index into `detail.runs` of the selected run — the run `o` jumps to.
+    /// This is the cursor; `detail_runs_scroll` is only the viewport offset
+    /// that follows it (`follow_run_focus`). Unlike `detail_comment_sel` it is
+    /// *not* gated on `detail_scroll_target`: `o` works from either section, so
+    /// the selection stays meaningful while comments have key focus — see
+    /// `focused_run`.
+    pub detail_run_sel: usize,
     /// The comment-history sheet's state (`Screen::CommentHistory`); `None`
     /// when not open.
     pub comment_history: Option<CommentHistoryView>,
@@ -353,6 +362,7 @@ impl App {
             detail_comments_scroll: 0,
             detail_runs_scroll: 0,
             detail_comment_sel: 0,
+            detail_run_sel: 0,
             comment_history: None,
             form: None,
             form_from_detail: false,
@@ -384,6 +394,7 @@ impl App {
         self.detail_comments_scroll = 0;
         self.detail_runs_scroll = 0;
         self.detail_comment_sel = 0;
+        self.detail_run_sel = 0;
         self.comment_history = None;
         self.form = None;
         self.form_from_detail = false;
@@ -547,6 +558,92 @@ impl App {
             scroll = start;
         }
         self.detail_comments_scroll = scroll;
+    }
+
+    /// The selected run — what `o` jumps to. `Some` whenever a detail with at
+    /// least one run is open, regardless of which section has key focus (`o`
+    /// has no competing binding, so it must keep working from the comments
+    /// section too). The runs list only *highlights* the row while the runs
+    /// section is focused, mirroring the comments list.
+    pub fn focused_run(&self) -> Option<&board_core::model::Run> {
+        let detail = self.detail.as_ref()?;
+        if detail.runs.is_empty() {
+            return None;
+        }
+        let idx = self.detail_run_sel.min(detail.runs.len() - 1);
+        detail.runs.get(idx)
+    }
+
+    /// After `detail_run_sel` changes, keep it in range and scroll the runs
+    /// viewport just enough to keep the selected row visible. Runs are exactly
+    /// one row each, so this needs no wrapped-span arithmetic.
+    fn follow_run_focus(&mut self) {
+        let len = match &self.detail {
+            Some(d) if !d.runs.is_empty() => d.runs.len(),
+            _ => return,
+        };
+        self.detail_run_sel = self.detail_run_sel.min(len - 1);
+        let layout = crate::view::detail_layout(self, self.last_area);
+        let visible = (layout.runs.height.saturating_sub(1) as usize).max(1);
+        let sel = self.detail_run_sel;
+        let mut scroll = self.detail_runs_scroll.min(len - 1);
+        if sel < scroll {
+            scroll = sel;
+        }
+        if sel >= scroll + visible {
+            scroll = sel + 1 - visible;
+        }
+        self.detail_runs_scroll = scroll;
+    }
+
+    /// The mirror image of `follow_*_focus`, for a **raw** scroll (the mouse
+    /// wheel) that moves the offset without moving the cursor: pull the cursor
+    /// into the rows the wheel just brought into view. The wheel keeps its
+    /// natural "scroll" meaning while the `▸` marker stays on screen, so the
+    /// keys that act on the focused row — `o` on the selected run, `e`/`d`/`h`
+    /// on the focused comment — can never target a row the user cannot see.
+    /// Both detail sections behave identically here.
+    fn follow_detail_scroll(&mut self) {
+        let layout = crate::view::detail_layout(self, self.last_area);
+        match self.detail_scroll_target {
+            DetailScrollTarget::Comments => {
+                let Some(detail) = self.detail.as_ref() else {
+                    return;
+                };
+                if detail.comments.is_empty() {
+                    return;
+                }
+                // Comments wrap, so "visible" is a row window that a comment's
+                // span must intersect — not a comment index range.
+                let spans = crate::view::comment_row_spans(detail, layout.comments.width);
+                let (_, visible) = crate::view::comments_viewport(self, &layout);
+                let lo = self.detail_comments_scroll;
+                let hi = lo + visible.max(1);
+                let visible_idx: Vec<usize> = spans
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, &(start, len))| start < hi && start + len > lo)
+                    .map(|(i, _)| i)
+                    .collect();
+                let (Some(&first), Some(&last)) = (visible_idx.first(), visible_idx.last()) else {
+                    return;
+                };
+                self.detail_comment_sel = self
+                    .detail_comment_sel
+                    .min(spans.len() - 1)
+                    .clamp(first, last);
+            }
+            DetailScrollTarget::Runs => {
+                let len = match &self.detail {
+                    Some(d) if !d.runs.is_empty() => d.runs.len(),
+                    _ => return,
+                };
+                let visible = (layout.runs.height.saturating_sub(1) as usize).max(1);
+                let first = self.detail_runs_scroll.min(len - 1);
+                let last = (first + visible - 1).min(len - 1);
+                self.detail_run_sel = self.detail_run_sel.min(len - 1).clamp(first, last);
+            }
+        }
     }
 
     // -- navigation ----------------------------------------------------------

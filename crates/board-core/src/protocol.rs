@@ -673,17 +673,63 @@ pub struct RunCardParams {
 }
 
 /// `run.focus` params. `origin_socket` identifies the invoking Herdr session.
+///
+/// `run_id` is **required**: the daemon never implicitly picks a run. Callers
+/// that want "the newest run with a pane" resolve that themselves from the
+/// card's run list and pass the exact id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunFocusParams {
     pub card_id: i64,
+    pub run_id: i64,
     pub origin_socket: String,
 }
 
-/// `run.focus` result.
+/// What `run.focus` actually did, so the caller can tell an ordinary jump from
+/// a rescue instead of inferring it from the pane id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunFocusAction {
+    /// The pane recorded on the run row was alive and got focus.
+    FocusedRecordedPane,
+    /// The recorded pane is gone, but an earlier rescue's pane for this run was
+    /// still alive in the card tab, so that one got focus. No pane was created.
+    FocusedRescuedPane,
+    /// The recorded pane is gone; a **new** pane was created in the card tab and
+    /// the harness conversation was resumed in it. The pane is ephemeral: it has
+    /// no `runs` row, so the daemon does not own, watch, or time it out.
+    Rescued,
+}
+
+/// `run.focus` result: the full identity of the run that was focused, so the
+/// caller can say exactly *which* historical run it landed on, plus what the
+/// daemon had to do to get there.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunFocusResult {
+    /// Focus vs. rescue. Missing on older serialized payloads, which always
+    /// meant an ordinary focus of the recorded pane.
+    #[serde(default = "default_focus_action")]
+    pub action: RunFocusAction,
+    /// The pane the run row records, when it records one. On a rescue this is
+    /// the **dead** pane, kept for diagnostics; `pane_id` is the live one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_pane_id: Option<String>,
     pub run_id: i64,
+    pub card_id: i64,
+    pub column_id: i64,
+    pub harness: String,
+    /// The **herdr session name** this run spawned into (`herdr --session <name>`),
+    /// i.e. which Herdr instance/socket owns the pane. `None` = default session.
+    /// This is NOT the harness conversation id — see `session_id`.
+    pub session: Option<String>,
+    /// The **harness conversation id** (Claude/Pi `--resume` id) recorded for
+    /// this run. This is NOT a herdr session name — see `session`.
+    pub session_id: Option<String>,
+    /// The pane that now has focus — the recorded one, or the rescued one.
     pub pane_id: String,
+}
+
+fn default_focus_action() -> RunFocusAction {
+    RunFocusAction::FocusedRecordedPane
 }
 
 /// `{run, card}` returned by run.done / run.cancel / run.retry.

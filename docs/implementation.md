@@ -29,7 +29,7 @@ board wire DTOs; `board-herdr` owns only the verified Herdr socket surface; and 
 and `docs/protocol.md` explain behavior rather than defining duplicate serde shapes. Schema v13 adds
 soft-deleted comments and immutable comment-history snapshots; the CLI exposes their nested CRUD
 and history commands while boardd remains the sole SQLite writer. The complete live use-case catalog
-is [`../e2e/README.md`](../e2e/README.md), scenarios **01–26**; the safe
+is [`../e2e/README.md`](../e2e/README.md), scenarios **01–27**; the safe
 static harness is `e2e/test-harness.sh`, while `e2e/run-all.sh` is the opt-in live gate.
 
 ## Configuration boundary
@@ -80,6 +80,15 @@ pub trait Spawner: Send + Sync {
 // board-daemon implements HerdrSpawner (via board-herdr) and LocalSpawner (plain child process,
 // used by integration tests with the fake harness — no herdr needed). Runtime placement,
 // process handles, liveness, and cleanup never belong to board-core.
+
+// board-daemon::spawner::rescue — placement + launch WITHOUT run promotion, for
+// reopening a run whose pane is gone (`run.focus`). It shares the placement and
+// launch helpers with `Spawner::spawn` instead of duplicating them, but calls no
+// unit of work: a rescue performs zero DB writes, so its pane has no run row and
+// is neither owned, watched, nor timed out. `board_core::harness::resume_invocation`
+// re-threads the run's persisted ExecutionSpec onto SessionPlan::Resume (per-harness
+// syntax owned by `session_argv`) and clears every prompt channel.
+pub(crate) fn rescue_run_pane(plan: &RescuePlan<'_>) -> Result<RescueOutcome>;
 ```
 
 ## Semantics source of truth
@@ -126,8 +135,10 @@ or other external I/O occurs inside the SQLite transaction.
 
 ## Conventions
 
-- `cargo fmt` clean; `cargo clippy --all-targets -- -D warnings` clean; `cargo test` green
-  before an agent reports done. No `unwrap()` outside tests; anyhow at edges, thiserror in core.
+- `cargo fmt` clean; `cargo clippy --all-targets -- -D warnings` clean; `cargo test` green, and
+  `python3 -m unittest discover -s scripts/tests -p 'test_*.py'` green (the docs/release contract
+  tier CI also runs) before an agent reports done. No `unwrap()` outside tests; anyhow at edges,
+  thiserror in core.
 - No `Date.now`-style flakiness in tests: inject clocks where needed (engine takes `now: i64`).
 - Paths via `directories::BaseDirs` + env overrides (`BOARD_DB`, `BOARD_SOCKET`).
 - Log with tracing; daemon writes `~/.local/share/herdr-board/daemon.log`.
@@ -148,7 +159,7 @@ A (core+scaffold) → B (herdr client) ∥ C (TUI) → D (daemon+CLI+integration
 - C: insta snapshots via `ratatui::backend::TestBackend` + synthetic key events + FakeBoardClient: empty board (Todo only + hints), board with example pipeline & cards (status glyphs), new-card modal, column form, card detail w/ comments+runs, `?` help, delete-column prompt, move flow.
 - Restart recovery (`board-daemon::supervisor`) is a conservative one-pass classifier. Session resolution and snapshot I/O are injectable and happen before mutation. `Alive` adopts scheduler/watch intent and replays terminal status, `Gone` uses the existing pane-exit finalizer, and `Unknown` does nothing. The apply phase re-reads the open run/card, making duplicate passes idempotent and rejecting stale observations. Startup constructs/runs this pass for the Herdr spawner regardless of whether its initial best-effort client connected. The always-on supervisor then maintains independent per-socket streams and backoff, subscribes before taking a fresh bounded snapshot, and periodically reconciles missed events without resetting healthy sockets.
 - D: integration test (no herdr): start daemon on temp socket + temp DB with LocalSpawner + fake harness script → create card → move to auto column → fake agent comments + done → assert auto-transition, comments, run rows, statuses; timeout path; cancel path; queue serialization (two cards same space key run serially). The daemon comment suite also checks actor ownership, system-comment immutability, soft deletion, audit history, and event routing.
-- E: scenarios `e2e/01-core.sh` through `e2e/26-compact-mobile.sh` (real Herdr, fake
+- E: scenarios `e2e/01-core.sh` through `e2e/27-rescue-dead-pane.sh` (real Herdr, fake
   harnesses): disposable workspaces, protocol-17 placement, typed prompt delivery, bounded
   same-pane `agent_pane_busy` retry, supervisor recovery, timer refresh, and identity-gated cleanup. CLI comment creation/context and system transition comments are covered by the live suite; CRUD/audit parity is kept hermetic in the CLI contracts. Run `bash e2e/test-harness.sh` for the
   provider-free static safety checks; reserve `e2e/run-all.sh` for the separate live gate.
