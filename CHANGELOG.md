@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-07-27
+
 - [#47](https://github.com/nelsonPires5/herdr-board/pull/47) feat(cli)!: `board` exit codes are meaningful instead of always `1` — an RPC error exits with the daemon's protocol code for `1..=5` so a script can branch on `$?`, a protocol code outside that range exits `70` (`EX_SOFTWARE`, because an exit status is taken modulo 256 and `256` would read as success) while the `--json` envelope still carries the exact code, and an error the CLI itself raised (usage/parse, a declined confirmation, a bad enum value, a column reference that resolves to nothing client-side, a missing `$BOARD_CARD_ID`) exits `64` (`EX_USAGE`).
 - [#47](https://github.com/nelsonPires5/herdr-board/pull/47) fix(cli)!: the `--json` error envelope for CLI-local errors reports `"code": 64` instead of `"code": 2`, so a CLI refusal can no longer be mistaken for the daemon's "not found"; `kind` stays `"cli"` and RPC envelopes are unchanged.
 - [#47](https://github.com/nelsonPires5/herdr-board/pull/47) fix(cli): `--json` is a true global flag accepted before or after the subcommand path, and is decided by parsing rather than an argv scan — a positional whose *value* is the literal `--json` no longer flips error rendering.
@@ -321,7 +323,8 @@ a visible herdr pane. Ships as a single `board` binary (TUI + daemon + CLI) and 
 - **Packaging.** `herdr-plugin.toml` manifest, and `scripts/` for build, install (guarded behind
   `--yes`), the open-or-focus launcher, a raw protocol client, and a live-herdr e2e smoke test.
 
-[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.9.1
 [0.9.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.9.0
 [0.8.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.8.0
 [0.7.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.7.0
