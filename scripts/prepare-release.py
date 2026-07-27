@@ -38,6 +38,11 @@ LOCAL_PACKAGES = ("board-cli", "board-core", "board-daemon", "board-herdr", "boa
 # the copy-pasteable install/update command, so they are part of the release
 # contract rather than free prose: a stale pin installs the previous release.
 INSTALL_REF_DOCS = ("README.md", "docs/install.md", "docs/operations.md")
+# The version-bearing files `apply` always rewrites, alongside INSTALL_REF_DOCS.
+# `managed_documents` is the single list the Prepare Release workflow stages;
+# hardcoding it a second time in the workflow is what silently dropped the
+# install-ref repin from the v0.9.1 release branch.
+RELEASE_FILES = ("Cargo.toml", "herdr-plugin.toml", "Cargo.lock", "CHANGELOG.md")
 INSTALL_REF_RE = re.compile(r"(--ref\s+v)(\d+\.\d+\.\d+)")
 
 
@@ -229,6 +234,20 @@ def install_ref_documents(repo_root: Path) -> list[Path]:
         for relative in INSTALL_REF_DOCS
         if (repo_root / relative).is_file()
     ]
+
+
+def managed_documents(repo_root: Path) -> list[Path]:
+    """Every file `apply` may rewrite, in a stable order.
+
+    Exposed as the `files` subcommand so the release workflow stages exactly
+    what the tool writes. A caller that repeats this list instead will keep
+    working right up until the list grows, then silently discard the new file.
+    """
+    return [
+        repo_root / relative
+        for relative in RELEASE_FILES
+        if (repo_root / relative).is_file()
+    ] + install_ref_documents(repo_root)
 
 
 def parse_lock_versions(lock_text: str) -> Dict[str, str]:
@@ -579,6 +598,8 @@ def build_parser() -> argparse.ArgumentParser:
     verify = sub.add_parser("verify", help="verify synchronized, prepared release files")
     verify.add_argument("--repo-url", help="GitHub repo URL for changelog links")
 
+    sub.add_parser("files", help="list the repo-relative files `apply` may rewrite")
+
     return parser
 
 
@@ -607,6 +628,13 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_files(args: argparse.Namespace) -> int:
+    repo_root = Path(args.repo)
+    for path in managed_documents(repo_root):
+        print(path.relative_to(repo_root).as_posix())
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -617,6 +645,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_apply(args)
         if args.cmd == "verify":
             return cmd_verify(args)
+        if args.cmd == "files":
+            return cmd_files(args)
         raise AssertionError(f"unknown command: {args.cmd!r}")
     except ReleaseError as exc:
         print(f"prepare-release.py: {exc}", file=sys.stderr)

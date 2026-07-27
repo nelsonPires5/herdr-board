@@ -504,3 +504,69 @@ class PrepareReleaseTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover - convenience.
     unittest.main()
+
+
+class ManagedFileListTests(unittest.TestCase):
+    """`files` must equal what `apply` actually writes.
+
+    The Prepare Release workflow stages the output of `files`. If the two ever
+    disagree, a release is cut with some managed file silently left behind —
+    which is exactly how v0.9.1 shipped with stale `--ref v0.9.0` pins while
+    `verify` still reported success.
+    """
+
+    def test_files_lists_every_document_apply_rewrites(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            PrepareReleaseTests.write_fixture(self, repo_root)
+            for relative in prepare_release.INSTALL_REF_DOCS:
+                path = repo_root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(
+                    "install:\n\n    herdr plugin install owner/repo --ref v0.1.0\n",
+                    encoding="utf-8",
+                )
+
+            before = {
+                path: path.read_bytes()
+                for path in repo_root.rglob("*")
+                if path.is_file()
+            }
+            prepare_release.apply_release(
+                repo_root,
+                "0.2.0",
+                release_date="2026-01-01",
+                repo_url="https://github.com/owner/repo",
+            )
+            rewritten = {
+                path.relative_to(repo_root).as_posix()
+                for path, blob in before.items()
+                if path.read_bytes() != blob
+            }
+            advertised = {
+                path.relative_to(repo_root).as_posix()
+                for path in prepare_release.managed_documents(repo_root)
+            }
+
+            self.assertTrue(rewritten, "apply rewrote nothing; fixture is wrong")
+            self.assertTrue(
+                rewritten <= advertised,
+                f"apply rewrote {sorted(rewritten - advertised)}, which `files` "
+                "does not list, so the release workflow would not stage it",
+            )
+
+    def test_files_output_is_repo_relative_and_ordered(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            PrepareReleaseTests.write_fixture(self, repo_root)
+            listed = [
+                path.relative_to(repo_root).as_posix()
+                for path in prepare_release.managed_documents(repo_root)
+            ]
+            self.assertIn("Cargo.toml", listed)
+            self.assertIn("CHANGELOG.md", listed)
+            for entry in listed:
+                self.assertFalse(entry.startswith("/"), f"{entry} is absolute")
+            # A missing optional document is skipped, never emitted as a path
+            # that `git add` would then fail on.
+            self.assertNotIn("docs/install.md", listed)

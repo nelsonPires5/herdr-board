@@ -82,6 +82,12 @@ jobs:
             --repo-url "$REPO_URL"
           python3 scripts/prepare-release.py --repo . verify --repo-url "$REPO_URL"
 
+      # Re-run the documentation contracts against the BUMPED tree. The pre-bump
+      # run above cannot see a stale pin, and `verify` runs before `git add`, so
+      # this is the only step positioned to fail on what actually gets committed.
+      - name: Documentation contracts (bumped tree)
+        run: python3 -m unittest discover -s scripts/tests -p 'test_docs.py'
+
       - name: fmt
         run: cargo fmt --all --check
 
@@ -103,7 +109,12 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           if [ -n "$(git status --porcelain)" ]; then
-            git add Cargo.toml herdr-plugin.toml Cargo.lock CHANGELOG.md
+            # Stage exactly what the tool writes. This list used to be repeated
+            # here, and when `apply` grew the install-ref repin the extra files
+            # were rewritten on the runner and then dropped at `git add`, so
+            # v0.9.1 was cut with stale `--ref v0.9.0` pins.
+            python3 scripts/prepare-release.py --repo . files \
+              | tr '\n' '\0' | xargs -0 --no-run-if-empty git add --
             git commit -m "chore(release): v$TARGET"
           else
             echo "prepare-release.py made no file changes"
