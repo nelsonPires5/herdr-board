@@ -14,10 +14,7 @@
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/lib.sh"
 
-e2e_init
-e2e_build
-e2e_isolate
-e2e_daemon_start
+e2e_boot   # e2e_init + e2e_build + e2e_isolate + e2e_daemon_start (in that order)
 
 step "HERDR MUTATION: create disposable workspace for the move-column TUI"
 e2e_ws_create move-column; WS_ID="$E2E_WS"

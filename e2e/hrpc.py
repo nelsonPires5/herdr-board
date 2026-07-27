@@ -30,17 +30,21 @@ Examples:
     hrpc.py pane.layout '{"pane_id":"w3:t1:p1"}'
 """
 import json
-import os
-import socket
 import sys
+from pathlib import Path
+
+# The socket resolution / connect / send / read-to-newline transport is shared
+# with scripts/board-rpc.py; only the response interpretation below differs.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+
+import ndjson_rpc  # noqa: E402  (path shim above must run first)
+
+SOCKET_ENV_VARS = ("HERDR_SOCKET_PATH", "HERDR_SOCKET")
+DEFAULT_SOCKET = "~/.config/herdr/herdr.sock"
 
 
 def socket_path() -> str:
-    for var in ("HERDR_SOCKET_PATH", "HERDR_SOCKET"):
-        p = os.environ.get(var)
-        if p:
-            return p
-    return os.path.expanduser("~/.config/herdr/herdr.sock")
+    return ndjson_rpc.socket_path(SOCKET_ENV_VARS, DEFAULT_SOCKET)
 
 
 def main() -> int:
@@ -50,28 +54,18 @@ def main() -> int:
     method = sys.argv[1]
     params = sys.argv[2] if len(sys.argv) > 2 else "{}"
     try:
-        params_obj = json.loads(params)
+        params_obj = ndjson_rpc.parse_params(params)
     except json.JSONDecodeError as e:
         print(f"hrpc.py: invalid JSON params: {e}", file=sys.stderr)
         return 2
 
-    req = {"id": "hrpc", "method": method, "params": params_obj}
     path = socket_path()
     try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-            s.connect(path)
-            s.sendall((json.dumps(req) + "\n").encode("utf-8"))
-            buf = b""
-            while b"\n" not in buf:
-                chunk = s.recv(4096)
-                if not chunk:
-                    break
-                buf += chunk
+        line = ndjson_rpc.request_line(path, "hrpc", method, params_obj)
     except OSError as e:
         print(f"hrpc.py: cannot reach herdr at {path}: {e}", file=sys.stderr)
         return 1
 
-    line = buf.split(b"\n", 1)[0].decode("utf-8", "replace")
     if not line:
         print("hrpc.py: empty response", file=sys.stderr)
         return 1

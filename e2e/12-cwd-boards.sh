@@ -3,10 +3,7 @@
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/lib.sh"
 
-e2e_init
-e2e_build
-e2e_isolate
-e2e_daemon_start
+e2e_boot   # e2e_init + e2e_build + e2e_isolate + e2e_daemon_start (in that order)
 
 board_at() {
   local cwd="$1"

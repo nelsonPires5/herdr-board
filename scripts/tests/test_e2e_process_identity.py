@@ -9,7 +9,7 @@ import time
 import unittest
 
 
-ROOT = Path(__file__).resolve().parents[2]
+from _support import REPO_ROOT as ROOT
 SPEC = importlib.util.spec_from_file_location(
     "e2e_process_identity", ROOT / "e2e" / "process_identity.py"
 )

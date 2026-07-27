@@ -17,10 +17,7 @@ e2e_enable_fake_pi
 [ "$(type -P claude)" = "$E2E_FAKE_PI_BIN_DIR/claude" ] || fail "fake Claude shadowing failed"
 [ "$(type -t pi)" = function ] || fail "fake Pi exec function was not exported"
 [ "$(type -t claude)" = function ] || fail "fake Claude exec function was not exported"
-e2e_init
-e2e_build
-e2e_isolate
-e2e_daemon_start
+e2e_boot   # e2e_init + e2e_build + e2e_isolate + e2e_daemon_start (in that order)
 
 managed_failure_diag() {
   local kind="$1" card="$2" panes target record

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 import tempfile
 import textwrap
@@ -8,7 +9,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-SCRIPT_PATH = Path(__file__).resolve().parents[1] / "prepare-release.py"
+from _support import SCRIPTS_DIR
+
+SCRIPT_PATH = SCRIPTS_DIR / "prepare-release.py"
 SPEC = importlib.util.spec_from_file_location("prepare_release", SCRIPT_PATH)
 if SPEC is None or SPEC.loader is None:  # pragma: no cover - import plumbing.
     raise RuntimeError(f"cannot load {SCRIPT_PATH}")
@@ -127,6 +130,30 @@ class PrepareReleaseTests(unittest.TestCase):
             ]
         )
         (repo_root / "CHANGELOG.md").write_text("\n".join(changelog_parts), encoding="utf-8")
+
+    def write_install_docs(self, repo_root: Path, *, ref_version: str = "0.1.0") -> None:
+        """Write the documents that carry a `herdr plugin install --ref` pin."""
+        (repo_root / "README.md").write_text(
+            textwrap.dedent(
+                f"""
+                # herdr-board
+
+                ```bash
+                herdr plugin install nelsonPires5/herdr-board --ref v{ref_version}
+                ```
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        (repo_root / "docs").mkdir(parents=True, exist_ok=True)
+        (repo_root / "docs/install.md").write_text(
+            f"herdr plugin install nelsonPires5/herdr-board --ref v{ref_version} --yes\n",
+            encoding="utf-8",
+        )
+        (repo_root / "docs/operations.md").write_text(
+            f"herdr plugin install nelsonPires5/herdr-board --ref v{ref_version} --yes\n",
+            encoding="utf-8",
+        )
 
     def test_bump_semver_patch_minor_major(self) -> None:
         self.assertEqual(prepare_release.bump_semver("0.1.0", "patch"), "0.1.1")
@@ -344,6 +371,110 @@ class PrepareReleaseTests(unittest.TestCase):
             self.assertEqual(path.read_text(encoding="utf-8"), "new")
             self.assertEqual(path.stat().st_mode & 0o777, 0o640)
             self.assertEqual(list(Path(tmp).iterdir()), [path])
+
+    def test_apply_release_repins_documented_install_refs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self.write_fixture(repo)
+            self.write_install_docs(repo)
+
+            prepare_release.apply_release(
+                repo,
+                "0.2.0",
+                release_date="2026-07-16",
+                repo_url="https://github.com/example/herdr-board",
+            )
+
+            for relative in prepare_release.INSTALL_REF_DOCS:
+                with self.subTest(document=relative):
+                    text = (repo / relative).read_text(encoding="utf-8")
+                    self.assertEqual(
+                        prepare_release.parse_install_ref_versions(text),
+                        ["0.2.0"],
+                    )
+
+    def test_verify_rejects_a_stale_documented_install_ref(self) -> None:
+        for relative in prepare_release.INSTALL_REF_DOCS:
+            with self.subTest(document=relative), tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                self.write_fixture(repo)
+                self.write_install_docs(repo)
+                prepare_release.apply_release(
+                    repo,
+                    "0.2.0",
+                    release_date="2026-07-16",
+                    repo_url="https://github.com/example/herdr-board",
+                )
+                self.assertEqual(
+                    prepare_release.verify_release(
+                        repo, repo_url="https://github.com/example/herdr-board"
+                    ),
+                    "0.2.0",
+                )
+
+                path = repo / relative
+                path.write_text(
+                    path.read_text(encoding="utf-8").replace("--ref v0.2.0", "--ref v0.1.0"),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(
+                    prepare_release.ReleaseError, rf"{re.escape(relative)} --ref v0\.1\.0"
+                ):
+                    prepare_release.verify_release(
+                        repo, repo_url="https://github.com/example/herdr-board"
+                    )
+
+    def test_apply_release_stays_idempotent_with_install_ref_documents(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self.write_fixture(repo)
+            self.write_install_docs(repo)
+            prepare_release.apply_release(
+                repo,
+                "0.2.0",
+                release_date="2026-07-16",
+                repo_url="https://github.com/example/herdr-board",
+            )
+            second = prepare_release.apply_release(
+                repo,
+                "0.2.0",
+                release_date="2026-07-16",
+                repo_url="https://github.com/example/herdr-board",
+            )
+            self.assertFalse(second.changed)
+            self.assertTrue(second.already_prepared)
+
+    def test_apply_release_repairs_a_pin_that_drifted_after_the_bump(self) -> None:
+        """A doc-only pin regression must not need a second version bump."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self.write_fixture(repo)
+            self.write_install_docs(repo)
+            prepare_release.apply_release(
+                repo,
+                "0.2.0",
+                release_date="2026-07-16",
+                repo_url="https://github.com/example/herdr-board",
+            )
+            readme = repo / "README.md"
+            readme.write_text(
+                readme.read_text(encoding="utf-8").replace("--ref v0.2.0", "--ref v0.1.0"),
+                encoding="utf-8",
+            )
+
+            result = prepare_release.apply_release(
+                repo,
+                "0.2.0",
+                release_date="2026-07-16",
+                repo_url="https://github.com/example/herdr-board",
+            )
+            self.assertTrue(result.changed)
+            self.assertEqual(
+                prepare_release.parse_install_ref_versions(
+                    readme.read_text(encoding="utf-8")
+                ),
+                ["0.2.0"],
+            )
 
     def test_apply_release_errors_on_mismatch_and_empty_unreleased(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

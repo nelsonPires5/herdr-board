@@ -17,14 +17,9 @@ set -euo pipefail
 
 export E2E_FAKE_ENV="FAKE_AGENT_SLEEP=30"   # keep the run live (not yet `done`)
 
-e2e_init
-e2e_build
-e2e_isolate
-e2e_daemon_start
+e2e_boot   # e2e_init + e2e_build + e2e_isolate + e2e_daemon_start (in that order)
 
-step "HERDR MUTATION: create disposable workspace"
-e2e_ws_create board-e2e; WS_ID="$E2E_WS"
-echo "  workspace: $WS_ID"
+e2e_ws_standard board-e2e   # step + e2e_ws_create + WS_ID + echo
 
 step "Create an auto column 'Execute'"
 EXEC_ID="$(col_create '{"name":"Execute","trigger":"auto"}')"

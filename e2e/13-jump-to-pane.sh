@@ -4,10 +4,7 @@ set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/lib.sh"
 
 export E2E_FAKE_ENV="FAKE_AGENT_HOLD=300"
-e2e_init
-e2e_build
-e2e_isolate
-e2e_daemon_start
+e2e_boot   # e2e_init + e2e_build + e2e_isolate + e2e_daemon_start (in that order)
 
 step "Create a disposable target workspace and a held fake-agent pane"
 e2e_ws_create jump-target; WS_ID="$E2E_WS"

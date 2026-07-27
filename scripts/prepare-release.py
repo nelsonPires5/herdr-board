@@ -4,7 +4,8 @@
 This helper is workflow-friendly and stdlib-only. It can:
 - plan a semver bump from the current workspace version;
 - apply a target release version across Cargo.toml, herdr-plugin.toml,
-  Cargo.lock, and CHANGELOG.md;
+  Cargo.lock, CHANGELOG.md, and the documented `herdr plugin install --ref vX.Y.Z`
+  pins;
 - keep the release cut idempotent on a rerun when the target is already ready.
 """
 from __future__ import annotations
@@ -32,6 +33,12 @@ LOCK_BLOCK_RE = re.compile(r"(?ms)^\[\[package\]\]\n.*?(?=^\[\[package\]\]|\Z)")
 REF_LINE_RE = re.compile(r"^\[([^\]]+)\]:\s+(\S+)\s*$")
 TARGET_HEADING_RE = re.compile(r"^## \[(?P<version>[^\]]+)\] - .+$")
 LOCAL_PACKAGES = ("board-cli", "board-core", "board-daemon", "board-herdr", "board-tui")
+
+# Documented `herdr plugin install … --ref vX.Y.Z` pins. These ship to users as
+# the copy-pasteable install/update command, so they are part of the release
+# contract rather than free prose: a stale pin installs the previous release.
+INSTALL_REF_DOCS = ("README.md", "docs/install.md", "docs/operations.md")
+INSTALL_REF_RE = re.compile(r"(--ref\s+v)(\d+\.\d+\.\d+)")
 
 
 class ReleaseError(RuntimeError):
@@ -198,6 +205,30 @@ def rewrite_simple_version_toml(toml_text: str, target: str) -> str:
     if not match:
         raise ReleaseError("missing top-level version = \"...\" line")
     return toml_text[: match.start(1)] + target + toml_text[match.end(1) :]
+
+
+def parse_install_ref_versions(doc_text: str) -> list[str]:
+    """Return every `--ref vX.Y.Z` version pinned in one document, in order."""
+    return [match.group(2) for match in INSTALL_REF_RE.finditer(doc_text)]
+
+
+def rewrite_install_refs(doc_text: str, target: str) -> str:
+    """Repin every `--ref vX.Y.Z` occurrence to the target release."""
+    return INSTALL_REF_RE.sub(lambda match: f"{match.group(1)}{target}", doc_text)
+
+
+def install_ref_documents(repo_root: Path) -> list[Path]:
+    """The existing documents that carry an install pin.
+
+    A document is skipped when it does not exist, so moving the install prose
+    between pages does not break the release cut; the verify step still fails
+    on any *present* document whose pin is stale.
+    """
+    return [
+        repo_root / relative
+        for relative in INSTALL_REF_DOCS
+        if (repo_root / relative).is_file()
+    ]
 
 
 def parse_lock_versions(lock_text: str) -> Dict[str, str]:
@@ -394,6 +425,12 @@ def verify_release(repo_root: Path, *, repo_url: str | None = None) -> str:
         for name, package_version in lock_versions.items()
         if package_version != version
     )
+    for document in install_ref_documents(repo_root):
+        pins = parse_install_ref_versions(read_text(document))
+        relative = document.relative_to(repo_root)
+        mismatches.extend(
+            f"{relative} --ref v{pin}, expected v{version}" for pin in pins if pin != version
+        )
     if mismatches:
         raise ReleaseError("release version mismatch: " + "; ".join(mismatches))
 
@@ -438,6 +475,9 @@ def apply_release(
     lock_text = read_text(lock_path)
     changelog_text = read_text(changelog_path)
 
+    doc_paths = install_ref_documents(repo_root)
+    doc_texts = {path: read_text(path) for path in doc_paths}
+
     current_version = parse_workspace_version(cargo_text)
     if not SEMVER_RE.match(target_version):
         raise ReleaseError(f"invalid target version: {target_version!r}")
@@ -446,8 +486,14 @@ def apply_release(
     changelog = analyze_changelog(changelog_text, target_version, repo_url)
 
     if current_version == target_version:
-        all_target = plugin_version == target_version and all(
-            version == target_version for version in lock_versions.values()
+        all_target = (
+            plugin_version == target_version
+            and all(version == target_version for version in lock_versions.values())
+            and all(
+                pin == target_version
+                for text in doc_texts.values()
+                for pin in parse_install_ref_versions(text)
+            )
         )
         if all_target and changelog.prepared:
             return ApplyResult(
@@ -494,12 +540,19 @@ def apply_release(
 
     # Do not roll back: every replacement is atomic, and keeping a valid
     # partial state makes an interrupted run recoverable by rerunning apply.
-    for path, content in (
+    # The install pins are repinned unconditionally, so a rerun repairs a
+    # document that drifted away from the release version on its own.
+    writes: list[Tuple[Path, str]] = [
         (cargo_path, updated_cargo),
         (plugin_path, updated_plugin),
         (lock_path, updated_lock),
         (changelog_path, updated_changelog),
-    ):
+    ]
+    for path, text in doc_texts.items():
+        updated_doc = rewrite_install_refs(text, target_version)
+        if updated_doc != text:
+            writes.append((path, updated_doc))
+    for path, content in writes:
         write_text(path, content)
 
     verify_release(repo_root, repo_url=repo_url)

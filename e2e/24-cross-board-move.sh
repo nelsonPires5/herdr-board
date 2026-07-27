@@ -14,10 +14,7 @@
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/lib.sh"
 
-e2e_init
-e2e_build
-e2e_isolate
-e2e_daemon_start
+e2e_boot   # e2e_init + e2e_build + e2e_isolate + e2e_daemon_start (in that order)
 
 # Board A is the daemon's initial board (E2E_BOARD_ID). Open a second board B.
 B_OPEN="$(brpc board.open "$(python3 -c 'import json,sys; print(json.dumps({"scope_path":sys.argv[1]}))' "$E2E_TMP/board-b")")"

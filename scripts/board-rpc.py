@@ -21,16 +21,16 @@ Examples:
     board-rpc.py column.update '{"id":2,"on_success_column_id":3}'
 """
 import json
-import os
-import socket
 import sys
+
+import ndjson_rpc
+
+SOCKET_ENV_VARS = ("BOARD_SOCKET",)
+DEFAULT_SOCKET = "~/.local/share/herdr-board/boardd.sock"
 
 
 def socket_path() -> str:
-    p = os.environ.get("BOARD_SOCKET")
-    if p:
-        return p
-    return os.path.expanduser("~/.local/share/herdr-board/boardd.sock")
+    return ndjson_rpc.socket_path(SOCKET_ENV_VARS, DEFAULT_SOCKET)
 
 
 def main() -> int:
@@ -40,29 +40,18 @@ def main() -> int:
     method = sys.argv[1]
     params = sys.argv[2] if len(sys.argv) > 2 else "{}"
     try:
-        params_obj = json.loads(params)
+        params_obj = ndjson_rpc.parse_params(params)
     except json.JSONDecodeError as e:
         print(f"board-rpc.py: invalid JSON params: {e}", file=sys.stderr)
         return 2
 
-    req = {"id": "rpc", "method": method, "params": params_obj}
     path = socket_path()
     try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-            s.connect(path)
-            s.sendall((json.dumps(req) + "\n").encode("utf-8"))
-            # Read one NDJSON line (the response for our id).
-            buf = b""
-            while b"\n" not in buf:
-                chunk = s.recv(4096)
-                if not chunk:
-                    break
-                buf += chunk
+        line = ndjson_rpc.request_line(path, "rpc", method, params_obj)
     except OSError as e:
         print(f"board-rpc.py: cannot reach boardd at {path}: {e}", file=sys.stderr)
         return 1
 
-    line = buf.split(b"\n", 1)[0].decode("utf-8", "replace")
     if not line:
         print("board-rpc.py: empty response", file=sys.stderr)
         return 1

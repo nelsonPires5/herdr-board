@@ -82,3 +82,9 @@ jobs:
       # the e2e script (scripts/e2e.sh) is run out-of-band, so no live herdr is needed.
       - name: Rust tests
         run: cargo test --workspace --all-features
+
+      # Provider-free STATIC safety gate for the e2e harness: shell-level checks
+      # of ownership tokens, key scrubbing, and ledger handling. It starts no
+      # Herdr and calls no provider, unlike the live suite (e2e/run-all.sh).
+      - name: E2E static safety gate
+        run: bash e2e/test-harness.sh

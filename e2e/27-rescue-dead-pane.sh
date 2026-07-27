@@ -19,10 +19,7 @@ set -euo pipefail
 # Fake-managed setup creates roots, so cleanup must already be armed.
 trap e2e_cleanup EXIT
 e2e_enable_fake_pi
-e2e_init
-e2e_build
-e2e_isolate
-e2e_daemon_start
+e2e_boot   # e2e_init + e2e_build + e2e_isolate + e2e_daemon_start (in that order)
 
 # Read one pane's field from the disposable workspace (read-only probe).
 pane_field() {

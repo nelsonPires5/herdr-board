@@ -13,7 +13,8 @@ import threading
 import unittest
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+from _support import REPO_ROOT, clean_env, run_bash, write_executable
+
 E2E_LIB = REPO_ROOT / "e2e" / "lib.sh"
 REAL_CLAUDE_SMOKE = REPO_ROOT / "e2e" / "real-claude-haiku-smoke.sh"
 
@@ -89,10 +90,7 @@ class _NonHerdrSocket(_RpcSocket):
 
 class E2ESafetyTests(unittest.TestCase):
     def _write_executable(self, directory: Path, name: str, body: str) -> Path:
-        path = directory / name
-        path.write_text(f"#!/bin/sh\n{body}", encoding="utf-8")
-        path.chmod(0o755)
-        return path
+        return write_executable(directory, name, body)
 
     def _write_server_executable(self, directory: Path) -> Path:
         """Build a tiny exact-argv fake Herdr server for identity-gated tests."""
@@ -118,29 +116,21 @@ int main(void) {
     def _run_bash(
         self, script: str, *, env: dict[str, str], timeout: float = 5
     ) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            ["bash", "-c", textwrap.dedent(script)],
-            env=env,
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=timeout,
-        )
+        return run_bash(script, env=env, timeout=timeout)
 
     def _base_env(self, *, herdr: Path) -> dict[str, str]:
-        env = os.environ.copy()
-        env["HERDR_BIN_PATH"] = str(herdr)
         # Do not let a caller's E2E session or managed-pane settings affect the
         # source-only shell harness below.
-        for key in (
-            "E2E_SESSION",
-            "E2E_SESSION_SOCKET",
-            "E2E_FAKE_MANAGED_ZDOT",
-            "E2E_MANAGED_ZDOTDIR",
-            "HERDR_BIN_RESOLVED",
-        ):
-            env.pop(key, None)
-        return env
+        return clean_env(
+            drop=(
+                "E2E_SESSION",
+                "E2E_SESSION_SOCKET",
+                "E2E_FAKE_MANAGED_ZDOT",
+                "E2E_MANAGED_ZDOTDIR",
+                "HERDR_BIN_RESOLVED",
+            ),
+            HERDR_BIN_PATH=str(herdr),
+        )
 
     def test_function_named_herdr_cannot_redirect_path_resolution(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
