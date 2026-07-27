@@ -425,21 +425,9 @@ pub(super) fn draw_detail(app: &App, f: &mut Frame, area: Rect) {
             .iter()
             .enumerate()
             .map(|(i, c)| {
-                let focused = sel == Some(i);
-                let gutter_style = if focused {
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
-                let body_style = if focused {
-                    Style::default().add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
+                let (gutter, body_style) = focus_row_marker(sel == Some(i));
                 Line::from(vec![
-                    Span::styled(if focused { "▸" } else { " " }, gutter_style),
+                    gutter,
                     Span::styled(
                         format!("[{}] ", c.author),
                         Style::default().fg(Color::LightCyan),
@@ -499,17 +487,28 @@ pub(super) fn draw_detail(app: &App, f: &mut Frame, area: Rect) {
         }
     }
 
+    let runs_active = app.detail_scroll_target == DetailScrollTarget::Runs;
+    // The selected run is highlighted only while the runs section holds key
+    // focus, exactly like the comments list. `o` still jumps to it from either
+    // section (see `App::focused_run`).
+    let run_sel = (!detail.runs.is_empty()).then(|| app.detail_run_sel.min(detail.runs.len() - 1));
+    // Budget the row against the section width: the detail rect can be narrow,
+    // and the identity fields must truncate instead of overflowing.
+    let run_text_width = (layout.runs.width as usize).saturating_sub(1);
     let runs: Vec<ListItem> = detail
         .runs
         .iter()
+        .enumerate()
         .skip(app.detail_runs_scroll)
-        .map(|run| {
-            let outcome = run.outcome.map(|o| o.as_str()).unwrap_or("active");
-            let dur = run_duration(app, run);
-            ListItem::new(Line::from(format!(
-                "#{} {} · {} · {}",
-                run.id, run.harness, outcome, dur
-            )))
+        .map(|(i, run)| {
+            let (gutter, body_style) = focus_row_marker(runs_active && run_sel == Some(i));
+            ListItem::new(Line::from(vec![
+                gutter,
+                Span::styled(
+                    truncate(&run_row_text(app, run), run_text_width),
+                    body_style,
+                ),
+            ]))
         })
         .collect();
     let runs = if detail.runs.is_empty() {
@@ -520,7 +519,6 @@ pub(super) fn draw_detail(app: &App, f: &mut Frame, area: Rect) {
     } else {
         runs
     };
-    let runs_active = app.detail_scroll_target == DetailScrollTarget::Runs;
     let runs_total = detail.runs.len();
     let runs_visible = layout.runs.height.saturating_sub(1) as usize;
     let runs_title = detail_section_title("runs", runs_total, app.detail_runs_scroll, runs_visible);
@@ -571,6 +569,54 @@ fn draw_comment_action_bar(app: &App, f: &mut Frame, area: Rect) {
         hit_map.push(rect, zone);
         x = x.saturating_add(w).saturating_add(1);
     }
+}
+
+/// The 1-char focus gutter (`▸` on the focused/selected row) plus the body
+/// style that goes with it. The single definition shared by the comments list
+/// and the runs list, so both mark their cursor identically.
+///
+/// The arrow is **bright** blue (`LightBlue`, the terminal's intense blue),
+/// matching the blue used for the focused section's divider and the status
+/// labels. Plain `Color::Blue` would be the dark navy of the 256-colour palette
+/// and would lose contrast against a dark terminal background, which is the
+/// opposite of the point.
+fn focus_row_marker(focused: bool) -> (Span<'static>, Style) {
+    if focused {
+        (
+            Span::styled(
+                "▸",
+                Style::default()
+                    .fg(Color::LightBlue)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Style::default().add_modifier(Modifier::BOLD),
+        )
+    } else {
+        (Span::raw(" "), Style::default())
+    }
+}
+
+/// One run row, deliberately minimal: the **run number**, the **harness**, the
+/// **status** (`outcome`, or `active` while the run is still open) and **how
+/// long it ran** — or has been running, since `run_duration` measures an open
+/// run against `app.now`.
+///
+/// Nothing else. The column is already implied by the card, the harness
+/// **conversation id** and the herdr **session name** are carried by the
+/// detail's status fields (never in the same slot as each other — the confusion
+/// `run.focus`'s separate `session` / `session_id` fields exist to prevent),
+/// and a `pane ✓|-` marker would now be actively misleading: a run whose pane
+/// is gone is reopened by resuming its conversation, so a missing pane no longer
+/// predicts whether `o` works.
+fn run_row_text(app: &App, run: &board_core::model::Run) -> String {
+    let outcome = run.outcome.map(|o| o.as_str()).unwrap_or("active");
+    format!(
+        "#{} {} · {} · {}",
+        run.id,
+        run.harness,
+        outcome,
+        run_duration(app, run)
+    )
 }
 
 fn run_duration(app: &App, run: &board_core::model::Run) -> String {

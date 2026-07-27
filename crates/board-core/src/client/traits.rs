@@ -330,9 +330,17 @@ pub trait BoardClient {
             self.call("run.retry", serde_json::to_value(p)?)?,
         )?)
     }
-    fn run_focus(&mut self, card_id: i64, origin_socket: &str) -> anyhow::Result<RunFocusResult> {
+    /// Focus one exact run's pane. `run_id` is required — the daemon never
+    /// picks a run implicitly.
+    fn run_focus(
+        &mut self,
+        card_id: i64,
+        run_id: i64,
+        origin_socket: &str,
+    ) -> anyhow::Result<RunFocusResult> {
         let p = RunFocusParams {
             card_id,
+            run_id,
             origin_socket: origin_socket.to_string(),
         };
         Ok(serde_json::from_value(

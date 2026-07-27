@@ -296,15 +296,17 @@ impl Db {
         ))
     }
 
-    /// Most recent run for the card that still records a target pane.
-    pub fn latest_run_with_pane(&self, card_id: i64) -> Result<Option<Run>> {
+    /// One exact run of one exact card. Ownership is validated at the SQL
+    /// boundary: a run id that exists but belongs to another card is reported
+    /// as not found for `card_id`, and the message never names the other card.
+    pub fn run_for_card(&self, card_id: i64, run_id: i64) -> Result<Run> {
         self.require_card(card_id)?;
         rows::opt(self.conn.query_row(
-            "SELECT * FROM runs WHERE card_id=?1 AND herdr_pane_id IS NOT NULL
-             ORDER BY id DESC LIMIT 1",
-            params![card_id],
+            "SELECT * FROM runs WHERE id=?1 AND card_id=?2",
+            params![run_id, card_id],
             rows::row_to_run,
-        ))
+        ))?
+        .ok_or_else(|| Error::NotFound(format!("run {run_id} for card {card_id}")))
     }
 
     /// Started and open runs paired with their cards, using only the partial

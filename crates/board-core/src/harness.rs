@@ -5,7 +5,9 @@
 //! - config-defined harnesses — an argv template with `{model}`/`{effort}`/
 //!   `{permission_mode}` placeholders; prompt via `BOARD_PROMPT` env.
 
+use crate::capability::ResumeSupport;
 use crate::config::Config;
+use crate::launch::ExecutionSpec;
 use crate::prompt::EffectiveSettings;
 
 /// Harness stored on newly-created cards when the caller omits one.
@@ -76,6 +78,210 @@ pub enum HarnessError {
     MissingForkTargetSession,
     #[error("pi does not support permission modes")]
     PiPermissionModeUnsupported,
+    /// The harness declares no way to resume a conversation by id. There is
+    /// deliberately no fallback: launching a *fresh* conversation instead would
+    /// silently re-run the task.
+    #[error("harness '{0}' cannot resume a recorded conversation, so its run cannot be reopened")]
+    ResumeUnsupported(String),
+    /// Resume was requested for a run that never recorded a conversation id.
+    #[error("resume requires a recorded harness conversation id, and this run has none")]
+    MissingResumeSession,
+    /// The persisted argv is the legacy all-in-one form that embeds the prompt
+    /// positionally, so resume flags cannot be appended safely. See the
+    /// invariant documented on [`resume_invocation`].
+    #[error(
+        "harness '{0}' recorded a legacy all-in-one command line that embeds the task text, \
+         so it cannot be re-threaded onto a resume without re-sending that task"
+    )]
+    ResumeLegacyArgv(String),
+}
+
+// ---------------------------------------------------------------------------
+// Session flags — one owner for every harness's session syntax
+// ---------------------------------------------------------------------------
+
+/// The exact startup flags a built-in harness uses to express a
+/// [`SessionPlan`], plus the harness conversation id the run should persist.
+///
+/// This is the single source of truth for "how does this harness spell mint /
+/// resume / fork". Every argv builder in this module goes through it, and so
+/// does [`resume_invocation`], so a rescue can never drift into a second,
+/// hand-rolled resume syntax.
+pub fn session_argv(
+    harness_name: &str,
+    session: &SessionPlan,
+    target_uuid: Option<&str>,
+) -> Result<(Vec<String>, Option<String>), HarnessError> {
+    match harness_name {
+        "pi" => match session {
+            SessionPlan::Mint => {
+                let id = target_uuid.ok_or(HarnessError::MissingMintedSession)?;
+                Ok((
+                    vec!["--session-id".to_string(), id.to_string()],
+                    Some(id.to_string()),
+                ))
+            }
+            // Pi has no separate resume flag: handing back a session id it
+            // already knows re-attaches to that conversation.
+            SessionPlan::Resume(id) => Ok((
+                vec!["--session-id".to_string(), id.clone()],
+                Some(id.clone()),
+            )),
+            SessionPlan::Fork(source) => {
+                let target = target_uuid.ok_or(HarnessError::MissingForkTargetSession)?;
+                Ok((
+                    vec![
+                        "--fork".to_string(),
+                        source.clone(),
+                        "--session-id".to_string(),
+                        target.to_string(),
+                    ],
+                    Some(target.to_string()),
+                ))
+            }
+        },
+        "claude" => match session {
+            SessionPlan::Mint => {
+                let id = target_uuid.ok_or(HarnessError::MissingMintedSession)?;
+                Ok((
+                    vec!["--session-id".to_string(), id.to_string()],
+                    Some(id.to_string()),
+                ))
+            }
+            SessionPlan::Resume(id) => {
+                Ok((vec!["--resume".to_string(), id.clone()], Some(id.clone())))
+            }
+            SessionPlan::Fork(id) => Ok((
+                vec![
+                    "--resume".to_string(),
+                    id.clone(),
+                    "--fork-session".to_string(),
+                ],
+                Some(id.clone()),
+            )),
+        },
+        other => Err(HarnessError::UnknownHarness(other.to_string())),
+    }
+}
+
+/// Session-carrying startup flags per built-in harness, as `(flag, takes_value)`.
+/// Re-threading a *persisted* argv onto another [`SessionPlan`] means removing
+/// exactly these and appending [`session_argv`]; listing them explicitly keeps
+/// that surgery per-harness instead of a generic guess about flag shapes.
+fn session_flags(harness_name: &str) -> &'static [(&'static str, bool)] {
+    match harness_name {
+        "pi" => &[("--session-id", true), ("--fork", true)],
+        "claude" => &[
+            ("--session-id", true),
+            ("--resume", true),
+            ("--fork-session", false),
+        ],
+        _ => &[],
+    }
+}
+
+/// Drop every session-carrying flag (and its value) from a persisted argv.
+fn strip_session_flags(harness_name: &str, argv: &[String]) -> Vec<String> {
+    let flags = session_flags(harness_name);
+    let mut out = Vec::with_capacity(argv.len());
+    let mut index = 0;
+    while index < argv.len() {
+        match flags.iter().find(|(flag, _)| *flag == argv[index]) {
+            Some((_, true)) => index += 2,
+            Some((_, false)) => index += 1,
+            None => {
+                out.push(argv[index].clone());
+                index += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Environment variable carrying the conversation id to a *configured* harness
+/// on resume. A configured run's argv is persisted fully materialized, so there
+/// is no placeholder left to substitute; declaring `resume = true` in
+/// `[harness.NAME]` is a promise to read this variable.
+pub const BOARD_RESUME_SESSION_ID: &str = "BOARD_RESUME_SESSION_ID";
+
+/// Marker env var set on every rescued pane. It tells the harness (and anything
+/// reading the run env) that this pane continues an already-finished run and is
+/// not board-managed, so `board done` no longer applies to it.
+pub const BOARD_RESCUE: &str = "BOARD_RESCUE";
+
+/// Build the launch that **resumes** a run's conversation in a fresh pane.
+///
+/// The spec is derived from the run's *persisted* [`ExecutionSpec`] rather than
+/// rebuilt from current config, so a rescue continues the same work in the same
+/// execution environment (model, effort, permission mode, env) instead of
+/// silently switching model after a config edit.
+///
+/// Two invariants are explicit here, not incidental:
+/// - `initial_prompt` is cleared and `BOARD_PROMPT` is removed from the env, so
+///   resuming can never re-send the original task and re-run it;
+/// - an unsupported harness or a missing conversation id is an error, never a
+///   fresh-conversation fallback.
+///
+/// # Invariant: the persisted built-in argv carries no positional prompt
+///
+/// Re-threading works by [`strip_session_flags`] + append, which is only sound
+/// while the persisted argv is *startup-only*. That holds for every spec
+/// [`build_invocation`] produces (protocol-17 managed launches keep both prompt
+/// channels out of argv). The legacy all-in-one helpers [`claude_argv`] /
+/// [`pi_argv`] do **not** hold it: they end in `-- "<prompt>"` (claude) or a
+/// bare positional (pi). If such an argv were ever persisted, appending resume
+/// flags would produce `… -- "<prompt>" --resume <id>` — re-sending the task
+/// *and* handing `--resume` to the harness as prompt text. Rather than trust
+/// that this never happens, the `--` form is detected and refused below.
+pub fn resume_invocation(
+    harness_name: &str,
+    support: ResumeSupport,
+    persisted: &ExecutionSpec,
+    session_id: &str,
+) -> Result<ExecutionSpec, HarnessError> {
+    if !support.is_supported() {
+        return Err(HarnessError::ResumeUnsupported(harness_name.to_string()));
+    }
+    if session_id.trim().is_empty() {
+        return Err(HarnessError::MissingResumeSession);
+    }
+
+    let argv = if is_builtin_harness(harness_name) {
+        // Fail closed on the legacy all-in-one form (see the invariant above).
+        if persisted.argv.iter().any(|arg| arg == "--") {
+            return Err(HarnessError::ResumeLegacyArgv(harness_name.to_string()));
+        }
+        let mut argv = strip_session_flags(harness_name, &persisted.argv);
+        let (session, _) = session_argv(
+            harness_name,
+            &SessionPlan::Resume(session_id.to_string()),
+            None,
+        )?;
+        argv.extend(session);
+        argv
+    } else {
+        // A configured harness runs its persisted argv unchanged; the id is
+        // delivered through the environment (see BOARD_RESUME_SESSION_ID).
+        persisted.argv.clone()
+    };
+
+    let mut env: Vec<(String, String)> = persisted
+        .env
+        .iter()
+        .filter(|(key, _)| key != "BOARD_PROMPT")
+        .cloned()
+        .collect();
+    env.push((BOARD_RESUME_SESSION_ID.to_string(), session_id.to_string()));
+    env.push((BOARD_RESCUE.to_string(), "1".to_string()));
+
+    Ok(ExecutionSpec {
+        argv,
+        env,
+        agent_kind: persisted.agent_kind.clone(),
+        // Never re-send the card task: the conversation already contains it.
+        initial_prompt: None,
+        system_prompt: persisted.system_prompt.clone(),
+    })
 }
 
 /// Board-protocol trailer appended to EVERY run's system prompt (built-in argv
@@ -137,22 +343,7 @@ pub fn claude_argv(
     argv.push("--allowedTools".to_string());
     argv.push("Bash(board:*)".to_string());
 
-    match session {
-        SessionPlan::Mint => {
-            let uuid = minted_uuid.ok_or(HarnessError::MissingMintedSession)?;
-            argv.push("--session-id".to_string());
-            argv.push(uuid.to_string());
-        }
-        SessionPlan::Resume(id) => {
-            argv.push("--resume".to_string());
-            argv.push(id.clone());
-        }
-        SessionPlan::Fork(id) => {
-            argv.push("--resume".to_string());
-            argv.push(id.clone());
-            argv.push("--fork-session".to_string());
-        }
-    }
+    argv.extend(session_argv("claude", session, minted_uuid)?.0);
 
     argv.push("--".to_string());
     argv.push(prompt.to_string());
@@ -188,27 +379,9 @@ pub fn pi_argv(
     argv.push("--append-system-prompt".to_string());
     argv.push(protocol_system_prompt(settings.system_prompt.as_deref()));
 
-    let resulting_session_id = match session {
-        SessionPlan::Mint => {
-            let id = target_uuid.ok_or(HarnessError::MissingMintedSession)?;
-            argv.push("--session-id".to_string());
-            argv.push(id.to_string());
-            id.to_string()
-        }
-        SessionPlan::Resume(id) => {
-            argv.push("--session-id".to_string());
-            argv.push(id.clone());
-            id.clone()
-        }
-        SessionPlan::Fork(source) => {
-            let target = target_uuid.ok_or(HarnessError::MissingForkTargetSession)?;
-            argv.push("--fork".to_string());
-            argv.push(source.clone());
-            argv.push("--session-id".to_string());
-            argv.push(target.to_string());
-            target.to_string()
-        }
-    };
+    let (session_flags, resulting_session_id) = session_argv("pi", session, target_uuid)?;
+    argv.extend(session_flags);
+    let resulting_session_id = resulting_session_id.ok_or(HarnessError::MissingMintedSession)?;
     argv.push(format!("Card task:\n{prompt}"));
 
     Ok(HarnessInvocation {
@@ -286,27 +459,9 @@ fn managed_pi_invocation(
         argv.extend(["--thinking".to_string(), effort.as_str().to_string()]);
     }
 
-    let resulting_session_id = match session {
-        SessionPlan::Mint => {
-            let id = target_uuid.ok_or(HarnessError::MissingMintedSession)?;
-            argv.extend(["--session-id".to_string(), id.to_string()]);
-            id.to_string()
-        }
-        SessionPlan::Resume(id) => {
-            argv.extend(["--session-id".to_string(), id.clone()]);
-            id.clone()
-        }
-        SessionPlan::Fork(source) => {
-            let target = target_uuid.ok_or(HarnessError::MissingForkTargetSession)?;
-            argv.extend([
-                "--fork".to_string(),
-                source.clone(),
-                "--session-id".to_string(),
-                target.to_string(),
-            ]);
-            target.to_string()
-        }
-    };
+    let (session_flags, resulting_session_id) = session_argv("pi", session, target_uuid)?;
+    argv.extend(session_flags);
+    let resulting_session_id = resulting_session_id.ok_or(HarnessError::MissingMintedSession)?;
 
     Ok(HarnessInvocation {
         agent_kind: Some("pi".to_string()),
@@ -338,25 +493,8 @@ fn managed_claude_invocation(
     }
     argv.extend(["--allowedTools".to_string(), "Bash(board:*)".to_string()]);
 
-    let resulting_session_id = match session {
-        SessionPlan::Mint => {
-            let id = minted_uuid.ok_or(HarnessError::MissingMintedSession)?;
-            argv.extend(["--session-id".to_string(), id.to_string()]);
-            Some(id.to_string())
-        }
-        SessionPlan::Resume(id) => {
-            argv.extend(["--resume".to_string(), id.clone()]);
-            Some(id.clone())
-        }
-        SessionPlan::Fork(id) => {
-            argv.extend([
-                "--resume".to_string(),
-                id.clone(),
-                "--fork-session".to_string(),
-            ]);
-            Some(id.clone())
-        }
-    };
+    let (session_flags, resulting_session_id) = session_argv("claude", session, minted_uuid)?;
+    argv.extend(session_flags);
 
     Ok(HarnessInvocation {
         agent_kind: Some("claude".to_string()),

@@ -6,9 +6,9 @@ use board_core::protocol::{
     ActiveRunSummary, AwaitingReason, BoardChangedReason, BoardGetParams, BoardListResult,
     BoardOpenParams, BoardSnapshot, CardArchiveParams, CardCreateParams, CardListParams,
     CardStatus, CardUpdateParams, ColumnCreateParams, ColumnUpdateParams, Effort, Event,
-    HarnessCapabilitiesParams, Patch, Request, Response, RpcError, RunDoneParams, RunFocusParams,
-    RunFocusResult, RunOutcome, RunPaneExitedParams, SpaceInfo, SpaceKind, SpaceListResult,
-    TemplateApplyParams, Trigger,
+    HarnessCapabilitiesParams, Patch, Request, Response, RpcError, RunDoneParams, RunFocusAction,
+    RunFocusParams, RunFocusResult, RunOutcome, RunPaneExitedParams, SpaceInfo, SpaceKind,
+    SpaceListResult, TemplateApplyParams, Trigger,
 };
 use serde_json::json;
 
@@ -354,12 +354,71 @@ fn scoped_board_and_run_focus_types_roundtrip_with_legacy_defaults() {
 
     roundtrip(&RunFocusParams {
         card_id: 7,
+        run_id: 9,
         origin_socket: "/tmp/herdr.sock".into(),
     });
+    // `run_id` is required: there is no implicit "latest run" default.
+    assert!(serde_json::from_value::<RunFocusParams>(
+        json!({"card_id":7,"origin_socket":"/tmp/herdr.sock"})
+    )
+    .is_err());
+
     roundtrip(&RunFocusResult {
+        action: RunFocusAction::FocusedRecordedPane,
+        recorded_pane_id: Some("p1".into()),
         run_id: 9,
+        card_id: 7,
+        column_id: 3,
+        harness: "pi".into(),
+        session: Some("work".into()),
+        session_id: Some("conv-1".into()),
         pane_id: "p1".into(),
     });
+    // A rescue reports a *different* live pane than the recorded (dead) one.
+    roundtrip(&RunFocusResult {
+        action: RunFocusAction::Rescued,
+        recorded_pane_id: Some("w1:dead".into()),
+        run_id: 9,
+        card_id: 7,
+        column_id: 3,
+        harness: "claude".into(),
+        session: None,
+        session_id: Some("conv-1".into()),
+        pane_id: "w1:fresh".into(),
+    });
+    roundtrip(&RunFocusResult {
+        action: RunFocusAction::FocusedRescuedPane,
+        recorded_pane_id: None,
+        run_id: 9,
+        card_id: 7,
+        column_id: 3,
+        harness: "claude".into(),
+        session: None,
+        session_id: Some("conv-1".into()),
+        pane_id: "w1:fresh".into(),
+    });
+    // `session` is the herdr session name; `session_id` is the harness
+    // conversation id. They are separate fields and never interchangeable.
+    let result: RunFocusResult = serde_json::from_value(json!({
+        "run_id": 9, "card_id": 7, "column_id": 3, "harness": "pi",
+        "session": "work", "session_id": "conv-1", "pane_id": "p1"
+    }))
+    .unwrap();
+    assert_eq!(result.session.as_deref(), Some("work"));
+    assert_eq!(result.session_id.as_deref(), Some("conv-1"));
+    // A payload from before the rescue existed means "focused the recorded
+    // pane" — the only thing `run.focus` could do back then.
+    assert_eq!(result.action, RunFocusAction::FocusedRecordedPane);
+    assert_eq!(result.recorded_pane_id, None);
+
+    // The action is a stable snake_case wire enum.
+    for (action, wire) in [
+        (RunFocusAction::FocusedRecordedPane, "focused_recorded_pane"),
+        (RunFocusAction::FocusedRescuedPane, "focused_rescued_pane"),
+        (RunFocusAction::Rescued, "rescued"),
+    ] {
+        assert_eq!(serde_json::to_value(action).unwrap(), json!(wire));
+    }
 }
 
 #[test]

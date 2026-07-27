@@ -414,3 +414,74 @@ fn durable_timeout_pause_resume_is_atomic_idempotent_and_saturating() {
         Some(i64::MAX)
     );
 }
+
+#[test]
+fn run_for_card_requires_the_exact_owning_card() {
+    let db = mem();
+    let make_card = |title: &str| {
+        db.create_card(&CardCreateParams {
+            title: title.into(),
+            ..Default::default()
+        })
+        .unwrap()
+    };
+    let owner = make_card("owner");
+    let other = make_card("other");
+    let enqueue = |card: &board_core::model::Card| {
+        db.enqueue_run_uow(&EnqueueRun {
+            card_id: card.id,
+            column_id: card.column_id,
+            harness: "pi",
+            argv_json: "[]",
+            prompt_snapshot: "p",
+            system_prompt_snapshot: None,
+            launch_spec_json: None,
+            session_id: Some("conv-1"),
+            session: Some("work"),
+        })
+        .unwrap()
+    };
+    let first = enqueue(&owner);
+    db.promote_run_uow(first.id, Some("w1"), Some("w1:p1"), None)
+        .unwrap();
+    db.finalize_run_uow(&FinalizeRun {
+        run_id: first.id,
+        outcome: RunOutcome::Ok,
+        summary: None,
+        comments: &[],
+        target_column_id: None,
+        final_status: CardStatus::Done,
+        final_awaiting_reason: None,
+        next: None,
+    })
+    .unwrap();
+    let second = enqueue(&owner);
+    db.promote_run_uow(second.id, Some("w1"), Some("w1:p2"), None)
+        .unwrap();
+    let foreign = enqueue(&other);
+
+    // Happy path: an *older* run is addressable, not only the latest.
+    let got = db.run_for_card(owner.id, first.id).unwrap();
+    assert_eq!(got.id, first.id);
+    assert_eq!(got.card_id, owner.id);
+    assert_eq!(got.herdr_pane_id.as_deref(), Some("w1:p1"));
+    assert_eq!(got.session.as_deref(), Some("work"));
+    assert_eq!(got.session_id.as_deref(), Some("conv-1"));
+    assert_eq!(db.run_for_card(owner.id, second.id).unwrap().id, second.id);
+
+    // A run that exists but belongs to another card is not found for this
+    // card, and the message must not leak the owning card.
+    let err = db.run_for_card(owner.id, foreign.id).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains(&foreign.id.to_string()), "message: {msg}");
+    assert!(msg.contains(&owner.id.to_string()), "message: {msg}");
+    assert!(!msg.contains(&format!("card {}", other.id)), "leak: {msg}");
+
+    // Unknown run id.
+    let err = db.run_for_card(owner.id, 99_999).unwrap_err();
+    assert!(err.to_string().contains("99999"), "message: {err}");
+
+    // Unknown card: `require_card` reports the card, not the run.
+    let unknown = db.run_for_card(4242, first.id).unwrap_err();
+    assert_eq!(unknown.to_string(), "not found: card 4242");
+}

@@ -271,6 +271,26 @@ impl HerdrClient {
         Ok(())
     }
 
+    /// `pane.get` for one exact pane: `Ok(Some(info))` when it exists,
+    /// `Ok(None)` when it does not.
+    ///
+    /// Herdr does not return a null pane for a dead id — it answers with the
+    /// `pane_not_found` error envelope, which is a *negative answer* to a
+    /// liveness question rather than a failure, so it is modelled as `None`
+    /// here and every other error still propagates. Verified against
+    /// Herdr 0.7.5 / protocol 17: `tests/fixtures/schema.json` types
+    /// `pane.get`'s params as `PaneTarget {pane_id}` with a
+    /// `{"type":"pane_info","pane":PaneInfo}` success result, and a live socket
+    /// answers an unknown pane id with
+    /// `{"error":{"code":"pane_not_found","message":"pane <id> not found"}}`.
+    pub fn pane_get(&mut self, pane_id: &str) -> Result<Option<PaneInfo>> {
+        match self.call_field::<PaneInfo>("pane.get", json!({ "pane_id": pane_id }), "pane") {
+            Ok(pane) => Ok(Some(pane)),
+            Err(HerdrError::Protocol { code, .. }) if code == "pane_not_found" => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Focus a pane; returns the pane's updated [`PaneInfo`].
     pub fn pane_focus(&mut self, pane_id: &str) -> Result<PaneInfo> {
         self.call_field("pane.focus", json!({ "pane_id": pane_id }), "pane")

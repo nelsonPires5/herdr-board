@@ -80,6 +80,15 @@ pub trait Spawner: Send + Sync {
 // board-daemon implements HerdrSpawner (via board-herdr) and LocalSpawner (plain child process,
 // used by integration tests with the fake harness — no herdr needed). Runtime placement,
 // process handles, liveness, and cleanup never belong to board-core.
+
+// board-daemon::spawner::rescue — placement + launch WITHOUT run promotion, for
+// reopening a run whose pane is gone (`run.focus`). It shares the placement and
+// launch helpers with `Spawner::spawn` instead of duplicating them, but calls no
+// unit of work: a rescue performs zero DB writes, so its pane has no run row and
+// is neither owned, watched, nor timed out. `board_core::harness::resume_invocation`
+// re-threads the run's persisted ExecutionSpec onto SessionPlan::Resume (per-harness
+// syntax owned by `session_argv`) and clears every prompt channel.
+pub(crate) fn rescue_run_pane(plan: &RescuePlan<'_>) -> Result<RescueOutcome>;
 ```
 
 ## Semantics source of truth

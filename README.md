@@ -162,7 +162,7 @@ is recovered only from a durable board pane, otherwise a fresh tab is created. L
 | `←/→` or `h/l` | Focus column | `↑/↓` or `k/j` | Focus card |
 | `b` | Switch project/Global board | `n` | New card |
 | `N` | New column | `Enter` | Card detail |
-| `m` | Move card picker | `o` (detail) | Jump to latest run pane |
+| `m` | Move card picker | `o` (detail) | Jump to selected run's pane |
 | `H / L` | Move card left/right | `a` | Archive/restore card |
 | `e` | Edit card | `E` | Edit column |
 | `v` | Active/all/archived view | `?` | Full help overlay |
@@ -184,8 +184,8 @@ is recovered only from a durable board pane, otherwise a fresh tab is created. L
 | `v` | active / all / archived view | | `f` / click title | popup / fullscreen |
 | `d` | delete card | | `c` | add comment |
 | `D` | delete column | | `Tab` | focus comments / runs |
-| `m` | move card picker | | `↑/↓ k/j` | scroll focused detail section |
-| `H / L` | move card left / right | | `o` | jump to latest same-session run pane |
+| `m` | move card picker | | `↑/↓ k/j` | select comment / run (section follows) |
+| `H / L` | move card left / right | | `o` | jump to the selected run's same-session pane |
 | | | | `Enter` | confirm done (`awaiting` card) |
 | **forms** | | | `x` / `r` | cancel / retry run |
 | `Tab` / `Shift+Tab` | next / previous field | | `Tab`, `↑/↓` | choose/scroll detail history |
@@ -312,7 +312,7 @@ board card run done [CARD_ID] --outcome ok|fail [--summary S] [--json]
 board card run confirm [CARD_ID] [--summary S] [--json]
 board card run cancel <CARD_ID> [--json]
 board card run retry <CARD_ID> [--json]
-board card run focus <CARD_ID> [--origin-socket SOCKET] [--json]
+board card run focus <CARD_ID> <RUN_ID> [--origin-socket SOCKET] [--json]
 ```
 
 Comment add returns the compact current comment (`id`, `card_id`, `author`, `body`,
@@ -322,8 +322,16 @@ inside a durable run is owned by `agent:<BOARD_RUN_ID>`; with `BOARD_RUN_ID` set
 edit/delete only its own comment while the run is open. Human calls without it may edit/delete
 non-system comments. System comments and deleted comments are immutable. `card run confirm` is the
 `done --outcome ok` channel for awaiting review.
-Focus returns `{run_id, pane_id}` and requires the target run to belong to the current Herdr session;
-without `--origin-socket`, it uses `HERDR_SOCKET_PATH` or `HERDR_SOCK`.
+Focus returns `{action, recorded_pane_id?, run_id, card_id, column_id, harness, session, session_id,
+pane_id}` and requires the target run to belong to the current Herdr session;
+without `--origin-socket`, it uses `HERDR_SOCKET_PATH` or `HERDR_SOCK`. If that run's pane was
+closed, focus **reopens** it: the harness conversation is resumed in a new pane in the card's tab
+(`action` = `rescued`, or `focused_rescued_pane` when an earlier reopen's pane is still alive), the
+card task is not re-sent, and nothing is written to the database — so that pane is ephemeral and not
+tracked as a run. A harness that cannot resume, or a run with no recorded conversation id, is
+refused explicitly; use `card run retry` to start a new run instead. A reopened pane can still
+`board comment` on the card (as a human comment), but `board done` does not apply to it — the run it
+continues is already closed and stays that way.
 
 ### Columns and discovery
 
@@ -405,10 +413,22 @@ local_poll_ms = 2000        # local-spawner liveness interval
 
 [harness.myharness]
 argv = ["mytool", "--model", "{model}"]
+resume = false             # can this harness resume a recorded conversation? default false
 ```
 
 Custom harness prompts are delivered through `$BOARD_PROMPT`. The placeholders `{model}`, `{effort}`,
-and `{permission_mode}` are available in `argv`.
+and `{permission_mode}` are available in `argv`. Optional keys `models`, `efforts`, and
+`permission_modes` declare the harness's capability catalog.
+
+`resume` declares whether this harness can re-attach to a conversation it recorded earlier, which is
+what lets `board card run focus` **reopen a run whose pane was closed** (see
+[`docs/protocol.md`](docs/protocol.md) → `run.focus`). It **defaults to `false`**: there is no
+universal CLI syntax for resuming, so herdr-board never guesses one — the built-ins `pi`
+(`--session-id <id>`) and `claude` (`--resume <id>`) declare it themselves. Setting `resume = true`
+promises that your `argv` re-attaches to the conversation named by `$BOARD_RESUME_SESSION_ID`, which
+the daemon sets on the reopened pane along with `BOARD_RESCUE=1` (the run's argv is persisted fully
+materialized, so there is no placeholder left to substitute). Without it, focusing such a run is
+refused explicitly rather than starting a fresh conversation that would re-run the task.
 
 The daemon parses the complete document once, including `[daemon]`, into typed settings. A missing
 file or omitted section uses the defaults shown above. An existing file with malformed TOML or an
@@ -427,6 +447,7 @@ override values also prevent daemon startup.
 | `BOARD_SPAWNER` | `herdr` or `local`; overrides `[daemon] spawner`. |
 | `BOARD_CARD_ID` / `BOARD_RUN_ID` | Injected into runs; `comment`/`done` use them by default. |
 | `BOARD_PROMPT` / `BOARD_SYSTEM_PROMPT` | Prompt delivery for custom harnesses. |
+| `BOARD_RESCUE` / `BOARD_RESUME_SESSION_ID` / `BOARD_RESCUED_RUN_ID` | Set on a *reopened* run pane only: marks it as an ephemeral rescue (not a tracked run), names the conversation to resume, and labels which run it continues. A reopened pane gets `BOARD_CARD_ID`/`BOARD_SOCKET`/`BOARD_BIN` but **never** `BOARD_RUN_ID` — that is the actor credential for `comment`/`done`, and a rescued pane must not be able to write to the finished run. |
 | `BOARD_TIMEOUT_UNIT_SECS` / `BOARD_LOCAL_POLL_MS` / `BOARD_TICK_MS` | Test-tuning knobs. |
 
 </details>

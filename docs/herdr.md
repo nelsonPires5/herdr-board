@@ -95,6 +95,32 @@ Labels are display metadata and never authorize a tab or pane.
 `agent.read` remains a terminal screen/scrollback read, not a semantic result
 channel.
 
+Two protocol-17 facts the rescue depends on, both observed on a live 0.7.5 socket
+via `e2e/27-rescue-dead-pane.sh` rather than assumed: a pane label set with
+`pane.rename` survives a subsequent `agent.start`; and when a managed agent's
+process exits, Herdr **clears** `PaneInfo.agent` while keeping the pane open as a
+plain shell (label included). The second is why "does this pane still have a
+registered agent" is a sound liveness test and a label match alone is not.
+`PaneInfo.agent` is also not the exclusive name passed to `agent.start` — the
+schema carries `agent` and `name` separately — so it is only ever tested for
+presence, never compared to a board-chosen name.
+
+Reopening a run whose pane was closed (`run.focus` rescue) reuses this exact
+contract, not a second one: `board-daemon::spawner::rescue` calls the same
+`allocate_owned_pane` placement (with an empty reclaim list, so reopening one run
+never closes another's pane), the same `require_protocol` gate, and the same
+`agent.start` + `interactive_ready` wait. Three things differ, all
+deliberate: `agent.prompt` is **not** sent (the conversation already contains the
+task, and re-sending it would re-run the work); the new pane is renamed to
+`card-<id>-r<run>-rescue` before launch so a later reopen can find it again with
+one `pane.list` scan (a name built from stable ids only, never from a column
+name that a user can change — and `agent.start` is verified to leave that label
+intact, so it is set once); and the pane env omits `BOARD_RUN_ID`, since a
+rescued pane must not hold the credential that writes to a finished run. Nothing is persisted for that pane — Herdr's
+own pane label/agent name is the only record of it, which is why the dedup scan
+is a hint rather than proof (see `docs/design.md` → Limitations). The dead
+`pane_id` is never reused or revived.
+
 Configured harnesses are intentionally unmanaged. Protocol 17 has a
 `herdr pane run <PANE_ID> <COMMAND>...` CLI command but no `pane.run` socket
 method, so the daemon invokes that CLI against the selected session socket via

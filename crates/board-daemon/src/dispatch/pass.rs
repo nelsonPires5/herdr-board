@@ -90,7 +90,7 @@ pub(crate) fn launch_session<'a>(run: &'a Run, card: &'a Card) -> Option<&'a str
 
 /// Reconstruct a card tab's ownership from a durable board-owned pane id.
 /// A matching pane is proof of ownership; tab labels alone are never used.
-pub(super) fn reconstruct_owned_tab_id(
+pub(crate) fn reconstruct_owned_tab_id(
     snapshot: &SessionSnapshot,
     workspace_id: &str,
     prior_pane_ids: &[String],
@@ -116,7 +116,7 @@ pub(super) fn reconstruct_owned_tab_id(
 /// session and workspace are eligible; legacy rows and panes from another
 /// placement scope cannot confer tab ownership. The ids are newest-first so
 /// reconstruction remains deterministic if old runs occupy different tabs.
-pub(super) fn durable_owned_pane_ids(
+pub(crate) fn durable_owned_pane_ids(
     runs: &[Run],
     session: Option<&str>,
     workspace_id: &str,
@@ -162,7 +162,7 @@ pub(super) fn reclaimable_owned_pane_ids(
 
 /// Return exact persisted card-tab anchors, newest run first. v11 rows have
 /// NULL here by design and therefore cannot prove an anchor after restart.
-pub(super) fn durable_owned_anchor_pane_ids(
+pub(crate) fn durable_owned_anchor_pane_ids(
     runs: &[Run],
     session: Option<&str>,
     workspace_id: &str,

@@ -24,7 +24,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use board_core::capability::HarnessCapabilities;
 use board_core::client::BoardClient;
-use board_core::protocol::{BoardSnapshot, Event, SessionInfo, SpaceInfo};
+use board_core::protocol::{
+    BoardSnapshot, Event, RunFocusAction, RunFocusResult, SessionInfo, SpaceInfo,
+};
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event as CtEvent, KeyEventKind};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -322,6 +324,17 @@ impl Driver {
             } else {
                 self.app.detail_comment_sel.min(len - 1)
             };
+            // The run cursor follows the exact same rule: the `usize::MAX`
+            // sentinel clamps onto the newest run (what `o` targets by
+            // default), while an in-range cursor survives a refresh so a
+            // reload never yanks the user off the run they picked. Clamping on
+            // every load also keeps a shrinking run list in bounds.
+            let runs = self.app.detail.as_ref().map(|d| d.runs.len()).unwrap_or(0);
+            self.app.detail_run_sel = if runs == 0 {
+                0
+            } else {
+                self.app.detail_run_sel.min(runs - 1)
+            };
             self.app.scroll_detail_to_latest();
         }
     }
@@ -478,7 +491,7 @@ impl Driver {
                     self.refetch();
                 }
             }
-            Effect::FocusRun(id) => {
+            Effect::FocusRun(card_id, run_id) => {
                 let Some(origin_socket) = self.origin.origin_socket.clone() else {
                     self.app.set_toast(
                         "jump to pane requires Herdr (HERDR_SOCKET_PATH is unset)",
@@ -486,9 +499,26 @@ impl Driver {
                     );
                     return;
                 };
-                let r = self.client.run_focus(id, &origin_socket);
-                if self.guard(r).is_some() {
-                    self.app.should_quit = true;
+                match self.client.run_focus(card_id, run_id, &origin_socket) {
+                    // Focusing an existing pane means the user's attention now
+                    // belongs to Herdr, so the TUI steps aside. A *rescue* is a
+                    // new pane the user did not ask for by name, so say what
+                    // happened before leaving.
+                    Ok(result) => match result.action {
+                        RunFocusAction::FocusedRecordedPane => self.app.should_quit = true,
+                        // A rescue is not what the user literally asked for, so
+                        // it must be explained. Herdr has already moved focus to
+                        // the rescued pane, so quitting here would only throw
+                        // the explanation away — stay up and toast instead.
+                        RunFocusAction::Rescued | RunFocusAction::FocusedRescuedPane => {
+                            self.app.set_toast(focus_rescue_toast(&result), false);
+                        }
+                    },
+                    // The daemon owns the authoritative diagnosis (nothing to
+                    // resume, harness cannot resume, cross-session, Herdr down)
+                    // — the TUI only renders it, non-fatally, and leaves the
+                    // board usable.
+                    Err(e) => self.app.set_toast(format!("run #{run_id}: {e}"), true),
                 }
             }
             Effect::EditFocusedTextArea => self.edit_focused(),
@@ -597,6 +627,24 @@ fn fetch_harness_list(client: &mut dyn BoardClient) -> Result<Vec<String>> {
 /// client API.
 fn fetch_spaces(client: &mut dyn BoardClient, session: Option<&str>) -> Result<Vec<SpaceInfo>> {
     Ok(client.space_list(session)?.spaces)
+}
+
+/// Describe a rescue in one toast line: what was reopened, where, and the fact
+/// that the new pane is ephemeral (no run row ⇒ the daemon does not watch or
+/// time it out).
+fn focus_rescue_toast(result: &RunFocusResult) -> String {
+    match result.action {
+        RunFocusAction::FocusedRescuedPane => format!(
+            "run #{}: its pane is gone; focused the reopened pane {} (ephemeral, not tracked \
+             as a run)",
+            result.run_id, result.pane_id
+        ),
+        _ => format!(
+            "run #{}: its pane is gone; resumed the {} session in new pane {} (ephemeral, not \
+             tracked as a run)",
+            result.run_id, result.harness, result.pane_id
+        ),
+    }
 }
 
 /// Fetch `session.list` through the typed client API.

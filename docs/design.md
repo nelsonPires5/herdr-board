@@ -314,11 +314,96 @@ while a non-Git directory keeps its exact canonical CWD. Subdirectories of one r
 a board; equal basenames at different paths do not. Moving/renaming a path does not migrate its old
 board, which remains available in the picker.
 
-`o` is daemon-mediated: `run.focus` chooses the card's newest run with a recorded pane, resolves the
-run's session socket, canonicalizes and compares it with the invoking plugin's
-`HERDR_SOCKET_PATH`, then calls Herdr socket method `pane.focus {pane_id}`. Cross-session jumps are
-refused; success exits the overlay, while missing/stale panes and Herdr errors remain visible as a
-toast.
+`o` is daemon-mediated, and **run selection is explicit end to end**: `run.focus` takes a required
+`{card_id, run_id}` and never implicitly picks a run. The TUI passes the run the user *selected* in
+card detail's Runs section — `detail_run_sel`, a cursor separate from the viewport offset, which
+defaults to the newest run (so `o` keeps its familiar meaning), moves with `↑`/`↓` and `k`/`j` while
+the Runs section is focused (saturating at both ends, never wrapping, the offset following so the
+selected row stays rendered), and survives a detail refresh instead of snapping back. `o` works from
+either section; a card with no runs at all toasts locally. The daemon then loads that exact run
+(rejecting a run id owned by another card), resolves the run's session socket, canonicalizes and
+compares it with the invoking plugin's `HERDR_SOCKET_PATH`, checks the recorded pane still exists
+(one targeted `pane.get`), then calls Herdr socket method `pane.focus {pane_id}`. Cross-session
+jumps are refused. The result carries the focused run's full identity (card, column, harness, herdr
+session name, harness conversation id, pane) plus an `action` saying what the daemon had to do, so
+callers can name *which* run they landed on and *how*.
+
+**Rescuing a run whose pane is gone.** A finished run's pane is an ordinary terminal: the user can
+close it, and then the run's `herdr_pane_id` points at nothing. Rather than dead-ending, `o` reopens
+the run by **resuming its harness conversation in a brand-new pane** in the card's `card-<id>` tab —
+automatically, with no confirmation prompt, and reported after the fact. The same path covers a run
+that never recorded a pane at all. End to end:
+
+1. the user selects a run in card detail and presses `o` (`Effect::FocusRun(card_id, run_id)`);
+2. the daemon loads that exact run, resolves its session socket, and enforces the cross-session
+   guard;
+3. one `pane.get` decides live vs. dead. Live ⇒ `pane.focus`, `action=focused_recorded_pane`, and
+   the overlay exits (attention now belongs to Herdr);
+4. dead ⇒ *rescue*. The run row + config alone must supply a harness conversation id
+   (`run.session_id`, **not** `run.session`), a harness that explicitly declares
+   `ResumeSupport::ByConversationId`, a durable `launch_spec_json`, and a recorded workspace.
+   Anything missing is an explicit, actionable refusal — never a fresh-conversation fallback, which
+   would silently re-run the card's task. These checks run before Herdr is involved, so "this run
+   can never be reopened" is answerable with Herdr down;
+5. the resume launch is derived from the **persisted** launch spec (preserving the original
+   execution's model/effort/permission mode/env) with `initial_prompt` cleared and `BOARD_PROMPT`
+   stripped. The session flags are re-threaded through `SessionPlan::Resume`, whose per-harness
+   syntax lives in exactly one place (`board_core::harness::session_argv`), so there is no second
+   resume argv path to drift; a persisted *legacy all-in-one* argv (task embedded after `--`) is
+   refused instead of rewritten;
+6. the board environment is added, and one variable is pointedly left out — see **Credentials**
+   below;
+7. `spawner::rescue` takes the same per-card-tab allocation lock as dispatch (so a focus racing
+   another focus, or a dispatch, cannot each create a pane or a tab), scans for a *live* pane an
+   earlier rescue left (`action=focused_rescued_pane` if found), closes dead remains carrying this
+   run's marker, else splits a new child in the card tab using the same placement helpers as dispatch
+   — with `reclaimable_pane_ids` deliberately empty, so reopening one run never closes another's pane
+   — labels it, launches the harness, and focuses it (`action=rescued`). A failed launch closes the
+   pane it created, plus the tab anchor when placement had to create the tab; it also registers the
+   exact tab/anchor it kept, so a later dispatch reuses that tab instead of making another;
+8. the TUI toasts what happened and **stays up** on a rescue (Herdr already moved focus to the new
+   pane, so quitting would only discard the explanation). Refusals and Herdr errors stay visible as a
+   non-fatal toast that leaves the board usable, and never fall back to a different run's pane.
+
+**Credentials: a rescued pane is not the run.** Protocol-17 placement is pane-first, so the pane's
+environment comes from the `pane.split` that creates it; the daemon installs the persisted run env
+plus `BOARD_CARD_ID`, `BOARD_SOCKET`, `BOARD_BIN`, `BOARD_RESCUE=1`, `BOARD_RESUME_SESSION_ID` and
+`BOARD_RESCUED_RUN_ID`. `BOARD_RUN_ID` is **withheld on purpose**. It is not documentation but the
+actor credential: `board comment` authenticates as `agent:$BOARD_RUN_ID`, `board done` forwards it as
+the run to finalize, and the configured-harness wrapper passes it to `run.pane_exited`. Since the
+rescued pane belongs to no run and the historical row must stay immutable, granting it that id would
+either be rejected anyway (`require_agent_run` refuses an ended run) or, for the narrow case of a
+still-open run whose pane died, let an unwatched pane finalize that run while racing the liveness
+watcher for the right to write its outcome. Withholding it fails closed and still leaves the useful
+path open: `board comment` becomes an ordinary human comment on the card, which is the durable place
+for a resumed conversation to report back.
+
+**Limitations (accepted, by design).** The rescue writes **nothing** to the database: no new `runs`
+row, no `herdr_pane_id` update, no reopened `ended_at`/`outcome`, no new column, no migration. The
+historical run row is immutable, which is the point — a rescue is a way to *read and continue* a past
+execution, not to resurrect it as a run. Two consequences follow and are not worked around:
+
+- the rescued pane is **ephemeral and unmanaged**. With no run row there is no ownership record, no
+  watcher, no idle grace, and no timeout: the daemon will not observe it, will not close it, and will
+  not report anything it does. `board done` from inside it does not apply (the run is closed); the
+  pane carries `BOARD_RESCUE=1` to say so. Closing it is the user's job.
+- deduplication rests on a **name, not a record**. The rescued pane's label/agent name
+  `card-<id>-r<run>-rescue` is the only trace a previous rescue can leave, so pressing `o` twice is
+  reliably idempotent for panes the daemon created, but a user who renames the pane or its agent can
+  defeat the scan. This is a diagnostic hint, not an authoritative record, and it is the direct cost
+  of the no-database-writes decision. The marker derives from card id + run id only, precisely so
+  that renaming a *column* cannot break it.
+- for a **configured** (unmanaged) harness, a rescued pane that outlived its harness cannot be
+  detected. Herdr tracks no `agent` for unmanaged panes, so the label is the only evidence and a
+  leftover shell looks exactly like a live resume; `o` will focus it rather than resuming again.
+  Managed `pi`/`claude` panes do not have this problem — Herdr's agent registration disappears with
+  the process (observed live: the pane stays open as a labelled shell with `agent` absent), so the
+  daemon re-rescues and reclaims the dead shell. That is a *presence* check: `PaneInfo.agent` is not
+  the exclusive name the board picked — the schema carries `agent` and `name` separately — so it is
+  never compared to the marker.
+- a rescued pane cannot report through the run channel at all (see **Credentials** above): `board
+  done` and the `__pane-exited` callback do not apply to it. This is the intended consequence of the
+  immutable-history rule, not an oversight.
 
 ### TUI interactions (v1)
 
@@ -335,9 +420,22 @@ toast.
   their content; the description and each comment body word-wrap (`Wrap { trim: false }`) at the
   panel border instead of being truncated, and comments scroll by wrapped row. Runs stay one line.
   Comments and runs scroll independently (`Tab` selects, mouse
-  wheel scroll), with a blue divider for the focused history. Histories open at the latest item and
-  show only directional arrows (no counts) when content is hidden. With runs focused, arrows/`k`/`j`
-  scroll; with comments focused they instead move a **focused-comment** marker (a `▸` gutter, bold
+  wheel scroll — a wheel notch is a raw offset move that then drags the section's cursor into the
+  rows it brought into view, so the `▸` marker never leaves the screen and `o`/`e`/`d`/`h` can only
+  ever act on a visible row), with a blue divider for the focused history. Histories open at the latest item and
+  show only directional arrows (no counts) when content is hidden. Each run row is deliberately
+  minimal — `#<id> <harness> · <outcome|active> · <duration>`, i.e. run number, harness, status, and
+  how long the run took (an open run is measured against the injected `app.now`, so `active` rows
+  count up) — still budgeted against the section width so a narrow detail truncates instead of
+  overflowing. The column, the **harness conversation id** and a `pane ✓|-` marker are deliberately
+  *not* in the row: the column is implied by the card, the conversation id and the herdr **session
+  name** live in the status fields (and never in the same slot as each other), and since a run whose
+  pane is gone is now reopened by resuming its conversation, a missing pane no longer predicts
+  whether `o` works. With runs focused, arrows/`k`/`j` move a **selected-run** marker (the same
+  bright-blue `▸` gutter and bold row the comments list uses — one shared `focus_row_marker`, so both
+  lists mark their cursor identically; bright/intense blue, never the 256-palette navy `Blue`, which
+  would lose contrast on a dark background) one run at a time, dragging the viewport along; with
+  comments focused they instead move a **focused-comment** marker (the same `▸` gutter, bold
   body) one comment at a time, pulling the viewport along so the focused comment's wrapped rows stay
   visible. The focused comment is what comment management acts on: `e` edits it (the same one-field
   comment form, pre-filled), `d` deletes it behind the confirm overlay, and `h` opens its audit trail
@@ -356,8 +454,8 @@ toast.
 - Mouse **and** keyboard for everything: `b` switches between `Global` and scoped boards; drag card
   between columns / `m` move; `n` new card, `N` new column; `e` edit card; `a` archive/restore; `v`
   cycles `ACTIVE` / `ALL` / `ARCHIVED`; `c` comment, with `e`/`d`/`h` managing the focused one in
-  card detail; `Enter` card detail; `o` focuses the latest
-  recorded run pane when it belongs to the current Herdr session; `r` refreshes the selected board
+  card detail; `Enter` card detail; `o` focuses the **selected** run's
+  pane when it belongs to the current Herdr session (help: `o  jump to selected run pane`); `r` refreshes the selected board
   on demand); `?` help overlay listing **all** keybinds; column config form (rename, system prompt,
   trigger, on_success/on_fail, overrides, reorder, delete). **Column reorder** is reachable by mouse
   drag or the `M` (Shift+m) mini-mode: it mirrors the move-card picker's stage→commit→cancel shape —

@@ -50,6 +50,10 @@ pub(super) fn on_mouse(app: &mut App, m: MouseEvent) -> Vec<Effect> {
                 } else {
                     -1
                 });
+                // A raw offset move can leave the focused/selected row off
+                // screen; carry the cursor along so the `▸` marker (and what
+                // `o`/`e`/`d`/`h` act on) stays inside the rendered window.
+                app.follow_detail_scroll();
             }
             _ => {}
         }
@@ -81,6 +85,7 @@ pub(super) fn on_mouse(app: &mut App, m: MouseEvent) -> Vec<Effect> {
                         // See `board::board_key`'s `Enter` arm: sentinel for
                         // "not yet focused anywhere".
                         app.detail_comment_sel = usize::MAX;
+                        app.detail_run_sel = usize::MAX;
                         app.screen = Screen::CardDetail;
                         return vec![Effect::LoadDetail(id)];
                     }

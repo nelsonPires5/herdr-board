@@ -377,6 +377,49 @@ fn pane_rename_serializes_typed_params_and_parses_pane_info() {
 }
 
 #[test]
+fn pane_get_decodes_pane_info_and_maps_a_dead_pane_to_none() {
+    // Envelope captured from Herdr 0.7.5 / protocol 17 (`pane.get`): params are
+    // `PaneTarget {pane_id}`, success is `{"type":"pane_info","pane":…}`.
+    let path = serve_calls(|req| {
+        assert_eq!(req["method"], "pane.get");
+        assert_eq!(req["params"], serde_json::json!({"pane_id": "wV:p2"}));
+        reply_for(
+            req,
+            r#"{"type":"pane_info","pane":{"pane_id":"wV:p2","terminal_id":"term_65789afd0779b1","workspace_id":"wV","tab_id":"wV:t1","focused":false,"cwd":"/home/np","agent_status":"unknown","revision":0}}"#,
+        )
+    });
+    let mut c = HerdrClient::connect(&path).unwrap();
+    let pane = c.pane_get("wV:p2").unwrap().expect("live pane");
+    assert_eq!(pane.pane_id, "wV:p2");
+    assert_eq!(pane.tab_id, "wV:t1");
+
+    // A pane that no longer exists is an *error envelope* upstream, not a null
+    // result: `{"error":{"code":"pane_not_found",…}}` (verified live against a
+    // bogus pane id). The liveness wrapper reports that as `None`.
+    let path = serve_calls(|req| {
+        Action::Reply(format!(
+            "{{\"id\":\"{}\",\"error\":{{\"code\":\"pane_not_found\",\"message\":\"pane nope:p999 not found\"}}}}",
+            req["id"].as_str().unwrap()
+        ))
+    });
+    let mut c = HerdrClient::connect(&path).unwrap();
+    assert!(c.pane_get("nope:p999").unwrap().is_none());
+
+    // Any other error still propagates.
+    let path = serve_calls(|req| {
+        Action::Reply(format!(
+            "{{\"id\":\"{}\",\"error\":{{\"code\":\"internal_error\",\"message\":\"boom\"}}}}",
+            req["id"].as_str().unwrap()
+        ))
+    });
+    let mut c = HerdrClient::connect(&path).unwrap();
+    assert!(matches!(
+        c.pane_get("wV:p2"),
+        Err(HerdrError::Protocol { code, .. }) if code == "internal_error"
+    ));
+}
+
+#[test]
 fn pane_focus_returns_pane_info() {
     let path = serve_calls(|req| {
         assert_eq!(req["method"], "pane.focus");

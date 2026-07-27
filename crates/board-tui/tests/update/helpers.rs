@@ -59,6 +59,7 @@ pub fn split_effort_caps() -> HarnessCapabilities {
         model_freeform: true,
         default_efforts: vec![Effort::Low, Effort::Medium, Effort::High],
         permission_modes: vec!["manual".to_string()],
+        resume: Default::default(),
     }
 }
 

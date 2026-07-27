@@ -102,6 +102,9 @@ pub(super) fn board_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
                 // on the newest comment (matching `scroll_detail_to_latest`'s
                 // bottom-open behaviour) instead of jumping to the oldest.
                 app.detail_comment_sel = usize::MAX;
+                // Same sentinel for the run cursor: it lands on the newest
+                // run, which is the run `o` jumps to by default.
+                app.detail_run_sel = usize::MAX;
                 app.screen = Screen::CardDetail;
                 return vec![Effect::LoadDetail(id)];
             }

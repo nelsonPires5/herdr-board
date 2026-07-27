@@ -5,13 +5,19 @@
 //! `sheet_area` directly against a pure `App`.
 
 use board_core::client::{BoardClient, FakeBoardClient};
-use board_core::protocol::CardCreateParams;
-use board_tui::app::{App, DetailScrollTarget, Screen};
+use board_core::db::{EnqueueRun, FinalizeRun};
+use board_core::protocol::{CardCreateParams, CardStatus, RunOutcome};
+use board_tui::app::{update, App, DetailScrollTarget, Msg, Screen};
 use board_tui::view::{
     board_layout, comment_row_spans, comment_wrapped_rows, comments_action_bar_shown,
     detail_layout, sheet_area, LayoutMode,
 };
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
+
+fn key(code: KeyCode) -> Msg {
+    Msg::Key(KeyEvent::new(code, KeyModifiers::empty()))
+}
 
 fn card(title: &str, column_id: i64) -> CardCreateParams {
     CardCreateParams {
@@ -318,6 +324,94 @@ fn action_bar_absent_when_unfocused_empty_or_too_short() {
     let layout = detail_layout(&app, short_area);
     if layout.comments.height < 3 {
         assert!(!comments_action_bar_shown(&app, &layout));
+    }
+}
+
+/// A `CardDetail` with `n` finished runs (each recording a pane), opened in
+/// `CardDetail` with the **runs** section focused.
+fn app_with_detail_runs(n: usize) -> App {
+    let mut c = FakeBoardClient::new().unwrap();
+    let column_id = c.board_get().unwrap().columns[0].id;
+    let card = c.card_create(&card("run fixture", column_id)).unwrap();
+    for i in 0..n {
+        let run = c
+            .db()
+            .enqueue_run_uow(&EnqueueRun {
+                card_id: card.id,
+                column_id: card.column_id,
+                harness: "claude",
+                argv_json: "[]",
+                prompt_snapshot: "p",
+                system_prompt_snapshot: None,
+                launch_spec_json: None,
+                session_id: None,
+                session: None,
+            })
+            .unwrap();
+        let pane = format!("w1:p-{i}");
+        c.db()
+            .promote_run_uow(run.id, Some("w1"), Some(pane.as_str()), None)
+            .unwrap();
+        c.db()
+            .finalize_run_uow(&FinalizeRun {
+                run_id: run.id,
+                outcome: RunOutcome::Ok,
+                summary: None,
+                comments: &[],
+                target_column_id: None,
+                final_status: CardStatus::Done,
+                final_awaiting_reason: None,
+                next: None,
+            })
+            .unwrap();
+    }
+    let detail = c.card_get(card.id).unwrap();
+    let mut app = App::new(c.board_get().unwrap());
+    app.detail = Some(detail);
+    app.screen = Screen::CardDetail;
+    app.detail_scroll_target = DetailScrollTarget::Runs;
+    app
+}
+
+#[test]
+fn runs_selection_stays_inside_the_rendered_runs_viewport() {
+    for (w, h) in [(80_u16, 24_u16), (52, 20), (120, 35)] {
+        let mut app = app_with_detail_runs(30);
+        app.last_area = Rect::new(0, 0, w, h);
+        let len = app.detail.as_ref().unwrap().runs.len();
+        let visible = {
+            let layout = detail_layout(&app, app.last_area);
+            (layout.runs.height.saturating_sub(1) as usize).max(1)
+        };
+        assert!(
+            len > visible,
+            "{w}x{h}: fixture must overflow the runs viewport ({len} runs, {visible} rows)"
+        );
+
+        let inside = |app: &App| {
+            let sel = app.detail_run_sel;
+            let offset = app.detail_runs_scroll;
+            assert!(
+                sel >= offset && sel < offset + visible,
+                "{w}x{h}: selected run row {sel} outside the rendered window [{offset}, {})",
+                offset + visible
+            );
+            // The window itself never runs past the end of the list.
+            assert!(offset + visible <= len.max(visible));
+        };
+
+        inside(&app);
+        for _ in 0..len + 5 {
+            update(&mut app, key(KeyCode::Down));
+            inside(&app);
+        }
+        assert_eq!(app.detail_run_sel, len - 1);
+        for _ in 0..len + 5 {
+            update(&mut app, key(KeyCode::Char('k')));
+            inside(&app);
+        }
+        assert_eq!(app.detail_run_sel, 0);
+        assert_eq!(app.detail_runs_scroll, 0);
     }
 }
 
