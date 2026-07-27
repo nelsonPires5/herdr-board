@@ -7,17 +7,14 @@
 use board_core::client::{BoardClient, FakeBoardClient};
 use board_core::db::{EnqueueRun, FinalizeRun};
 use board_core::protocol::{CardCreateParams, CardStatus, RunOutcome};
-use board_tui::app::{update, App, DetailScrollTarget, Msg, Screen};
+use board_tui::app::{update, App, DetailScrollTarget, Screen};
+use board_tui::testkit::key;
 use board_tui::view::{
     board_layout, comment_row_spans, comment_wrapped_rows, comments_action_bar_shown,
     detail_layout, sheet_area, LayoutMode,
 };
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::KeyCode;
 use ratatui::layout::Rect;
-
-fn key(code: KeyCode) -> Msg {
-    Msg::Key(KeyEvent::new(code, KeyModifiers::empty()))
-}
 
 fn card(title: &str, column_id: i64) -> CardCreateParams {
     CardCreateParams {

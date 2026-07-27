@@ -99,13 +99,13 @@ fn submit_form(app: &mut App) -> Vec<Effect> {
     }
 }
 
+/// Dismiss the form, landing on the screen it was opened from
+/// (`Form::return_to`) — the same destination for save and for cancel.
 fn close_form(app: &mut App, _submitted: bool) {
-    let back_to_detail = app.form_from_detail;
-    app.form = None;
-    app.form_from_detail = false;
-    app.screen = if back_to_detail {
-        Screen::CardDetail
-    } else {
-        Screen::Board
-    };
+    let return_to = app
+        .form
+        .take()
+        .map(|form| form.return_to)
+        .unwrap_or(Screen::Board);
+    app.screen = return_to;
 }

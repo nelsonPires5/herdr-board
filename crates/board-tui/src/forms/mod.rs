@@ -12,6 +12,5 @@ mod options;
 mod submit;
 
 pub use fields::{ChoiceOpt, ChoiceVal, Field, FieldId, FieldKind, Form, FormKind, Submit};
-pub use submit::session_name_from_socket;
 
 use builders::{build_card_fields, column_fields_from_values, CardValues, ColumnValues};

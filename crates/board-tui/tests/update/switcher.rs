@@ -89,6 +89,7 @@ fn esc_from_header_tap_drilled_boards_level_returns_to_columns() {
         columns_sel: sel_col,
         boards: Vec::new(),
         entered_at_boards: false,
+        return_to: Screen::Board,
     });
     d.app.screen = Screen::Switcher;
 
@@ -134,6 +135,7 @@ fn app_at_switcher_columns(board: board_core::protocol::BoardSnapshot) -> App {
         columns_sel: sel_col,
         boards: Vec::new(),
         entered_at_boards: false,
+        return_to: Screen::Board,
     });
     app.screen = Screen::Switcher;
     app

@@ -26,10 +26,12 @@ fake-client = ["board-core/fake-client"]
 name = "tui_fake"
 required-features = ["fake-client"]
 
-# The integration tests drive a FakeBoardClient / FakeEditor from `testkit`,
-# both gated behind `fake-client`; declare the dependency so a plain
-# `cargo test --workspace` (no `--all-features`) skips rather than fails to
-# compile them.
+# The integration tests drive a FakeBoardClient / FakeEditor and the shared
+# driver/input/render harness from `testkit`, all gated behind `fake-client`;
+# declare the dependency so a plain `cargo test --workspace` (no
+# `--all-features`) skips rather than fails to compile them. Every documented
+# gate (`docs/README.md`, `.github/workflows/ci.yml`) runs `--all-features`, so
+# nothing here is skipped in CI. `help.rs` needs none of it and stays ungated.
 [[test]]
 name = "update"
 required-features = ["fake-client"]
@@ -40,4 +42,12 @@ required-features = ["fake-client"]
 
 [[test]]
 name = "mouse"
+required-features = ["fake-client"]
+
+[[test]]
+name = "layout"
+required-features = ["fake-client"]
+
+[[test]]
+name = "forms"
 required-features = ["fake-client"]

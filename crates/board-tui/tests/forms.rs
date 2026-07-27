@@ -1,43 +1,62 @@
 use board_core::capability::{
     claude_capabilities, pi_capabilities, HarnessCapabilities, ModelInfo,
 };
-use board_core::protocol::Effort;
-use board_tui::forms::{session_name_from_socket, Field, FieldId, FieldKind, Form, Submit};
+use board_core::engine::{validate_card_space, validate_column_permission_override};
+use board_core::protocol::{Effort, SpaceKind};
+use board_tui::forms::{FieldId, FieldKind, Form, Submit};
+use board_tui::testkit::{choice_labels, field, field_index as idx_of, set_choice};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-/// Find a field by id.
-fn field(form: &Form, id: FieldId) -> &Field {
-    form.fields
-        .iter()
-        .find(|f| f.id == id)
-        .expect("field present")
-}
+/// KNOWN BUG (documented, not fixed here).
+///
+/// Every choice change rebuilds the *whole* field list: `on_model_changed` /
+/// `on_space_kind_changed` / `apply_options` all funnel into
+/// `Form::rebuild_card_fields`, which snapshots each text field as a `String`
+/// and hands it to `Field::text` → `new_textarea`, constructing a brand-new
+/// `TextArea`. The text survives; the cursor position and the undo/redo
+/// history do not. Typing a description, moving the cursor, then cycling the
+/// model selector silently teleports the caret back to (0, 0).
+///
+/// Fixing it means rebuilding *options* without rebuilding *fields* — i.e. the
+/// declarative field-spec rewrite `src/forms/` needs anyway (adding one field
+/// today touches ~5 places). That is deliberately out of scope for a
+/// code-motion pass, so this test is `#[ignore]`d rather than deleted: it is
+/// the executable statement of the defect.
+#[test]
+#[ignore = "known bug: a choice change rebuilds every field, resetting the text \
+            editors' cursor and undo history; needs the forms declarative-spec \
+            rewrite"]
+fn cycling_a_choice_keeps_the_description_cursor_where_the_user_left_it() {
+    let mut form = Form::card_create(1);
 
-/// Labels of a choice field's options.
-fn choice_labels(form: &Form, id: FieldId) -> Vec<String> {
-    match &field(form, id).kind {
-        FieldKind::Choice { opts, .. } => opts.iter().map(|o| o.label.clone()).collect(),
-        _ => panic!("field {id:?} is not a choice"),
+    let desc = idx_of(&form, FieldId::Description);
+    let FieldKind::Text(ta) = &mut form.fields[desc].kind else {
+        panic!("Description is a text field");
+    };
+    for c in "hello world".chars() {
+        ta.input(KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty()));
     }
-}
+    assert_eq!(
+        ta.cursor(),
+        (0, 11),
+        "precondition: caret at end of typed text"
+    );
 
-/// Index of a column-field id in the flat field list (for field_visible).
-fn idx_of(form: &Form, id: FieldId) -> usize {
-    form.fields.iter().position(|f| f.id == id).unwrap()
-}
+    // A pure selector change. It must not touch the text editors at all.
+    let model = idx_of(&form, FieldId::Model);
+    form.fields[model].cycle(1);
+    form.on_model_changed();
 
-/// Set a choice field to the option whose label matches.
-fn set_choice(form: &mut Form, id: FieldId, label: &str) {
-    let f = form
-        .fields
-        .iter_mut()
-        .find(|f| f.id == id)
-        .unwrap_or_else(|| panic!("field {id:?} present"));
-    if let FieldKind::Choice { opts, idx } = &mut f.kind {
-        *idx = opts
-            .iter()
-            .position(|o| o.label == label)
-            .unwrap_or_else(|| panic!("option {label:?} in {id:?}"));
-    }
+    let desc = idx_of(&form, FieldId::Description);
+    let FieldKind::Text(ta) = &form.fields[desc].kind else {
+        panic!("Description is a text field");
+    };
+    assert_eq!(ta.lines().join("\n"), "hello world", "text is preserved");
+    assert_eq!(
+        ta.cursor(),
+        (0, 11),
+        "the caret must survive a selector change — a rebuilt TextArea resets it"
+    );
 }
 
 #[test]
@@ -101,6 +120,178 @@ fn column_permission_override_hidden_for_pi_shown_for_claude() {
     let modes = choice_labels(&form, FieldId::PermissionOverride);
     assert!(modes.contains(&"acceptEdits".to_string()));
     assert!(modes.contains(&"plan".to_string()));
+}
+
+#[test]
+fn column_override_permission_menu_never_offers_a_value_the_validator_rejects() {
+    // The column-override selector is filtered by the SAME validator the
+    // daemon applies (`validate_column_permission_override`), so it can never
+    // offer a value a `column.create`/`column.update` would be refused for.
+    // `bypassPermissions` is exactly that value: a per-card opt-in only.
+    let mut form = Form::column_create(&[]);
+    form.apply_options(Some(claude_capabilities()), None, None, None);
+    let modes = choice_labels(&form, FieldId::PermissionOverride);
+    assert!(
+        modes.contains(&"acceptEdits".to_string()),
+        "catalog modes are still offered: {modes:?}"
+    );
+    for mode in &modes {
+        if mode == "(default)" {
+            continue;
+        }
+        assert!(
+            validate_column_permission_override(Some(mode)).is_ok(),
+            "column-override selector offers {mode:?}, which the validator rejects"
+        );
+    }
+    assert!(!modes.contains(&"bypassPermissions".to_string()));
+
+    // The card Permission selector is a different context and keeps it.
+    let mut card = Form::card_create(1);
+    set_choice(&mut card, FieldId::Harness, "claude");
+    card.apply_options(Some(claude_capabilities()), None, None, None);
+    assert!(choice_labels(&card, FieldId::Permission).contains(&"bypassPermissions".to_string()));
+}
+
+/// A2: with no capability catalog fetched yet, the effort/permission menus and
+/// the permission field's visibility come from `default_capabilities`, not
+/// from a hardcoded `harness != "pi"` comparison.
+#[test]
+fn card_selectors_fall_back_to_default_capabilities_per_harness() {
+    // pi: full effort ladder, no permission modes → field hidden.
+    let mut pi = Form::card_create(1);
+    assert_eq!(
+        choice_labels(&pi, FieldId::Effort),
+        vec![
+            "(default)",
+            "off",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+        ]
+    );
+    assert!(!pi.field_visible(idx_of(&pi, FieldId::Permission)));
+    // …and submit sends no permission_mode for a harness that has none.
+    if let Some(f) = pi.fields.iter_mut().find(|f| f.id == FieldId::Title) {
+        f.set_text("t");
+    }
+    match pi.submit().unwrap() {
+        Submit::CardCreate(p) => assert_eq!(p.permission_mode, None),
+        _ => panic!("expected CardCreate"),
+    }
+
+    // claude: its own five-rung ladder and its own permission enum.
+    let mut claude = Form::card_create(1);
+    set_choice(&mut claude, FieldId::Harness, "claude");
+    // Rebuild against the new harness without any fetch succeeding.
+    claude.apply_options(None, None, None, None);
+    assert_eq!(
+        choice_labels(&claude, FieldId::Effort),
+        vec!["(default)", "low", "medium", "high", "xhigh", "max"]
+    );
+    assert!(claude.field_visible(idx_of(&claude, FieldId::Permission)));
+    assert_eq!(
+        choice_labels(&claude, FieldId::Permission),
+        claude_capabilities()
+            .permission_modes
+            .iter()
+            .map(String::as_str)
+            .fold(vec!["(default)"], |mut acc, m| {
+                acc.push(m);
+                acc
+            })
+    );
+
+    // An unknown harness: permissive about efforts (any string is plausible),
+    // fail-closed about permission modes — another CLI's enum is never a safe
+    // guess, so the selector is hidden until real caps arrive.
+    let mut unknown = Form::card_create(1);
+    unknown.apply_options(None, Some(vec!["pi".into(), "mystery".into()]), None, None);
+    set_choice(&mut unknown, FieldId::Harness, "mystery");
+    unknown.apply_options(None, None, None, None);
+    assert_eq!(unknown.current_harness(), "mystery");
+    assert!(!unknown.field_visible(idx_of(&unknown, FieldId::Permission)));
+    assert_eq!(
+        choice_labels(&unknown, FieldId::Effort),
+        vec![
+            "(default)",
+            "off",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+        ]
+    );
+
+    // Real caps from the daemon always win over the built-in default: once
+    // `harness.capabilities` answers for the config-defined harness, its
+    // permission vocabulary appears.
+    unknown.apply_options(
+        Some(HarnessCapabilities {
+            harness: "mystery".into(),
+            models: vec![],
+            model_freeform: true,
+            default_efforts: vec![Effort::Low],
+            permission_modes: vec!["ask".into()],
+            resume: Default::default(),
+        }),
+        None,
+        None,
+        None,
+    );
+    assert!(unknown.field_visible(idx_of(&unknown, FieldId::Permission)));
+    assert_eq!(
+        choice_labels(&unknown, FieldId::Permission),
+        vec!["(default)", "ask"]
+    );
+}
+
+/// A9: submit runs the core validators as a pre-flight, so the
+/// "new_workspace needs BOTH a label and a cwd" rule is reported in the open
+/// form instead of after a failed round-trip.
+#[test]
+fn new_workspace_submit_requires_both_ref_and_cwd() {
+    let complete = |name: &str, cwd: &str| {
+        let mut form = Form::card_create(1);
+        set_choice(&mut form, FieldId::SpaceKind, "new workspace");
+        form.on_space_kind_changed();
+        for (id, text) in [
+            (FieldId::Title, "t"),
+            (FieldId::SpaceRef, name),
+            (FieldId::SpaceCwd, cwd),
+        ] {
+            form.fields
+                .iter_mut()
+                .find(|f| f.id == id)
+                .unwrap()
+                .set_text(text);
+        }
+        form.submit().map(|_| ())
+    };
+
+    // Neither / only one of the two → the core message, no RPC attempted.
+    let expected = validate_card_space(SpaceKind::NewWorkspace, None, None)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(complete("", ""), Err(expected.clone()));
+    assert_eq!(complete("scratch", ""), Err(expected.clone()));
+    assert_eq!(complete("", "/tmp/scratch"), Err(expected));
+    // Both present → the form submits.
+    assert_eq!(complete("scratch", "/tmp/scratch"), Ok(()));
+
+    // A plain `workspace` space is unaffected by the rule.
+    let mut ws = Form::card_create(1);
+    ws.fields
+        .iter_mut()
+        .find(|f| f.id == FieldId::Title)
+        .unwrap()
+        .set_text("t");
+    assert!(ws.submit().is_ok());
 }
 
 #[test]
@@ -196,37 +387,6 @@ fn column_submit_none_harness_override_extracts_none() {
         Submit::ColumnCreate(p) => assert_eq!(p.harness_override, None),
         _ => panic!("expected ColumnCreate"),
     }
-}
-
-// -- session socket parsing ---------------------------------------------
-
-#[test]
-fn session_name_from_named_session_socket() {
-    assert_eq!(
-        session_name_from_socket(Some("/home/np/.config/herdr/sessions/feature/herdr.sock")),
-        Some("feature".to_string())
-    );
-}
-
-#[test]
-fn session_name_from_default_socket_is_none() {
-    // The plain default socket (no `sessions/<name>/` segment) = default.
-    assert_eq!(
-        session_name_from_socket(Some("/home/np/.config/herdr/herdr.sock")),
-        None
-    );
-}
-
-#[test]
-fn session_name_unset_or_unrelated_is_none() {
-    assert_eq!(session_name_from_socket(None), None);
-    assert_eq!(session_name_from_socket(Some("")), None);
-    assert_eq!(session_name_from_socket(Some("/tmp/whatever.sock")), None);
-    // A `sessions` dir with an empty name is not a valid session.
-    assert_eq!(
-        session_name_from_socket(Some("/x/sessions//herdr.sock")),
-        None
-    );
 }
 
 // -- column system_prompt conditional on trigger ---------------------------

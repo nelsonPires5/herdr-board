@@ -78,23 +78,12 @@ pub(super) fn on_mouse(app: &mut App, m: MouseEvent) -> Vec<Effect> {
                 app.last_click = Some((m.column, m.row, app.now_ms));
                 if dbl {
                     if let Some(id) = app.selected_card_id() {
-                        app.detail_fullscreen = false;
-                        app.detail_scroll_target = DetailScrollTarget::Comments;
-                        app.detail_comments_scroll = 0;
-                        app.detail_runs_scroll = 0;
-                        // See `board::board_key`'s `Enter` arm: sentinel for
-                        // "not yet focused anywhere".
-                        app.detail_comment_sel = usize::MAX;
-                        app.detail_run_sel = usize::MAX;
-                        app.screen = Screen::CardDetail;
-                        return vec![Effect::LoadDetail(id)];
+                        return app.open_detail(id);
                     }
                 }
-                if let Some(card) = app.selected_card() {
-                    if card.archived_at.is_some() {
-                        app.set_toast("restore archived card before moving", true);
-                    } else {
-                        app.begin_card_drag(card.id, col_idx);
+                if !app.reject_archived_move() {
+                    if let Some(id) = app.selected_card_id() {
+                        app.begin_card_drag(id, col_idx);
                     }
                 }
             } else if let Some(col_idx) = layout.hit_header(m.column, m.row) {
@@ -194,6 +183,7 @@ fn handle_zone(app: &mut App, zone: Zone) -> Option<Vec<Effect>> {
                 columns_sel: app.sel_col,
                 boards: Vec::new(),
                 entered_at_boards: false,
+                return_to: Screen::Board,
             });
             app.screen = Screen::Switcher;
             Some(vec![])

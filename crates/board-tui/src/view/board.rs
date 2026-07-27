@@ -1,21 +1,18 @@
-use board_core::engine::format_duration;
+use board_core::engine::{format_duration, run_elapsed};
 use board_core::model::Card;
-use board_core::protocol::CardStatus;
+use board_core::protocol::{parse_timestamp, CardStatus};
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{
-    Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
-    ScrollbarState, Wrap,
-};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::{App, CardFilter, Screen, SwitcherLevel};
 use crate::widgets::{render_sheet_frame, Zone};
 
 use super::{
-    board_layout, centered_rect_abs, main_area, parse_epoch, sheet_area, status_glyph, truncate,
-    CompactHeader, LayoutMode,
+    board_layout, centered_rect_abs, main_area, sheet_area, status_glyph, truncate, CompactHeader,
+    LayoutMode,
 };
 
 // -- board -------------------------------------------------------------------
@@ -30,7 +27,9 @@ pub(super) fn draw_board(app: &App, f: &mut Frame, area: Rect) {
     }
 
     for col in &layout.cols {
-        let column = &app.board.columns[col.idx];
+        let Some(column) = app.display_column(col.idx) else {
+            continue;
+        };
         let is_sel_col = col.idx == app.sel_col;
         let hover = app
             .drag
@@ -68,13 +67,13 @@ pub(super) fn draw_board(app: &App, f: &mut Frame, area: Rect) {
         }
 
         if let Some(sb_rect) = col.scrollbar_rect {
-            let mut state = ScrollbarState::new(col.scroll.total.max(1))
-                .position(col.scroll.offset)
-                .viewport_content_length(col.scroll.visible.max(1));
-            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .track_symbol(Some("│"))
-                .thumb_symbol("█");
-            f.render_stateful_widget(scrollbar, sb_rect, &mut state);
+            crate::widgets::vertical_scrollbar(
+                f,
+                sb_rect,
+                col.scroll.total,
+                col.scroll.offset,
+                col.scroll.visible,
+            );
         }
     }
 
@@ -125,7 +124,7 @@ fn draw_compact_header(app: &App, f: &mut Frame, header: &CompactHeader) {
     hit_map.push(header.prev, Zone::HeaderPrev);
 
     let n = app.board.columns.len();
-    let column = app.board.columns.get(app.sel_col);
+    let column = app.display_column(app.sel_col);
     let label = match column {
         Some(c) => format!("[ ⇄ {}  {}/{} ]", c.name, app.sel_col + 1, n.max(1)),
         None => "[ ⇄ no columns ]".to_string(),
@@ -192,11 +191,13 @@ fn draw_card(app: &App, f: &mut Frame, card: &Card, r: Rect, selected: bool, com
         // remains open. Prefer the board-scoped active-run summary so the
         // timer measures execution time rather than unrelated card activity;
         // the card timestamp is a compatibility fallback for old snapshots.
-        let start = app
+        let started = app
             .active_run_for_card(card.id)
-            .and_then(|run| parse_epoch(&run.started_at))
-            .or_else(|| parse_epoch(&card.updated_at));
-        let elapsed = start.map(|s| (app.now - s).max(0)).unwrap_or(0);
+            .and_then(|run| parse_timestamp(&run.started_at))
+            .or_else(|| parse_timestamp(&card.updated_at));
+        // The run is open by definition here (the card is `running`), so the
+        // engine measures it against `app.now`; the view only formats.
+        let elapsed = run_elapsed(started, None, app.now).unwrap_or(0);
         status_spans.push(Span::raw(format!(" · {}", format_duration(Some(elapsed)))));
     }
     status_spans.push(Span::styled(

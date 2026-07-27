@@ -1,6 +1,8 @@
 //! Card detail tests: popup, fullscreen, scrolling, history, awaiting/done.
 
 use super::helpers::{demo_app, demo_app_with_detail, driver_of, key};
+/// One mouse-wheel notch over `(x, y)` — the shared `Msg::Mouse` injector.
+use super::helpers::{mouse as wheel, rendered_rows};
 use board_core::client::BoardClient;
 use board_core::db::{EnqueueRun, FinalizeRun};
 use board_core::protocol::{CardStatus, RunOutcome};
@@ -294,31 +296,6 @@ fn detail_runs_selection_moves_with_arrows_and_jk_and_saturates() {
     assert_eq!(d.app.detail_runs_scroll, len - visible);
 }
 
-/// One mouse-wheel notch over `(x, y)`.
-fn wheel(kind: MouseEventKind, x: u16, y: u16) -> Msg {
-    Msg::Mouse(MouseEvent {
-        kind,
-        column: x,
-        row: y,
-        modifiers: KeyModifiers::empty(),
-    })
-}
-
-/// The rendered frame as one string per row.
-fn rendered_rows(app: &board_tui::app::App) -> Vec<String> {
-    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(
-        app.last_area.width,
-        app.last_area.height,
-    ))
-    .unwrap();
-    term.draw(|f| board_tui::view::view(app, f)).unwrap();
-    term.backend()
-        .to_string()
-        .lines()
-        .map(|l| l.to_string())
-        .collect()
-}
-
 /// The run row is deliberately minimal: **run number, harness, status, and how
 /// long it ran**, and nothing else. The column, the harness conversation id
 /// (`conv`) and the `pane ✓|-` marker are not in the row — the identity fields
@@ -411,7 +388,7 @@ fn an_active_run_row_reports_how_long_it_has_been_running() {
         .iter()
         .find(|r| r.id == run.id)
         .and_then(|r| r.started_at.as_deref())
-        .and_then(board_tui::view::parse_epoch)
+        .and_then(board_core::protocol::parse_timestamp)
         .expect("a promoted run records started_at");
     d.app.now = started + 95;
 

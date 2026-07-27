@@ -180,11 +180,65 @@ fn move_column_esc_restores_order_and_emits_nothing() {
     update(&mut app, key(KeyCode::Char('M')));
     update(&mut app, key(KeyCode::Right));
     update(&mut app, key(KeyCode::Right));
+    // Mid-mode the *displayed* order is the staged one…
+    let staged: Vec<i64> = (0..original.len())
+        .map(|i| app.col_id_at(i).unwrap())
+        .collect();
+    assert_ne!(staged, original);
     let effects = update(&mut app, key(KeyCode::Esc));
     assert!(effects.is_empty(), "Esc must not persist anything");
     assert_eq!(app.screen, Screen::Board);
-    let now: Vec<i64> = app.board.columns.iter().map(|c| c.id).collect();
+    // …and Esc drops the staging, so the displayed order is the snapshot again.
+    let now: Vec<i64> = (0..original.len())
+        .map(|i| app.col_id_at(i).unwrap())
+        .collect();
     assert_eq!(now, original, "Esc must restore the original column order");
+    assert_eq!(
+        app.board.columns.iter().map(|c| c.id).collect::<Vec<_>>(),
+        original
+    );
+}
+
+/// A11: the staged reorder must live outside `app.board`, which a
+/// `board_changed` refresh replaces wholesale. Staging it *in* the snapshot
+/// meant a refresh tick landing mid-mode silently threw the user's order away.
+#[test]
+fn move_column_staged_order_survives_a_refresh_mid_mode() {
+    let mut d = driver_of(demo_client().unwrap());
+    let snapshot_order: Vec<i64> = d.app.board.columns.iter().map(|c| c.id).collect();
+    let plan_id = snapshot_order[1];
+
+    d.handle(key(KeyCode::Right)); // focus Plan
+    d.handle(key(KeyCode::Char('M')));
+    d.handle(key(KeyCode::Right));
+    d.handle(key(KeyCode::Right)); // Plan staged at index 3
+    let staged: Vec<i64> = (0..snapshot_order.len())
+        .map(|i| d.app.col_id_at(i).unwrap())
+        .collect();
+    assert_eq!(staged[3], plan_id, "Plan is staged at index 3");
+
+    // A refresh tick replaces the whole snapshot while the mode is still open.
+    d.handle(board_tui::app::Msg::Refresh);
+    assert_eq!(d.app.screen, Screen::MoveColumn);
+    assert_eq!(
+        d.app.board.columns.iter().map(|c| c.id).collect::<Vec<_>>(),
+        snapshot_order,
+        "the authoritative snapshot is never mutated by staging"
+    );
+    let after: Vec<i64> = (0..snapshot_order.len())
+        .map(|i| d.app.col_id_at(i).unwrap())
+        .collect();
+    assert_eq!(after, staged, "the staged order survives the refresh");
+
+    // …and Enter still commits the staged position, not the snapshot one.
+    let effects = board_tui::app::update(&mut d.app, key(KeyCode::Enter));
+    match effects.as_slice() {
+        [Effect::ColumnReorder { id, position }] => {
+            assert_eq!(*id, plan_id);
+            assert_eq!(*position, 3);
+        }
+        other => panic!("expected one ColumnReorder, got {} effects", other.len()),
+    }
 }
 
 #[test]
