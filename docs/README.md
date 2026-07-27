@@ -47,14 +47,29 @@ root `README.md` link here instead of repeating it. Every command below is also 
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
-python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+python3 -m unittest discover -s scripts/tests -p 'test_docs.py'
+python3 -m unittest discover -s scripts/tests -p 'test_prepare_release.py'
+python3 -m unittest discover -s scripts/tests -p 'test_install_cli.py'
+python3 -m unittest discover -s scripts/tests -p 'test_stage_claude_config.py'
+python3 -m unittest discover -s scripts/tests -p 'test_e2e_*.py'
 bash e2e/test-harness.sh
 ```
 
-Run the whole Python tier, not just `test_docs` — that is what CI executes, and the release
-contracts in the same directory fail independently of the documentation ones.
+CI runs those as four independent jobs — `docs`, `scripts`, `e2e-safety`, `test` — split by what
+each protects rather than by language. Only `test` needs a Rust toolchain, so a stale doc or a
+regressed safety token reports in seconds instead of queueing behind a compile, and one failure no
+longer hides the other answers. `test_docs.py` asserts that every `scripts/tests/test_*.py` is
+matched by a pattern above, so a new module cannot land in no job at all.
+
+Locally the whole Python tier is one command:
+
+```bash
+python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+```
+
 `e2e/test-harness.sh` is the provider-free **static** safety gate: it starts no Herdr and needs no
-provider, which is why it belongs in CI.
+provider, which is why it belongs in CI. It overlaps `test_e2e_safety.py` by design — they are two
+implementations of the same checks, which is why they share the `e2e-safety` job.
 
 The full live suite (`e2e/run-all.sh`) is a separate gate: it needs Herdr 0.7.5 to boot a real
 ephemeral protocol-17 server, so it is not part of CI and is run by a human/orchestrator.

@@ -60,6 +60,68 @@ jobs:
         if: github.event_name != 'pull_request'
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+  # The three jobs below are split by what they protect, not by language, and
+  # none of them needs a Rust toolchain — so a stale doc, a broken release
+  # script, or a regressed safety token reports in seconds instead of queueing
+  # behind a compile. They also fail independently: when they shared one job
+  # with `cargo test`, the first failure hid the other two answers.
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Pins the version matrix, the e2e scenario catalog, the documented
+      # install refs, and this workflow's own gate list against docs/README.md.
+      - name: Documentation contracts
+        run: python3 -m unittest discover -s scripts/tests -p 'test_docs.py'
+
+  scripts:
+    name: scripts
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Release/install helpers are stdlib-only and part of the release gate.
+      - name: Release helper
+        run: python3 -m unittest discover -s scripts/tests -p 'test_prepare_release.py'
+
+      - name: CLI installer
+        run: python3 -m unittest discover -s scripts/tests -p 'test_install_cli.py'
+
+      - name: Claude config staging
+        run: python3 -m unittest discover -s scripts/tests -p 'test_stage_claude_config.py'
+
+  e2e-safety:
+    name: e2e-safety
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Both halves of the provider-free STATIC safety gate for the e2e harness:
+      # ownership tokens, key scrubbing, cleanup ledger handling. They are two
+      # implementations of the same checks (Python with real sockets and tamper
+      # matrices, shell over the scenario sources), so they belong together and
+      # this is where one of them should eventually be retired. Neither starts a
+      # Herdr nor calls a provider, unlike the live suite (e2e/run-all.sh).
+      - name: E2E safety (python)
+        run: python3 -m unittest discover -s scripts/tests -p 'test_e2e_*.py'
+
+      - name: E2E safety (shell)
+        run: bash e2e/test-harness.sh
+
   test:
     name: test
     runs-on: ubuntu-latest
@@ -74,17 +136,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # The release helper is stdlib-only and is part of the release gate.
-      - name: Python tests
-        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
-
       # Unit / integration tests are hermetic: live-herdr tests are #[ignore]d and
-      # the e2e script (scripts/e2e.sh) is run out-of-band, so no live herdr is needed.
+      # the live e2e suite (e2e/run-all.sh) is run out-of-band, so no herdr binary
+      # is needed — see docs/testing.md's gotcha on tests that shell out to herdr.
       - name: Rust tests
         run: cargo test --workspace --all-features
-
-      # Provider-free STATIC safety gate for the e2e harness: shell-level checks
-      # of ownership tokens, key scrubbing, and ledger handling. It starts no
-      # Herdr and calls no provider, unlike the live suite (e2e/run-all.sh).
-      - name: E2E static safety gate
-        run: bash e2e/test-harness.sh

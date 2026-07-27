@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
@@ -286,6 +287,32 @@ class DocumentationContractTests(unittest.TestCase):
                     "python3 -m unittest discover",
                     text,
                     f"{relative} re-lists the gates; link docs/README.md instead",
+                )
+
+    def test_every_python_test_module_runs_in_some_ci_job(self) -> None:
+        """No `scripts/tests/test_*.py` may fall outside every CI pattern.
+
+        CI runs this tier as three jobs matching disjoint `-p` patterns instead
+        of one `test_*.py` sweep. That trade buys independent failures, but it
+        also means a new module lands in *no* job and silently never runs. This
+        is the assertion that makes the split safe.
+        """
+        patterns = [
+            match.group(1)
+            for line in fenced_block(
+                (ROOT / "docs/README.md").read_text(encoding="utf-8"),
+                "## Test gates (single source)",
+            )
+            if (match := re.search(r"-p '([^']+)'", line))
+        ]
+        self.assertTrue(patterns, "no python -p patterns in the gate block")
+        modules = sorted(p.name for p in (ROOT / "scripts/tests").glob("test_*.py"))
+        self.assertTrue(modules, "no test modules discovered")
+        for module in modules:
+            with self.subTest(module=module):
+                self.assertTrue(
+                    any(fnmatch.fnmatch(module, pattern) for pattern in patterns),
+                    f"{module} matches no CI pattern {patterns}; it would never run",
                 )
 
     def test_maintained_markdown_links_resolve(self) -> None:
