@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-27
+
 - [#45](https://github.com/nelsonPires5/herdr-board/pull/45) feat(core,daemon,cli,tui)!: `run.focus` now requires an explicit `run_id` (breaking) and returns the focused run's full identity — card, column, harness, herdr session name and harness conversation id as separate documented fields, plus pane — resolved through a new ownership-validating `Db::run_for_card`, so a specific historical run can be focused and a foreign or pane-less run fails with a clear non-destructive error instead of silently landing on the latest run.
 - [#45](https://github.com/nelsonPires5/herdr-board/pull/45) feat(tui,daemon,herdr): pick a specific historical run in card detail's Runs section — a bright-blue `▸` selected-run cursor moved with `↑`/`↓` and `k`/`j` (separate from the scroll offset, which follows it, defaulting to the newest run and surviving a detail refresh; the same shared marker the comments list uses, so both lists now mark their cursor in blue), run rows kept minimal — run number, harness, status and how long the run took or has been running — and `o` jumping to that exact run (a mouse-wheel scroll of either detail section now drags that section's cursor into view instead of stranding the marker off screen, and `o` before the detail loads says so rather than doing nothing); the daemon additionally verifies the recorded pane still exists (new `pane.get` wrapper) so a closed pane fails with a distinct non-destructive error rendered as a non-fatal toast instead of an opaque `pane.focus` failure, and the now-callerless `Db::latest_run_with_pane` is gone.
 - [#45](https://github.com/nelsonPires5/herdr-board/pull/45) feat(core,daemon,cli,tui): reopen a run whose pane was closed — `run.focus` now resumes the run's harness conversation in a new pane in the card's tab instead of dead-ending, reported through a new `action` field (`focused_recorded_pane` / `focused_rescued_pane` / `rescued`) plus the dead `recorded_pane_id`; the launch is derived from the run's persisted launch spec (same model/effort/env) with the card task never re-sent, resume is an explicit per-harness capability (`pi`/`claude` built in, `[harness.NAME] resume = true` to opt in, fail-closed otherwise), a second `o` reuses the reopened pane instead of creating a second one, and the rescue writes **nothing** to the database — so the historical run row stays immutable and the reopened pane is deliberately ephemeral and unwatched, receiving `BOARD_CARD_ID`/`BOARD_SOCKET`/`BOARD_BIN` but never the `BOARD_RUN_ID` actor credential that would let it rewrite the finished run.
@@ -301,7 +303,8 @@ a visible herdr pane. Ships as a single `board` binary (TUI + daemon + CLI) and 
 - **Packaging.** `herdr-plugin.toml` manifest, and `scripts/` for build, install (guarded behind
   `--yes`), the open-or-focus launcher, a raw protocol client, and a live-herdr e2e smoke test.
 
-[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.9.0
 [0.8.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.8.0
 [0.7.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.7.0
 [0.6.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.6.0
