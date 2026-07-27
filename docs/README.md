@@ -12,7 +12,7 @@ The reference detail behind the [root README](../README.md). Start here to find 
 | Herdr client | 0.7.5 / socket protocol 17; `board-herdr` typed calls | [herdr.md](herdr.md) |
 | Runtime launch | daemon-owned `Spawner`, placement, process/pane handles | [implementation.md](implementation.md) |
 | Config | typed `RootConfig`, one parse, environment overrides after parse | [design.md](design.md) |
-| Live catalog | scenarios 01–26; provider-free fake/safe harness boundary | [e2e/README.md](../e2e/README.md) |
+| Live catalog | scenarios 01–27; provider-free fake/safe harness boundary | [e2e/README.md](../e2e/README.md) |
 
 Keep these links as navigation, not duplicate wire definitions: serde types and migrations are the
 source of truth. The old worktree API is intentionally absent from `board-herdr`; repository
