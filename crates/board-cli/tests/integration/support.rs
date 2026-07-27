@@ -1,7 +1,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -13,6 +13,7 @@ use board_core::client::{BoardClient, UnixClient};
 use board_core::protocol::{
     CardCreateParams, CardStatus, ColumnCreateParams, DaemonStatus, Request, Response, Trigger,
 };
+use serde_json::Value;
 
 pub(crate) const BOARD_BIN: &str = env!("CARGO_BIN_EXE_board");
 
@@ -209,7 +210,40 @@ impl Drop for TestDaemon {
     }
 }
 
+// -- assertion helpers --------------------------------------------------------
+
+/// Assert the command succeeded and parse its stdout as JSON.
+pub(crate) fn json_output(out: &Output) -> Value {
+    assert!(
+        out.status.success(),
+        "command failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).expect("command should emit JSON")
+}
+
+/// Assert the command failed with a JSON error envelope on stderr and parse it.
+pub(crate) fn json_error(out: &Output) -> Value {
+    assert!(!out.status.success(), "command unexpectedly succeeded");
+    assert!(out.stdout.is_empty(), "JSON errors must leave stdout empty");
+    serde_json::from_slice(&out.stderr).expect("JSON error should be emitted on stderr")
+}
+
 // -- helpers -----------------------------------------------------------------
+
+/// Create a card through the legacy top-level `card new` verb and return its id.
+pub(crate) fn old_card(td: &TestDaemon, title: &str) -> i64 {
+    let out = td.board(&[
+        "card",
+        "new",
+        "--title",
+        title,
+        "--harness",
+        "fake",
+        "--json",
+    ]);
+    json_output(&out)["id"].as_i64().expect("created card id")
+}
 
 pub(crate) fn col(name: &str, trigger: Trigger) -> ColumnCreateParams {
     ColumnCreateParams {

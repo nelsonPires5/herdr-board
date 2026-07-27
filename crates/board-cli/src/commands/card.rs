@@ -1,28 +1,29 @@
 use anyhow::{bail, Result};
-use board_core::client::{BoardClient, UnixClient};
-use board_core::protocol::{CardCreateParams, CardMoveParams, CardUpdateParams, Patch};
+use board_core::client::BoardClient;
+use board_core::protocol::{
+    BoardSnapshot, CardCreateParams, CardMoveParams, CardUpdateParams, Patch,
+};
 
 use crate::args::CardCmd;
 use crate::commands::run::{cmd_card_comment, cmd_card_run};
-use crate::daemon::connect_or_start;
-use crate::helpers::{
-    confirm_action, parse_effort, parse_space_kind, parse_visibility, print_json,
-};
+use crate::context::Ctx;
+use crate::helpers::{confirm_action, parse_effort, parse_space_kind, parse_visibility};
+use crate::render::{emit, emit_line};
 use crate::scope::{open_selected_board, resolve_column_in};
 
-pub(crate) fn cmd_card(sub: CardCmd, selector: Option<&str>) -> Result<()> {
+pub(crate) fn cmd_card(sub: CardCmd, ctx: &mut Ctx) -> Result<()> {
     // Do not even auto-start boardd for a refused non-interactive deletion.
-    if let CardCmd::Delete { yes, .. } = &sub {
-        confirm_action("card deletion", *yes)?;
+    if let CardCmd::Delete { confirm, .. } = &sub {
+        confirm_action("card deletion", confirm.yes)?;
     }
     if let CardCmd::Comment {
-        sub: crate::args::CommentCmd::Delete { yes, .. },
+        sub: crate::args::CommentCmd::Delete { confirm, .. },
     } = &sub
     {
-        confirm_action("comment deletion", *yes)?;
+        confirm_action("comment deletion", confirm.yes)?;
     }
 
-    let mut c = connect_or_start()?;
+    let json = ctx.json();
     match sub {
         CardCmd::Create {
             title,
@@ -36,16 +37,11 @@ pub(crate) fn cmd_card(sub: CardCmd, selector: Option<&str>) -> Result<()> {
             space_kind,
             space_ref,
             space_cwd,
-            json,
         } => {
-            let board = open_selected_board(&mut c, selector)?;
-            let column_id = column
-                .as_deref()
-                .map(|value| resolve_column_in(&board, value))
-                .transpose()?;
+            let column_id = ctx.optional_column_id(column.as_deref())?;
             let p = CardCreateParams {
                 title,
-                board_id: Some(board.board.id),
+                board_id: Some(ctx.board_id()?),
                 description,
                 column_id,
                 harness,
@@ -58,15 +54,15 @@ pub(crate) fn cmd_card(sub: CardCmd, selector: Option<&str>) -> Result<()> {
                 space_cwd,
                 position: None,
             };
-            let card = c.card_create(&p)?;
-            if json {
-                print_json(&card)?;
-            } else {
-                println!(
+            let card = ctx.client()?.card_create(&p)?;
+            emit_line(
+                &card,
+                json,
+                format!(
                     "Created card #{} \"{}\" in column {}",
                     card.id, card.title, card.column_id
-                );
-            }
+                ),
+            )
         }
         CardCmd::Edit {
             id,
@@ -87,7 +83,6 @@ pub(crate) fn cmd_card(sub: CardCmd, selector: Option<&str>) -> Result<()> {
             clear_space_ref,
             space_cwd,
             clear_space_cwd,
-            json,
         } => {
             if clear_harness {
                 bail!("--clear-harness is not supported: harness is required")
@@ -101,181 +96,113 @@ pub(crate) fn cmd_card(sub: CardCmd, selector: Option<&str>) -> Result<()> {
                     description
                 },
                 harness,
-                model: patch(clear_model, model),
-                effort: patch(clear_effort, parse_effort(effort)?),
-                permission_mode: patch(clear_permission, permission),
-                session: patch(clear_session, session),
+                model: Patch::from_flags(clear_model, model),
+                effort: Patch::from_flags(clear_effort, parse_effort(effort)?),
+                permission_mode: Patch::from_flags(clear_permission, permission),
+                session: Patch::from_flags(clear_session, session),
                 space_kind: None,
-                space_ref: patch(clear_space_ref, space_ref),
-                space_cwd: patch(clear_space_cwd, space_cwd),
+                space_ref: Patch::from_flags(clear_space_ref, space_ref),
+                space_cwd: Patch::from_flags(clear_space_cwd, space_cwd),
             };
-            let card = c.card_update(&p)?;
-            if json {
-                print_json(&card)?;
-            } else {
-                println!("Updated card #{}", card.id);
-            }
+            let card = ctx.client()?.card_update(&p)?;
+            emit_line(&card, json, format!("Updated card #{}", card.id))
         }
-        CardCmd::Delete { id, json, .. } => {
-            let result = c.card_delete(id)?;
-            if json {
-                print_json(&result)?;
-            } else {
-                println!("Deleted card #{id}");
-            }
+        CardCmd::Delete { id, .. } => {
+            let result = ctx.client()?.card_delete(id)?;
+            emit_line(&result, json, format!("Deleted card #{id}"))
         }
-        CardCmd::Archive { id, json } => card_archive(&mut c, id, true, json)?,
-        CardCmd::Restore { id, json } => card_archive(&mut c, id, false, json)?,
-        CardCmd::Show { id, json } => {
-            let detail = c.card_get(id)?;
-            if json {
-                print_json(&detail)?;
-            } else {
-                println!(
-                    "#{} {}  [{}{}]",
-                    detail.card.id,
-                    detail.card.title,
-                    detail.card.status,
-                    if detail.card.archived_at.is_some() {
-                        ", archived"
-                    } else {
-                        ""
-                    }
-                );
-                if let Some(session) = &detail.card.session {
-                    println!("session: {session}");
-                }
-                if !detail.card.description.is_empty() {
-                    println!("\n{}", detail.card.description);
-                }
-                if !detail.comments.is_empty() {
-                    println!("\nComments:");
-                    for comment in &detail.comments {
-                        println!(
-                            "  [{}] {} ({}): {}",
-                            comment.id, comment.author, comment.created_at, comment.body
-                        );
-                    }
-                }
-                if !detail.runs.is_empty() {
-                    println!("\nRuns:");
-                    for run in &detail.runs {
-                        println!(
-                            "  #{} col={} {} started={:?} ended={:?}",
-                            run.id,
-                            run.column_id,
-                            run.outcome
-                                .map(|outcome| outcome.to_string())
-                                .unwrap_or_else(|| "-".into()),
-                            run.started_at,
-                            run.ended_at
-                        );
-                    }
-                }
-            }
+        CardCmd::Archive { id } => card_archive(ctx, id, true),
+        CardCmd::Restore { id } => card_archive(ctx, id, false),
+        CardCmd::Show { id } => {
+            let detail = ctx.client()?.card_get(id)?;
+            emit(&detail, json)
         }
-        CardCmd::List {
-            column,
-            visibility,
-            json,
-        } => {
-            let board = open_selected_board(&mut c, selector)?;
-            let column_id = column
-                .as_deref()
-                .map(|value| resolve_column_in(&board, value))
-                .transpose()?;
-            let cards = c.card_list_for_board_visible(
-                Some(board.board.id),
-                column_id,
-                parse_visibility(visibility)?,
-            )?;
-            if json {
-                print_json(&cards)?;
-            } else {
-                for card in &cards {
-                    let session = card
-                        .session
-                        .as_deref()
-                        .map(|value| format!("\tsession={value}"))
-                        .unwrap_or_default();
-                    let archived = if card.archived_at.is_some() {
-                        "\tarchived"
-                    } else {
-                        ""
-                    };
-                    println!(
-                        "#{}\t[{}]\tcol={}\t{}{}{}",
-                        card.id, card.status, card.column_id, card.title, session, archived
-                    );
-                }
-            }
+        CardCmd::List { column, visibility } => {
+            let column_id = ctx.optional_column_id(column.as_deref())?;
+            let board_id = ctx.board_id()?;
+            let visibility = parse_visibility(visibility)?;
+            let cards =
+                ctx.client()?
+                    .card_list_for_board_visible(Some(board_id), column_id, visibility)?;
+            emit(&cards, json)
         }
         CardCmd::Move {
             id,
             column,
             destination_board,
-            json,
-        } => cmd_move(
-            &mut c,
-            id,
-            &column,
-            destination_board.as_deref().or(selector),
-            json,
-        )?,
-        CardCmd::Comment { sub } => cmd_card_comment(sub)?,
-        CardCmd::Run { sub } => cmd_card_run(sub)?,
-    }
-    Ok(())
-}
-
-fn patch<T>(clear: bool, value: Option<T>) -> Patch<T> {
-    if clear {
-        Patch::Clear
-    } else if let Some(value) = value {
-        Patch::Set(value)
-    } else {
-        Patch::Unchanged
+        } => cmd_move(ctx, id, &column, destination_board.as_deref()),
+        CardCmd::Comment { sub } => cmd_card_comment(sub, ctx),
+        CardCmd::Run { sub } => cmd_card_run(sub, ctx),
     }
 }
 
-fn card_archive(c: &mut UnixClient, id: i64, archived: bool, json: bool) -> Result<()> {
-    let card = c.card_archive(id, archived)?;
-    if json {
-        print_json(&card)?;
-    } else if archived {
-        println!("Archived card #{}", card.id);
-    } else {
-        println!("Restored card #{}", card.id);
-    }
-    Ok(())
+fn card_archive(ctx: &mut Ctx, id: i64, archived: bool) -> Result<()> {
+    let json = ctx.json();
+    let card = ctx.client()?.card_archive(id, archived)?;
+    let action = if archived { "Archived" } else { "Restored" };
+    emit_line(&card, json, format!("{action} card #{}", card.id))
 }
 
+/// Move a card, resolving the destination column against the board the card is
+/// landing on.
+///
+/// Destination precedence, unchanged: an explicit `--destination-board`, else
+/// the global `--board` selector (deprecated — it warns), else the card's own
+/// board. A named destination costs two RPCs (`board.open`/`board.get` plus
+/// `card.move`); the "stay on the card's board" case still needs three, because
+/// protocol v1 has no way to learn a card's board without `card.get` and no way
+/// to move a card by column *name*. A `card.move` that accepted a column name
+/// would collapse every case to one round-trip.
 pub(crate) fn cmd_move(
-    c: &mut UnixClient,
+    ctx: &mut Ctx,
     card_id: i64,
     column: &str,
-    destination_selector: Option<&str>,
-    json: bool,
+    explicit_destination: Option<&str>,
 ) -> Result<()> {
-    let card = c.card_get(card_id)?.card;
-    let board = match destination_selector {
-        Some(selector) => open_selected_board(c, Some(selector))?,
-        None => c.board_get_by_id(card.board_id)?,
+    let json = ctx.json();
+    let destination = match explicit_destination {
+        Some(destination) => Some(destination),
+        None => match ctx.selector() {
+            Some(selector) => {
+                eprintln!(
+                    "board: warning: `move` is using the global --board {selector} as the move \
+                     destination; this fallback is deprecated, pass --destination-board \
+                     {selector} to cross boards"
+                );
+                Some(selector)
+            }
+            None => None,
+        },
     };
+
+    let board = destination_board(ctx, card_id, destination)?;
     let column_id = resolve_column_in(&board, column)?;
-    let card = c.card_move(&CardMoveParams {
+    let card = ctx.client()?.card_move(&CardMoveParams {
         id: card_id,
         column_id,
         board_id: Some(board.board.id),
         position: None,
     })?;
-    if json {
-        print_json(&card)?;
-    } else {
-        println!(
+    emit_line(
+        &card,
+        json,
+        format!(
             "Moved card #{} to column {} [{}]",
             card.id, card.column_id, card.status
-        );
+        ),
+    )
+}
+
+fn destination_board(
+    ctx: &mut Ctx,
+    card_id: i64,
+    destination: Option<&str>,
+) -> Result<BoardSnapshot> {
+    match destination {
+        Some(selector) => open_selected_board(ctx.client()?, Some(selector)),
+        None => {
+            let board_id = ctx.client()?.card_get(card_id)?.card.board_id;
+            ctx.client()?.board_get_by_id(board_id)
+        }
     }
-    Ok(())
 }
