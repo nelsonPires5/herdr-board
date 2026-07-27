@@ -31,10 +31,10 @@ The stable ownership layout is responsibility-oriented, not a file manifest:
 
 | Area | Boundary and representative coverage |
 |---|---|
-| `board-core` | Public engine, client, protocol, configuration, prompt, harness, and database behavior lives under `crates/board-core/tests/`. The production responsibilities are separated into `crates/board-core/src/engine/` (pure lifecycle, transitions, validation, and signals) and `crates/board-core/src/client/` (traits, Unix transport, and fake client). |
-| `board-daemon` | Queue lifecycle and launch behavior remain private daemon tests under `crates/board-daemon/src/dispatch/tests/` and `crates/board-daemon/src/spawner/tests/`; request operation tests live under `crates/board-daemon/src/ops/tests/`, and timeout/local/Herdr observation tests under `crates/board-daemon/src/watchers/tests/`. Their production owners are the corresponding responsibility directories. Supervisor, server, session, settings, and snapshot tests remain adjacent to those smaller private modules. |
+| `board-core` | Public engine, client, protocol, configuration, prompt, harness, and database behavior lives under `crates/board-core/tests/`. Database coverage is one binary, `tests/db.rs`, delegating to `tests/db/{migrations,crud,runs,atomic}.rs` over shared fixtures — `migrations.rs` owns every schema upgrade and `atomic.rs` owns rollback of the durable units of work. The production responsibilities are separated into `crates/board-core/src/engine/` (pure lifecycle, transitions, validation, signals, and column resolution) and `crates/board-core/src/client/` (traits, Unix transport, and fake client). |
+| `board-daemon` | Queue lifecycle and launch behavior remain private daemon tests under `crates/board-daemon/src/dispatch/tests/` and `crates/board-daemon/src/spawner/tests/`; request operation tests live under `crates/board-daemon/src/ops/tests/`, and timeout/local/Herdr observation tests under `crates/board-daemon/src/watchers/tests/`. Their production owners are the corresponding responsibility directories. Each of those directories is split by *concern*, not by file size — `dispatch/tests/{atomicity,finalize,registration,ownership,space}.rs`, `spawner/tests/{card_tabs,managed,races,placement}.rs`, `ops/tests/{lifecycle,rollback}.rs`. Supervisor, server, session, settings, and snapshot tests remain adjacent to those smaller private modules, and all of them build on `crates/board-daemon/src/testkit.rs` (below). |
 | `board-herdr` | Public envelope, event, and socket behavior is tested from `crates/board-herdr/tests/`, including ignored live probes. Event parsing, backoff, and stream handling are owned by `crates/board-herdr/src/events/`; all unsafe board-herdr Unix transport operations remain in `crates/board-herdr/src/transport.rs`. |
-| `board-tui` | Public reducer, form, and rendering behavior is tested from `crates/board-tui/tests/` (including `forms.rs`, `update.rs`, and snapshots). The implementation is organized under `crates/board-tui/src/app/`, `crates/board-tui/src/forms/`, and `crates/board-tui/src/view/`; only view tests that need private rendering helpers remain adjacent in `crates/board-tui/src/view/tests.rs`. |
+| `board-tui` | Public reducer, form, and rendering behavior is tested from `crates/board-tui/tests/` (`update.rs`, `forms.rs`, `layout.rs`, `mouse.rs`, and snapshots). Each of those declares `required-features = ["fake-client"]` in `Cargo.toml`, because they all link `crates/board-tui/src/testkit.rs`, which is compiled only under that feature; `help.rs` is the exception — it reads the handler *sources* as text to prove `view::HELP_KEYS` still lists every handled key, so it needs no client at all. The implementation is organized under `crates/board-tui/src/app/` (reducer, split into `state`/`effect`/`nav`/`drag` plus one module per screen), `crates/board-tui/src/driver/` (the effect loop), `crates/board-tui/src/forms/`, and `crates/board-tui/src/view/`; only view tests that need private rendering helpers remain adjacent in `crates/board-tui/src/view/tests.rs`. |
 
 The public core suites cover deterministic engine decisions, schema-v13 migrations and atomic
 run units of work, protocol-v1 serde, typed client boundaries, configuration, prompt assembly,
@@ -44,6 +44,48 @@ spawn/finalization atomicity, pane placement, configured and managed launch char
 request routing, watcher signals, timeout handling, per-session recovery, and comment actor policy.
 TUI suites cover fake-client reducer behavior, forms, and ratatui snapshots. Keep descriptions at
 this ownership level; add a path only when it is a stable boundary or a useful entry point.
+
+### Testkits: one construction per thing under test
+
+Two crates own a `src/testkit.rs`. Neither is production code; both exist because the alternative is
+a dozen near-identical hand-rolled setups that drift apart and then hide bugs in the differences.
+
+- **`crates/board-daemon/src/testkit.rs`** (`cfg(test)` only) provides three things. `daemon()` is
+  one builder for the twelve-argument `Daemon::new`, with an in-memory store, a `LocalSpawner` and
+  dummy paths by default; `build()` also hands back the event and dispatch receivers, so a test can
+  prove that a rolled-back operation emitted *nothing*. `herdr_server()` is one fake protocol-17
+  Herdr Unix socket with a settable protocol/version (so the compatibility gate can be served a
+  **wrong** one), per-method canned responses, an optional accept count, and recorded-request
+  inspection, plus the protocol-17 JSON constructors (`pane_info`, `agent_started`, …) used to build
+  those responses. Finally the shared negative assertions `assert_no_events`, `assert_no_effects`,
+  `assert_no_rollback_effects`, and `fault_db`, the armed lifecycle-fault `Db`.
+- **`crates/board-tui/src/testkit.rs`** (feature `fake-client`) holds `DemoClient`, the driver and
+  synthetic-input helpers, and the rendering helpers. It lives in the library rather than in a test
+  file because each `tests/*.rs` is its own crate and its own link step — per-file helpers would be
+  compiled once per test binary.
+
+### The fake-client ↔ daemon parity guard
+
+`crates/board-daemon/src/ops/tests/parity.rs` is the mechanism that stops `FakeBoardClient` from
+drifting away from boardd. The **entire** board-tui test tier runs against the fake, so a method the
+daemon routes but the fake does not is a hole those suites cannot see: the reducer path that calls
+it passes its own tests and fails only live.
+
+Both sides are generated from the dispatch tables that actually answer requests — `ROUTED_METHODS`
+from the daemon's `routes!`, `FAKE_CLIENT_METHODS` from the fake's `fake_methods!` — so neither list
+can drift from the code. Four assertions hold: no duplicates on either side; the fake never answers
+a method boardd does not route (which would let a TUI test pass against an RPC that does not exist);
+every routed method is either implemented by the fake or named in `KNOWN_UNIMPLEMENTED`; and that
+allowlist names only methods still routed.
+
+`KNOWN_UNIMPLEMENTED` is the load-bearing half. Adding a method to the daemon **fails this test**
+until someone either implements it in the fake (preferred) or lands it on the allowlist with a
+reason. It currently holds `daemon.status`/`daemon.stop` (no daemon behind the fake),
+`harness.capabilities`/`harness.list`/`session.list`/`space.list` (catalog RPCs answered from daemon
+config and a live Herdr; the TUI's `DemoClient` stubs them on top of the fake),
+`run.cancel`/`run.retry` (they mean "kill a pane" / "enqueue a run", which a DB-only fake with no
+dispatcher cannot honestly model), and `run.pane_exited` (an internal wrapper callback no client
+sends).
 
 ### RED → GREEN parity and schema-v13 coverage
 
@@ -55,9 +97,12 @@ The current parity/schema-v13 change is specified test-first:
   legacy board/card/comment/run values.
 - **GREEN implementation coverage:** `board-daemon/src/ops/tests/comments.rs` checks RPC routing,
   exact open-run actor ownership, fake-harness compatibility, immutable system comments, hidden
-  deleted comments, and scoped change events. `board-cli/tests/integration/cli_contract.rs`
-  exercises canonical nested CRUD/history, JSON output/errors, global selectors, version/status
-  separation, and the canonical command surface; `compat.rs` protects top-level aliases.
+  deleted comments, and scoped change events. The canonical CLI surface is covered by
+  `board-cli/tests/integration/{cards,comments,columns,runs}.rs` (one file per noun: CRUD, nullable
+  clears, visibility, comment history and agent-run ownership, and the live-run verbs) plus
+  `meta.rs` (command-tree refusals, `template apply`, version/status separation, `skill`, and the
+  JSON error envelope); `compat.rs` protects top-level aliases and `exit_codes.rs` pins the process
+  exit contract.
 - **CLI/E2E boundary:** live scenarios 01, 04, 06, 08, 09, 11, 16, and 17 exercise CLI comment
   creation, transition/silent-exit/timeout system comments, comment context in later prompts, and
   managed/configured comment completion against disposable Herdr. CRUD/audit semantics stay in
@@ -83,20 +128,23 @@ shared root once and applies those overrides afterward.
 
 ### 2. Daemon + CLI integration (real boardd socket, no herdr)
 
-`crates/board-cli/tests/integration.rs` (delegates to `integration/{lifecycle,harness,events,scope,stop,support}.rs`) exercises the whole daemon⇄CLI path
-without herdr by using the **`LocalSpawner`** (agents are plain child processes)
-and a **fake harness script**.
+`crates/board-cli/tests/integration.rs` is one test binary that delegates to
+`integration/{cards,columns,comments,compat,events,exit_codes,harness,lifecycle,meta,runs,scope,stop}.rs`
+over the shared `support.rs`. It exercises the whole daemon⇄CLI path without herdr by using the
+**`LocalSpawner`** (agents are plain child processes) and a **fake harness script**.
 
-- `TestDaemon::start(&[(k,v)])` (a helper struct in that file, torn down on
+- `TestDaemon::start(&[(k,v)])` (defined in `integration/support.rs` and shared
+  by every module above, torn down on
   `Drop`) creates a `tempfile::TempDir`, writes a `config.toml`, points
   `BOARD_DB`/`BOARD_SOCKET`/`HERDR_BOARD_CONFIG`/`HOME` at it, spawns the real
   `board daemon --foreground` (`env!("CARGO_BIN_EXE_board")`), and polls
   `wait_ready`. Timing knobs keep it fast: `BOARD_TICK_MS=150`,
   `BOARD_LOCAL_POLL_MS=150`, `FAKE_AGENT_SLEEP=0.3`.
 - Spawner selection is `BOARD_SPAWNER=local` + `[daemon] spawner = "local"`.
-  `LocalSpawner` (`crates/board-daemon/src/spawner/`) launches agents via
+  `LocalSpawner` (`crates/board-daemon/src/spawner/local.rs`) launches agents via
   `std::process::Command` and tracks each `Child` for precise liveness/kill —
-  no herdr, no Claude cost. Its sibling `HerdrSpawner` launches herdr panes.
+  no herdr, no Claude cost. Its sibling `HerdrSpawner`
+  (`crates/board-daemon/src/spawner/herdr/`) launches herdr panes.
 - The fake harness is `crates/board-cli/tests/fixtures/fake-agent.sh`, wired via
   `[harness.fake] argv = ["bash", "<path>"]`. It reads the board env, sleeps,
   then calls `$BOARD_BIN comment` + `$BOARD_BIN done`, so the real CLI request
@@ -106,6 +154,18 @@ and a **fake harness script**.
   captures output. Covered flows: happy pipeline, fail path, exit-without-done,
   timeout, queue serialization, cancel, retry-forks-a-run, template apply/refuse,
   archive/restore, the flock singleton, event subscription, and CLI-verb error surfacing.
+- `exit_codes.rs` pins the process-status contract, which is scripted by agents:
+  success is `0`; an RPC error in `1..=5` becomes `$?` verbatim (with or without
+  `--json`); a CLI-local failure — a refused non-interactive `card delete`, an
+  unknown verb, a bad enum value — exits `64` and, under `--json`, carries
+  `{"code":64,"kind":"cli"}`. Out-of-range protocol codes need a **stub daemon**,
+  a hand-rolled Unix listener answering one canned `Response::err(…, 256, …)`,
+  because the real daemon cannot produce a code an exit status would silently
+  turn into success: the exit clamps to `70` while the JSON envelope keeps the
+  exact `256`. Two tests guard `--json` as a *parsed* global rather than an argv
+  scan: a comment body of literally `--json` (after `--`) must still render a
+  plain-text error, while a real leading `--json` in the same command line must
+  still render JSON.
 
 ### 3. TUI fake-client tests (snapshots + reducer)
 
@@ -122,7 +182,8 @@ the `fake-client` feature.
   Determinism comes from a fixed `now` (`NOW_STR = "2026-07-14 12:00:00"`) and a
   `pin()` helper that rewrites active-run summary starts, so timers don't drift; it deliberately leaves
   the card `updated_at` at a conflicting value to prove card activity cannot reset a run timer.
-- `crates/board-tui/tests/update.rs` (delegates to `update/{detail,forms,scope,support_nav,helpers}.rs`)
+- `crates/board-tui/tests/update.rs` (delegates to
+  `update/{detail,editor,forms,modals,pane_title,scope,support_nav,switcher}.rs` over `helpers.rs`)
   unit-tests the pure reducer (`board_tui::app::update`) — detail popup/fullscreen toggle, edit→detail
   round-trip, comment/run scrolling and latest-item anchoring, `Enter` on `awaiting` confirmation,
   nullable-field explicit clears, space-kind visibility, form metadata loading without session/workspace
@@ -142,8 +203,9 @@ the herdr wire integration end to end. It is covered in depth below.
 
 ## The live e2e harness
 
-Layout under `e2e/` (see [`e2e/README.md`](../e2e/README.md) for the full use
-case ↔ scenario ↔ status catalog):
+Layout under `e2e/`. The per-scenario catalog (use case ↔ scenario file ↔ status) lives in
+[`e2e/README.md`](../e2e/README.md) and is maintained **only** there — this table covers the
+shared infrastructure the scenarios sit on:
 
 | File | Role |
 |---|---|
@@ -152,34 +214,6 @@ case ↔ scenario ↔ status catalog):
 | `process_identity.py` | Standard-library process backend: exact `/proc` identity plus owner environment on Linux; `proc_pidinfo`/`proc_pidpath`/`KERN_PROCARGS2` and signed direct-child transitions on Darwin. |
 | `fake-agent.sh` | The fake harness dispatched instead of a real agent. Mirrors the crate fixture and adds `FAKE_AGENT_HOLD` (keep the pane alive after the run). |
 | `hrpc.py` | One-shot raw herdr socket RPC (honours `HERDR_SOCKET_PATH`) for structural assertions (`tab.list`/`pane.list`/`pane.layout`). |
-| `01-core.sh` | CLI path (dispatch → run → outcome/comment) + TUI path (drive the new-card form via send-keys). |
-| `02-kanban-grid.sh` | Several cards → one auto column → asserts separate stable `card-<id>` tabs, each with one shell anchor and its run child. |
-| `03-sessions.sh` | Multi-session behaviour against a **second collision-resistant ephemeral session it boots itself** (`hb-e2e-<scenario-b>-<pid>-<random64>`). |
-| `04-fail-on-fail.sh` | `board done --outcome fail` → card follows the column's `on_fail_column_id`. |
-| `05-retry.sh` | `board retry` spawns a NEW run row for a finished card (run count grows). |
-| `06-silent-exit.sh` | A configured harness exits without `board done`; its generated runner calls the private pane-exit fallback → run failed, **no** auto-transition. |
-| `07-cancel.sh` | `board cancel` on a live run kills the herdr pane; run `cancelled`, card `failed`. |
-| `08-column-timeout.sh` | A run past its column `timeout_minutes` is killed and follows `on_fail`. |
-| `09-comment-context.sh` | A stage-1 comment flows into the stage-2 run's `prompt_snapshot` (`## Card comments`). |
-| `10-archive-filter-title.sh` | Archive filter → scoped dynamic pane title (`Board [scope · ACTIVE/ALL/ARCHIVED]`) + minimal footer. |
-| `11-pi-harness.sh` | Built-in Pi mint/retry through real Herdr with `e2e/fake-bin/pi`; validates model, low thinking, 0600 protocol system file, exact `agent.prompt` delivery, comments, and fork target without provider cost. |
-| `12-cwd-boards.sh` | Git root/subdir sharing, non-Git CWD isolation, independent columns/cards, scoped TUI title, and picker including Global. |
-| `13-jump-to-pane.sh` | Held fake-agent pane + real plugin overlay: canonical CLI `card run focus` and detail `o` both focus the same-session target; `o` also closes the board pane. |
-| `14-column-config.sh` | Column harness/effort/permission overrides flow into a config-defined harness. |
-| `15-awaiting.sh` | Integration-style reports on a live managed pane: blocked → working → end-of-turn idle (Herdr derives `done`) → `awaiting` (`agent_done`, run/pane stay open, timeout paused); `board done ok` confirms → `done`, no column move. |
-| `16-managed-p17.sh` | Pane-first protocol-17 Pi + Claude launch through checked-in no-provider fixtures: exact 0600 system files, readiness, session/idle reports, `agent.prompt`, and held layout. |
-| `17-configured-p17-runner.sh` | Unmanaged protocol-17 configured-harness bridge: exact argv/multiline env/cwd/socket values, `pane run`, held layout, and explicit `board done`. |
-| `18-nullable-clear.sh` | Omitted/null/value persistence, merged validation with atomic rejection, and provider-free dispatch after clearing overrides. |
-| `19-daemon-before-herdr.sh` | Boardd starts before Herdr, then the always-on supervisor late-connects and observes an exact owned pane exit. |
-| `20-herdr-recovery.sh` | An owned transparent proxy proves outage/restart remains `Unknown`, durable timeout budget survives, and reconnect snapshot closes a dropped-event gap once. |
-| `21-active-run-timer.sh` | A real TUI refresh after card activity proves the active-run start summary drives the timer while the run remains open. |
-| `22-move-column-tui.sh` | TUI column reorder mini-mode commits one `column.reorder` and cancels without mutation; provider-free. |
-| `23-agent-pane-busy-retry.sh` | Typed `agent_pane_busy` retries the exact request twice on one owned child with 100ms/200ms backoff; persistent failure cleans only that child (any pre-existing anchor remains). |
-| `24-cross-board-move.sh` | `card.move` with `board_id` transfers a card to another board's column atomically (source and destination columns recompacted); a destination column whose board differs from the declared `board_id` is rejected with nothing written. |
-| `25-card-tabs.sh` | Duplicate card-tab labels are ignored, the shell anchor and exact tab are reused after daemon restart, and a closed tab is recreated safely. |
-| `26-compact-mobile.sh` | Real TUI forced to a 40-col `LayoutMode::Compact` pane: the compact header (`⇄` + focused column + `n/N`), a focused-column card title, `b` opening the switcher directly at the board list (not Columns), the `[×]` close affordance, and `Esc` closing the sheet outright. |
-| `real-pi-smoke.sh` | Separate opt-in (`E2E_REAL_PI=1`) real-provider poem smoke; never included by `run-all.sh`. |
-| `real-claude-haiku-smoke.sh` | Opt-in intended-contract smoke (`E2E_REAL_CLAUDE_HAIKU=1`): exactly one authorized Claude Haiku/low attempt, stages only completed onboarding/theme, exact workspace trust, the installed Herdr hook, credentials, and approved remote-settings bytes, preventing startup dialogs from consuming `agent.prompt`; no broad personal Claude state, retry/fallback, or standard-suite inclusion. |
 | `run-all.sh` | Builds once, runs every standard no-cost scenario, prints a PASS/FAIL/SKIP summary. |
 
 Deterministic daemon tests cover working→running, blocked, Herdr's output-only `done` event →
@@ -289,14 +323,18 @@ set -euo pipefail
 
 # export E2E_FAKE_ENV="FAKE_AGENT_HOLD=300"   # only if you inspect live panes
 
-e2e_init          # cleanup trap + private root/session + preconditions (FIRST)
-e2e_build         # idempotent release build
-e2e_isolate       # temp db/socket/config with the fake harness
-e2e_daemon_start  # isolated boardd, stopped on cleanup
+e2e_boot          # e2e_init + e2e_build + e2e_isolate + e2e_daemon_start
+                  #   e2e_init          cleanup trap + private root/session (FIRST)
+                  #   e2e_build         idempotent release build
+                  #   e2e_isolate       temp db/socket/config with the fake harness
+                  #   e2e_daemon_start  isolated boardd, stopped on cleanup
+                  # Interleaving your own setup? Call the four in the long form
+                  # instead — the order is a safety property.
 
 step "Do the thing"
 e2e_ws_create my-ws            # -> $E2E_WS, auto-closed on cleanup
 WS="$E2E_WS"
+# or: e2e_ws_standard my-ws    # step + create + WS_ID + echo, for the plain case
 card_json="$("$BOARD_BIN" card new --title T -d D --harness fake \
   --space-kind workspace --space-ref "$WS" --json)"
 CARD="$(printf '%s' "$card_json" | jget id)"
@@ -316,6 +354,7 @@ Then add the filename to the `SCENARIOS` array in `run-all.sh`.
 Checklist:
 
 - [ ] `set -euo pipefail`; source `lib.sh`.
+- [ ] `e2e_boot` (or the same four calls in the same order) **before** creating anything.
 - [ ] `e2e_init` **before** creating anything (it installs the cleanup trap and
       boots the invocation-owned ephemeral session, so partial runs still tear down).
 - [ ] `e2e_init` boots a new invocation-owned session; it never adopts inherited session state.
@@ -369,9 +408,10 @@ E2E_REAL_CLAUDE_HAIKU=1 e2e/real-claude-haiku-smoke.sh  # one authorized Haiku/l
   session; scenario 03 additionally owns an independently tokened secondary session.
 - Exit codes: scenario `0` = PASS, `3` = SKIP, other = FAIL; `run-all.sh` exits
   non-zero if any scenario FAILED.
-- **Not in CI.** CI runs `cargo fmt`/`clippy`/`test` (layers 1–3); `bash e2e/test-harness.sh`
-  adds provider-free static ownership checks. The live e2e suite needs Herdr 0.7.5 to boot a real
-  ephemeral protocol-17 server and is run by a human/orchestrator, separately from this cleanup.
+- **The live suite is not in CI.** CI runs layers 1–3 plus the Python tier and
+  `bash e2e/test-harness.sh`, the provider-free static ownership gate that starts no Herdr — see
+  the [test gates](README.md#test-gates-single-source). The live e2e suite needs Herdr 0.7.5 to
+  boot a real ephemeral protocol-17 server, so it is run by a human/orchestrator instead.
 
 ### Multi-session (`03-sessions.sh`)
 

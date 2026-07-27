@@ -16,7 +16,18 @@ protocol version.
   Error objects may add `kind` and `details`; old clients may ignore those members.
 - Error codes: `1` bad request / unknown method, `2` not found, `3` invalid state
   (e.g. delete column with running card), `4` herdr unavailable, `5` internal. The CLI preserves
-  this envelope for `--json` errors on stderr and emits no JSON on stdout.
+  this envelope for `--json` errors on stderr and emits no JSON on stdout. A request handler task
+  that **panics** (or is cancelled) still answers, with `5`: dropping the request would leave the
+  client waiting forever, and killing the connection would take every other in-flight request on it
+  down as well.
+- **Protocol codes are not exit codes.** `board` maps `1..=5` straight onto its process exit status
+  so scripts can branch on `$?`; any other protocol code exits `70` (`EX_SOFTWARE`) because an exit
+  status is taken modulo 256 and `256` would silently read as success — the `--json` envelope still
+  carries the exact code the daemon sent. Errors raised by the CLI itself, before or instead of an
+  RPC (usage/parse, a declined confirmation, a bad enum value, a column reference that resolves to
+  nothing client-side, a missing `$BOARD_CARD_ID`), are **not** protocol errors: they exit `64`
+  (`EX_USAGE`) and their envelope is `{"code":64,"kind":"cli"}`. `64` is deliberately outside
+  `1..=5`, so a CLI-local failure can no longer be mistaken for the daemon's "not found".
 - A connection may send `{"id":"...","method":"events.subscribe"}`; boardd replies
   `{"id":"...","result":{"subscribed":true}}` and then streams event objects
   (no `id` field) on that connection until it closes. A subscribed connection can still
@@ -55,15 +66,19 @@ with lightweight recording/fake clients. Production clients perform no SQLite I/
 and mutates the database.
 
 The typed catalog/action surface includes `harness.capabilities`, `harness.list`,
-`space.list`, `session.list`, `run.cancel`, and `run.retry`, in addition to the existing board,
-column, card, comment, and run wrappers. `space.list(None)` deliberately serializes as `{}` while
-a named session serializes as `{ "session": "..." }`, preserving the v1 wire contract.
+`space.list`, `session.list`, `run.cancel`, `run.retry`, and `pane.set_title`, in addition to the
+existing board, column, card, comment, and run wrappers. `space.list(None)` deliberately serializes
+as `{}` while a named session serializes as `{ "session": "..." }`, preserving the v1 wire contract.
+
+The daemon owns **all** Herdr interaction (`AGENTS.md`): no client opens a Herdr socket or runs the
+`herdr` binary for itself. `pane.set_title` exists for exactly that reason — it is how the TUI
+plugin pane relabels its own border.
 
 ## Methods
 
 ### daemon
 - `daemon.status` → `{version, db_path, herdr_connected: bool, active_runs: int, queued_runs: int}`
-- `daemon.stop` → `{stopping:true}` (graceful: cancels nothing; running panes keep running, runs are re-adopted on next start via herdr pane liveness check). The CLI stop command treats this as an acknowledgement, not completion: it returns success only after the listener disappears. RPC errors, a listener that remains live past the bounded wait, and socket-path replacement are errors and preserve the socket. If the initial connect fails, a stale socket is removed only after a fresh failed connect and matching device/inode/socket-type identity checks; a replacement path is preserved.
+- `daemon.stop` → `{stopping:true}` (graceful: cancels nothing; running panes keep running, runs are re-adopted on next start via herdr pane liveness check). The CLI stop command treats this as an acknowledgement, not completion: it returns success only after the listener disappears. RPC errors, a listener that remains live past the bounded wait, and socket-path replacement are errors and preserve the socket. If the initial connect fails, a stale socket is removed only after a fresh failed connect and matching device/inode/socket-type identity checks; a replacement path is preserved. `board daemon stop --json` reports that outcome as `{"stopped": bool, "was_running": bool}` — `was_running:false` is the "nothing to stop" success, distinguishable from a real stop without parsing text. The human line is unchanged (`boardd stopped` / `boardd not running`).
 
 ### board / columns
 
@@ -131,6 +146,13 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
   - `space_kind`:
     - `workspace` — an ALREADY-OPEN workspace in the session; `space_ref` = its workspace id (a case-insensitive label is also accepted at dispatch).
     - `new_workspace` — the daemon creates the workspace on first dispatch (label = `space_ref`, cwd = `space_cwd`), reusing an open workspace with that label if one exists. **Requires** non-empty `space_ref` and `space_cwd` on create (else error 1).
+    - The wire vocabulary is exactly `"workspace"` and `"new_workspace"`: `SpaceKind` is serde
+      `snake_case`, so a hyphenated `"new-workspace"` on the socket is still rejected (error 1,
+      unknown variant). The hyphen is a **CLI spelling** — `SpaceKind::parse_str` accepts
+      `new-workspace` as an alias so `board card create --space-kind new-workspace` resolves through
+      board-core instead of a hand-rolled match in the CLI, and the CLI then emits the canonical
+      underscored form. `parse_str` is also what reads the value back out of SQLite, where only the
+      canonical form is ever stored.
   - creating directly into an `auto` column dispatches immediately (same as move)
   - In the legacy v1→v2 migration, `cwd`/`worktree` kinds and `worktree_base` were removed;
     current schema v13 treats worktree isolation as the agent's job via prompt instructions, not a
@@ -306,7 +328,23 @@ it, a residual configured-script orphan is an explicitly documented limitation.
   - error 2 (not found) for an unknown harness, listing the known harnesses.
 - `harness.list` (no params) → `{harnesses:[…]}` — every harness the daemon knows about: the built-ins `pi`/`claude` in their default order (pi first), then every config-defined `[harness.NAME]` sorted, de-duplicated. This is the single source for BOTH the card `harness` and column `harness_override` selects in the TUI, so every harness menu shares one list in one (default-first) order.
 - `space.list {session?}` → `{spaces:[{id, label}]}` — workspaces in the given session (`null` = default), filled from that session's herdr `workspace.list`. Unknown/not-running session → error 4 listing the known sessions.
-- `session.list` (no params) → `{sessions:[{name, default: bool, running: bool}]}` — the daemon shells out to `herdr session list --json` (session enumeration is not in the herdr socket API; a session only knows itself). Binary resolved via `$HERDR_BIN_PATH`, else `herdr` on `$PATH`. Error 4 if herdr is unavailable / the CLI fails.
+- `session.list` (no params) → `{sessions:[{name, default: bool, running: bool}]}` — the daemon shells out to `herdr session list --json` (session enumeration is not in the herdr socket API; a session only knows itself). Binary resolved via `$HERDR_BIN_PATH`, else `herdr` on `$PATH`. Error 4 if herdr is unavailable / the CLI fails. That shell-out has a **10-second wall-clock budget** and the child is killed when it expires (error 4, naming the timeout): the session registry sits on the path of every request that resolves a session, and every caller reaches it through the blocking pool, so a hung `herdr` must not pin one of those threads forever. A normal `session list` is sub-100ms; the result is cached for the registry TTL.
+
+### panes
+
+- `pane.set_title {pane_id, title, origin_socket}` → `{renamed:true}` — set the label Herdr renders
+  in one pane's border, in the **caller's own** herdr session. `origin_socket` names that session
+  exactly as it does for `run.focus` (only the caller knows which Herdr it runs inside); the path is
+  canonicalized and then opened through the same gated connect as every other operation, so the
+  pinned Herdr 0.7.5 / protocol 17 check runs before the rename. Maps to herdr `pane.rename`, and
+  touches no board state — the daemon exists here only because it owns every Herdr call.
+  Error 1 for an empty `pane_id`, error 4 for an unavailable socket, a socket that fails the
+  protocol gate, or a `pane.rename` herdr refuses (e.g. an unknown pane). A rename that did not
+  happen is always one of those errors, never a successful `{renamed:false}`.
+  **Whether a failed rename matters is the caller's policy, not the protocol's.** The TUI keeps its
+  plugin pane border in sync with the board it shows and drops the result: a cosmetic title must
+  never surface an error over the board, and outside a Herdr plugin pane (standalone TUI, tests) it
+  never sends the request at all.
 
 ## Card statuses & signals
 

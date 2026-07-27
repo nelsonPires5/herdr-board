@@ -58,10 +58,12 @@ overflows.
 
 ## CLI taxonomy
 
-The nested forms are canonical. A global board selector accepts a stable id or canonical scope path:
+The nested forms are canonical. `--board` (a stable id or canonical scope path) and `--json` are both
+**global** flags: either position parses identically, before or after the subcommand path.
 
 ```bash
 board --board <ID|PATH> card list --json
+board card list --board <ID|PATH> --json     # identical
 ```
 
 Without `--board`, board-aware commands use the focused Git root, or the canonical CWD outside Git;
@@ -107,9 +109,14 @@ Creating directly in an `auto` column dispatches immediately. `card list` defaul
 `all` includes archived cards and `archived` returns only archived cards. `card show` includes current
 comments and run history; soft-deleted comments are omitted.
 
+A cross-board move goes on `--destination-board`. The old fallback — a global `--board` naming a
+*different* board than the card's — still works but prints a deprecation warning to stderr; do not
+write new automation against it.
+
 Omitted edit options are unchanged. Explicit `--clear-*` flags clear nullable values;
 `--clear-description` sets the description to an empty string. Harness is required and cannot be
-cleared. Model/effort/permission/session/space edits are refused while a card has an open run.
+cleared (`--clear-harness` parses but is refused). Model/effort/permission/session/space edits are
+refused while a card has an open run.
 Archiving and deletion also require an idle/terminal card; cancel an open run first. Delete is
 permanent and removes card history. It prompts on a TTY and requires `--yes` in non-interactive use.
 
@@ -124,7 +131,8 @@ board card comment history COMMENT_ID [--json]
 ```
 
 Add returns the compact current comment (`id`, `card_id`, `author`, `body`, `created_at`);
-show/edit return the current record with those fields plus `deleted_at`. Delete is a soft delete and
+show/edit return the current record with those fields plus `deleted_at`; `card show` prints each
+comment in that same one-line shape. Delete is a soft delete and
 returns `{"deleted":true}`. History returns immutable snapshots from creation through the latest
 edit; deletion marks the final snapshot. Card detail and run prompts show only non-deleted comments.
 
@@ -182,34 +190,83 @@ board column edit COLUMN [--name NAME] [--prompt TEXT|--clear-prompt] \
   [--timeout MINUTES|--clear-timeout] [--json]
 board column reorder COLUMN ZERO_BASED_POSITION [--json]
 board column delete COLUMN [--move-cards-to COLUMN] [--yes] [--json]
-board harness list|models|efforts|permissions [--json]
+board harness list [--json]
+board harness models [HARNESS] [--json]
+board harness efforts [HARNESS] --model MODEL [--json]
+board harness permissions [HARNESS] [--json]
 board space list [--session SESSION] [--json]
 board session list [--json]
 ```
 
-Column references accept an id or case-insensitive name. List and reorder return ordered arrays;
-create/show/edit return a column. `--fresh-session` and `--reuse-session` are mutually exclusive.
+`HARNESS` is a positional and defaults to `pi`; `harness efforts` additionally **requires**
+`--model`. Column references accept an id or case-insensitive name. List and reorder return ordered
+arrays; create/show/edit return a column. `--fresh-session` and `--reuse-session` conflict at
+**parse time** — passing both is a usage error (exit 64), not a runtime rejection.
 A column containing cards needs `--move-cards-to`; any open card run blocks deletion. Column
 settings are validated as a complete merged configuration, and effective card+column settings are
 checked again before dispatch. Pi has no permission modes; `bypassPermissions` is never a column
 override.
 
-## Status, version, skill, JSON, and aliases
+### TUI, daemon, version, skill
 
-- `board daemon status [--json]` is the only supported daemon status command and the operational
-  probe: `{version, db_path, herdr_connected, active_runs, queued_runs}`.
+```bash
+board tui
+board daemon start [--foreground]
+board daemon stop [--json]
+board daemon status [--json]
+board version [--json]
+board skill
+```
+
+- `board tui` opens the kanban TUI, auto-starting boardd. `daemon start` runs boardd in this
+  process; `--foreground` additionally logs to stderr and stays attached. Bare `board daemon` (no
+  subcommand) is unchanged, and the historical `board daemon --foreground` / `board daemon --stop`
+  flags still work but are hidden from `--help`.
+- `daemon status` is the operational probe: `{version, db_path, herdr_connected, active_runs,
+  queued_runs}`. `daemon stop --json` reports `{"stopped": bool, "was_running": bool}`; it is
+  fail-closed and errors rather than removing a socket it cannot prove is stale.
 - `board version --json` never starts boardd and reports `{cli_version, daemon_version}`. The daemon
   value is `null`/`unavailable` when boardd is offline; use daemon status for liveness and run counts.
 - `board skill` prints this exact checked-in `skill/SKILL.md` file, byte-for-byte, with no JSON wrapper.
-- Successful `--json` output goes to stdout. JSON errors go to stderr, leave stdout empty, and use
-  the stable envelope `{"error":{"code":N,"kind":"...","message":"...","details":...}}`;
-  `kind` and `details` are additive and may be absent. Codes are 1 bad request, 2 not found/CLI
-  error, 3 invalid state, 4 Herdr unavailable, and 5 internal error.
-- Legacy top-level run/action forms remain supported: `board comment`, `board done`, `board move`,
-  `board cancel`, and `board retry`. `card new` and `--to-board` are also retained aliases. Prefer
-  the nested forms above for new automation.
 
-When creating work, create the card first, then move it into an `auto` column:
+### JSON and errors
+
+Successful `--json` output goes to stdout. JSON errors go to stderr, leave stdout empty, and use the
+stable envelope `{"error":{"code":N,"kind":"...","message":"...","details":...}}`; `kind` and
+`details` are additive and may be absent. An error the **daemon** raised carries its protocol code —
+1 bad request, 2 not found, 3 invalid state, 4 Herdr unavailable, 5 internal. An error the **CLI**
+itself raised carries `{"code":64,"kind":"cli"}`.
+
+Bad enum values are one shape everywhere: `invalid <kind> '<value>' (expected: a, b, c)`.
+
+### Exit codes
+
+Scripted agents should branch on `$?`, not on stderr text.
+
+| Code | Meaning |
+|---|---|
+| `0` | Success. |
+| `1`–`5` | The daemon's protocol code, passed straight through (see above). |
+| `64` | The CLI itself refused: a clap usage/parse error, a declined confirmation prompt, a bad enum value, a column name that resolves to nothing client-side, or a missing `$BOARD_CARD_ID`. `EX_USAGE`. |
+| `70` | The daemon reported a protocol code outside `1..=5`. Clamped, because an exit status is taken mod 256. `EX_SOFTWARE`. |
+
+```bash
+board done --outcome ok || case $? in
+  2) echo "no open run for this card" ;;
+  4) echo "herdr is unavailable; retry later" ;;
+  64) echo "my own invocation was wrong" ;;
+esac
+```
+
+### Aliases
+
+Legacy top-level run/action forms remain supported and re-dispatch into the nested handlers:
+`board comment`, `board done`, `board move`, `board cancel`, and `board retry`. `card new` and
+`--to-board` are also retained aliases. Prefer the nested forms above for new automation.
+
+## Creating work
+
+Create the card first, then move it into an `auto` column:
 
 ```bash
 board card create --title "Add retry to the uploader" \
