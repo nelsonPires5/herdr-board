@@ -115,6 +115,7 @@ Required gates:
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test --workspace --all-features
+python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 e2e/run-all.sh
 ```
 

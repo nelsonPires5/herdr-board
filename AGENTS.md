@@ -27,7 +27,13 @@ safety gate.
 cargo test --workspace --all-features       # unit + integration; no live herdr needed
 cargo clippy --all-targets -- -D warnings    # zero warnings
 cargo fmt --all --check                      # formatted
+python3 -m unittest discover -s scripts/tests -p 'test_*.py'   # docs/release contracts
 ```
+
+- The Python tier is a CI gate too (`ci.yml`'s `Python tests` step) and is easy to forget:
+  `scripts/tests/test_docs.py` pins the version matrix (schema v13, protocol 17, Herdr 0.7.5)
+  and the exact `e2e/NN-*.sh` catalog, so adding a scenario or bumping the schema fails here
+  until the docs and that test are updated together.
 
 - `#[ignore]`'d tests hit a live herdr (run only when `HERDR_SOCK`/`HERDR_SOCKET_PATH` exists).
 - End-to-end: `e2e/run-all.sh` (compat: `scripts/e2e.sh`) drives a REAL Herdr with a scenario

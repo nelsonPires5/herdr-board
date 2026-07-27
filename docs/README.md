@@ -31,14 +31,17 @@ isolation is an agent prompt concern, not a board space primitive.
 The [`schema.sql`](../schema.sql) at the repo root is the fresh SQLite schema; migration behavior
 and upgrade tests live in `board-core::db`. Before handoff, check that docs still point to existing
 files, that the version matrix above says schema v13 / protocol v1 / Herdr 0.7.5-protocol 17, and that
-the scenario catalog lists every `e2e/NN-*.sh` from 01 through 26. The provider-free static safety gate is:
+the scenario catalog lists every `e2e/NN-*.sh` from 01 through 27. The provider-free static safety gate is:
 
 ```bash
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test --workspace --all-features
-python3 -m unittest scripts.tests.test_docs
+python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 bash e2e/test-harness.sh
 ```
+
+Run the whole Python tier, not just `test_docs` — that is what CI executes, and the release
+contracts in the same directory fail independently of the documentation ones.
 
 The full live suite is a separate gate and is intentionally not run by this cleanup task.

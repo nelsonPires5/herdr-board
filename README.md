@@ -604,6 +604,7 @@ The Unix-socket transport retains only the raw request primitive; production cli
 cargo test --workspace --all-features
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all --check
+python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 ./e2e/run-all.sh
 ```
 

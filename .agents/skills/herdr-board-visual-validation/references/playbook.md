@@ -457,6 +457,7 @@ Execution-validation mode requires no promotion: its source changes already live
 ~/.cargo/bin/cargo fmt --all --check
 ~/.cargo/bin/cargo clippy --all-targets -- -D warnings
 ~/.cargo/bin/cargo test --workspace --all-features
+python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 PATH="$HOME/.cargo/bin:$PATH" e2e/run-all.sh
 ```
 

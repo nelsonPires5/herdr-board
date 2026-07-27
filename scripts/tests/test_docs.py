@@ -32,6 +32,28 @@ class DocumentationContractTests(unittest.TestCase):
         for scenario in scenarios:
             self.assertIn(scenario.name, runner)
 
+    def test_documents_quoting_the_scenario_range_track_the_last_scenario(self) -> None:
+        """Every doc that spells the catalog range must name the real last scenario.
+
+        Adding a scenario used to leave stale `01 through 26` prose in docs the
+        version-matrix assertion above does not read, so only CI caught it — and
+        only for `docs/README.md`. Derive the bound instead of hardcoding it.
+        """
+        scenarios = sorted((ROOT / "e2e").glob("[0-9][0-9]-*.sh"))
+        last = scenarios[-1]
+        last_number = last.name[:2]
+        for relative, expected in (
+            ("docs/README.md", f"scenarios 01–{last_number}"),
+            ("e2e/README.md", f"**01 through {last_number}**"),
+            ("AGENTS.md", f"scenarios 01–{last_number}"),
+            ("README.md", f"scenarios 01–{last_number}"),
+            ("docs/implementation.md", f"through `e2e/{last.name}`"),
+        ):
+            with self.subTest(document=relative):
+                self.assertIn(
+                    expected, (ROOT / relative).read_text(encoding="utf-8")
+                )
+
     def test_maintained_markdown_links_resolve(self) -> None:
         documents = [
             ROOT / "AGENTS.md",
