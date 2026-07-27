@@ -315,6 +315,34 @@ class DocumentationContractTests(unittest.TestCase):
                     f"{module} matches no CI pattern {patterns}; it would never run",
                 )
 
+    def test_release_workflow_stages_what_the_tool_writes(self) -> None:
+        """The Prepare Release workflow must not repeat the managed-file list.
+
+        It used to `git add` four filenames literally. When `apply` grew the
+        install-ref repin, those three extra files were rewritten on the runner
+        and dropped at staging, so v0.9.1 was cut with stale pins — and
+        `verify`, which runs before `git add`, could not see it.
+        """
+        workflow = (ROOT / ".github/workflows/prepare-release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "prepare-release.py --repo . files",
+            workflow,
+            "stage the tool's own file list instead of repeating it",
+        )
+        for literal in ("git add Cargo.toml", "git add README.md"):
+            self.assertNotIn(
+                literal,
+                workflow,
+                f"{literal!r} hardcodes the managed-file list again",
+            )
+        self.assertIn(
+            "-p 'test_docs.py'",
+            workflow,
+            "re-run the documentation contracts against the bumped tree",
+        )
+
     def test_maintained_markdown_links_resolve(self) -> None:
         for document in maintained_markdown():
             for link in re.findall(r"\[[^]]+\]\(([^)]+)\)", document.read_text()):
