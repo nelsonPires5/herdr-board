@@ -1,24 +1,19 @@
-pub(super) use std::io::{BufRead, BufReader, Write};
-pub(super) use std::os::unix::net::UnixListener;
 pub(super) use std::path::PathBuf;
-pub(super) use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+pub(super) use std::sync::atomic::{AtomicUsize, Ordering};
 pub(super) use std::sync::{Arc, Condvar, Mutex};
-pub(super) use std::thread;
 pub(super) use std::time::{Duration, Instant};
 
 pub(super) use super::enqueue::enqueue_run;
 pub(super) use super::finalize::{finalize_run, finalize_run_timeout};
-pub(super) use super::pass::{
-    dispatch_pass, durable_owned_anchor_pane_ids, durable_owned_pane_ids, harness_prompt_env,
-    launch_session, reconstruct_owned_tab_id, register_spawned_run,
-};
+pub(super) use super::launch_plan::{board_env, harness_prompt_env, register_spawned_run};
+pub(super) use super::ownership::{owned_pane_ids, reconstruct_owned_tab_id, OwnedPanes};
+pub(super) use super::pass::{dispatch_pass, launch_session};
 pub(super) use super::space::{
     find_workspace_by_label, resolve_space, resolve_workspace_ref, validate_space_resolvable,
 };
-pub(super) use crate::settings::DaemonSettings;
-pub(super) use crate::spawner::{HerdrLaunchPlan, RuntimeHandle, Spawner};
+pub(super) use crate::spawner::{HerdrLaunchPlan, RuntimeHandle, SpawnError, Spawner};
 pub(super) use crate::state::{ActiveRun, Daemon};
-pub(super) use crate::store::Store;
+pub(super) use crate::testkit::{self, FakeHerdr};
 pub(super) use board_core::config::Config;
 pub(super) use board_core::db::{Db, EnqueueRun, FinalizeRun, LifecycleFaultPoint};
 pub(super) use board_core::model::{Card, Run};
@@ -30,14 +25,18 @@ pub(super) use board_core::protocol::{
 pub(super) use board_core::{Error, Result};
 pub(super) use board_herdr::{AgentStatus, HerdrClient, PaneInfo, SessionSnapshot, WorkspaceInfo};
 pub(super) use serde_json::Value;
-pub(super) use tokio::sync::{broadcast, mpsc, watch};
+pub(super) use tokio::sync::{broadcast, mpsc};
 
 struct MissingPiSpawner;
 
 impl Spawner for MissingPiSpawner {
-    fn spawn(&self, req: &HerdrLaunchPlan) -> anyhow::Result<RuntimeHandle> {
+    fn spawn(&self, req: &HerdrLaunchPlan) -> std::result::Result<RuntimeHandle, SpawnError> {
         assert_eq!(req.argv.first().map(String::as_str), Some("pi"));
-        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "pi not found").into())
+        Err(anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "pi not found",
+        ))
+        .into())
     }
 
     fn kill(&self, _h: &RuntimeHandle) -> anyhow::Result<()> {
@@ -91,7 +90,7 @@ impl PausedSpawner {
 }
 
 impl Spawner for PausedSpawner {
-    fn spawn(&self, req: &HerdrLaunchPlan) -> anyhow::Result<RuntimeHandle> {
+    fn spawn(&self, req: &HerdrLaunchPlan) -> std::result::Result<RuntimeHandle, SpawnError> {
         let mut state = self.state.lock().unwrap();
         state.started.push(req.name.clone());
         self.started_notify.notify_one();
@@ -115,7 +114,7 @@ impl Spawner for PausedSpawner {
 }
 
 impl Spawner for FaultPromotionSpawner {
-    fn spawn(&self, _req: &HerdrLaunchPlan) -> anyhow::Result<RuntimeHandle> {
+    fn spawn(&self, _req: &HerdrLaunchPlan) -> std::result::Result<RuntimeHandle, SpawnError> {
         Ok(RuntimeHandle {
             pid: Some(4242),
             workspace_id: Some("spawned-workspace".into()),
@@ -135,7 +134,7 @@ impl Spawner for FaultPromotionSpawner {
 }
 
 impl Spawner for CapturingSpawner {
-    fn spawn(&self, req: &HerdrLaunchPlan) -> anyhow::Result<RuntimeHandle> {
+    fn spawn(&self, req: &HerdrLaunchPlan) -> std::result::Result<RuntimeHandle, SpawnError> {
         self.requests.lock().unwrap().push(req.clone());
         Ok(RuntimeHandle {
             pid: Some(4242),
@@ -153,7 +152,7 @@ impl Spawner for CapturingSpawner {
 }
 
 impl Spawner for RecordingSpawner {
-    fn spawn(&self, _req: &HerdrLaunchPlan) -> anyhow::Result<RuntimeHandle> {
+    fn spawn(&self, _req: &HerdrLaunchPlan) -> std::result::Result<RuntimeHandle, SpawnError> {
         unreachable!("registration tests provide the spawned handle")
     }
 
@@ -188,23 +187,10 @@ fn test_daemon_with_config(
     broadcast::Receiver<Event>,
     mpsc::UnboundedReceiver<()>,
 ) {
-    let (events_tx, events_rx) = broadcast::channel(16);
-    let (dispatch_tx, dispatch_rx) = mpsc::unbounded_channel();
-    let (shutdown_tx, _shutdown_rx) = watch::channel(false);
-    let daemon = Arc::new(Daemon::new(
-        Store::new(Db::open_in_memory().unwrap()),
-        config,
-        DaemonSettings::default(),
-        PathBuf::from("/tmp/board-test.db"),
-        PathBuf::from("/tmp/board-test.sock"),
-        spawner,
-        None,
-        None,
-        events_tx,
-        dispatch_tx,
-        shutdown_tx,
-    ));
-    (daemon, events_rx, dispatch_rx)
+    testkit::daemon()
+        .config(config)
+        .spawner(spawner)
+        .build_parts()
 }
 
 fn test_daemon(spawner: Arc<dyn Spawner>) -> Arc<Daemon> {
@@ -226,127 +212,71 @@ fn ws(id: &str, label: &str) -> WorkspaceInfo {
 /// workspace discovery, and the live pane snapshot. Keeping the fixture
 /// single-purpose makes cwd failure tests deterministic and independent of
 /// a real Herdr process.
-fn workspace_resolution_server(snapshot: Option<Value>) -> (tempfile::TempDir, PathBuf) {
-    let dir = tempfile::tempdir().unwrap();
-    let socket = dir.path().join("workspace-resolution.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
-    thread::spawn(move || {
-        for incoming in listener.incoming().take(3) {
-            let Ok(stream) = incoming else { break };
-            let mut writer = stream.try_clone().unwrap();
-            let mut reader = BufReader::new(stream);
-            let mut line = String::new();
-            if reader.read_line(&mut line).unwrap_or(0) == 0 {
-                continue;
-            }
-            let request: Value = serde_json::from_str(line.trim()).unwrap();
-            let response = match request["method"].as_str().unwrap() {
-                "ping" => serde_json::json!({
-                    "id": request["id"],
-                    "result": {
-                        "type": "pong", "version": "0.7.5", "protocol": 17,
-                        "capabilities": {}
-                    }
-                }),
-                "workspace.list" => serde_json::json!({
-                    "id": request["id"],
-                    "result": {"workspaces": [{
-                        "workspace_id": "w1", "label": "Feature", "number": 1,
-                        "focused": false, "active_tab_id": "", "agent_status": "idle"
-                    }]}
-                }),
-                "session.snapshot" => match &snapshot {
-                    Some(snapshot) => serde_json::json!({
-                        "id": request["id"],
-                        "result": {"snapshot": snapshot}
-                    }),
-                    None => serde_json::json!({
-                        "id": request["id"],
-                        "error": {
-                            "code": "snapshot_failed",
-                            "message": "session snapshot unavailable"
-                        }
-                    }),
-                },
-                method => panic!("unexpected workspace resolution method: {method}"),
-            };
-            writeln!(writer, "{response}").unwrap();
-            writer.flush().unwrap();
-        }
-    });
-    (dir, socket)
+fn workspace_resolution_server(snapshot: Option<Value>) -> FakeHerdr {
+    testkit::herdr_server()
+        .take(3)
+        .on("workspace.list", |req| {
+            testkit::reply(
+                req,
+                serde_json::json!({"workspaces": [{
+                    "workspace_id": "w1", "label": "Feature", "number": 1,
+                    "focused": false, "active_tab_id": "", "agent_status": "idle"
+                }]}),
+            )
+        })
+        .on("session.snapshot", move |req| match &snapshot {
+            Some(snapshot) => testkit::reply(req, serde_json::json!({"snapshot": snapshot})),
+            None => testkit::error(req, "snapshot_failed", "session snapshot unavailable"),
+        })
+        .serve()
 }
 
 /// Serve the four calls made while creating a missing `new_workspace`:
 /// protocol gate, workspace discovery, create, and live pane snapshot.
-fn new_workspace_resolution_server(snapshot: Option<Value>) -> (tempfile::TempDir, PathBuf) {
-    let dir = tempfile::tempdir().unwrap();
-    let socket = dir.path().join("new-workspace-resolution.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
-    thread::spawn(move || {
-        for incoming in listener.incoming().take(4) {
-            let Ok(stream) = incoming else { break };
-            let mut writer = stream.try_clone().unwrap();
-            let mut reader = BufReader::new(stream);
-            let mut line = String::new();
-            if reader.read_line(&mut line).unwrap_or(0) == 0 {
-                continue;
-            }
-            let request: Value = serde_json::from_str(line.trim()).unwrap();
-            let response = match request["method"].as_str().unwrap() {
-                "ping" => serde_json::json!({
-                    "id": request["id"],
-                    "result": {
-                        "type": "pong", "version": "0.7.5", "protocol": 17,
-                        "capabilities": {}
+fn new_workspace_resolution_server(snapshot: Option<Value>) -> FakeHerdr {
+    testkit::herdr_server()
+        .take(4)
+        .on("workspace.list", |req| {
+            testkit::reply(req, serde_json::json!({"workspaces": []}))
+        })
+        .on("workspace.create", |req| {
+            testkit::reply(
+                req,
+                serde_json::json!({
+                    "type": "workspace_created",
+                    "workspace": {
+                        "workspace_id": "created-ws", "label": "Created", "number": 1,
+                        "focused": false, "active_tab_id": "created-ws:t1",
+                        "agent_status": "unknown"
+                    },
+                    "tab": {
+                        "tab_id": "created-ws:t1", "workspace_id": "created-ws",
+                        "label": "tab", "focused": false, "number": 1,
+                        "pane_count": 1, "agent_status": "unknown"
+                    },
+                    "root_pane": {
+                        "pane_id": "created-ws:p1", "terminal_id": "term-1",
+                        "workspace_id": "created-ws", "tab_id": "created-ws:t1",
+                        "focused": true, "revision": 0, "agent_status": "unknown"
                     }
                 }),
-                "workspace.list" => serde_json::json!({
-                    "id": request["id"], "result": {"workspaces": []}
-                }),
-                "workspace.create" => serde_json::json!({
-                    "id": request["id"],
-                    "result": {
-                        "type": "workspace_created",
-                        "workspace": {
-                            "workspace_id": "created-ws", "label": "Created", "number": 1,
-                            "focused": false, "active_tab_id": "created-ws:t1",
-                            "agent_status": "unknown"
-                        },
-                        "tab": {
-                            "tab_id": "created-ws:t1", "workspace_id": "created-ws",
-                            "label": "tab", "focused": false, "number": 1,
-                            "pane_count": 1, "agent_status": "unknown"
-                        },
-                        "root_pane": {
-                            "pane_id": "created-ws:p1", "terminal_id": "term-1",
-                            "workspace_id": "created-ws", "tab_id": "created-ws:t1",
-                            "focused": true, "revision": 0, "agent_status": "unknown"
-                        }
-                    }
-                }),
-                "session.snapshot" => match &snapshot {
-                    Some(snapshot) => serde_json::json!({
-                        "id": request["id"], "result": {"snapshot": snapshot}
-                    }),
-                    None => serde_json::json!({
-                        "id": request["id"],
-                        "error": {
-                            "code": "snapshot_failed",
-                            "message": "created workspace snapshot unavailable"
-                        }
-                    }),
-                },
-                method => panic!("unexpected new-workspace resolution method: {method}"),
-            };
-            writeln!(writer, "{response}").unwrap();
-            writer.flush().unwrap();
-        }
-    });
-    (dir, socket)
+            )
+        })
+        .on("session.snapshot", move |req| match &snapshot {
+            Some(snapshot) => testkit::reply(req, serde_json::json!({"snapshot": snapshot})),
+            None => testkit::error(
+                req,
+                "snapshot_failed",
+                "created workspace snapshot unavailable",
+            ),
+        })
+        .serve()
 }
 
+mod atomicity;
 mod concurrency;
 mod enqueue;
 mod finalize;
-mod placement;
+mod ownership;
+mod registration;
+mod space;

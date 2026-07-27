@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, bail, Context};
 
-use super::{HerdrLaunchPlan, RuntimeHandle, Spawner};
+use super::{HerdrLaunchPlan, RuntimeHandle, SpawnError, Spawner};
 
 // ---------------------------------------------------------------------------
 // LocalSpawner
@@ -76,8 +76,10 @@ pub(crate) fn materialize_local_argv(req: &HerdrLaunchPlan) -> anyhow::Result<Ve
     Ok(argv)
 }
 
-impl Spawner for LocalSpawner {
-    fn spawn(&self, req: &HerdrLaunchPlan) -> anyhow::Result<RuntimeHandle> {
+impl LocalSpawner {
+    /// The launch itself, in `anyhow` terms. Nothing here touches Herdr, so it
+    /// always classifies as [`SpawnError::Other`].
+    fn spawn_inner(&self, req: &HerdrLaunchPlan) -> anyhow::Result<RuntimeHandle> {
         let argv = materialize_local_argv(req)?;
         let (prog, args) = argv.split_first().ok_or_else(|| anyhow!("empty argv"))?;
         let mut cmd = Command::new(prog);
@@ -105,6 +107,12 @@ impl Spawner for LocalSpawner {
             pid: Some(pid),
             ..Default::default()
         })
+    }
+}
+
+impl Spawner for LocalSpawner {
+    fn spawn(&self, req: &HerdrLaunchPlan) -> Result<RuntimeHandle, SpawnError> {
+        self.spawn_inner(req).map_err(SpawnError::from)
     }
 
     fn kill(&self, h: &RuntimeHandle) -> anyhow::Result<()> {

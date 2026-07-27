@@ -15,7 +15,15 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 libc = { workspace = true }
+thiserror = { workspace = true }
+# Runtime dependency, not a test-only one: the Herdr spawner writes the
+# configured-harness startup script and the managed system-prompt file through
+# `tempfile::Builder` (see `spawner/herdr/{configured,managed}.rs`).
 tempfile = { workspace = true }
 
 [dev-dependencies]
 rusqlite = { workspace = true }
+# The fake-client ↔ daemon method parity guard (`ops::tests::parity`) compares
+# `ROUTED_METHODS` against board-core's `FAKE_CLIENT_METHODS`, which the
+# `fake-client` feature gates.
+board-core = { workspace = true, features = ["fake-client"] }

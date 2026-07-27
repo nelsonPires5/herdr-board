@@ -4,17 +4,18 @@
 
 mod enqueue;
 mod finalize;
+mod launch_plan;
+mod ownership;
 mod pass;
 mod space;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use enqueue::enqueue_run;
+pub(crate) use enqueue::{enqueue_run, prepare_enqueue_values};
 pub(crate) use finalize::{finalize_run, finalize_run_timeout};
+pub(crate) use launch_plan::board_env;
+pub(crate) use ownership::{owned_pane_ids, reconstruct_owned_tab_id, OwnedPanes};
 pub(crate) use pass::dispatch_pass;
-pub(crate) use pass::{
-    durable_owned_anchor_pane_ids, durable_owned_pane_ids, reconstruct_owned_tab_id,
-};
 pub(crate) use space::{validate_space_resolvable, workspace_cwd};
 
 use board_core::db::EnqueueRun;

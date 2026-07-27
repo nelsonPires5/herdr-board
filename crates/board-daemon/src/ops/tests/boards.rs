@@ -206,22 +206,11 @@ fn template_apply_rolls_back_columns_after_intermediate_wiring_failure() {
         )
         .unwrap();
 
-    let (events_tx, mut events_rx) = broadcast::channel(16);
-    let (dispatch_tx, mut dispatch_rx) = mpsc::unbounded_channel();
-    let (shutdown_tx, _shutdown_rx) = watch::channel(false);
-    let d = Arc::new(Daemon::new(
-        Store::new(db),
-        Config::default(),
-        DaemonSettings::default(),
-        path.clone(),
-        dir.path().join("board.sock"),
-        Arc::new(LocalSpawner::new()),
-        None,
-        None,
-        events_tx,
-        dispatch_tx,
-        shutdown_tx,
-    ));
+    let (d, mut events_rx, mut dispatch_rx) = testkit::daemon()
+        .db(db)
+        .db_path(path.clone())
+        .socket_path(dir.path().join("board.sock"))
+        .build_parts();
 
     let error = handle_request(
         &d,
@@ -234,14 +223,7 @@ fn template_apply_rolls_back_columns_after_intermediate_wiring_failure() {
         "{error}"
     );
 
-    assert!(matches!(
-        events_rx.try_recv(),
-        Err(broadcast::error::TryRecvError::Empty)
-    ));
-    assert!(matches!(
-        dispatch_rx.try_recv(),
-        Err(mpsc::error::TryRecvError::Empty)
-    ));
+    testkit::assert_no_effects(&mut events_rx, &mut dispatch_rx);
 
     drop(d);
     let reopened = Db::open(&path).unwrap();

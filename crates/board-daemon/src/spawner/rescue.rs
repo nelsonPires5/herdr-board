@@ -33,7 +33,7 @@ use super::placement::{
 };
 use super::HerdrLaunchPlan;
 use crate::dispatch::workspace_cwd;
-use crate::HERDR_PROTOCOL;
+use crate::herdr_conn::connect_checked_for;
 
 /// Everything a rescue needs. All of it is derived from the run row plus the
 /// live Herdr session — nothing is written back.
@@ -88,10 +88,10 @@ pub(crate) enum RescueOutcome {
 ///   separate `name` field, and `e2e/16-managed-p17.sh` matches `pane.agent`
 ///   against the agent *kind* (`pi`/`claude`), so `agent` is not the exclusive
 ///   name we chose and must not be compared to it. Presence is the same
-///   semantics `placement.rs` already relies on for `usable_anchor`, and it is
+///   semantics `placement::alloc` already relies on for `usable_anchor`, and it is
 ///   correct either way: when the managed process goes, the registration goes.
 /// - **configured** (`agent_kind: None`): intentionally unmanaged, so Herdr
-///   registers no agent for it at all (see `placement.rs`). The label is the only
+///   registers no agent for it at all (see `placement::alloc`). The label is the only
 ///   evidence, so a leftover configured shell cannot be distinguished from a live
 ///   one — recorded in `docs/design.md` as a limitation of unmanaged harnesses
 ///   rather than papered over.
@@ -167,15 +167,9 @@ pub(crate) fn rescue_run_pane(plan: &RescuePlan<'_>) -> anyhow::Result<RescueOut
         })
         .transpose()?;
 
-    let mut client = HerdrClient::connect(plan.socket).map_err(|error| {
-        let message = error.to_string();
-        anyhow::Error::new(error).context(format!("herdr unavailable: {message}"))
-    })?;
-    // Must precede any placement or launch action, exactly as in `spawn`.
-    client.require_protocol(HERDR_PROTOCOL).map_err(|error| {
-        let message = error.to_string();
-        anyhow::Error::new(error).context(format!("checking Herdr protocol: {message}"))
-    })?;
+    // The gate must precede any placement or launch action, exactly as in
+    // `spawn`; `connect_checked_for` is the one place that pairs the two.
+    let mut client = connect_checked_for(plan.socket, "the run-pane rescue")?;
 
     let managed = plan.execution.agent_kind.is_some();
 
@@ -198,7 +192,7 @@ pub(crate) fn rescue_run_pane(plan: &RescuePlan<'_>) -> anyhow::Result<RescueOut
     // it before splitting again: repeated presses of `o` would otherwise pile up
     // idle shells that nothing can ever collect, because a rescue leaves no run
     // row to reclaim them from. An actively working/blocked pane is never a
-    // candidate, mirroring `placement::reclaim_prior_children`.
+    // candidate, mirroring `placement::alloc::reclaim_prior_children`.
     for stale in candidates.iter().filter(|pane| {
         !matches!(
             pane.agent_status,

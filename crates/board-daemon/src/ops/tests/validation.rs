@@ -33,10 +33,7 @@ fn merged_invalid_updates_are_atomic_and_emit_no_event() {
     )
     .unwrap_err();
     assert_eq!(err.code(), 1);
-    assert!(matches!(
-        events.try_recv(),
-        Err(broadcast::error::TryRecvError::Empty)
-    ));
+    testkit::assert_no_events(&mut events);
     let unchanged = d.store.lock().get_card(card_id).unwrap().unwrap();
     assert_eq!(unchanged.space_ref.as_deref(), Some("feature"));
     assert_eq!(unchanged.space_cwd.as_deref(), Some("/repo"));
@@ -67,10 +64,7 @@ fn invalid_column_update_keeps_dependents_and_emits_no_event() {
     )
     .unwrap_err();
     assert_eq!(err.code(), 1);
-    assert!(matches!(
-        events.try_recv(),
-        Err(broadcast::error::TryRecvError::Empty)
-    ));
+    testkit::assert_no_events(&mut events);
     let unchanged = d.store.lock().get_column(id).unwrap().unwrap();
     assert_eq!(unchanged.harness_override.as_deref(), Some("claude"));
     assert_eq!(unchanged.effort_override.as_deref(), Some("high"));
@@ -143,4 +137,50 @@ fn switching_card_from_pi_to_claude_rejects_incompatible_effort() {
         .unwrap();
     assert_eq!(unchanged.harness, "pi");
     assert_eq!(unchanged.effort, Some(Effort::Off));
+}
+
+#[test]
+fn duplicate_column_name_is_a_bad_request_over_the_rpc() {
+    let d = test_daemon(Config::default());
+    let mut events = d.events_tx.subscribe();
+
+    let err = handle_request(&d, "column.create", json!({"name": "Todo"})).unwrap_err();
+
+    // Code 1, not 5: retrying this exact request can never succeed, so a
+    // scripting agent must be told to change it rather than to retry.
+    assert_eq!(err.code(), 1);
+    let message = err.to_string();
+    assert!(
+        message.contains(r#"column "Todo" already exists on this board"#),
+        "{message}"
+    );
+    assert!(!message.contains("sqlite"), "{message}");
+    assert!(!message.contains("columns.board_id"), "{message}");
+    testkit::assert_no_events(&mut events);
+    assert_eq!(d.store.lock().list_columns(BOARD_ID).unwrap().len(), 1);
+}
+
+#[test]
+fn duplicate_board_rename_is_a_bad_request_over_the_rpc() {
+    let d = test_daemon(Config::default());
+    let scoped = handle_request(&d, "board.open", json!({"scope_path": "/repo"})).unwrap();
+    let board_id = scoped["board"]["id"].as_i64().unwrap();
+    let mut events = d.events_tx.subscribe();
+
+    let err = handle_request(
+        &d,
+        "board.rename",
+        json!({"board_id": board_id, "name": "Global"}),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.code(), 1);
+    let message = err.to_string();
+    assert!(
+        message.contains(r#"board "Global" already exists"#),
+        "{message}"
+    );
+    assert!(!message.contains("sqlite"), "{message}");
+    testkit::assert_no_events(&mut events);
+    assert_eq!(d.store.lock().get_board(board_id).unwrap().name, "/repo");
 }

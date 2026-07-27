@@ -1,26 +1,21 @@
+//! Tab/pane allocation: choose (or create) a card's tab, keep its shell anchor,
+//! and split the run child from it. Every function here talks to Herdr; the
+//! pure sizing decisions live in [`super::geometry`].
+
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::Context;
 use board_herdr::{
-    AgentStatus, HerdrClient, HerdrError, Layout, LayoutPane, PaneInfo, PaneRenameParams,
-    PaneSplitParams, SplitDirection, TabCreateParams,
+    AgentStatus, HerdrClient, HerdrError, LayoutPane, PaneInfo, PaneRenameParams, PaneSplitParams,
+    SplitDirection, TabCreateParams,
 };
 
-pub(crate) const ERR_PANE_NOT_FOUND: &str = "pane_not_found";
-pub(crate) const ERR_EMPTY_TAB: &str = "empty_tab";
-pub(crate) const ERR_EMPTY_LAYOUT: &str = "empty_layout";
-pub(crate) const ERR_ANCHOR_TOO_SMALL: &str = "anchor_too_small";
-
-/// The root pane of a durable card tab is deliberately kept as a shell. These
-/// dimensions describe the smallest useful anchor/agent split; Herdr itself
-/// accepts the ratio but does not enforce a board-specific minimum.
-pub(crate) const ANCHOR_MIN_WIDTH: u64 = 24;
-pub(crate) const ANCHOR_MIN_HEIGHT: u64 = 6;
-pub(crate) const AGENT_MIN_WIDTH: u64 = 12;
-pub(crate) const AGENT_MIN_HEIGHT: u64 = 8;
-pub(crate) const ANCHOR_RATIO: f64 = 0.40;
-pub(crate) const RECOVERY_TARGET_RATIO: f64 = 0.75;
+use super::geometry::{initial_split_geometry, recovery_target_ratio, split_geometry};
+use super::race::{
+    cleanup_new_card_tab, close_owned_for_retry, mark_retryable_placement_race, ERR_EMPTY_LAYOUT,
+    ERR_EMPTY_TAB,
+};
 
 pub(crate) struct CardOwnership<'a> {
     pub(crate) owned_tab_id: Option<&'a str>,
@@ -393,157 +388,6 @@ fn split_run_child(
     })
 }
 
-pub(crate) fn initial_split_geometry(
-    layout: &Layout,
-    target_id: &str,
-) -> anyhow::Result<(SplitDirection, f64)> {
-    let target = layout
-        .panes
-        .iter()
-        .find(|pane| pane.pane_id == target_id)
-        .ok_or_else(|| anyhow::anyhow!("layout has no target pane {target_id}"))?;
-    let right_ok = target.rect.width >= ANCHOR_MIN_WIDTH + AGENT_MIN_WIDTH
-        && target.rect.height >= ANCHOR_MIN_HEIGHT.max(AGENT_MIN_HEIGHT);
-    let down_ok = target.rect.height >= ANCHOR_MIN_HEIGHT + AGENT_MIN_HEIGHT
-        && target.rect.width >= ANCHOR_MIN_WIDTH.max(AGENT_MIN_WIDTH);
-    let prefer_right = target.rect.width >= 2_u64.saturating_mul(target.rect.height);
-    let direction = if prefer_right && right_ok {
-        SplitDirection::Right
-    } else if down_ok {
-        SplitDirection::Down
-    } else if right_ok {
-        SplitDirection::Right
-    } else {
-        return Err(anyhow::anyhow!(
-            "{ERR_ANCHOR_TOO_SMALL}: pane {target_id} is {}x{}, need at least 36x14 for an anchor and agent",
-            target.rect.width,
-            target.rect.height
-        ));
-    };
-    let (split_axis, anchor_min, child_min) = match direction {
-        SplitDirection::Right => (target.rect.width, ANCHOR_MIN_WIDTH, AGENT_MIN_WIDTH),
-        SplitDirection::Down => (target.rect.height, ANCHOR_MIN_HEIGHT, AGENT_MIN_HEIGHT),
-    };
-    let min_ratio = anchor_min as f64 / split_axis as f64;
-    let max_ratio = 1.0 - child_min as f64 / split_axis as f64;
-    Ok((direction, ANCHOR_RATIO.clamp(min_ratio, max_ratio)))
-}
-
-pub(crate) fn recovery_target_ratio(
-    layout: &Layout,
-    target_id: &str,
-    direction: SplitDirection,
-) -> anyhow::Result<f64> {
-    let target = layout
-        .panes
-        .iter()
-        .find(|pane| pane.pane_id == target_id)
-        .ok_or_else(|| anyhow::anyhow!("layout has no target pane {target_id}"))?;
-    let axis = match direction {
-        SplitDirection::Right => target.rect.width,
-        SplitDirection::Down => target.rect.height,
-    };
-    let target_min = match direction {
-        SplitDirection::Right => AGENT_MIN_WIDTH,
-        SplitDirection::Down => AGENT_MIN_HEIGHT,
-    };
-    let anchor_min = match direction {
-        SplitDirection::Right => ANCHOR_MIN_WIDTH + AGENT_MIN_WIDTH,
-        SplitDirection::Down => ANCHOR_MIN_HEIGHT + AGENT_MIN_HEIGHT,
-    };
-    let total_min = target_min.saturating_add(anchor_min);
-    if axis < total_min {
-        return Err(anyhow::anyhow!(
-            "{ERR_ANCHOR_TOO_SMALL}: pane {target_id} is too small to recreate an anchor and split a child"
-        ));
-    }
-    let cross_axis = match direction {
-        SplitDirection::Right => target.rect.height,
-        SplitDirection::Down => target.rect.width,
-    };
-    let cross_min = match direction {
-        SplitDirection::Right => ANCHOR_MIN_HEIGHT.max(AGENT_MIN_HEIGHT),
-        SplitDirection::Down => ANCHOR_MIN_WIDTH.max(AGENT_MIN_WIDTH),
-    };
-    if cross_axis < cross_min {
-        return Err(anyhow::anyhow!(
-            "{ERR_ANCHOR_TOO_SMALL}: pane {target_id} is too narrow to recreate an anchor"
-        ));
-    }
-    let min_target_ratio = target_min as f64 / axis as f64;
-    let max_target_ratio = 1.0 - anchor_min as f64 / axis as f64;
-    Ok(RECOVERY_TARGET_RATIO.clamp(min_target_ratio, max_target_ratio))
-}
-
-pub(crate) fn split_geometry(
-    layout: &Layout,
-    target_id: &str,
-) -> anyhow::Result<(SplitDirection, f64)> {
-    let target = layout
-        .panes
-        .iter()
-        .find(|pane| pane.pane_id == target_id)
-        .ok_or_else(|| anyhow::anyhow!("layout has no target pane {target_id}"))?;
-    let right_ok = target.rect.width >= ANCHOR_MIN_WIDTH + AGENT_MIN_WIDTH
-        && target.rect.height >= ANCHOR_MIN_HEIGHT.max(AGENT_MIN_HEIGHT);
-    let down_ok = target.rect.height >= ANCHOR_MIN_HEIGHT + AGENT_MIN_HEIGHT
-        && target.rect.width >= ANCHOR_MIN_WIDTH.max(AGENT_MIN_WIDTH);
-    let prefer_right = target.rect.width >= 2_u64.saturating_mul(target.rect.height);
-    let direction = if prefer_right && right_ok {
-        SplitDirection::Right
-    } else if down_ok {
-        SplitDirection::Down
-    } else if right_ok {
-        SplitDirection::Right
-    } else {
-        return Err(anyhow::anyhow!(
-            "{ERR_ANCHOR_TOO_SMALL}: pane {} is {}x{}, need at least 36x14 for an anchor and agent",
-            target_id,
-            target.rect.width,
-            target.rect.height
-        ));
-    };
-    let (split_axis, cross_axis, anchor_min, child_min) = match direction {
-        SplitDirection::Right => (
-            target.rect.width,
-            target.rect.height,
-            ANCHOR_MIN_WIDTH,
-            AGENT_MIN_WIDTH,
-        ),
-        SplitDirection::Down => (
-            target.rect.height,
-            target.rect.width,
-            ANCHOR_MIN_HEIGHT,
-            AGENT_MIN_HEIGHT,
-        ),
-    };
-    let cross_min = match direction {
-        SplitDirection::Right => ANCHOR_MIN_HEIGHT.max(AGENT_MIN_HEIGHT),
-        SplitDirection::Down => ANCHOR_MIN_WIDTH.max(AGENT_MIN_WIDTH),
-    };
-    if split_axis < anchor_min.saturating_add(child_min) || cross_axis < cross_min {
-        return Err(anyhow::anyhow!(
-            "{ERR_ANCHOR_TOO_SMALL}: pane {target_id} is {}x{}, need at least {}x{} for an anchor and agent",
-            target.rect.width,
-            target.rect.height,
-            if matches!(direction, SplitDirection::Right) {
-                anchor_min + child_min
-            } else {
-                cross_min
-            },
-            if matches!(direction, SplitDirection::Right) {
-                cross_min
-            } else {
-                anchor_min + child_min
-            }
-        ));
-    }
-    let min_ratio = anchor_min as f64 / split_axis as f64;
-    let max_ratio = 1.0 - child_min as f64 / split_axis as f64;
-    let ratio = ANCHOR_RATIO.clamp(min_ratio, max_ratio);
-    Ok((direction, ratio))
-}
-
 fn grid_slot_result(panes: &[LayoutPane]) -> Result<(String, SplitDirection), HerdrError> {
     if panes.is_empty() {
         return Err(HerdrError::Protocol {
@@ -572,88 +416,6 @@ pub fn grid_slot(panes: &[LayoutPane]) -> (String, SplitDirection) {
     (target.pane_id.clone(), direction)
 }
 
-// ---------------------------------------------------------------------------
-// Placement retry / error helpers
-// ---------------------------------------------------------------------------
-
-/// Marks placement disappearance only at operations where restarting the
-/// complete placement is safe. Keeping `HerdrError` as the source preserves
-/// its typed protocol code in the anyhow chain.
-#[derive(Debug)]
-pub(crate) struct RetryablePlacementRace(pub(crate) HerdrError);
-
-impl std::fmt::Display for RetryablePlacementRace {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
-impl std::error::Error for RetryablePlacementRace {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.0)
-    }
-}
-
-pub(crate) fn mark_retryable_placement_race(error: HerdrError) -> anyhow::Error {
-    if is_placement_disappearance(&error) {
-        anyhow::Error::new(RetryablePlacementRace(error))
-    } else {
-        anyhow::Error::new(error)
-    }
-}
-
-pub(crate) fn is_retryable_placement_race(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause.downcast_ref::<RetryablePlacementRace>().is_some()
-            || cause
-                .downcast_ref::<RetryableRunnerPlacementRace>()
-                .is_some()
-    })
-}
-
-pub(crate) fn mark_retryable_runner_race(error: anyhow::Error) -> anyhow::Error {
-    let pane_disappeared = error.chain().any(|cause| {
-        cause
-            .downcast_ref::<HerdrError>()
-            .is_some_and(is_pane_not_found)
-    });
-    if pane_disappeared {
-        anyhow::Error::new(RetryableRunnerPlacementRace(error))
-    } else {
-        error
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct RetryableRunnerPlacementRace(anyhow::Error);
-
-impl std::fmt::Display for RetryableRunnerPlacementRace {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
-impl std::error::Error for RetryableRunnerPlacementRace {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(self.0.as_ref())
-    }
-}
-
-pub(crate) fn is_placement_disappearance(error: &HerdrError) -> bool {
-    matches!(
-        error,
-        HerdrError::Protocol { code, .. }
-            if matches!(code.as_str(), ERR_PANE_NOT_FOUND | ERR_EMPTY_TAB | ERR_EMPTY_LAYOUT)
-    )
-}
-
-pub(crate) fn is_pane_not_found(error: &HerdrError) -> bool {
-    matches!(
-        error,
-        HerdrError::Protocol { code, .. } if code == ERR_PANE_NOT_FOUND
-    )
-}
-
 /// Close only exact ended child panes from this card/tab before another split.
 /// Active/blocked panes are left untouched even when a stale database row says
 /// the run ended; foreign panes and the anchor are not candidates.
@@ -675,44 +437,4 @@ fn reclaim_prior_children(
             .with_context(|| format!("reclaiming prior board-owned child {}", pane.pane_id))?;
     }
     Ok(())
-}
-
-/// A fresh card tab has no durable ownership yet. If any later placement step
-/// fails, close only its newly-created root; closing that root also removes the
-/// otherwise empty tab. A race that already removed it is success.
-fn cleanup_new_card_tab(
-    client: &mut HerdrClient,
-    anchor_id: &str,
-    error: anyhow::Error,
-) -> anyhow::Error {
-    match client.pane_close(anchor_id) {
-        Ok(()) => error,
-        Err(cleanup_error) if is_pane_not_found(&cleanup_error) => error,
-        Err(cleanup_error) => error.context(format!(
-            "additionally failed to clean up newly created card-tab anchor {anchor_id}: {cleanup_error}"
-        )),
-    }
-}
-
-pub(crate) fn close_owned_for_retry(client: &mut HerdrClient, pane_id: &str) -> anyhow::Result<()> {
-    match client.pane_close(pane_id) {
-        Ok(()) => Ok(()),
-        Err(error) if is_pane_not_found(&error) => Ok(()),
-        Err(error) => Err(anyhow::Error::new(error)
-            .context(format!("herdr pane.close board-owned pane {pane_id}"))),
-    }
-}
-
-pub(crate) fn close_owned_after_error(
-    client: &mut HerdrClient,
-    pane_id: &str,
-    error: anyhow::Error,
-) -> anyhow::Error {
-    match client.pane_close(pane_id) {
-        Ok(()) => error,
-        Err(cleanup_error) if is_pane_not_found(&cleanup_error) => error,
-        Err(cleanup_error) => error.context(format!(
-            "additionally failed to close board-owned pane {pane_id}: {cleanup_error}"
-        )),
-    }
 }

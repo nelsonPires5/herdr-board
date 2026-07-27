@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use board_core::engine::AgentSignal;
 use board_core::protocol::{CardStatus, RunOutcome};
-use board_herdr::{watch_subscriptions, AgentStatus, HerdrClient, HerdrEvent, HerdrEvents};
+use board_herdr::{watch_subscriptions, AgentStatus, HerdrEvent, HerdrEvents};
 
 use super::{apply_signal, run_open};
 use crate::dispatch::finalize_run;
@@ -39,7 +39,7 @@ pub(super) trait WatchConnector: Send + Sync {
     fn snapshot(&self, socket: &std::path::Path) -> board_herdr::Result<WatchSnapshot>;
 }
 
-struct HerdrWatchConnector;
+pub(super) struct HerdrWatchConnector;
 
 impl WatchConnector for HerdrWatchConnector {
     fn subscribe(
@@ -52,7 +52,10 @@ impl WatchConnector for HerdrWatchConnector {
     }
 
     fn snapshot(&self, socket: &std::path::Path) -> board_herdr::Result<WatchSnapshot> {
-        let mut client = HerdrClient::connect(socket)?;
+        // A snapshot that answers is authoritative for this socket: a watched
+        // pane it omits is reported as `PaneExited` and finalizes the run. An
+        // incompatible socket must therefore fail here (Unknown), never answer.
+        let mut client = crate::herdr_conn::connect_checked(socket)?;
         let snapshot = client.session_snapshot()?;
         let panes = crate::herdr_snapshot::snapshot_pane_statuses(snapshot);
         Ok(WatchSnapshot { panes })
@@ -325,7 +328,11 @@ pub(super) fn handle_event_from_socket(
             if let Some(run_id) = find_run_by_pane(d, &pane_id, source_socket) {
                 if run_open(d, run_id) {
                     let msg = "pane exited without board done".to_string();
-                    let _ = finalize_run(
+                    // Highest-impact swallow in the daemon: this is the only
+                    // thing that closes a run whose pane died without `board
+                    // done`. If it fails silently the run stays open forever
+                    // with no output and no card movement.
+                    if let Err(error) = finalize_run(
                         d,
                         run_id,
                         RunOutcome::Fail,
@@ -333,7 +340,13 @@ pub(super) fn handle_event_from_socket(
                         Some(msg),
                         false,
                         false,
-                    );
+                    ) {
+                        tracing::error!(
+                            run_id,
+                            pane_id = %pane_id,
+                            "pane exit could not finalize the run; it stays open: {error}"
+                        );
+                    }
                 }
             }
         }

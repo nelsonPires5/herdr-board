@@ -25,9 +25,7 @@ fn require_agent_run(
             // BOARD_RUN_ID without first persisting a lifecycle row. Keep
             // that compatibility path, but do not weaken identity checks for
             // normal harnesses or for a durable run that belongs elsewhere.
-            let card = db
-                .get_card(card_id)?
-                .ok_or_else(|| Error::NotFound(format!("card {card_id}")))?;
+            let card = db.require_card(card_id)?;
             if card.harness == "fake" && db.open_run_for_card(card_id)?.is_none() {
                 return Ok(());
             }
@@ -65,9 +63,7 @@ fn comment_for_mutation(
 pub(super) fn comment_add(d: &Arc<Daemon>, p: CommentAddParams) -> Result<Value> {
     let (comment, card) = {
         let db = d.store.lock();
-        let card = db
-            .get_card(p.card_id)?
-            .ok_or_else(|| Error::NotFound(format!("card {}", p.card_id)))?;
+        let card = db.require_card(p.card_id)?;
         let author = match p.actor_run_id {
             Some(run_id) => {
                 let expected = format!("agent:{run_id}");
@@ -110,9 +106,7 @@ pub(super) fn comment_update(d: &Arc<Daemon>, p: CommentUpdateParams) -> Result<
     let (updated, card) = {
         let db = d.store.lock();
         let comment = comment_for_mutation(&db, p.id, p.actor_run_id)?;
-        let card = db
-            .get_card(comment.card_id)?
-            .ok_or_else(|| Error::NotFound(format!("card {}", comment.card_id)))?;
+        let card = db.require_card(comment.card_id)?;
         let updated = db.update_comment(comment.id, &p.body)?;
         (updated, card)
     };
@@ -129,9 +123,7 @@ pub(super) fn comment_delete(d: &Arc<Daemon>, p: CommentDeleteParams) -> Result<
     let card = {
         let db = d.store.lock();
         let comment = comment_for_mutation(&db, p.id, p.actor_run_id)?;
-        let card = db
-            .get_card(comment.card_id)?
-            .ok_or_else(|| Error::NotFound(format!("card {}", comment.card_id)))?;
+        let card = db.require_card(comment.card_id)?;
         db.soft_delete_comment(comment.id)?;
         card
     };

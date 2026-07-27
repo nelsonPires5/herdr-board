@@ -12,7 +12,7 @@ use crate::spawner::RuntimeHandle;
 use board_core::engine::AgentSignal;
 use board_core::model::{Card, Run};
 use board_core::protocol::RunOutcome;
-use board_herdr::{AgentStatus, HerdrClient};
+use board_herdr::AgentStatus;
 
 use crate::dispatch;
 use crate::session::SessionRegistry;
@@ -121,7 +121,10 @@ pub struct HerdrRuntime;
 impl Runtime for HerdrRuntime {
     fn snapshot(&self, target: &SessionTarget) -> Result<RuntimeSnapshot, ProbeFailure> {
         let socket = target.socket().ok_or(ProbeFailure::Transport)?;
-        let mut client = HerdrClient::connect(socket).map_err(classify_herdr_error)?;
+        // Only a valid snapshot omitting a pane classifies as `Gone`, so an
+        // incompatible socket must fail the gate rather than produce one.
+        let mut client =
+            crate::herdr_conn::connect_checked(socket).map_err(classify_herdr_error)?;
         let snapshot = client.session_snapshot().map_err(classify_herdr_error)?;
         let panes: Vec<(String, AgentStatus)> =
             crate::herdr_snapshot::snapshot_pane_statuses(snapshot)
@@ -163,15 +166,36 @@ pub async fn reconcile_once(
             (_, Some(pane_id)) => {
                 let runtime = runtime.clone();
                 let worker_target = target.clone();
-                let pane_id = pane_id.to_string();
-                tokio::task::spawn_blocking(move || {
+                let probed_pane = pane_id.to_string();
+                let probe = tokio::task::spawn_blocking(move || {
                     runtime
                         .snapshot(&worker_target)
-                        .map(|snapshot| snapshot.observe(&pane_id))
-                        .unwrap_or(RuntimeProbe::Unknown)
+                        .map(|snapshot| snapshot.observe(&probed_pane))
                 })
-                .await
-                .unwrap_or(RuntimeProbe::Unknown)
+                .await;
+                // Both collapses stay conservative (`Unknown` never finalizes a
+                // run), but `classify_herdr_error` already computed the precise
+                // reason — losing it unlogged made "remains unknown" unanswerable.
+                match probe {
+                    Ok(Ok(probe)) => probe,
+                    Ok(Err(failure)) => {
+                        tracing::warn!(
+                            run_id = run.id,
+                            pane_id,
+                            failure = ?failure,
+                            "reconciliation: runtime probe failed; treating the run as unknown"
+                        );
+                        RuntimeProbe::Unknown
+                    }
+                    Err(join_error) => {
+                        tracing::warn!(
+                            run_id = run.id,
+                            pane_id,
+                            "reconciliation: runtime probe task failed: {join_error}"
+                        );
+                        RuntimeProbe::Unknown
+                    }
+                }
             }
         };
         apply_observation(d, run, card, target, probe, clock.as_ref());
@@ -210,7 +234,7 @@ fn apply_observation(
                 return;
             }
             let message = "daemon restart: pane exited".to_string();
-            let _ = dispatch::finalize_run(
+            if let Err(error) = dispatch::finalize_run(
                 d,
                 run.id,
                 RunOutcome::Fail,
@@ -218,7 +242,13 @@ fn apply_observation(
                 Some(message),
                 false,
                 false,
-            );
+            ) {
+                tracing::error!(
+                    run_id = run.id,
+                    card_id = card.id,
+                    "reconciliation could not finalize a gone run; it stays open: {error}"
+                );
+            }
         }
         RuntimeProbe::Alive(status) => adopt_alive(d, run, card, target, status, clock),
     }

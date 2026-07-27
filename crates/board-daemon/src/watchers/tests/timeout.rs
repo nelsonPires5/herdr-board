@@ -75,7 +75,7 @@ fn stale_idle_expiry_after_working_is_ignored_without_sleeping() {
         .unwrap()
         .idle_since
         .is_none());
-    assert!(events.try_recv().is_err());
+    crate::testkit::assert_no_events(&mut events);
 }
 #[test]
 fn ticker_skips_awaiting_runs_for_both_idle_and_timeout() {

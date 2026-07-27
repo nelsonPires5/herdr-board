@@ -19,7 +19,7 @@ fn stale_signal_after_terminal_completion_is_ignored() {
         db.get_card(card_id).unwrap().unwrap().status,
         CardStatus::Done
     );
-    assert!(events.try_recv().is_err());
+    crate::testkit::assert_no_events(&mut events);
 }
 
 #[test]
@@ -38,7 +38,7 @@ fn stale_status_events_without_an_active_run_are_ignored() {
         d.store.lock().get_card(card_id).unwrap().unwrap().status,
         CardStatus::Running
     );
-    assert!(events.try_recv().is_err());
+    crate::testkit::assert_no_events(&mut events);
 }
 
 #[test]

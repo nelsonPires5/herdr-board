@@ -21,9 +21,7 @@ pub(super) fn column_update(d: &Arc<Daemon>, p: ColumnUpdateParams) -> Result<Va
     let col = {
         let _sched = d.sched.lock().unwrap();
         let db = d.store.lock();
-        let current = db
-            .get_column(p.id)?
-            .ok_or_else(|| Error::NotFound(format!("column {}", p.id)))?;
+        let current = db.require_column(p.id)?;
         let merged = merge_column_update(&current, &p);
         validate_column_update(&current, &merged, &p, &d.config)?;
         db.update_column(&p)?

@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 mod card_tabs;
+mod error;
 mod herdr;
 mod local;
 mod placement;
@@ -13,6 +14,7 @@ mod rescue;
 mod tests;
 
 pub use card_tabs::CardTabRegistry;
+pub use error::SpawnError;
 pub use herdr::HerdrSpawner;
 pub use local::LocalSpawner;
 pub(crate) use placement::CardOwnership;
@@ -82,7 +84,10 @@ pub struct RuntimeHandle {
 
 /// Launch, kill, and liveness-check agent processes.
 pub trait Spawner: Send + Sync {
-    fn spawn(&self, req: &HerdrLaunchPlan) -> anyhow::Result<RuntimeHandle>;
+    /// Launch one agent. The [`SpawnError`] discriminant keeps the Herdr
+    /// failure mode (deadline / protocol refusal / dropped transport) legible
+    /// at the dispatch boundary instead of flattening it into a string.
+    fn spawn(&self, req: &HerdrLaunchPlan) -> Result<RuntimeHandle, SpawnError>;
     fn kill(&self, h: &RuntimeHandle) -> anyhow::Result<()>;
     fn is_alive(&self, h: &RuntimeHandle) -> anyhow::Result<bool>;
     /// The shared card-tab allocation registry, when this spawner places panes

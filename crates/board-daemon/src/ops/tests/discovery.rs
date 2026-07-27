@@ -71,10 +71,11 @@ fn run_focus_reports_a_recorded_pane_that_no_longer_exists() {
     // `pane.focus` would still "succeed" in this fake; the run must be refused
     // by the explicit `pane.get` liveness check before that, and never fall
     // back to another run's pane.
-    let (_dir, socket) = fake_herdr_with_pane(
+    let herdr = fake_herdr_with_pane(
         "\"result\":{\"type\":\"pane_info\",\"pane\":{\"pane_id\":\"w1:p9\",\"terminal_id\":\"term\",\"workspace_id\":\"w1\",\"tab_id\":\"w1:t1\",\"focused\":true,\"revision\":0,\"agent_status\":\"idle\"}}",
         false,
     );
+    let socket = herdr.socket.clone();
     let d = test_daemon_with_registry(
         Config::default(),
         Some(SessionRegistry::new(socket.clone())),
@@ -96,7 +97,8 @@ fn run_focus_reports_a_recorded_pane_that_no_longer_exists() {
 
 #[test]
 fn run_focus_propagates_herdr_error_and_returns_success_ids() {
-    let (_dir, socket) = fake_herdr("\"error\":{\"code\":\"pane_not_found\",\"message\":\"gone\"}");
+    let herdr = fake_herdr("\"error\":{\"code\":\"pane_not_found\",\"message\":\"gone\"}");
+    let socket = herdr.socket.clone();
     let d = test_daemon_with_registry(
         Config::default(),
         Some(SessionRegistry::new(socket.clone())),
@@ -111,9 +113,10 @@ fn run_focus_propagates_herdr_error_and_returns_success_ids() {
     assert_eq!(err.code(), 4);
     assert!(err.to_string().contains("gone"));
 
-    let (_dir, socket) = fake_herdr(
+    let herdr = fake_herdr(
             "\"result\":{\"type\":\"pane_info\",\"pane\":{\"pane_id\":\"w1:p9\",\"terminal_id\":\"term\",\"workspace_id\":\"w1\",\"tab_id\":\"w1:t1\",\"focused\":true,\"revision\":0,\"agent_status\":\"idle\"}}",
         );
+    let socket = herdr.socket.clone();
     let d = test_daemon_with_registry(
         Config::default(),
         Some(SessionRegistry::new(socket.clone())),
@@ -188,7 +191,7 @@ fn run_focus_rescues_a_dead_pane_by_resuming_in_a_new_pane_without_touching_the_
 
     // The harness was started in *resume* mode with the persisted conversation
     // id, and the original task was NOT re-sent (no agent.prompt at all).
-    let starts = fake.agent_starts.lock().unwrap().clone();
+    let starts = fake.agent_starts();
     assert_eq!(starts.len(), 1, "exactly one agent.start");
     let args: Vec<String> = starts[0]["params"]["args"]
         .as_array()
@@ -293,7 +296,7 @@ fn run_focus_rescue_dedup_survives_a_column_rename() {
     assert_eq!(first["action"], "rescued");
     let pane = first["pane_id"].as_str().unwrap().to_string();
     // The marker names only the card and the run.
-    let marker = fake.agent_starts.lock().unwrap()[0]["params"]["name"]
+    let marker = fake.agent_starts()[0]["params"]["name"]
         .as_str()
         .unwrap()
         .to_string();
@@ -708,4 +711,50 @@ fn space_list_without_herdr_is_herdr_unavailable() {
     let d = test_daemon(Config::default());
     let err = handle_request(&d, "space.list", json!({})).unwrap_err();
     assert_eq!(err.code(), 4);
+}
+
+#[test]
+fn space_list_rejects_a_socket_with_the_wrong_protocol() {
+    let herdr = fake_herdr_with_protocol(16);
+    let d = test_daemon_with_registry(
+        Config::default(),
+        Some(SessionRegistry::new(herdr.socket.clone())),
+    );
+    let err = handle_request(&d, "space.list", json!({})).unwrap_err();
+    assert_eq!(err.code(), 4);
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Herdr 0.7.5 with protocol 17 is required"),
+        "message: {msg}"
+    );
+    // The gate is the first and only request: workspace.list never happens.
+    assert_eq!(herdr.methods(), vec!["ping"]);
+}
+
+#[test]
+fn run_focus_rejects_a_socket_with_the_wrong_protocol() {
+    let herdr = fake_herdr_with_protocol(16);
+    let origin_dir = tempfile::tempdir().unwrap();
+    let origin = origin_dir.path().join("origin.sock");
+    std::os::unix::fs::symlink(&herdr.socket, &origin).unwrap();
+    let d = test_daemon_with_registry(
+        Config::default(),
+        Some(SessionRegistry::new(herdr.socket.clone())),
+    );
+    let (card_id, run_id) = add_run_with_pane(&d, Some("w1:p1"));
+    let err = handle_request(
+        &d,
+        "run.focus",
+        json!({"card_id":card_id,"run_id":run_id,"origin_socket":origin}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), 4);
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Herdr 0.7.5 with protocol 17 is required"),
+        "message: {msg}"
+    );
+    // The liveness probe for the recorded pane must not reach an incompatible
+    // socket, so the whole focus stops at the gate.
+    assert_eq!(herdr.methods(), vec!["ping"]);
 }
