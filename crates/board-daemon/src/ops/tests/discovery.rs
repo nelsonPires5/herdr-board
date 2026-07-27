@@ -716,9 +716,20 @@ fn space_list_without_herdr_is_herdr_unavailable() {
 #[test]
 fn space_list_rejects_a_socket_with_the_wrong_protocol() {
     let herdr = fake_herdr_with_protocol(16);
+    // Seed the listing: resolving the default session otherwise shells out to
+    // `herdr session list --json`, which makes this assert on whatever herdr is
+    // on PATH rather than on the protocol gate — green locally, red in CI.
     let d = test_daemon_with_registry(
         Config::default(),
-        Some(SessionRegistry::new(herdr.socket.clone())),
+        Some(SessionRegistry::with_entries(
+            herdr.socket.clone(),
+            vec![SessionEntry {
+                name: "default".to_string(),
+                default: true,
+                running: true,
+                socket_path: herdr.socket.display().to_string(),
+            }],
+        )),
     );
     let err = handle_request(&d, "space.list", json!({})).unwrap_err();
     assert_eq!(err.code(), 4);

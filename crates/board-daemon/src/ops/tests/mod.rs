@@ -1,5 +1,5 @@
 use super::*;
-use crate::session::SessionRegistry;
+use crate::session::{SessionEntry, SessionRegistry};
 use crate::testkit::{self, FakeHerdr};
 use board_core::config::{Config, HarnessDef};
 use board_core::db::{Db, EnqueueRun, FinalizeRun, LifecycleFaultPoint, BOARD_ID};

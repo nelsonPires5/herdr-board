@@ -378,6 +378,7 @@ Checklist:
 | Gotcha | What to do |
 |---|---|
 | **AF_UNIX 108-char limit** | Test db/socket must live under a short path. `e2e_isolate` uses `/tmp/hb-e2e.XXXXXX`, not `$TMPDIR` (which may be long). |
+| **A unit test must not need `herdr` on `PATH`** | Layers 1–3 run without a live herdr, but `SessionRegistry::resolve` shells out to `herdr session list --json` even for the default session (only to name it), so any test reaching it passes on a developer machine and fails in CI, which has no herdr. Seed the listing with `SessionRegistry::with_entries` instead of `::new`. Reproduce CI locally before pushing: `env -u HERDR_BIN_PATH PATH="$(echo "$PATH" \| tr ':' '\n' \| grep -v "$HOME/.local/bin" \| paste -sd:):$HOME/.cargo/bin" cargo test --workspace --all-features`. |
 | **done-race** | Managed built-ins still require a registered pane, so an instant `board done` for a queued built-in run is rejected. A configured harness is different: its exact `board done` is accepted even before runner registration, and the fake agent still sleeps `FAKE_AGENT_SLEEP` (default 1.5s) before reporting in ordinary scenarios. |
 | **A pane dies with its process** | A herdr pane closes when its command exits. To inspect a live layout, keep the process alive — set `FAKE_AGENT_HOLD` (e.g. 300) so the agent sleeps **after** `board done`. Cleanup closes the workspace to end it. |
 | **herdr closes the socket per request** | herdr serves one request per connection. `hrpc.py` (and `board-herdr`'s client) open a fresh connection every call — don't try to reuse one. |

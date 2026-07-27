@@ -91,6 +91,27 @@ impl SessionRegistry {
         }
     }
 
+    /// Build a registry whose listing is already known, so no `herdr` binary is
+    /// ever invoked.
+    ///
+    /// The Rust suite must pass without a live herdr (see `AGENTS.md`), but
+    /// `resolve` consults the listing even for the default session — only to
+    /// give the socket a display name. A test that seeds the cache exercises
+    /// the code under test instead of whatever `herdr` happens to be on `PATH`;
+    /// without this, such a test passes on a developer machine and fails in CI.
+    #[cfg(test)]
+    pub(crate) fn with_entries(default_socket: PathBuf, entries: Vec<SessionEntry>) -> Self {
+        SessionRegistry {
+            herdr_bin: "/nonexistent/herdr".to_string(),
+            default_socket,
+            // Long enough that the seeded entries never expire mid-test and
+            // silently fall back to the shell-out this exists to avoid.
+            ttl: Duration::from_secs(86_400),
+            fetch_timeout: FETCH_TIMEOUT,
+            cache: Mutex::new(Some((Instant::now(), entries))),
+        }
+    }
+
     /// The daemon's bound herdr socket (default session).
     pub fn default_socket(&self) -> &Path {
         &self.default_socket
