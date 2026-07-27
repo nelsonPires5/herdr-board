@@ -10,7 +10,7 @@ Re-run the install command to update — Herdr has no separate update command, s
 existing plugin:
 
 ```bash
-herdr plugin install nelsonPires5/herdr-board --ref v0.9.0 --yes
+herdr plugin install nelsonPires5/herdr-board --ref v0.9.1 --yes
 ```
 
 The build step requests a graceful stop (`board daemon --stop`) before recompiling, so the new

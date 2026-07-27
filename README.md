@@ -48,7 +48,7 @@ The daemon checks the selected Herdr socket before workspace discovery and pane 
 any Herdr version other than 0.7.5 and any protocol other than 17; protocol 16 is not supported.
 
 ```bash
-herdr plugin install nelsonPires5/herdr-board --ref v0.9.0
+herdr plugin install nelsonPires5/herdr-board --ref v0.9.1
 ```
 
 Precise live lifecycle status also requires Herdr's integration for the harness you dispatch (for
