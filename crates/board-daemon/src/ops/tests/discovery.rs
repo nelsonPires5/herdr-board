@@ -655,14 +655,18 @@ fn harness_capabilities_pi_overlays_live_catalog() {
     let models = v["models"].as_array().unwrap();
     assert_eq!(models.len(), 1);
     assert_eq!(models[0]["id"], "zai/glm-5.2");
-    // Per-model efforts come from thinkingLevelMap, in canonical order.
+    // Omitted standard levels remain supported; explicit extended levels are
+    // included, all in canonical order.
     let efforts: Vec<&str> = models[0]["efforts"]
         .as_array()
         .unwrap()
         .iter()
         .map(|e| e.as_str().unwrap())
         .collect();
-    assert_eq!(efforts, vec!["minimal", "xhigh"]);
+    assert_eq!(
+        efforts,
+        vec!["off", "minimal", "low", "medium", "high", "xhigh"]
+    );
     // model_freeform stays true: arbitrary model strings are still accepted.
     assert_eq!(v["model_freeform"], true);
 }

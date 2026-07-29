@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+- fix(core,tui): honor Pi `thinkingLevelMap` missing/string/null semantics in model effort menus.
+
 ## [0.9.1] - 2026-07-27
 
 - [#47](https://github.com/nelsonPires5/herdr-board/pull/47) feat(cli)!: `board` exit codes are meaningful instead of always `1` — an RPC error exits with the daemon's protocol code for `1..=5` so a script can branch on `$?`, a protocol code outside that range exits `70` (`EX_SOFTWARE`, because an exit status is taken modulo 256 and `256` would read as success) while the `--json` envelope still carries the exact code, and an error the CLI itself raised (usage/parse, a declined confirmation, a bad enum value, a column reference that resolves to nothing client-side, a missing `$BOARD_CARD_ID`) exits `64` (`EX_USAGE`).
