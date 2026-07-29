@@ -9,7 +9,8 @@ This repo has two workflows:
    It checks the exact green run SHA and publishes only when the workspace version changed in
    `Cargo.toml` versus that commit's first parent.
 
-A normal commit is a successful no-op. No live e2e run is part of either workflow.
+A normal commit is a successful no-op. The unchanged Release workflow still consumes the existing
+`CI` result; that result now includes the provider-free live E2E job before publication can begin.
 
 ## Version and verification contract
 
@@ -45,7 +46,8 @@ it does not authorize publication.
 
 ## Release gate
 
-The Release workflow consumes only a successful CI `workflow_run` satisfying all of these:
+The Release workflow consumes only a successful CI `workflow_run`—including its dependent live E2E
+job—satisfying all of these:
 
 - `workflow_run.event == push` and `head_branch == main`;
 - `Cargo.toml` version at `head_sha` differs from the version at `head_sha^1`.

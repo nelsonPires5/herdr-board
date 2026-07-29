@@ -136,8 +136,43 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # Unit / integration tests are hermetic: live-herdr tests are #[ignore]d and
-      # the live e2e suite (e2e/run-all.sh) is run out-of-band, so no herdr binary
-      # is needed — see docs/testing.md's gotcha on tests that shell out to herdr.
+      # Unit / integration tests are hermetic: live-herdr tests are #[ignore]d,
+      # so this job needs no Herdr binary. The dependent live-e2e job owns that.
       - name: Rust tests
         run: cargo test --workspace --all-features
+
+  live-e2e:
+    name: live-e2e
+    needs: [fmt, clippy, docs, scripts, e2e-safety, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      HERDR_CACHE_DIR: ${{ runner.tool_cache }}/herdr-board-0.7.5-linux-x86_64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Cache Herdr 0.7.5
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.HERDR_CACHE_DIR }}
+          key: herdr-${{ runner.os }}-x86_64-0.7.5-3dc83288073e4c2d3c679a30e7be97bcca9141c6fd17dbbb9219142e95c59253
+
+      - name: Provider-free live E2E
+        run: bash e2e/ci.sh
+
+      - name: Upload live E2E evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          path: e2e-artifacts
+          if-no-files-found: warn
+          retention-days: 30

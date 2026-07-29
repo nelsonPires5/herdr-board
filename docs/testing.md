@@ -14,9 +14,8 @@ unit / pure (per crate)                 no I/O, no daemon        — cargo test
                                            workspaces
 ```
 
-The first three run in CI (`cargo test --workspace --all-features`); the live e2e
-suite does **not** (it needs Herdr 0.7.5 and boots a real ephemeral server) — see
-[Running](#running).
+All four layers run in CI. The live job starts only after the cheaper gates pass, installs the
+pinned Herdr 0.7.5 binary, and boots only suite-owned ephemeral servers — see [Running](#running).
 
 ## The pyramid
 
@@ -396,6 +395,7 @@ Checklist:
 e2e/run-all.sh                  # build once, run all scenarios, print a summary
 e2e/run-all.sh --keep           # keep each scenario's owned session/workspaces
 e2e/run-all.sh --require-all    # fail if any selected scenario skips
+bash e2e/ci.sh                  # CI-equivalent pin/verify/run/export wrapper (Linux x86_64)
 e2e/run-all.sh 04 07            # only scenarios matching a filename filter
 scripts/e2e.sh                  # compat wrapper -> run-all.sh
 bash e2e/test-harness.sh         # static Linux/macOS safety gate; no Herdr
@@ -409,10 +409,14 @@ E2E_REAL_CLAUDE_HAIKU=1 e2e/real-claude-haiku-smoke.sh  # one authorized Haiku/l
   session; scenario 03 additionally owns an independently tokened secondary session.
 - Exit codes: scenario `0` = PASS, `3` = SKIP, other = FAIL; `run-all.sh` exits
   non-zero if any scenario FAILED.
-- **The live suite is not in CI.** CI runs layers 1–3 plus the Python tier and
-  `bash e2e/test-harness.sh`, the provider-free static ownership gate that starts no Herdr — see
-  the [test gates](README.md#test-gates-single-source). The live e2e suite needs Herdr 0.7.5 to
-  boot a real ephemeral protocol-17 server, so it is run by a human/orchestrator instead.
+- **The provider-free live suite runs in CI.** After the static/Python/Rust jobs succeed,
+  `bash e2e/ci.sh` installs or reuses only the pinned SHA-verified Herdr 0.7.5 Linux x86_64 binary,
+  verifies protocol 17, and runs every standard scenario with `--require-all`. It never enables
+  the real-Pi or real-Claude opt-ins or propagates provider credentials. The wrapper preserves the
+  suite's newly-created private artifact root, copies only that exact validated root into
+  `e2e-artifacts/`, and the workflow uploads the evidence under `if: always()` for 30 days. The
+  static `bash e2e/test-harness.sh` gate remains separate and starts no Herdr — see the
+  [test gates](README.md#test-gates-single-source).
 
 ### Multi-session (`03-sessions.sh`)
 
