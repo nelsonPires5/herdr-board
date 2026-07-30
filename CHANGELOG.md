@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-30
+
 - [#50](https://github.com/nelsonPires5/herdr-board/pull/50) fix(core,tui): honor Pi `thinkingLevelMap` missing/string/null semantics in model effort menus.
 - [#51](https://github.com/nelsonPires5/herdr-board/pull/51) feat(daemon,herdr): add private daily redacted NDJSON diagnostics with 30-day retention.
 - [#52](https://github.com/nelsonPires5/herdr-board/pull/52) chore(ci): run the complete provider-free live E2E suite with pinned Herdr and always-uploaded 30-day evidence.
@@ -327,7 +329,8 @@ a visible herdr pane. Ships as a single `board` binary (TUI + daemon + CLI) and 
 - **Packaging.** `herdr-plugin.toml` manifest, and `scripts/` for build, install (guarded behind
   `--yes`), the open-or-focus launcher, a raw protocol client, and a live-herdr e2e smoke test.
 
-[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.10.0
 [0.9.1]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.9.1
 [0.9.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.9.0
 [0.8.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.8.0

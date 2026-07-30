@@ -15,7 +15,7 @@ checks out the source, builds the release binary, registers the plugin, and copi
 noninteractive install is available:
 
 ```bash
-herdr plugin install nelsonPires5/herdr-board --ref v0.9.1 --yes
+herdr plugin install nelsonPires5/herdr-board --ref v0.10.0 --yes
 ```
 
 Set `HERDR_BOARD_CLI_INSTALL_DIR` to an absolute user bin directory before installing to override
