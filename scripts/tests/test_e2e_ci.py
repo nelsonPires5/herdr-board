@@ -27,6 +27,11 @@ class LiveE2ECIContractTests(unittest.TestCase):
         self.assertIn("permissions:\n      contents: read", job)
         self.assertIn("persist-credentials: false", job)
 
+    def test_workflow_uses_runner_context_only_inside_steps(self) -> None:
+        job = self.workflow.split("  live-e2e:", 1)[1]
+        job_preamble = job.split("    steps:", 1)[0]
+        self.assertNotIn("${{ runner.", job_preamble)
+
     def test_workflow_runs_only_the_checked_in_wrapper_and_always_uploads(self) -> None:
         job = self.workflow.split("  live-e2e:", 1)[1]
         self.assertEqual(re.findall(r"^\s*run:\s*(.+)$", job, re.M), ["bash e2e/ci.sh"])
