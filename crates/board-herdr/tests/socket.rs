@@ -7,9 +7,10 @@
 //! reply (or closes it to simulate a disconnect). `serve_stream` hands the raw
 //! stream to a closure for the persistent event-subscription case.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -24,6 +25,34 @@ use serde_json::Value;
 enum Action {
     Reply(String),
     Close,
+}
+
+#[derive(Clone, Default)]
+struct TraceBuffer(Arc<Mutex<Vec<u8>>>);
+
+struct TraceWriter(Arc<Mutex<Vec<u8>>>);
+
+impl Write for TraceWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TraceBuffer {
+    type Writer = TraceWriter;
+    fn make_writer(&'a self) -> Self::Writer {
+        TraceWriter(self.0.clone())
+    }
+}
+
+impl TraceBuffer {
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
 }
 
 fn temp_sock() -> PathBuf {
@@ -725,7 +754,11 @@ fn subscribe_handshake_timeout_is_cleared_for_blocking_iteration() {
         if reader.read_line(&mut line).unwrap_or(0) == 0 {
             return;
         }
-        writeln!(writer, r#"{{"id":"subscribe","result":{{}}}}"#).unwrap();
+        writeln!(
+            writer,
+            r#"{{"id":"subscribe","result":{{"type":"subscription_started"}}}}"#
+        )
+        .unwrap();
         thread::sleep(Duration::from_millis(100));
         writeln!(
             writer,
@@ -742,6 +775,121 @@ fn subscribe_handshake_timeout_is_cleared_for_blocking_iteration() {
     assert!(
         matches!(events.next(), Some(HerdrEvent::PaneExited { pane_id, .. }) if pane_id == "p2")
     );
+}
+
+#[test]
+fn calls_and_subscriptions_emit_metadata_only_completion_records() {
+    const PARAM_SENTINEL: &str = "HERDR_PARAMS_SECRET_d2a7";
+    const RESULT_SENTINEL: &str = "HERDR_RESULT_SECRET_f10c";
+    const EVENT_SENTINEL: &str = "HERDR_EVENT_SECRET_88ba";
+    const CODE_SENTINEL: &str = "HERDR_ERROR_CODE_SECRET_/tmp/credential.sock";
+    let call_path = serve_calls(|req| match req["method"].as_str() {
+        Some("diagnostic.success") => reply_for(req, r#"{"payload":"HERDR_RESULT_SECRET_f10c"}"#),
+        Some("diagnostic.untrusted_code") => Action::Reply(format!(
+            r#"{{"id":"{}","error":{{"code":"HERDR_ERROR_CODE_SECRET_/tmp/credential.sock","message":"refused"}}}}"#,
+            req["id"].as_str().unwrap()
+        )),
+        _ => Action::Reply(format!(
+            r#"{{"id":"{}","error":{{"code":"invalid_request","message":"refused"}}}}"#,
+            req["id"].as_str().unwrap()
+        )),
+    });
+    let stream_path = serve_stream(|stream| {
+        let mut w = stream.try_clone().unwrap();
+        let mut r = BufReader::new(stream);
+        let mut line = String::new();
+        if r.read_line(&mut line).unwrap_or(0) == 0 {
+            return;
+        }
+        writeln!(
+            w,
+            r#"{{"id":"subscribe","result":{{"type":"subscription_started","ignored":"HERDR_EVENT_SECRET_88ba"}}}}"#
+        )
+        .unwrap();
+    });
+    let captured = TraceBuffer::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(captured.clone())
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+    // A process-global capture is deliberate in this integration-test binary:
+    // scoped dispatches race tracing's global callsite-interest cache when the
+    // rest of the socket suite runs in parallel. The arbitrary diagnostic
+    // methods all collapse to the stable `<unknown>` label.
+    tracing::subscriber::set_global_default(subscriber).expect("install test subscriber once");
+    let mut client = HerdrClient::connect(&call_path).unwrap();
+    assert!(client
+        .call(
+            "diagnostic.success",
+            serde_json::json!({"secret": PARAM_SENTINEL})
+        )
+        .is_ok());
+    assert!(client
+        .call(
+            "diagnostic.failure",
+            serde_json::json!({"secret": PARAM_SENTINEL})
+        )
+        .is_err());
+    assert!(client
+        .call("diagnostic.untrusted_code", serde_json::json!({}))
+        .is_err());
+    let _events = HerdrEvents::connect(&stream_path, &[Subscription::pane_exited()]).unwrap();
+
+    let text = captured.text();
+    let records: Vec<&str> = text
+        .lines()
+        .filter(|line| {
+            line.contains("method=\"<unknown>\"") || line.contains("Herdr subscription completed")
+        })
+        .collect();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|line| line.contains("method=\"<unknown>\""))
+            .count(),
+        3,
+        "completion records: {text}"
+    );
+    assert!(
+        records.iter().any(|line| {
+            line.contains("method=\"<unknown>\"") && line.contains("outcome=\"ok\"")
+        }),
+        "{text}"
+    );
+    assert!(
+        records.iter().any(|line| {
+            line.contains("method=\"<unknown>\"")
+                && line.contains("error_category=\"protocol\"")
+                && line.contains("error_code=\"invalid_request\"")
+        }),
+        "{text}"
+    );
+    assert!(
+        records.iter().any(|line| {
+            line.contains("method=\"<unknown>\"")
+                && line.contains("error_code=\"unknown_protocol\"")
+        }),
+        "{text}"
+    );
+    assert!(
+        records
+            .iter()
+            .any(|line| line.contains("method=\"events.subscribe\"")
+                && line.contains("subscription_count=1")),
+        "{text}"
+    );
+    for record in records {
+        assert!(record.contains("duration_ms="), "{record}");
+    }
+    assert!(!text.contains(PARAM_SENTINEL));
+    assert!(!text.contains(RESULT_SENTINEL));
+    assert!(!text.contains(EVENT_SENTINEL));
+    assert!(!text.contains(CODE_SENTINEL));
+    assert!(!text.contains("diagnostic."));
+    assert!(!text.contains("params"));
+    assert!(!text.contains("result"));
 }
 
 #[test]

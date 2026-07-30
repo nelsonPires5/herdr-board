@@ -28,5 +28,22 @@ pub enum HerdrError {
     Disconnected,
 }
 
+/// Return only protocol codes whose spelling is part of the supported Herdr
+/// contract. Error envelopes are remote input, so unknown code strings must
+/// not become diagnostic fields.
+pub(crate) fn diagnostic_protocol_code(code: &str) -> &'static str {
+    match code {
+        "agent_name_taken" => "agent_name_taken",
+        "agent_pane_busy" => "agent_pane_busy",
+        "incompatible_protocol" => "incompatible_protocol",
+        "internal_error" => "internal_error",
+        "invalid_request" => "invalid_request",
+        "pane_not_found" => "pane_not_found",
+        "unsupported_agent_kind" => "unsupported_agent_kind",
+        "workspace_not_found" => "workspace_not_found",
+        _ => "unknown_protocol",
+    }
+}
+
 /// Convenience alias.
 pub type Result<T> = std::result::Result<T, HerdrError>;

@@ -49,7 +49,8 @@ runner action. A mismatch fails the run before workspace mutation.
 ## Auto-start
 
 `board tui` and every CLI subcommand try to connect; on failure they spawn one detached
-`board daemon` child (stdout+stderr → `~/.local/share/herdr-board/daemon.log`), then retry with
+`board daemon` child (pre-subscriber stderr → private, truncated `logs/bootstrap.log`; structured
+runtime diagnostics → daily `logs/daemon.YYYY-MM-DD.ndjson`), then retry with
 backoff for ~3s. The child owns a new process group led by its exact PID; there is deliberately no
 double-fork or `setsid`, so diagnostics and the safe harness retain an unambiguous owner token.
 Lifecycle control uses the daemon socket (`daemon.stop`), never a broad process-group kill. Daemon
@@ -73,6 +74,15 @@ as `{}` while a named session serializes as `{ "session": "..." }`, preserving t
 The daemon owns **all** Herdr interaction (`AGENTS.md`): no client opens a Herdr socket or runs the
 `herdr` binary for itself. `pane.set_title` exists for exactly that reason — it is how the TUI
 plugin pane relabels its own border.
+
+## Request diagnostics
+
+boardd emits one metadata-only completion diagnostic for every parsed request and subscription
+acknowledgement: method, daemon-generated numeric `(conn, req_id)` correlation, duration, outcome,
+and protocol error code when failed. The arbitrary wire request ID is preserved in its response but
+never becomes diagnostic metadata; unknown method strings are recorded as `<unknown>`. Malformed
+input receives bounded parse metadata. Request parameters and response results are never attached
+to diagnostics.
 
 ## Methods
 
@@ -322,7 +332,7 @@ it, a residual configured-script orphan is an explicitly documented limitation.
 
 ### harness / spaces
 - `harness.capabilities {harness}` → `{harness, models:[{id, efforts:[…]}], model_freeform: bool, default_efforts:[…], permission_modes:[…], resume}`. `default_efforts` is serde-defaulted for backward-compatible clients and applies when model is omitted/free-form; a known model's own efforts remain authoritative. `resume` is `"by_conversation_id"` or `"unsupported"` and answers "can this harness re-attach to a conversation it recorded?" — the question `run.focus` must ask before reopening a run whose pane is gone. It is serde-defaulted to `"unsupported"`, so an older payload fails closed, and there is deliberately no universal-syntax assumption: each adapter declares it.
-  - Built-in `pi`: static `models:[]`, `model_freeform:true`, `default_efforts:["off","minimal","low","medium","high","xhigh","max"]`, `permission_modes:[]`. Pi's catalog is user/provider-specific, so the daemon overlays a **live** catalog when it can resolve the pi agent dir (`$PI_CODING_AGENT_DIR`, else `~/.pi/agent`): it reads `auth.json` for the authenticated providers, then `models-store.json` and keeps only those providers' models as `provider/model` ids with per-model efforts from each model's `thinkingLevelMap` (the full thinking ladder when a model has none). This reproduces `pi --list-models` (provider-auth scoped) with richer per-model effort data. If the files are missing/unreadable it falls back to shelling out to `pi --list-models`, and finally to the static free-form catalog. `model_freeform` stays `true`, so arbitrary model strings remain valid. Tests leave the agent dir unset, so the catalog stays the static `models:[]`.
+  - Built-in `pi`: static `models:[]`, `model_freeform:true`, `default_efforts:["off","minimal","low","medium","high","xhigh","max"]`, `permission_modes:[]`. Pi's catalog is user/provider-specific, so the daemon overlays a **live** catalog when it can resolve the pi agent dir (`$PI_CODING_AGENT_DIR`, else `~/.pi/agent`): it reads `auth.json` for the authenticated providers, then `models-store.json` and keeps only those providers' models as `provider/model` ids with per-model efforts from each model's `thinkingLevelMap`. Pi's map is tri-state: for standard levels `off` through `high`, an omitted key uses Pi's provider-default mapping, a string is supported with that mapping, and `null` is unsupported; for extended `xhigh`/`max`, only an explicit string is supported (omitted or `null` is unsupported). Efforts remain in canonical ascending order. This reproduces `pi --list-models` (provider-auth scoped) with richer per-model effort data. If the files are missing/unreadable it falls back to shelling out to `pi --list-models`, and finally to the static free-form catalog. `model_freeform` stays `true`, so arbitrary model strings remain valid. Tests leave the agent dir unset, so the catalog stays the static `models:[]`.
   - Built-in `claude` (CLI 2.1.209): models `fable`/`opus`/`sonnet`/`haiku`, each with `low|medium|high|xhigh|max`; the same levels are `default_efforts`; `model_freeform:true`; permissions are `["acceptEdits","auto","bypassPermissions","manual","dontAsk","plan"]`. Both built-ins report `resume:"by_conversation_id"` (`claude --resume <id>`; Pi re-uses `--session-id <id>`).
   - config-defined harnesses report `model_freeform:true` and the declared `models`/`efforts`/`permission_modes`; declared efforts also populate `default_efforts`. `resume` is `"by_conversation_id"` only when `[harness.NAME] resume = true` is declared, otherwise `"unsupported"` — the fail-closed default. Declaring it promises that the harness re-attaches to `$BOARD_RESUME_SESSION_ID` (see `run.focus`). Known model aliases use their declared effort set; omitted or free-form models use `default_efforts` (with a model-union fallback for older payloads that omitted `default_efforts`).
   - error 2 (not found) for an unknown harness, listing the known harnesses.

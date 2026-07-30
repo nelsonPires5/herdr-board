@@ -12,7 +12,7 @@ The reference detail behind the [root README](../README.md). Start here to find 
 | Herdr client | 0.7.5 / socket protocol 17; `board-herdr` typed calls | [herdr.md](herdr.md) |
 | Runtime launch | daemon-owned `Spawner`, placement, process/pane handles | [implementation.md](implementation.md) |
 | Config | typed `RootConfig`, one parse, environment overrides after parse | [configuration.md](configuration.md), [design.md](design.md) |
-| Live catalog | scenarios 01–27; provider-free fake/safe harness boundary | [e2e/README.md](../e2e/README.md) |
+| Live catalog | scenarios 01–29; provider-free fake/safe harness boundary | [e2e/README.md](../e2e/README.md) |
 
 Keep these links as navigation, not duplicate wire definitions: serde types and migrations are the
 source of truth. The old worktree API is intentionally absent from `board-herdr`; repository
@@ -34,7 +34,7 @@ isolation is an agent prompt concern, not a board space primitive.
 The [`schema.sql`](../schema.sql) at the repo root is the fresh SQLite schema; migration behavior
 and upgrade tests live in `board-core::db`. Before handoff, check that docs still point to existing
 files, that the version matrix above says schema v13 / protocol v1 / Herdr 0.7.5-protocol 17, and that
-the scenario catalog lists every `e2e/NN-*.sh` from 01 through 27.
+the scenario catalog lists every `e2e/NN-*.sh` from 01 through 29.
 
 ## Test gates (single source)
 

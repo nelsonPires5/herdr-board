@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -275,6 +276,36 @@ impl WatchConnector for FakeSocketConnector {
     }
 }
 
+#[derive(Clone, Default)]
+struct TraceBuffer(Arc<Mutex<Vec<u8>>>);
+
+struct TraceWriter(Arc<Mutex<Vec<u8>>>);
+
+impl io::Write for TraceWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TraceBuffer {
+    type Writer = TraceWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        TraceWriter(self.0.clone())
+    }
+}
+
+impl TraceBuffer {
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+}
+
 fn fake_supervisor(state: Arc<Mutex<FakeSocketState>>) -> HerdrSocketSupervisor {
     HerdrSocketSupervisor::new(
         Arc::new(FakeSocketConnector(state)),
@@ -295,6 +326,37 @@ fn watch_on(d: &Arc<Daemon>, run_id: i64, socket: &Path, pane: &str) {
     active.handle.herdr_socket = Some(socket.to_path_buf());
     drop(sched);
     d.refresh_watch();
+}
+
+#[test]
+fn debug_watcher_failure_never_logs_secret_bearing_socket_path() {
+    let (d, run_id, _, _) = active_daemon();
+    let socket = PathBuf::from("/tmp/credential-in-socket-path-S3CR3T/herdr.sock");
+    watch_on(&d, run_id, &socket, "p1");
+    let state = Arc::new(Mutex::new(FakeSocketState::default()));
+    state
+        .lock()
+        .unwrap()
+        .connect
+        .insert(socket, VecDeque::from([false]));
+    let mut supervisor = fake_supervisor(state);
+    let captured = TraceBuffer::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(captured.clone())
+        .with_max_level(tracing::Level::DEBUG)
+        .finish();
+
+    tracing::subscriber::with_default(subscriber, || supervisor.step(&d, Instant::now()));
+
+    let text = captured.text();
+    assert!(
+        text.contains("herdr subscribe failed"),
+        "debug proof: {text}"
+    );
+    assert!(!text.contains("credential-in-socket-path-S3CR3T"), "{text}");
+    assert!(!text.contains("/tmp/"), "full paths are prohibited: {text}");
 }
 
 #[test]

@@ -27,6 +27,37 @@ serving the old code, use your platform's process manager to stop that specific 
 (after verifying its PID and command) before reinstalling. Do not remove the socket or use a broad
 process-name kill.
 
+## Diagnostic logs
+
+boardd writes one JSON object per line to private daily files in the XDG data directory:
+`~/.local/share/herdr-board/logs/daemon.YYYY-MM-DD.ndjson` on Linux (the platform data
+directory equivalent on macOS). The directory is mode `0700` and regular log files are mode
+`0600`. `board daemon --foreground` mirrors the same structured events to stderr.
+
+Each board RPC and outbound Herdr RPC/subscription completion records its method, duration,
+outcome, error category/code when applicable, and safe correlation IDs. Board request correlation
+is the daemon-generated numeric `(conn, req_id)` pair; the arbitrary wire request ID is returned on
+the protocol unchanged but never logged. Records exclude request parameters and results by construction. Prompts, descriptions, comments, system prompts, agent
+output, argv/environment values, credentials, and terminal contents are never logged; there is no
+raw/debug payload mode. Review before sharing even though the format is designed to be redacted:
+
+```bash
+jq 'select(.target == "board_rpc" or .target == "herdr_rpc")' \
+  ~/.local/share/herdr-board/logs/daemon.*.ndjson
+jq -r '[.timestamp,.target,.fields.method,.fields.outcome] | @tsv' \
+  ~/.local/share/herdr-board/logs/daemon.*.ndjson
+```
+
+At startup and approximately daily while running, boardd removes only regular files with the exact
+`daemon.YYYY-MM-DD.ndjson` name (four ASCII year digits and two ASCII month/day digits) whose
+modification time is more than 30 days old. The exact 30-day boundary, symlinks, directories,
+malformed names, future files, and unrelated files remain. The old append-only
+`~/.local/share/herdr-board/daemon.log` is no longer opened or grown after upgrade; it may be
+reviewed and removed manually. Auto-start bootstrap errors use private `logs/bootstrap.log`, which
+is truncated on each start. If the daily writer repeatedly fails during that daemon lifetime,
+bootstrap receives at most one fixed path-free notice and the unavailable records are dropped;
+this deterministic fallback prevents runtime growth while preserving the private, symlink-safe file.
+
 ## Uninstall
 
 Herdr's plugin uninstall has no lifecycle hook and does not stop the board daemon — boardd is a

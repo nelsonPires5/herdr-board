@@ -1,5 +1,5 @@
 use std::fs::OpenOptions;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
@@ -36,11 +36,21 @@ pub(crate) fn connect_or_start() -> Result<UnixClient> {
 
 fn spawn_daemon() -> Result<()> {
     let exe = std::env::current_exe()?;
-    let log_path = paths::log_path();
-    if let Some(parent) = log_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    let bootstrap_path = paths::bootstrap_log_path();
+    if let Some(parent) = bootstrap_path.parent() {
+        match std::fs::symlink_metadata(parent) {
+            Ok(metadata) if !metadata.file_type().is_dir() => {
+                anyhow::bail!("diagnostic log path is not a directory");
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir_all(parent)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
     }
-    daemon_command(&exe, &log_path)?.spawn()?;
+    daemon_command(&exe, &bootstrap_path)?.spawn()?;
     Ok(())
 }
 
@@ -50,16 +60,21 @@ fn spawn_daemon() -> Result<()> {
 /// process group while remaining addressable by its exact PID for diagnostics.
 /// Lifecycle control still goes through `daemon.stop`; the process group is not
 /// used as a broad cleanup authority.
-pub(crate) fn daemon_command(exe: &Path, log_path: &Path) -> Result<Command> {
-    let out = OpenOptions::new()
+pub(crate) fn daemon_command(exe: &Path, bootstrap_path: &Path) -> Result<Command> {
+    // Truncate on each auto-start: this file contains only failures emitted
+    // before the structured subscriber is available and cannot grow forever.
+    let err = OpenOptions::new()
         .create(true)
-        .append(true)
-        .open(log_path)?;
-    let err = out.try_clone()?;
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(bootstrap_path)?;
+    err.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     let mut cmd = Command::new(exe);
     cmd.arg("daemon")
         .stdin(std::process::Stdio::null())
-        .stdout(out)
+        .stdout(std::process::Stdio::null())
         .stderr(err);
     // One child, one owned process group. Do not replace this with a
     // double-fork/setsid sequence: it would lose the exact child identity that

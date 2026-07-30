@@ -1,8 +1,38 @@
 use super::*;
 use board_core::protocol::RunOutcome;
 
+use std::io;
 use std::path::PathBuf;
+use std::sync::Mutex as StdMutex;
 use std::time::Duration;
+
+#[derive(Clone, Default)]
+struct TraceBuffer(Arc<StdMutex<Vec<u8>>>);
+
+struct TraceGuard(Arc<StdMutex<Vec<u8>>>);
+
+impl io::Write for TraceGuard {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TraceBuffer {
+    type Writer = TraceGuard;
+    fn make_writer(&'a self) -> Self::Writer {
+        TraceGuard(self.0.clone())
+    }
+}
+
+impl TraceBuffer {
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+}
 
 use crate::state::Daemon;
 use crate::testkit;
@@ -151,6 +181,77 @@ impl Client {
 /// runs on the blocking pool. The store lock is held across the whole batch, so
 /// the store-touching requests cannot overtake the store-free ones unless the
 /// server started answering a connection concurrently.
+#[test]
+fn board_rpc_success_and_error_emit_redacted_completion_metadata() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let d = test_daemon();
+    let captured = TraceBuffer::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(captured.clone())
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+    // Use one process-global capture for this unit-test binary. A scoped
+    // dispatcher can race tracing's global callsite-interest cache with the
+    // many parallel server/ops tests; conn=17 uniquely selects these records.
+    tracing::subscriber::set_global_default(subscriber).expect("install test subscriber once");
+    let success = rt.block_on(dispatch_request(
+        &d,
+        17,
+        1,
+        Request {
+            id: "credential-in-request-id-S3CR3T".into(),
+            method: "board.list".into(),
+            params: json!({"secret": "BOARD_PARAMS_SENTINEL_9fd1"}),
+        },
+    ));
+    assert!(success.error.is_none());
+    assert_eq!(success.id, "credential-in-request-id-S3CR3T");
+    let failure = rt.block_on(dispatch_request(
+        &d,
+        17,
+        2,
+        Request {
+            id: "error-request".into(),
+            method: "not.a.method".into(),
+            params: json!({"secret": "BOARD_RESULT_SENTINEL_531a"}),
+        },
+    ));
+    assert!(failure.error.is_some());
+
+    let text = captured.text();
+    let records: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("board_rpc") && line.contains("conn=17"))
+        .collect();
+    assert_eq!(records.len(), 2, "completion records: {text}");
+    for record in &records {
+        assert!(
+            record.contains("operation_family=\"board_rpc\""),
+            "{record}"
+        );
+        assert!(record.contains("conn=17"), "{record}");
+        assert!(record.contains("duration_ms="), "{record}");
+        assert!(record.contains("req_id="), "{record}");
+        assert!(record.contains("method="), "{record}");
+        assert!(record.contains("outcome=\"ok\"") || record.contains("outcome=\"error\""));
+    }
+    let error = records
+        .iter()
+        .find(|record| record.contains("outcome=\"error\""));
+    assert!(error.is_some_and(|record| record.contains("error_code=")));
+    assert!(!text.contains("credential-in-request-id-S3CR3T"));
+    assert!(!text.contains("BOARD_PARAMS_SENTINEL_9fd1"));
+    assert!(!text.contains("BOARD_RESULT_SENTINEL_531a"));
+    assert!(!text.contains("params"));
+    assert!(!text.contains("result"));
+}
+
 #[test]
 fn pipelined_requests_answer_in_request_order() {
     let rt = tokio::runtime::Builder::new_multi_thread()

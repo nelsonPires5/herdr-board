@@ -4,7 +4,9 @@ use super::helpers::{
     demo_client, driver_of, is_choice, key, opt_labels, set_choice, split_effort_caps,
     RecordingClient,
 };
-use board_core::capability::{claude_capabilities, pi_capabilities};
+use board_core::capability::{
+    claude_capabilities, pi_capabilities, HarnessCapabilities, ModelInfo,
+};
 use board_core::client::BoardClient;
 use board_core::model::Comment;
 use board_core::protocol::{Effort, Patch, SpaceInfo, SpaceKind};
@@ -421,31 +423,72 @@ fn model_selector_cycles_catalog_plus_custom() {
 }
 
 #[test]
-fn effort_options_follow_selected_model_and_reset_when_invalid() {
+fn effort_options_follow_corrected_gpt_capabilities_and_reset_when_invalid() {
+    let caps = HarnessCapabilities {
+        harness: "pi".to_string(),
+        models: vec![
+            ModelInfo {
+                id: "openai-codex/gpt-5.6-sol".to_string(),
+                efforts: vec![
+                    Effort::Off,
+                    Effort::Minimal,
+                    Effort::Low,
+                    Effort::Medium,
+                    Effort::High,
+                    Effort::Xhigh,
+                    Effort::Max,
+                ],
+            },
+            ModelInfo {
+                id: "zai/glm-holes".to_string(),
+                efforts: vec![Effort::Off, Effort::Minimal, Effort::High, Effort::Max],
+            },
+        ],
+        model_freeform: true,
+        default_efforts: vec![
+            Effort::Off,
+            Effort::Minimal,
+            Effort::Low,
+            Effort::Medium,
+            Effort::High,
+            Effort::Xhigh,
+            Effort::Max,
+        ],
+        permission_modes: vec![],
+        resume: Default::default(),
+    };
     let mut form = Form::card_create(1);
-    form.apply_options(Some(split_effort_caps()), None, Some(vec![]), None);
-    // `(default)` preserves an omitted model; selecting opus narrows efforts.
-    set_choice(&mut form, FieldId::Model, "opus");
+    form.apply_options(Some(caps), None, Some(vec![]), None);
+
+    set_choice(&mut form, FieldId::Model, "openai-codex/gpt-5.6-sol");
     form.on_model_changed();
     assert_eq!(
         opt_labels(&form, FieldId::Effort),
-        vec!["(default)", "low", "high"]
+        vec![
+            "(default)",
+            "off",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+        ]
     );
-    // Pick a valid effort for opus, then switch to haiku (efforts: medium).
-    set_choice(&mut form, FieldId::Effort, "high");
-    set_choice(&mut form, FieldId::Model, "haiku");
+
+    set_choice(&mut form, FieldId::Effort, "xhigh");
+    set_choice(&mut form, FieldId::Model, "zai/glm-holes");
     form.on_model_changed();
     assert_eq!(
         opt_labels(&form, FieldId::Effort),
-        vec!["(default)", "medium"]
+        vec!["(default)", "off", "minimal", "high", "max"]
     );
-    // "high" is invalid for haiku -> effort reset to the default sentinel.
-    let eff = form
+    let effort = form
         .fields
         .iter()
-        .find(|f| f.id == FieldId::Effort)
+        .find(|field| field.id == FieldId::Effort)
         .unwrap();
-    assert_eq!(eff.display(), "(default)");
+    assert_eq!(effort.display(), "(default)");
 }
 
 #[test]

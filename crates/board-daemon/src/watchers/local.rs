@@ -49,7 +49,7 @@ async fn poll_once(d: &Arc<Daemon>) {
         }
         if run_open(d, run_id) {
             let msg = "pane exited without board done".to_string();
-            if let Err(e) = finalize_run(
+            if let Err(_error) = finalize_run(
                 d,
                 run_id,
                 RunOutcome::Fail,
@@ -58,7 +58,11 @@ async fn poll_once(d: &Arc<Daemon>) {
                 false,
                 false,
             ) {
-                tracing::warn!("liveness finalize run {run_id}: {e}");
+                tracing::warn!(
+                    run_id,
+                    error_category = "database",
+                    "liveness finalize failed"
+                );
             }
         } else {
             // Already finalized elsewhere; just drop our bookkeeping.

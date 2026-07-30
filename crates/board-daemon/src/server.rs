@@ -4,6 +4,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use board_core::protocol::{BoardChangedReason, Event, Request, Response, SubscribeResult};
 use serde::Serialize;
@@ -172,7 +173,7 @@ pub async fn serve(d: Arc<Daemon>, listener: UnixListener) {
                     let conn_id = NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed);
                     tokio::spawn(handle_conn(d.clone(), stream, conn_id));
                 }
-                Err(e) => tracing::warn!("accept failed: {e}"),
+                Err(_) => tracing::warn!(error_category = "transport", "accept failed"),
             },
             _ = rx.changed() => break,
         }
@@ -213,6 +214,10 @@ async fn handle_conn(d: Arc<Daemon>, stream: UnixStream, conn_id: u64) {
     let mut reader = BufReader::new(read_half);
     let mut line = String::new();
     let mut event_forwarder = None;
+    // Correlation is daemon-owned: the wire request id is an arbitrary payload
+    // field and may contain credentials. `(conn, req_id)` is unique for this
+    // daemon lifetime while the original id remains untouched on the wire.
+    let mut request_correlation = 0_u64;
     loop {
         line.clear();
         match reader.read_line(&mut line).await {
@@ -222,9 +227,11 @@ async fn handle_conn(d: Arc<Daemon>, stream: UnixStream, conn_id: u64) {
                 if trimmed.is_empty() {
                     continue;
                 }
+                request_correlation = request_correlation.saturating_add(1);
                 let req: Request = match serde_json::from_str(trimmed) {
                     Ok(r) => r,
                     Err(e) => {
+                        tracing::info!(target: "board_rpc", operation_family = "board_rpc", conn = conn_id, req_id = request_correlation, method = "<parse>", outcome = "error", error_code = 1_i32, error_kind = "bad_request", duration_ms = 0_u64, "board RPC completed");
                         if !outbox
                             .response(to_line(&Response::err("", 1, format!("bad request: {e}"))))
                             .await
@@ -235,6 +242,7 @@ async fn handle_conn(d: Arc<Daemon>, stream: UnixStream, conn_id: u64) {
                     }
                 };
                 if req.method == "events.subscribe" {
+                    tracing::info!(target: "board_rpc", operation_family = "board_rpc", conn = conn_id, req_id = request_correlation, method = "events.subscribe", outcome = "ok", duration_ms = 0_u64, "board RPC completed");
                     let ack = Response::ok(req.id, json!(SubscribeResult { subscribed: true }));
                     if !outbox.response(to_line(&ack)).await {
                         break;
@@ -244,7 +252,7 @@ async fn handle_conn(d: Arc<Daemon>, stream: UnixStream, conn_id: u64) {
                     }
                     continue;
                 }
-                let resp = dispatch_request(&d, conn_id, req).await;
+                let resp = dispatch_request(&d, conn_id, request_correlation, req).await;
                 if !outbox.response(to_line(&resp)).await {
                     break;
                 }
@@ -269,9 +277,25 @@ async fn handle_conn(d: Arc<Daemon>, stream: UnixStream, conn_id: u64) {
 /// enough concurrent requests starved the accept loop, the dispatcher, and
 /// shutdown. `spawn_blocking` moves it to the blocking pool; the caller still
 /// awaits it, which is what keeps per-connection ordering intact.
-async fn dispatch_request(d: &Arc<Daemon>, conn_id: u64, req: Request) -> Response {
+async fn dispatch_request(
+    d: &Arc<Daemon>,
+    conn_id: u64,
+    request_correlation: u64,
+    req: Request,
+) -> Response {
     let Request { id, method, params } = req;
-    let span = tracing::info_span!("request", conn = conn_id, method = %method, req_id = %id);
+    let diagnostic_method = if ops::ROUTED_METHODS.contains(&method.as_str()) {
+        method.as_str()
+    } else {
+        "<unknown>"
+    };
+    let started = Instant::now();
+    let span = tracing::info_span!(
+        "request",
+        conn = conn_id,
+        method = diagnostic_method,
+        req_id = request_correlation
+    );
     let handler_d = d.clone();
     let handler_method = method.clone();
     let handled = tokio::task::spawn_blocking(move || {
@@ -279,10 +303,21 @@ async fn dispatch_request(d: &Arc<Daemon>, conn_id: u64, req: Request) -> Respon
         ops::handle_request(&handler_d, &handler_method, params)
     })
     .await;
+    let duration_ms = started.elapsed().as_millis() as u64;
     match handled {
-        Ok(Ok(value)) => Response::ok(id, value),
-        Ok(Err(e)) => Response::err(id, e.code(), e.to_string()),
-        Err(join_error) => join_error_response(id, &method, conn_id, join_error),
+        Ok(Ok(value)) => {
+            tracing::info!(target: "board_rpc", operation_family = "board_rpc", conn = conn_id, req_id = request_correlation, method = diagnostic_method, outcome = "ok", duration_ms, "board RPC completed");
+            Response::ok(id, value)
+        }
+        Ok(Err(e)) => {
+            let error_code = e.code();
+            tracing::info!(target: "board_rpc", operation_family = "board_rpc", conn = conn_id, req_id = request_correlation, method = diagnostic_method, outcome = "error", error_code, error_kind = "protocol", duration_ms, "board RPC completed");
+            Response::err(id, error_code, e.to_string())
+        }
+        Err(join_error) => {
+            tracing::error!(target: "board_rpc", operation_family = "board_rpc", conn = conn_id, req_id = request_correlation, method = diagnostic_method, outcome = "panic", error_code = CODE_INTERNAL, error_kind = "handler_task", duration_ms, "board RPC completed");
+            join_error_response(id, diagnostic_method, conn_id, join_error)
+        }
     }
 }
 
@@ -298,7 +333,8 @@ fn join_error_response(
     tracing::error!(
         conn = conn_id,
         method = %method,
-        "request handler task failed: {join_error}"
+        error_category = "task",
+        "request handler task failed"
     );
     Response::err(
         id,

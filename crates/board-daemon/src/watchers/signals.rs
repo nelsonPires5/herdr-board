@@ -107,8 +107,8 @@ fn apply_signal_guarded(
             }
             None => db.set_card_status(card_id, dec.new_status),
         };
-        if let Err(e) = written {
-            tracing::warn!("apply signal to card {card_id}: {e}");
+        if written.is_err() {
+            tracing::warn!(card_id, error_category = "database", "apply signal failed");
             return;
         }
 

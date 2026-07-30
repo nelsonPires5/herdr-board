@@ -4,14 +4,52 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::envelope::{Request, Response};
-use crate::error::{HerdrError, Result};
+use crate::error::{diagnostic_protocol_code, HerdrError, Result};
 use crate::transport::{self, connect_with_deadline, SocketDeadlines};
 
 use super::backoff::Backoff;
 use super::parse::{parse_event_line, HerdrEvent};
+
+#[derive(Deserialize)]
+struct SubscriptionAcknowledgement {
+    #[serde(rename = "type")]
+    acknowledgement_type: SubscriptionAcknowledgementType,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SubscriptionAcknowledgementType {
+    SubscriptionStarted,
+}
+
+fn stream_error_category(error: &HerdrError) -> &'static str {
+    match error {
+        HerdrError::Io(_) => "transport",
+        HerdrError::Protocol { .. } => "protocol",
+        HerdrError::Decode(_) => "decode",
+        HerdrError::Deadline { .. } => "deadline",
+        HerdrError::Disconnected => "disconnected",
+    }
+}
+
+fn log_subscription_completion<T>(result: &Result<T>, subscription_count: usize, started: Instant) {
+    let duration_ms = started.elapsed().as_millis() as u64;
+    match result {
+        Ok(_) => {
+            tracing::info!(target: "herdr_rpc", operation_family = "herdr_subscription", method = "events.subscribe", outcome = "ok", subscription_count, duration_ms, "Herdr subscription completed")
+        }
+        Err(HerdrError::Protocol { code, .. }) => {
+            tracing::info!(target: "herdr_rpc", operation_family = "herdr_subscription", method = "events.subscribe", outcome = "error", error_category = "protocol", error_code = diagnostic_protocol_code(code), subscription_count, duration_ms, "Herdr subscription completed")
+        }
+        Err(error) => {
+            tracing::info!(target: "herdr_rpc", operation_family = "herdr_subscription", method = "events.subscribe", outcome = "error", error_category = stream_error_category(error), subscription_count, duration_ms, "Herdr subscription completed")
+        }
+    }
+}
 
 /// One subscription entry for `events.subscribe`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,28 +117,34 @@ impl HerdrEvents {
         subscriptions: &[Subscription],
         deadlines: SocketDeadlines,
     ) -> Result<HerdrEvents> {
-        let stream = connect_with_deadline(path, deadlines.connect)?;
-        // Put the socket in non-blocking mode so poll_event can honour
-        // deadlines without SO_RCVTIMEO (which macOS locks on first read).
-        // The Iterator impl uses poll with infinite timeout for blocking
-        // semantics.
-        transport::set_nonblocking(&stream, true)?;
+        let started = Instant::now();
+        let result = (|| {
+            let stream = connect_with_deadline(path, deadlines.connect)?;
+            // Put the socket in non-blocking mode so poll_event can honour
+            // deadlines without SO_RCVTIMEO (which macOS locks on first read).
+            // The Iterator impl uses poll with infinite timeout for blocking
+            // semantics.
+            transport::set_nonblocking(&stream, true)?;
 
-        let reader = BufReader::new(stream.try_clone()?);
-        let writer = stream;
-        let mut ev = HerdrEvents {
-            path: path.to_path_buf(),
-            reader,
-            writer,
-            pending: String::new(),
-            pending_events: VecDeque::new(),
-            deadlines,
-            subscribe_id: 0,
-        };
+            let reader = BufReader::new(stream.try_clone()?);
+            let writer = stream;
+            let mut events = HerdrEvents {
+                path: path.to_path_buf(),
+                reader,
+                writer,
+                pending: String::new(),
+                pending_events: VecDeque::new(),
+                deadlines,
+                subscribe_id: 0,
+            };
 
-        let id = ev.send_subscribe(subscriptions)?;
-        ev.read_ack(&id)?;
-        Ok(ev)
+            // Initial send/ack is part of this outer boundary. Logging it again
+            // would duplicate completions when the handshake fails.
+            events.subscribe_inner(subscriptions)?;
+            Ok(events)
+        })();
+        log_subscription_completion(&result, subscriptions.len(), started);
+        result
     }
 
     /// Connect with exponential backoff. Honors [`Backoff::max_retries`].
@@ -132,8 +176,15 @@ impl HerdrEvents {
     /// pane). Sends another `events.subscribe`; on failure the daemon should
     /// reconnect with the full set instead.
     pub fn add_subscriptions(&mut self, subscriptions: &[Subscription]) -> Result<()> {
-        let id = self.send_subscribe(subscriptions)?;
-        self.read_ack(&id)
+        let started = Instant::now();
+        let result = self.subscribe_inner(subscriptions);
+        log_subscription_completion(&result, subscriptions.len(), started);
+        result
+    }
+
+    fn subscribe_inner(&mut self, subscriptions: &[Subscription]) -> Result<()> {
+        self.send_subscribe(subscriptions)
+            .and_then(|id| self.read_ack(&id))
     }
 
     /// The socket path (for reconnects).
@@ -225,7 +276,11 @@ impl HerdrEvents {
                             message: error.message,
                         });
                     }
-                    return Ok(());
+                    let acknowledgement: SubscriptionAcknowledgement =
+                        serde_json::from_value(response.result.unwrap_or(Value::Null))?;
+                    match acknowledgement.acknowledgement_type {
+                        SubscriptionAcknowledgementType::SubscriptionStarted => return Ok(()),
+                    }
                 }
                 Ok(_) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
