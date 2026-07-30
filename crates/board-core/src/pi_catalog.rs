@@ -10,8 +10,8 @@
 //!
 //! So the daemon's live Pi catalog is:
 //!   1. read `auth.json` → the providers the user has credentials for;
-//!   2. read `models-store.json` → keep only those providers' models, mapping
-//!      `thinkingLevelMap` keys to each model's effort levels;
+//!   2. read `models-store.json` → keep only those providers' models, applying
+//!      Pi's missing/string/null `thinkingLevelMap` semantics;
 //!   3. fall back to shelling out to `pi --list-models` when the files are
 //!      missing/unreadable;
 //!   4. fall back to the static free-form catalog (`models: []`) on failure.
@@ -70,20 +70,34 @@ struct StoreProvider {
     models: Vec<StoreModel>,
 }
 
-/// Efforts a model accepts, from its `thinkingLevelMap` keys (canonical order);
-/// when absent (e.g. plain reasoning models), the default Pi ladder applies.
-fn efforts_for_model(m: &StoreModel) -> Vec<Effort> {
-    match &m.thinking_level_map {
-        Some(map) if !map.is_empty() => EFFORT_ORDER
-            .iter()
-            .copied()
-            .filter(|e| map.contains_key(e.as_str()))
-            .collect(),
-        _ => default_pi_efforts(),
+/// Efforts a model accepts in canonical order. Pi treats omitted standard
+/// levels (`off` through `high`) as supported by the provider default, while
+/// omitted extended levels (`xhigh`, `max`) are unsupported. A string opts any
+/// level in and an explicit null opts it out.
+fn efforts_for_model(model: &StoreModel) -> Vec<Effort> {
+    EFFORT_ORDER
+        .iter()
+        .copied()
+        .filter(|effort| effort_is_supported(model.thinking_level_map.as_ref(), *effort))
+        .collect()
+}
+
+fn effort_is_supported(
+    map: Option<&serde_json::Map<String, serde_json::Value>>,
+    effort: Effort,
+) -> bool {
+    match map.and_then(|map| map.get(effort.as_str())) {
+        Some(serde_json::Value::String(_)) => true,
+        Some(_) => false,
+        None => matches!(
+            effort,
+            Effort::Off | Effort::Minimal | Effort::Low | Effort::Medium | Effort::High
+        ),
     }
 }
 
-/// The full Pi thinking ladder (off..max), used as the fallback effort set.
+/// The historical full Pi ladder used by the lossy `pi --list-models` fallback,
+/// whose human table does not expose per-model maps.
 fn default_pi_efforts() -> Vec<Effort> {
     EFFORT_ORDER.to_vec()
 }
