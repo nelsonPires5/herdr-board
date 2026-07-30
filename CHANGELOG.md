@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
-- fix(core,tui): honor Pi `thinkingLevelMap` missing/string/null semantics in model effort menus.
+- [#50](https://github.com/nelsonPires5/herdr-board/pull/50) fix(core,tui): honor Pi `thinkingLevelMap` missing/string/null semantics in model effort menus.
 
 ## [0.9.1] - 2026-07-27
 
