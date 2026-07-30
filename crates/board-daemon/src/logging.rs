@@ -310,6 +310,7 @@ mod tests {
             .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1)))
             .unwrap();
         fs::write(&boundary, "{}\n").unwrap();
+        fs::set_permissions(&boundary, fs::Permissions::from_mode(0o600)).unwrap();
         fs::write(&unrelated, SENTINEL).unwrap();
         fs::write(&positive_signed_year, "malformed").unwrap();
         fs::write(&negative_signed_year, "malformed").unwrap();
@@ -456,6 +457,22 @@ mod tests {
                 .file_type()
                 .is_symlink()
         );
+    }
+
+    #[test]
+    fn daily_writer_restricts_an_existing_regular_file_before_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = super::daily_path(dir.path(), super::unix_now());
+        fs::write(&path, "existing\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let writer = super::DailyFile::open(dir.path()).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        drop(writer);
+        assert_eq!(fs::read_to_string(path).unwrap(), "existing\n");
     }
 
     #[test]
