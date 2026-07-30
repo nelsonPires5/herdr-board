@@ -153,8 +153,11 @@ pub async fn reconcile_once(
 ) {
     let active = match d.store.active_runs() {
         Ok(active) => active,
-        Err(error) => {
-            tracing::warn!("reconciliation: active_runs failed: {error}");
+        Err(_) => {
+            tracing::warn!(
+                error_category = "database",
+                "reconciliation: active_runs failed"
+            );
             return;
         }
     };
@@ -181,17 +184,16 @@ pub async fn reconcile_once(
                     Ok(Err(failure)) => {
                         tracing::warn!(
                             run_id = run.id,
-                            pane_id,
                             failure = ?failure,
                             "reconciliation: runtime probe failed; treating the run as unknown"
                         );
                         RuntimeProbe::Unknown
                     }
-                    Err(join_error) => {
+                    Err(_) => {
                         tracing::warn!(
                             run_id = run.id,
-                            pane_id,
-                            "reconciliation: runtime probe task failed: {join_error}"
+                            error_category = "task",
+                            "reconciliation: runtime probe task failed"
                         );
                         RuntimeProbe::Unknown
                     }
@@ -234,7 +236,7 @@ fn apply_observation(
                 return;
             }
             let message = "daemon restart: pane exited".to_string();
-            if let Err(error) = dispatch::finalize_run(
+            if let Err(_error) = dispatch::finalize_run(
                 d,
                 run.id,
                 RunOutcome::Fail,
@@ -246,7 +248,8 @@ fn apply_observation(
                 tracing::error!(
                     run_id = run.id,
                     card_id = card.id,
-                    "reconciliation could not finalize a gone run; it stays open: {error}"
+                    error_category = "database",
+                    "reconciliation could not finalize a gone run; it stays open"
                 );
             }
         }

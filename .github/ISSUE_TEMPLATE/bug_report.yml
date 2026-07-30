@@ -60,7 +60,7 @@ body:
     id: daemon-log
     attributes:
       label: Daemon log excerpt
-      description: Relevant lines from the boardd log (`daemon.log`, or run `board daemon --foreground` to see live output). Redact anything sensitive.
+      description: Relevant NDJSON records from the private daily log (`~/.local/share/herdr-board/logs/daemon.YYYY-MM-DD.ndjson`, or run `board daemon --foreground`). Payloads are excluded by design, but review and redact anything sensitive before sharing.
       render: text
     validations:
       required: false

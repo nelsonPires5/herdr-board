@@ -51,8 +51,8 @@ pub(crate) async fn startup_recovery_with(
 async fn adopt_runs(d: &Arc<Daemon>) {
     let active = match d.store.active_runs() {
         Ok(v) => v,
-        Err(e) => {
-            tracing::warn!("adoption: active_runs failed: {e}");
+        Err(_) => {
+            tracing::warn!(error_category = "database", "adoption: active_runs failed");
             return;
         }
     };
@@ -117,7 +117,7 @@ async fn adopt_runs(d: &Arc<Daemon>) {
         } else {
             tracing::info!("run {} (card {}) lost across restart", run.id, card.id);
             let msg = "daemon restart: run lost".to_string();
-            if let Err(error) = dispatch::finalize_run(
+            if let Err(_error) = dispatch::finalize_run(
                 d,
                 run.id,
                 board_core::protocol::RunOutcome::Fail,
@@ -129,7 +129,8 @@ async fn adopt_runs(d: &Arc<Daemon>) {
                 tracing::error!(
                     run_id = run.id,
                     card_id = card.id,
-                    "adoption could not finalize a lost run; it stays open: {error}"
+                    error_category = "database",
+                    "adoption could not finalize a lost run; it stays open"
                 );
             }
         }

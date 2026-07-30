@@ -84,7 +84,7 @@ pub(super) fn apply_candidate(d: &Arc<Daemon>, c: Candidate, now: Instant) {
             "run timed out after {}; applying on_fail",
             format_duration(Some(c.elapsed.as_secs() as i64))
         );
-        if let Err(e) = finalize_run_timeout(
+        if let Err(_error) = finalize_run_timeout(
             d,
             c.run_id,
             now,
@@ -94,7 +94,11 @@ pub(super) fn apply_candidate(d: &Arc<Daemon>, c: Candidate, now: Instant) {
             true,
             true,
         ) {
-            tracing::warn!("timeout finalize run {}: {e}", c.run_id);
+            tracing::warn!(
+                run_id = c.run_id,
+                error_category = "database",
+                "timeout finalize failed"
+            );
         }
     } else if let Some(observed_idle_since) = c.observed_idle_since {
         // Idle past the grace period without `board done`: the agent may have

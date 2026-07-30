@@ -139,7 +139,13 @@ Event subscriptions use a persistent connection, but each subscribe/add acknowle
 bounded and must carry that subscribe request's exact ID. Events arriving before the matching
 acknowledgement are buffered in order rather than lost. After an acknowledgement or bounded
 `poll_event`, the temporary read timeout is removed so ordinary event iteration remains blocking.
-These transport failures do not log request or response payloads.
+Calls and subscription handshakes emit one metadata-only completion record (method, duration,
+outcome, and stable error category/code); typed result decoding is inside that same completion boundary.
+Method labels come from the crate's closed typed-method set (arbitrary public `call` methods are logged
+as `<unknown>` without changing the wire method). Initial subscription connection/setup failures and
+later add-subscription failures each emit exactly one error completion. Records never include request
+parameters, response results, or event payload bodies. Polling successful events does not emit per-poll
+diagnostics.
 
 ## Version drift
 

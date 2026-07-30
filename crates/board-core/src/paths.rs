@@ -36,8 +36,18 @@ pub fn socket_path() -> PathBuf {
     }
 }
 
-/// Daemon log path: `<data>/daemon.log`.
-pub fn log_path() -> PathBuf {
+/// Structured daemon log directory: `<data>/logs`.
+pub fn log_dir() -> PathBuf {
+    data_dir().join("logs")
+}
+
+/// Bounded pre-subscriber diagnostics for an auto-started daemon.
+pub fn bootstrap_log_path() -> PathBuf {
+    log_dir().join("bootstrap.log")
+}
+
+/// Legacy append-only path from releases before daily structured diagnostics.
+pub fn legacy_log_path() -> PathBuf {
     data_dir().join("daemon.log")
 }
 

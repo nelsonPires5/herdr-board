@@ -268,7 +268,7 @@ pub(super) async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result
                 card_id = card.id,
                 failure = e.label(),
                 retriable = e.retriable(),
-                "spawn failed: {e:#}"
+                "spawn failed"
             );
             // `:#` prints the whole anyhow chain — the herdr protocol error
             // (e.g. "workspace not found") lives below the top context.
@@ -279,7 +279,8 @@ pub(super) async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result
             tracing::error!(
                 run_id = run.id,
                 card_id = card.id,
-                "spawn task panicked: {e}"
+                error_category = "task",
+                "spawn task panicked"
             );
             fail_queued_run(d, run.id, &format!("spawn task panicked: {e}"))?;
             return Ok(false);
@@ -304,7 +305,13 @@ pub(super) async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result
         Some(card.id),
         Some(run.column_id),
     );
-    tracing::info!(column_id = run.column_id, timeout_ms, "run started");
+    tracing::info!(
+        run_id = run.id,
+        card_id = card.id,
+        column_id = run.column_id,
+        timeout_ms,
+        "run started"
+    );
     Ok(true)
 }
 
@@ -368,8 +375,12 @@ pub(crate) fn register_spawned_run(
         Ok(true) => Ok(true),
         other => {
             if let Some(unregistered) = handle.as_ref() {
-                if let Err(e) = d.spawner.kill(unregistered) {
-                    tracing::warn!("kill unregistered spawned run {run_id} failed: {e}");
+                if d.spawner.kill(unregistered).is_err() {
+                    tracing::warn!(
+                        run_id,
+                        error_category = "runtime",
+                        "kill unregistered spawned run failed"
+                    );
                 }
             }
             other
