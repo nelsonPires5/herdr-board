@@ -62,7 +62,7 @@ pub fn run(foreground: bool) -> anyhow::Result<()> {
     };
 
     logging::init_logging(foreground);
-    tracing::info!("boardd starting: db={:?} socket={:?}", db_path, socket_path);
+    tracing::info!("boardd starting");
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -140,6 +140,7 @@ async fn async_main(db_path: PathBuf, socket_path: PathBuf) -> anyhow::Result<()
             }
         });
     }
+    let retention = tokio::spawn(logging::retention_task(daemon.shutdown_rx()));
     tokio::spawn(watchers::timeout_ticker(daemon.clone()));
     tokio::spawn(watchers::local_liveness_poller(daemon.clone()));
     if matches!(daemon.settings.spawner, SpawnerKind::Herdr) {
@@ -189,9 +190,17 @@ async fn async_main(db_path: PathBuf, socket_path: PathBuf) -> anyhow::Result<()
     }
     let listener = tokio::net::UnixListener::bind(&socket_path)
         .with_context(|| format!("cannot bind the boardd socket {socket_path:?}"))?;
-    tracing::info!("listening on {:?}", socket_path);
+    tracing::info!("boardd listening");
 
     server::serve(daemon.clone(), listener).await;
+    // The same shutdown watch that ends the accept loop ends retention; join it
+    // before runtime teardown so an in-progress prune is not cancelled midway.
+    if retention.await.is_err() {
+        tracing::warn!(
+            error_category = "retention_task",
+            "diagnostic retention task failed"
+        );
+    }
 
     // Graceful: leave running panes alone; just clean up the socket.
     let _ = std::fs::remove_file(&socket_path);
@@ -203,15 +212,21 @@ fn spawn_signal_handler(d: Arc<Daemon>) {
         use tokio::signal::unix::{signal, SignalKind};
         let mut term = match signal(SignalKind::terminate()) {
             Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("SIGTERM handler: {e}");
+            Err(_) => {
+                tracing::warn!(
+                    error_category = "signal_handler",
+                    "SIGTERM handler setup failed"
+                );
                 return;
             }
         };
         let mut int = match signal(SignalKind::interrupt()) {
             Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("SIGINT handler: {e}");
+            Err(_) => {
+                tracing::warn!(
+                    error_category = "signal_handler",
+                    "SIGINT handler setup failed"
+                );
                 return;
             }
         };

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use board_core::engine::AgentSignal;
 use board_core::protocol::{CardStatus, RunOutcome};
-use board_herdr::{watch_subscriptions, AgentStatus, HerdrEvent, HerdrEvents};
+use board_herdr::{watch_subscriptions, AgentStatus, HerdrError, HerdrEvent, HerdrEvents};
 
 use super::{apply_signal, run_open};
 use crate::dispatch::finalize_run;
@@ -22,6 +22,16 @@ pub(super) trait WatchEventStream: Send {
 impl WatchEventStream for HerdrEvents {
     fn poll_event(&mut self, timeout: Duration) -> board_herdr::Result<Option<HerdrEvent>> {
         HerdrEvents::poll_event(self, timeout)
+    }
+}
+
+fn watch_error_category(error: &HerdrError) -> &'static str {
+    match error {
+        HerdrError::Io(_) => "transport",
+        HerdrError::Protocol { .. } => "protocol",
+        HerdrError::Decode(_) => "decode",
+        HerdrError::Deadline { .. } => "deadline",
+        HerdrError::Disconnected => "disconnected",
     }
 }
 
@@ -160,7 +170,10 @@ impl HerdrSocketSupervisor {
                         state.reconcile_at = now + self.timing.reconcile;
                     }
                     Err(error) => {
-                        tracing::debug!(?socket, "herdr subscribe failed: {error}");
+                        tracing::debug!(
+                            error_category = watch_error_category(&error),
+                            "herdr subscribe failed"
+                        );
                         state.disconnected(now, self.timing);
                     }
                 }
@@ -177,7 +190,10 @@ impl HerdrSocketSupervisor {
                 Some(Ok(Some(event))) => handle_event_from_socket(d, socket, event),
                 Some(Ok(None)) | None => {}
                 Some(Err(error)) => {
-                    tracing::debug!(?socket, "herdr event stream ended: {error}");
+                    tracing::debug!(
+                        error_category = watch_error_category(&error),
+                        "herdr event stream ended"
+                    );
                     state.disconnected(now, self.timing);
                 }
             }
@@ -332,7 +348,7 @@ pub(super) fn handle_event_from_socket(
                     // thing that closes a run whose pane died without `board
                     // done`. If it fails silently the run stays open forever
                     // with no output and no card movement.
-                    if let Err(error) = finalize_run(
+                    if let Err(_error) = finalize_run(
                         d,
                         run_id,
                         RunOutcome::Fail,
@@ -343,8 +359,8 @@ pub(super) fn handle_event_from_socket(
                     ) {
                         tracing::error!(
                             run_id,
-                            pane_id = %pane_id,
-                            "pane exit could not finalize the run; it stays open: {error}"
+                            error_category = "database",
+                            "pane exit could not finalize the run; it stays open"
                         );
                     }
                 }

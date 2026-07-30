@@ -291,10 +291,10 @@ pub(crate) fn rescue_run_pane(plan: &RescuePlan<'_>) -> anyhow::Result<RescueOut
     // conversation is resumed in it. A focus failure is cosmetic, so warn rather
     // than turn a completed rescue into an error the caller would only discover
     // was a lie on the next `o`.
-    if let Err(error) = client.pane_focus(&owned.pane_id) {
+    if client.pane_focus(&owned.pane_id).is_err() {
         tracing::warn!(
-            "rescued run pane {} was created and resumed, but focusing it failed: {error}",
-            owned.pane_id
+            error_category = "herdr",
+            "rescued run pane was created and resumed, but focusing it failed"
         );
     }
     Ok(RescueOutcome::Created(owned.pane_id))

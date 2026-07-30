@@ -49,7 +49,8 @@ runner action. A mismatch fails the run before workspace mutation.
 ## Auto-start
 
 `board tui` and every CLI subcommand try to connect; on failure they spawn one detached
-`board daemon` child (stdout+stderr → `~/.local/share/herdr-board/daemon.log`), then retry with
+`board daemon` child (pre-subscriber stderr → private, truncated `logs/bootstrap.log`; structured
+runtime diagnostics → daily `logs/daemon.YYYY-MM-DD.ndjson`), then retry with
 backoff for ~3s. The child owns a new process group led by its exact PID; there is deliberately no
 double-fork or `setsid`, so diagnostics and the safe harness retain an unambiguous owner token.
 Lifecycle control uses the daemon socket (`daemon.stop`), never a broad process-group kill. Daemon
@@ -73,6 +74,15 @@ as `{}` while a named session serializes as `{ "session": "..." }`, preserving t
 The daemon owns **all** Herdr interaction (`AGENTS.md`): no client opens a Herdr socket or runs the
 `herdr` binary for itself. `pane.set_title` exists for exactly that reason — it is how the TUI
 plugin pane relabels its own border.
+
+## Request diagnostics
+
+boardd emits one metadata-only completion diagnostic for every parsed request and subscription
+acknowledgement: method, daemon-generated numeric `(conn, req_id)` correlation, duration, outcome,
+and protocol error code when failed. The arbitrary wire request ID is preserved in its response but
+never becomes diagnostic metadata; unknown method strings are recorded as `<unknown>`. Malformed
+input receives bounded parse metadata. Request parameters and response results are never attached
+to diagnostics.
 
 ## Methods
 

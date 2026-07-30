@@ -7,13 +7,13 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
 use crate::envelope::{Request, Response};
-use crate::error::{HerdrError, Result};
+use crate::error::{diagnostic_protocol_code, HerdrError, Result};
 use crate::params::{
     AgentPromptParams, AgentStartParams, AgentWaitParams, PaneRenameParams, PaneSplitParams,
     TabCreateParams, WorkspaceCreateParams,
@@ -24,6 +24,47 @@ use crate::types::{
     PaneReadResult, Pong, ReadSource, SessionSnapshot, TabCreated, TabInfo, WorkspaceCreated,
     WorkspaceInfo,
 };
+
+fn error_category(error: &HerdrError) -> &'static str {
+    match error {
+        HerdrError::Io(_) => "transport",
+        HerdrError::Protocol { .. } => "protocol",
+        HerdrError::Decode(_) => "decode",
+        HerdrError::Deadline { .. } => "deadline",
+        HerdrError::Disconnected => "disconnected",
+    }
+}
+
+/// Diagnostic method labels are a closed set. `HerdrClient::call` is public,
+/// so its caller-controlled method must still go over the wire unchanged but
+/// must never become log data unless it is one of this crate's typed methods.
+fn diagnostic_method(method: &str) -> &'static str {
+    match method {
+        "ping" => "ping",
+        "workspace.create" => "workspace.create",
+        "workspace.list" => "workspace.list",
+        "workspace.close" => "workspace.close",
+        "tab.create" => "tab.create",
+        "tab.list" => "tab.list",
+        "agent.start" => "agent.start",
+        "agent.get" => "agent.get",
+        "agent.prompt" => "agent.prompt",
+        "agent.wait" => "agent.wait",
+        "pane.list" => "pane.list",
+        "pane.split" => "pane.split",
+        "pane.read" => "pane.read",
+        "pane.send_text" => "pane.send_text",
+        "pane.send_keys" => "pane.send_keys",
+        "pane.close" => "pane.close",
+        "pane.get" => "pane.get",
+        "pane.focus" => "pane.focus",
+        "pane.rename" => "pane.rename",
+        "pane.layout" => "pane.layout",
+        "notification.show" => "notification.show",
+        "session.snapshot" => "session.snapshot",
+        _ => "<unknown>",
+    }
+}
 
 // -- client ------------------------------------------------------------------
 
@@ -78,6 +119,37 @@ impl HerdrClient {
     /// mapping an `error` envelope to [`HerdrError::Protocol`] and EOF to
     /// [`HerdrError::Disconnected`].
     pub fn call(&mut self, method: &str, params: Value) -> Result<Value> {
+        self.call_decoded(method, params, Ok)
+    }
+
+    /// Execute the raw request and any typed result decoding inside one
+    /// completion boundary. Typed wrappers must not call the public `call`, or
+    /// a successful envelope followed by failed decoding would be logged as ok.
+    fn call_decoded<T>(
+        &mut self,
+        method: &str,
+        params: Value,
+        decode: impl FnOnce(Value) -> Result<T>,
+    ) -> Result<T> {
+        let started = Instant::now();
+        let result = self.call_inner(method, params).and_then(decode);
+        let duration_ms = started.elapsed().as_millis() as u64;
+        let method = diagnostic_method(method);
+        match &result {
+            Ok(_) => {
+                tracing::info!(target: "herdr_rpc", operation_family = "herdr_rpc", method, outcome = "ok", duration_ms, "Herdr RPC completed")
+            }
+            Err(HerdrError::Protocol { code, .. }) => {
+                tracing::info!(target: "herdr_rpc", operation_family = "herdr_rpc", method, outcome = "error", error_category = "protocol", error_code = diagnostic_protocol_code(code), duration_ms, "Herdr RPC completed")
+            }
+            Err(error) => {
+                tracing::info!(target: "herdr_rpc", operation_family = "herdr_rpc", method, outcome = "error", error_category = error_category(error), duration_ms, "Herdr RPC completed")
+            }
+        }
+        result
+    }
+
+    fn call_inner(&mut self, method: &str, params: Value) -> Result<Value> {
         self.next_id += 1;
         let id = self.next_id.to_string();
         let req = Request {
@@ -133,8 +205,7 @@ impl HerdrClient {
     }
 
     fn call_into<T: DeserializeOwned>(&mut self, method: &str, params: Value) -> Result<T> {
-        let v = self.call(method, params)?;
-        Ok(serde_json::from_value(v)?)
+        self.call_decoded(method, params, |value| Ok(serde_json::from_value(value)?))
     }
 
     fn call_field<T: DeserializeOwned>(
@@ -143,9 +214,10 @@ impl HerdrClient {
         params: Value,
         field: &str,
     ) -> Result<T> {
-        let v = self.call(method, params)?;
-        let inner = v.get(field).cloned().unwrap_or(Value::Null);
-        Ok(serde_json::from_value(inner)?)
+        self.call_decoded(method, params, |value| {
+            let inner = value.get(field).cloned().unwrap_or(Value::Null);
+            Ok(serde_json::from_value(inner)?)
+        })
     }
 
     // -- liveness ------------------------------------------------------------

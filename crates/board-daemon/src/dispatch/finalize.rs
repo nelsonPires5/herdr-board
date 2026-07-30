@@ -194,8 +194,8 @@ fn finalize_run_inner(
     d.refresh_watch();
     if kill {
         if let Some(active) = &removed {
-            if let Err(e) = d.spawner.kill(&active.handle) {
-                tracing::warn!("kill run {run_id} failed: {e}");
+            if d.spawner.kill(&active.handle).is_err() {
+                tracing::warn!(run_id, error_category = "runtime", "kill run failed");
             }
         }
     }

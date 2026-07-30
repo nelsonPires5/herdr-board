@@ -648,6 +648,18 @@ executes the returned plan; it performs no Herdr or SQLite I/O in the pure decis
 - Cards never auto-move into *Done*; last auto hop is always a human-gated column.
 - Retry = a new run; Pi uses `--fork <old> --session-id <new>`, Claude uses `--resume <old> --fork-session`; history is preserved.
 
+### Diagnostic security boundary
+
+Daemon diagnostics are local, private daily NDJSON. Board and Herdr transports emit completion
+metadata at their single call boundaries; payload DTOs are never passed to tracing, so redaction does
+not depend on a scrubber. Board correlation uses a daemon-generated per-connection sequence rather
+than the arbitrary wire request ID. Startup and daily retention delete only exact regular ASCII
+`daemon.YYYY-MM-DD.ndjson` files beyond 30 days and fail closed for every other path type/name.
+A failed daily writer emits one fixed path-free detached fallback notice per daemon lifetime and
+then drops unavailable records, bounding `bootstrap.log` without following symlinks. Lifecycle
+traces omit socket paths even when debug filtering is enabled. There is deliberately no raw payload
+mode, terminal capture, or telemetry upload.
+
 ## 9. Decisions (user-confirmed 2026-07-14)
 
 1. **Language: Rust** — ratatui TUI, rusqlite, tokio daemon; single binary `board` with canonical nested subcommands (`board`, `card`, `column`, `comment`, `run`) plus retained top-level aliases.

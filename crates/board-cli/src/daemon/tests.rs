@@ -1,9 +1,51 @@
 use super::daemon_command;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::Path;
 use std::thread;
 use std::time::Duration;
+
+#[test]
+fn detached_bootstrap_log_is_private_and_truncated_per_start() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = dir.path().join("bootstrap-probe.sh");
+    fs::write(
+        &script,
+        "#!/bin/sh\nprintf 'stdout-secret\\n'\nprintf '%s\\n' \"$BOOTSTRAP_MESSAGE\" >&2\n",
+    )
+    .expect("write probe");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).expect("chmod probe");
+    let log = dir.path().join("bootstrap.log");
+
+    for message in ["first", "second"] {
+        let status = daemon_command(&script, &log)
+            .expect("build command")
+            .env("BOOTSTRAP_MESSAGE", message)
+            .status()
+            .expect("run probe");
+        assert!(status.success());
+    }
+
+    assert_eq!(fs::read_to_string(&log).expect("read log"), "second\n");
+    assert_eq!(
+        fs::metadata(&log)
+            .expect("log metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+
+    let target = dir.path().join("target");
+    fs::write(&target, "do-not-truncate").expect("write target");
+    fs::remove_file(&log).expect("remove bootstrap log");
+    symlink(&target, &log).expect("symlink bootstrap log");
+    assert!(daemon_command(&script, &log).is_err());
+    assert_eq!(
+        fs::read_to_string(target).expect("read target"),
+        "do-not-truncate"
+    );
+}
 
 #[test]
 fn daemon_child_owns_a_distinct_process_group() {

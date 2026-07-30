@@ -10,13 +10,30 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::spawner::{RuntimeHandle, Spawner};
 use board_core::config::Config;
 use board_core::protocol::{BoardChangedReason, Event, RunOutcome};
-use board_herdr::{HerdrClient, NotificationSound};
+use board_herdr::{HerdrClient, HerdrError, NotificationSound};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, watch, Mutex as AsyncMutex};
 
 use crate::session::SessionRegistry;
 use crate::settings::DaemonSettings;
 use crate::store::Store;
+
+fn herdr_error_category(error: &HerdrError) -> &'static str {
+    match error {
+        HerdrError::Io(_) => "transport",
+        HerdrError::Protocol { .. } => "protocol",
+        HerdrError::Decode(_) => "decode",
+        HerdrError::Deadline { .. } => "deadline",
+        HerdrError::Disconnected => "disconnected",
+    }
+}
+
+fn trace_notification_error(error: &HerdrError) {
+    tracing::debug!(
+        error_category = herdr_error_category(error),
+        "herdr notification failed"
+    );
+}
 
 fn system_wall_now_ms() -> i64 {
     SystemTime::now()
@@ -260,7 +277,7 @@ impl Daemon {
                 // Cosmetic and detached, but a silently missing "ready for
                 // review" toast is otherwise unexplainable to the user.
                 if let Err(error) = c.notification_show(&title, body.as_deref(), sound) {
-                    tracing::debug!("herdr notification failed: {error}");
+                    trace_notification_error(&error);
                 }
             });
         }
@@ -325,5 +342,61 @@ impl Daemon {
 
     pub fn shutdown_rx(&self) -> watch::Receiver<bool> {
         self.shutdown_tx.subscribe()
+    }
+}
+
+#[cfg(test)]
+mod tracing_tests {
+    use super::*;
+    use std::io;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    struct CapturedWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for CapturedWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+        type Writer = CapturedWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            CapturedWriter(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn notification_protocol_error_trace_excludes_untrusted_message() {
+        const SECRET: &str = "HERDR_ERROR_CHAIN_SECRET_PATH_/tmp/credential.sock";
+        let captured = Captured::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(captured.clone())
+            .finish();
+        let error = HerdrError::Protocol {
+            code: "refused".into(),
+            message: SECRET.into(),
+        };
+
+        tracing::subscriber::with_default(subscriber, || trace_notification_error(&error));
+
+        let text = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        assert!(text.contains("error_category=\"protocol\""), "{text}");
+        assert!(
+            !text.contains(SECRET),
+            "secret-bearing protocol error leaked: {text}"
+        );
     }
 }

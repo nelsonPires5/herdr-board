@@ -20,8 +20,8 @@ pub(crate) async fn dispatch_pass(d: &Arc<Daemon>) {
     let _pass = d.dispatch_pass.lock().await;
     let active = match d.store.active_runs() {
         Ok(v) => v,
-        Err(e) => {
-            tracing::warn!("dispatch: active_runs failed: {e}");
+        Err(_) => {
+            tracing::warn!(error_category = "database", "dispatch: active_runs failed");
             return;
         }
     };
@@ -34,8 +34,8 @@ pub(crate) async fn dispatch_pass(d: &Arc<Daemon>) {
 
     let queued = match d.store.queued_runs() {
         Ok(v) => v,
-        Err(e) => {
-            tracing::warn!("dispatch: queued_runs failed: {e}");
+        Err(_) => {
+            tracing::warn!(error_category = "database", "dispatch: queued_runs failed");
             return;
         }
     };
@@ -77,10 +77,14 @@ pub(crate) async fn dispatch_pass(d: &Arc<Daemon>) {
     while let Some(result) = launches.join_next().await {
         match result {
             Ok((_, Ok(true) | Ok(false))) => {}
-            Ok((run_id, Err(error))) => {
-                tracing::error!("dispatch: spawn_one run {run_id} failed: {error}");
+            Ok((run_id, Err(_))) => {
+                tracing::error!(
+                    run_id,
+                    error_category = "launch",
+                    "dispatch: spawn_one failed"
+                );
             }
-            Err(error) => tracing::error!("dispatch: launch task failed: {error}"),
+            Err(_) => tracing::error!(error_category = "task", "dispatch: launch task failed"),
         }
     }
 }
