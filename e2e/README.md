@@ -12,8 +12,8 @@ isolation/safety design, and the **how-to-write-a-scenario** guide, see
 every numbered scenario from **01 through 29** must appear here and in `run-all.sh`. The provider-free
 safe boundary is `fake-agent.sh`,
 `fake-bin/{pi,claude}`, and `test-harness.sh`; prompt/system-prompt contents are never logged.
-Scenario 21 is the active-run timer/event-refresh characterization. The catalog describes the live
-gate, but this cleanup task runs only the static harness—not the full live suite.
+Scenario 21 is the active-run timer/event-refresh characterization. The complete catalog is run by
+the CI live gate after the cheaper static checks succeed.
 
 ## Use case ↔ scenario ↔ status
 
@@ -127,6 +127,7 @@ fake harnesses and never record prompt or system-prompt bodies.
 
 ```bash
 e2e/run-all.sh              # standard suite; fake Pi + Claude, no provider/model cost
+bash e2e/ci.sh              # CI-equivalent pinned install, --require-all, artifact export
 e2e/run-all.sh --keep       # keep sessions + each scenario's workspace for review
 e2e/run-all.sh 04 07        # only scenarios whose filename matches a filter
 scripts/e2e.sh              # compat wrapper -> e2e/run-all.sh
@@ -144,9 +145,12 @@ Scenario-level daemons/temp dirs are still cleaned up; cleanup failures still pr
 Exit codes: scenario `0` = PASS, `3` = SKIP (missing precondition), anything else =
 FAIL. `run-all.sh` captures the scenario side of its logging pipeline via `PIPESTATUS[0]` and exits
 non-zero if any scenario failed; `--require-all` also converts SKIP to failure. Per-scenario logs,
-status, exact owned session name, and sanitized manifest events are written below the run artifact root. The suite is **not** part
-of CI (it needs Herdr 0.7.5 to boot a real ephemeral protocol-17 server) — it is
-run by a human/orchestrator. The real-Claude smoke stages only completed onboarding/theme,
+status, exact owned session name, and sanitized manifest events are written below the run artifact root. In CI,
+`e2e/ci.sh` downloads or reuses the exact SHA-verified Herdr 0.7.5 Linux x86_64 asset, verifies
+protocol 17, invokes `run-all.sh --require-all`, and validates the one private artifact root printed
+by that invocation before copying it to the deterministic `e2e-artifacts/` upload directory. Runner
+and scenario evidence is uploaded even on failure and retained for 30 days. The same wrapper is the
+local CI equivalent; it never runs either real-provider smoke. The real-Claude smoke stages only completed onboarding/theme,
 exact workspace trust, the installed Herdr hook, credentials, and approved
 `remote-settings.json`, so startup dialogs cannot consume `agent.prompt`; it copies no broad
 personal Claude state. Its intended contract is one authorized attempt with no retry or fallback. The real-Claude smoke retains its independent Linux `/proc` identity implementation and is outside the portable standard-suite guarantee.
@@ -181,6 +185,7 @@ personal Claude state. Its intended contract is one authorized attempt with no r
 | `13-jump-to-pane.sh` | Canonical CLI and same-session TUI focus of a deliberately selected run through a real plugin overlay. |
 | `NN-*.sh` | The scenarios above. |
 | `run-all.sh` | Builds once, runs scenarios 01–29 as environment-scrubbed children with their own sessions, captures artifacts, and prints the summary (`--require-all` forbids skips). |
+| `ci.sh` | Pins, caches, and verifies Herdr for Linux x86_64; runs the complete suite with `--require-all`; exports only its exact private artifact root to `e2e-artifacts/`. |
 
 Columns have no `board` CLI verb, so scenarios configure them over the boardd
 socket via `scripts/board-rpc.py` (wrapped by `lib.sh`'s `col_create` / `brpc`). The

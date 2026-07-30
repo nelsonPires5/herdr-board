@@ -8,6 +8,7 @@ All notable changes to this project are documented here. The format is based on
 
 - [#50](https://github.com/nelsonPires5/herdr-board/pull/50) fix(core,tui): honor Pi `thinkingLevelMap` missing/string/null semantics in model effort menus.
 - [#51](https://github.com/nelsonPires5/herdr-board/pull/51) feat(daemon,herdr): add private daily redacted NDJSON diagnostics with 30-day retention.
+- [#52](https://github.com/nelsonPires5/herdr-board/pull/52) chore(ci): run the complete provider-free live E2E suite with pinned Herdr and always-uploaded 30-day evidence.
 
 ## [0.9.1] - 2026-07-27
 

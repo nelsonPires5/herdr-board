@@ -3,3 +3,4 @@
 daemon.log
 __pycache__/
 worktree/
+e2e-artifacts/

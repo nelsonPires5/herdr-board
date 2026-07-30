@@ -53,13 +53,15 @@ python3 -m unittest discover -s scripts/tests -p 'test_install_cli.py'
 python3 -m unittest discover -s scripts/tests -p 'test_stage_claude_config.py'
 python3 -m unittest discover -s scripts/tests -p 'test_e2e_*.py'
 bash e2e/test-harness.sh
+bash e2e/ci.sh
 ```
 
-CI runs those as four independent jobs — `docs`, `scripts`, `e2e-safety`, `test` — split by what
-each protects rather than by language. Only `test` needs a Rust toolchain, so a stale doc or a
-regressed safety token reports in seconds instead of queueing behind a compile, and one failure no
-longer hides the other answers. `test_docs.py` asserts that every `scripts/tests/test_*.py` is
-matched by a pattern above, so a new module cannot land in no job at all.
+CI runs the fast commands as independent `fmt`, `clippy`, `docs`, `scripts`, `e2e-safety`, and
+`test` jobs split by what each protects. The dependent `live-e2e` job starts only after all six
+succeed, installs SHA-verified Herdr 0.7.5, and runs the wrapper above. This keeps cheap failures
+fast while making the complete live suite part of the same required `CI` workflow. `test_docs.py`
+asserts that every `scripts/tests/test_*.py` is matched by a pattern above, so a new module cannot
+land in no job at all.
 
 Locally the whole Python tier is one command:
 
@@ -71,5 +73,7 @@ python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 provider, which is why it belongs in CI. It overlaps `test_e2e_safety.py` by design — they are two
 implementations of the same checks, which is why they share the `e2e-safety` job.
 
-The full live suite (`e2e/run-all.sh`) is a separate gate: it needs Herdr 0.7.5 to boot a real
-ephemeral protocol-17 server, so it is not part of CI and is run by a human/orchestrator.
+`e2e/ci.sh` is the CI and local-equivalent live gate. It caches only the exact SHA-verified Herdr
+0.7.5 Linux x86_64 binary, verifies protocol 17, runs `e2e/run-all.sh --require-all`, and exports
+sanitized runner/scenario evidence to `e2e-artifacts/` for the workflow's always-run 30-day upload.
+The standard suite remains provider-free and uses only suite-owned ephemeral resources.
