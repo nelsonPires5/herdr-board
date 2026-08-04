@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-04
+
 - [#54](https://github.com/nelsonPires5/herdr-board/pull/54) Upgrade Herdr compatibility to 0.8.0/socket protocol 19 and centralize the gated client/daemon integration with matching E2E preflight.
 
 ## [0.10.0] - 2026-07-30
@@ -331,7 +333,8 @@ a visible herdr pane. Ships as a single `board` binary (TUI + daemon + CLI) and 
 - **Packaging.** `herdr-plugin.toml` manifest, and `scripts/` for build, install (guarded behind
   `--yes`), the open-or-focus launcher, a raw protocol client, and a live-herdr e2e smoke test.
 
-[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.11.0
 [0.10.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.10.0
 [0.9.1]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.9.1
 [0.9.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.9.0
