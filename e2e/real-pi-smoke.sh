@@ -27,9 +27,16 @@ DEFAULT_THINKING="$(jq -er '.defaultThinkingLevel' "$SETTINGS")"
 PI_VERSION="$(pi --version)"
 MODEL_ROW="$(pi --list-models "$DEFAULT_MODEL" | awk -v p="$PROVIDER" -v m="$MODEL" '$1==p && $2==m {print; found=1} END{if(!found) exit 1}')" \
   || { echo "real-pi-smoke: default model $DEFAULT_MODEL not in pi --list-models" >&2; exit 2; }
-INTEGRATION="$("$HERDR_BIN" integration status | awk '$1=="pi:" {print}')"
-printf '%s\n' "$INTEGRATION" | grep -q 'current' \
-  || { echo "real-pi-smoke: Pi Herdr integration is not current: $INTEGRATION" >&2; exit 2; }
+HERDR_VERSION="$("$HERDR_BIN" --version 2>&1)"
+[ "$HERDR_VERSION" = "herdr 0.8.0" ] \
+  || { echo "real-pi-smoke: requires exactly Herdr 0.8.0 (got: $HERDR_VERSION)" >&2; exit 2; }
+HERDR_SCHEMA="$("$HERDR_BIN" api schema --json)"
+printf '%s' "$HERDR_SCHEMA" | jq -e '.protocol == 19' >/dev/null \
+  || { echo "real-pi-smoke: requires Herdr schema protocol 19" >&2; exit 2; }
+INTEGRATION="$("$HERDR_BIN" integration status | awk '$1=="pi:" {print; exit}')"
+printf '%s\n' "$INTEGRATION" \
+  | grep -Eq '^pi:[[:space:]]+current[[:space:]]+\(v8\)([[:space:]]+\(.+\))?$' \
+  || { echo "real-pi-smoke: Pi Herdr integration must be exactly current v8 (got: ${INTEGRATION:-missing})" >&2; exit 2; }
 
 RUN_ID="$$"
 SESSION="hb-pi-$RUN_ID"

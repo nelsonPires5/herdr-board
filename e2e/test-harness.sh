@@ -257,12 +257,22 @@ wait "$bad_server" 2>/dev/null || true
   [ "$E2E_SESSION_IDENTITY" = standalone-token ]
 )
 
-# Cleanup traps precede fake-managed root creation in both managed scenarios.
-python3 - "$E2E_LIB_DIR/11-pi-harness.sh" "$E2E_LIB_DIR/16-managed-p17.sh" <<'PY'
+# Cleanup traps precede fake-managed root creation in every managed fake-Pi
+# scenario, and fake-Pi setup precedes its e2e_init/e2e_boot call.
+python3 - "$E2E_LIB_DIR" <<'PY'
+import pathlib
+import re
 import sys
-for path in sys.argv[1:]:
-    text=open(path,encoding='utf-8').read()
-    assert text.index('trap e2e_cleanup EXIT') < text.index('e2e_enable_fake_pi')
+
+root = pathlib.Path(sys.argv[1])
+for path in sorted(root.glob('[0-9][0-9]-*.sh')):
+    text = path.read_text(encoding='utf-8')
+    if 'e2e_enable_fake_pi' not in text:
+        continue
+    enable = re.search(r'(?m)^\s*e2e_enable_fake_pi\s*$', text)
+    init = re.search(r'(?m)^\s*(?:e2e_init|e2e_boot)(?:\s|$)', text)
+    assert enable and init and enable.start() < init.start(), path
+    assert text.index('trap e2e_cleanup EXIT') < enable.start(), path
 PY
 
 # Spawn cleanup is armed/deferred before each race-prone full registration;

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Hermetic, no-provider Claude stand-in for protocol-17 managed launches.
+# Hermetic, no-provider Claude stand-in for protocol-19 managed launches.
 # The card prompt is forbidden in startup argv and must arrive through the
 # interactive terminal only after the system-prompt file has been consumed.
 set -euo pipefail
@@ -51,7 +51,7 @@ while (($#)); do
       [ -z "$system_file" ] || { echo 'fake claude: duplicate system-prompt file' >&2; exit 2; }
       system_file="$2"; shift 2 ;;
     --append-system-prompt|--)
-      echo "fake claude: invalid protocol-17 startup option: $1" >&2; exit 2 ;;
+      echo "fake claude: invalid protocol-19 startup option: $1" >&2; exit 2 ;;
     -*) echo "fake claude: unexpected startup option: $1" >&2; exit 2 ;;
     *) echo "fake claude: card prompt leaked into startup argv: $1" >&2; exit 2 ;;
   esac
@@ -132,6 +132,6 @@ fi
 FAKE_MANAGED_KIND=claude \
   python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/managed-terminal-shim.py" "$record"
 sleep "${FAKE_CLAUDE_SLEEP:-1.5}"
-"${BOARD_BIN:?BOARD_BIN required}" comment "fake claude: protocol-17 system file and agent.prompt validated"
+"${BOARD_BIN:?BOARD_BIN required}" comment "fake claude: protocol-19 system file and agent.prompt validated"
 "$BOARD_BIN" done --outcome ok
 sleep "${FAKE_MANAGED_HOLD:-60}"

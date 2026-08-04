@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Hermetic, no-provider Pi stand-in for protocol-17 managed launches.
+# Hermetic, no-provider Pi stand-in for protocol-19 managed launches.
 # It validates the authoritative startup-only system-prompt file, rejects card
 # prompt material in argv, reports through HERDR_PANE_ID, and then blocks on its
 # interactive tty until Herdr's agent.prompt delivers the card task on stdin.
@@ -46,7 +46,7 @@ while (($#)); do
       [ -z "$system_file" ] || { echo 'fake pi: duplicate --append-system-prompt' >&2; exit 2; }
       system_file="$2"; shift 2 ;;
     --append-system-prompt-file|--)
-      echo "fake pi: invalid protocol-17 startup option: $1" >&2; exit 2 ;;
+      echo "fake pi: invalid protocol-19 startup option: $1" >&2; exit 2 ;;
     -*) echo "fake pi: unexpected startup option: $1" >&2; exit 2 ;;
     *) echo "fake pi: card prompt leaked into startup argv: $1" >&2; exit 2 ;;
   esac
@@ -133,6 +133,6 @@ FAKE_MANAGED_KIND=pi \
 # Spawn registration commits only after readiness polling + agent.prompt return.
 # Keep the pre-done delay, then retain the pane for bounded structural asserts.
 sleep "${FAKE_PI_SLEEP:-1.5}"
-"${BOARD_BIN:?BOARD_BIN required}" comment "fake pi: protocol-17 system file and agent.prompt validated"
+"${BOARD_BIN:?BOARD_BIN required}" comment "fake pi: protocol-19 system file and agent.prompt validated"
 "$BOARD_BIN" done --outcome ok
 sleep "${FAKE_MANAGED_HOLD:-60}"
