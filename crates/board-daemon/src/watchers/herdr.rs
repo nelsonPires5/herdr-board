@@ -57,6 +57,11 @@ impl WatchConnector for HerdrWatchConnector {
         socket: &std::path::Path,
         panes: &[String],
     ) -> board_herdr::Result<Box<dyn WatchEventStream>> {
+        // The event stream has its own persistent connection and handshake,
+        // so gate the socket on a request connection first. This must happen
+        // before `events.subscribe`: an incompatible but pingable Herdr must
+        // never receive a subscription or become a watched generation.
+        let _client = crate::herdr_conn::connect_checked(socket)?;
         HerdrEvents::connect(socket, &watch_subscriptions(panes))
             .map(|events| Box::new(events) as Box<dyn WatchEventStream>)
     }

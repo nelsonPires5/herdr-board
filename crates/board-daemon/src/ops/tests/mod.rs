@@ -69,7 +69,11 @@ fn fake_herdr(reply: &'static str) -> FakeHerdr {
 /// `pane_exists == false` makes `pane.get` answer `pane_not_found`, i.e. the
 /// run's recorded pane id is stale (its terminal was closed).
 fn fake_herdr_with_pane(focus_reply: &'static str, pane_exists: bool) -> FakeHerdr {
-    fake_herdr_inner(focus_reply, pane_exists, crate::HERDR_PROTOCOL)
+    fake_herdr_inner(
+        focus_reply,
+        pane_exists,
+        board_herdr::SUPPORTED_HERDR_PROTOCOL,
+    )
 }
 
 /// A fake Herdr that answers the protocol gate with `protocol` and records
@@ -114,7 +118,8 @@ fn fake_herdr_inner(focus_reply: &'static str, pane_exists: bool, protocol: u32)
 }
 
 // ---------------------------------------------------------------------------
-// Rescue fixture: a small stateful protocol-17 Herdr for `run.focus` rescues
+// Rescue fixture: a small stateful Herdr 0.8.0 / protocol 19 server for
+// `run.focus` rescues
 // ---------------------------------------------------------------------------
 
 /// Create a card plus one *finished* run that recorded a dead pane, a live
@@ -246,7 +251,7 @@ impl RescueFake {
     }
 
     /// The env of the last `pane.split`, i.e. what the rescued pane received.
-    /// Protocol-17 placement is pane-first, so the run environment arrives on
+    /// Pane-first placement puts the run environment on
     /// `pane.split`, NOT on `agent.start`.
     fn last_split_env(&self) -> BTreeMap<String, String> {
         let splits = self.herdr.requests_for("pane.split");
@@ -255,7 +260,7 @@ impl RescueFake {
     }
 }
 
-/// A stateful protocol-17 Herdr covering the rescue path: the run's recorded
+/// A stateful Herdr 0.8.0 / protocol 19 server covering the rescue path: the run's recorded
 /// pane `w1:p9` is **absent** (its terminal was closed) while the card tab
 /// `w1:t1` and its shell anchor `w1:anchor` are still alive. Panes created by
 /// `pane.split` persist in this fake and are returned by `pane.list`, which is
@@ -341,7 +346,7 @@ fn fake_rescue_herdr(faults: RescueFakeFaults) -> RescueFake {
                     testkit::reply(
                         request,
                         json!({"type":"session_snapshot","snapshot":{
-                            "version":"0.7.5","protocol":17,
+                            "version":board_herdr::SUPPORTED_HERDR_VERSION,"protocol":board_herdr::SUPPORTED_HERDR_PROTOCOL,
                             "workspaces":[{"workspace_id":"w1","label":"ws","focused":true,
                                            "tab_count":1,"pane_count":1,"agent_status":"idle"}],
                             "tabs":tab_list,"panes":list,"agents":[]

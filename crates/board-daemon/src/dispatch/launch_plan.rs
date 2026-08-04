@@ -63,7 +63,7 @@ pub(super) async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result
         db.require_column(run.column_id)?
     };
 
-    // A non-NULL snapshot is explicit protocol-17 launch metadata. Legacy v6
+    // A non-NULL snapshot is explicit managed-launch metadata. Legacy v6
     // built-ins remain unmanaged so their persisted all-in-one argv executes
     // unchanged, without duplicate prompt delivery.
     let builtin = is_builtin_harness(&run.harness);

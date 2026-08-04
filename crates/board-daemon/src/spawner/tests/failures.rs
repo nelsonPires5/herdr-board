@@ -23,7 +23,7 @@ fn failed_managed_start_removes_prompt_file_and_closes_only_owned_pane() {
             error(req, "unsupported_agent_kind", "unsupported kind")
         }
         "pane.close" => pane_result(req, "w1:p2"),
-        method => panic!("unexpected protocol-17 method {method}"),
+        method => panic!("unexpected supported-contract method {method}"),
     });
     let spawner = HerdrSpawner::new(fake.socket.clone());
 

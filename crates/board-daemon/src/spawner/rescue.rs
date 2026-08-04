@@ -84,7 +84,7 @@ pub(crate) enum RescueOutcome {
 /// - **managed** (`agent_kind: Some`): Herdr tracks a registered agent for the
 ///   pane, so require `PaneInfo::agent` to still be *present*. Deliberately a
 ///   presence test, not an equality test against our `agent.start` name: the
-///   pinned protocol-17 schema gives `AgentInfo` **both** an `agent` and a
+///   supported Herdr 0.8.0 / protocol 19 schema gives `AgentInfo` **both** an `agent` and a
 ///   separate `name` field, and `e2e/16-managed-p17.sh` matches `pane.agent`
 ///   against the agent *kind* (`pi`/`claude`), so `agent` is not the exclusive
 ///   name we chose and must not be compared to it. Presence is the same
@@ -113,7 +113,7 @@ fn rescued_pane_is_live(pane: &PaneInfo, marker_name: &str, managed: bool) -> bo
 ///
 /// The label is used because it is the one field we both **write** (`pane.rename
 /// {pane_id, label}`) and can **read back** (`PaneInfo::label`) under the pinned
-/// protocol-17 schema. The `agent.start` name is deliberately *not* matched
+/// supported Herdr 0.8.0 / protocol 19 schema. The `agent.start` name is deliberately *not* matched
 /// against `PaneInfo::agent`: that field is not the exclusive name we chose (see
 /// [`rescued_pane_is_live`]).
 ///
@@ -207,7 +207,8 @@ pub(crate) fn rescue_run_pane(plan: &RescuePlan<'_>) -> anyhow::Result<RescueOut
         })?;
     }
 
-    // Protocol 17 never inherits a workspace cwd, so the rescue pane's cwd is
+    // The supported Herdr launch contract never inherits a workspace cwd, so
+    // the rescue pane's cwd is
     // read from a live pane of the run's recorded workspace — the same rule
     // dispatch uses. A vanished workspace fails here rather than launching in
     // some implicit directory.
@@ -304,7 +305,7 @@ pub(crate) fn rescue_run_pane(plan: &RescuePlan<'_>) -> anyhow::Result<RescueOut
 /// it. Labelling happens before the launch so the correlator exists even if the
 /// launch is slow; a failed launch removes the pane again.
 ///
-/// Verified against Herdr 0.7.5 / protocol 17 on a live socket: `agent.start`
+/// Verified against Herdr 0.8.0 / protocol 19 on a live socket: `agent.start`
 /// leaves a board-set `label` untouched, so this single pre-launch rename is
 /// enough and the label is still `marker_name` afterwards. That was checked by
 /// running `e2e/27-rescue-dead-pane.sh` with the label re-asserted post-launch

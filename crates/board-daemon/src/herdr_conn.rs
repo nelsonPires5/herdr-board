@@ -1,14 +1,13 @@
 //! The single gated way to open a Herdr request connection.
 //!
-//! `AGENTS.md` pins herdr-board to exactly Herdr 0.7.5 / socket protocol 17 and
-//! rejects every other one. The daemon opens a fresh connection per operation,
+//! The board-herdr client pins herdr-board to one supported Herdr release and
+//! socket protocol and rejects every other one. The daemon opens a fresh
+//! connection per operation,
 //! so the gate has to live at the connect, not at a single startup check.
 
 use std::path::{Path, PathBuf};
 
 use board_herdr::HerdrClient;
-
-use crate::HERDR_PROTOCOL;
 
 /// Connect to `socket` and require the pinned Herdr protocol before any other
 /// request can reach it.
@@ -19,7 +18,7 @@ use crate::HERDR_PROTOCOL;
 /// while the gate itself stays identical everywhere.
 pub(crate) fn connect_checked(socket: &Path) -> board_herdr::Result<HerdrClient> {
     let mut client = HerdrClient::connect(socket)?;
-    client.require_protocol(HERDR_PROTOCOL)?;
+    client.require_supported_protocol()?;
     Ok(client)
 }
 
@@ -32,7 +31,7 @@ pub(crate) fn connect_checked_for(socket: &Path, purpose: &str) -> anyhow::Resul
         let message = error.to_string();
         anyhow::Error::new(error).context(format!("herdr unavailable: {message}"))
     })?;
-    client.require_protocol(HERDR_PROTOCOL).map_err(|error| {
+    client.require_supported_protocol().map_err(|error| {
         let message = error.to_string();
         anyhow::Error::new(error).context(format!(
             "checking Herdr protocol before {purpose}: {message}"

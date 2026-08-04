@@ -35,6 +35,20 @@ fn trace_notification_error(error: &HerdrError) {
     );
 }
 
+/// Probe the exact supported Herdr contract immediately before the cosmetic
+/// notification mutation. Keeping this synchronous helper separate from the
+/// detached wrapper makes the gate and request ordering deterministic in tests.
+fn send_notification(
+    client: &mut HerdrClient,
+    title: &str,
+    body: Option<&str>,
+    sound: NotificationSound,
+) -> board_herdr::Result<()> {
+    client.require_supported_protocol()?;
+    client.notification_show(title, body, sound)?;
+    Ok(())
+}
+
 fn system_wall_now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -267,7 +281,11 @@ impl Daemon {
         let _ = self.dispatch_tx.send(());
     }
 
-    /// Fire a herdr notification (best effort, detached; no-op without herdr).
+    /// Fire a Herdr notification (best effort, detached; no-op without Herdr).
+    ///
+    /// The compatibility probe stays inside the detached effect immediately
+    /// before the mutation. Notifications are cosmetic, but an incompatible
+    /// pingable Herdr must not receive a `notification.show` request.
     pub fn notify(&self, title: String, body: Option<String>, sound: NotificationSound) {
         #[cfg(test)]
         self.record_effect("notification");
@@ -276,7 +294,7 @@ impl Daemon {
             std::thread::spawn(move || {
                 // Cosmetic and detached, but a silently missing "ready for
                 // review" toast is otherwise unexplainable to the user.
-                if let Err(error) = c.notification_show(&title, body.as_deref(), sound) {
+                if let Err(error) = send_notification(&mut c, &title, body.as_deref(), sound) {
                     trace_notification_error(&error);
                 }
             });
@@ -398,5 +416,46 @@ mod tracing_tests {
             !text.contains(SECRET),
             "secret-bearing protocol error leaked: {text}"
         );
+    }
+
+    #[test]
+    fn notification_send_pings_before_sending_a_supported_notification() {
+        let herdr = crate::testkit::herdr_server()
+            .on("notification.show", |req| {
+                crate::testkit::reply(req, serde_json::json!({"shown": true}))
+            })
+            .serve();
+        let mut client = HerdrClient::connect(&herdr.socket).unwrap();
+
+        send_notification(
+            &mut client,
+            "title",
+            Some("body"),
+            NotificationSound::Request,
+        )
+        .expect("the supported notification should be sent");
+
+        assert_eq!(herdr.methods(), vec!["ping", "notification.show"]);
+    }
+
+    #[test]
+    fn notification_send_only_pings_an_incompatible_herdr() {
+        let herdr = crate::testkit::herdr_server()
+            .version("0.8.1")
+            .on("notification.show", |req| {
+                crate::testkit::reply(req, serde_json::json!({"shown": true}))
+            })
+            .serve();
+        let mut client = HerdrClient::connect(&herdr.socket).unwrap();
+
+        assert!(send_notification(
+            &mut client,
+            "title",
+            Some("body"),
+            NotificationSound::Request,
+        )
+        .is_err());
+
+        assert_eq!(herdr.methods(), vec!["ping"]);
     }
 }

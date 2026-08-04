@@ -9,7 +9,7 @@ pub(super) fn daemon_status(d: &Arc<Daemon>) -> Result<Value> {
     let herdr_connected = match &d.herdr {
         Some(h) => {
             let mut c = h.clone();
-            c.is_live()
+            c.require_supported_protocol().is_ok()
         }
         None => false,
     };

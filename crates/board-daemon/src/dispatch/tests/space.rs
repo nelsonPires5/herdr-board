@@ -96,11 +96,11 @@ fn newly_created_workspace_requires_live_snapshot_cwd() {
 
 #[test]
 fn new_workspace_selected_socket_preflights_protocol_before_resolution() {
-    // RED: dispatch must gate the selected socket before resolve_space. A
+    // Dispatch must gate the selected socket before resolve_space. A
     // mismatched socket must receive exactly ping; workspace.list/create,
     // session.snapshot, and spawner placement must not be reached.
     let herdr = testkit::herdr_server()
-        .version("0.7.4")
+        .version("0.8.1")
         .take(3)
         .on("workspace.list", |req| {
             testkit::reply(
@@ -126,9 +126,11 @@ fn new_workspace_selected_socket_preflights_protocol_before_resolution() {
 
     assert_eq!(herdr.methods(), vec!["ping"]);
     let err = result.expect_err("protocol mismatch must stop workspace resolution");
-    assert!(err
-        .to_string()
-        .contains("Herdr 0.7.5 with protocol 17 is required"));
+    assert!(err.to_string().contains(&format!(
+        "Herdr {} with protocol {} is required",
+        board_herdr::SUPPORTED_HERDR_VERSION,
+        board_herdr::SUPPORTED_HERDR_PROTOCOL
+    )));
 }
 
 // ---------------------------------------------------------------------------

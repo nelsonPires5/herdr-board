@@ -20,8 +20,8 @@ fn make_pane(pane_id: &str, agent_status: AgentStatus) -> PaneInfo {
 
 fn empty_snapshot() -> SessionSnapshot {
     SessionSnapshot {
-        version: "1".into(),
-        protocol: 17,
+        version: board_herdr::SUPPORTED_HERDR_VERSION.into(),
+        protocol: board_herdr::SUPPORTED_HERDR_PROTOCOL,
         workspaces: vec![],
         tabs: vec![],
         panes: vec![],

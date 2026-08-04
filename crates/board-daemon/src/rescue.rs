@@ -209,7 +209,7 @@ fn rescue_identity(
 ///
 /// Dispatch injects `BOARD_CARD_ID`/`BOARD_RUN_ID`/`BOARD_SOCKET`/`BOARD_BIN` at
 /// spawn time (`dispatch::launch_plan`); none of them live in the persisted launch
-/// spec (a built-in's persisted `env` is empty), and protocol-17 `agent.start` carries
+/// spec (a built-in's persisted `env` is empty), and the supported Herdr `agent.start` carries
 /// no environment of its own. Without this the rescued pane would receive only
 /// the two rescue variables, and any harness that reads the board env — the
 /// checked-in fixtures do, under `set -u` — would exit immediately.

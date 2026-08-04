@@ -440,7 +440,8 @@ fn fake_herdr_socket(protocol: u32) -> FakeHerdr {
             testkit::reply(
                 req,
                 serde_json::json!({"snapshot": {
-                    "version": "0.7.5", "protocol": 17,
+                    "version": board_herdr::SUPPORTED_HERDR_VERSION,
+                    "protocol": board_herdr::SUPPORTED_HERDR_PROTOCOL,
                     "workspaces": [], "tabs": [], "panes": [], "agents": []
                 }}),
             )
@@ -450,7 +451,7 @@ fn fake_herdr_socket(protocol: u32) -> FakeHerdr {
 
 #[test]
 fn herdr_runtime_snapshot_rejects_a_socket_with_the_wrong_protocol() {
-    let herdr = fake_herdr_socket(16);
+    let herdr = fake_herdr_socket(board_herdr::SUPPORTED_HERDR_PROTOCOL - 1);
     let probe = HerdrRuntime.snapshot(&SessionTarget::Default(herdr.socket.clone()));
     assert_eq!(probe, Err(ProbeFailure::Transport));
     // An incompatible socket must never yield a snapshot: a "valid snapshot
@@ -459,9 +460,12 @@ fn herdr_runtime_snapshot_rejects_a_socket_with_the_wrong_protocol() {
 }
 
 #[test]
-fn herdr_runtime_snapshot_accepts_the_pinned_protocol() {
-    let herdr = fake_herdr_socket(17);
+fn herdr_runtime_snapshot_accepts_the_supported_protocol() {
+    let herdr = fake_herdr_socket(board_herdr::SUPPORTED_HERDR_PROTOCOL);
     let probe = HerdrRuntime.snapshot(&SessionTarget::Default(herdr.socket.clone()));
-    assert!(probe.is_ok(), "protocol 17 must pass the gate: {probe:?}");
+    assert!(
+        probe.is_ok(),
+        "the supported Herdr contract must pass the gate: {probe:?}"
+    );
     assert_eq!(herdr.methods(), vec!["ping", "session.snapshot"]);
 }

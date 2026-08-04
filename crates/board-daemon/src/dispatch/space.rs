@@ -1,8 +1,6 @@
 use board_core::protocol::SpaceKind;
 use board_herdr::{HerdrClient, WorkspaceCreateParams, WorkspaceInfo};
 
-use crate::HERDR_PROTOCOL;
-
 /// Resolve a card's space within its session to `(workspace_id, cwd)`.
 ///
 /// - [`SpaceKind::Workspace`]: `space_ref` is an existing workspace id or a
@@ -18,7 +16,7 @@ pub(crate) fn resolve_space(
 ) -> anyhow::Result<(String, String)> {
     // Dispatch performs workspace discovery before handing off to the spawner,
     // so the selected socket must be gated here as well as in HerdrSpawner.
-    client.require_protocol(HERDR_PROTOCOL).map_err(|error| {
+    client.require_supported_protocol().map_err(|error| {
         let message = error.to_string();
         anyhow::Error::new(error).context(format!(
             "checking Herdr protocol before workspace resolution: {message}"
@@ -42,8 +40,9 @@ pub(crate) fn resolve_space(
                 .ok_or_else(|| anyhow::anyhow!("new_workspace space requires space_cwd"))?;
             match find_workspace_by_label(&workspaces, label) {
                 // A reused workspace must use a cwd from one of its live
-                // panes. Protocol 17 does not inherit workspace cwd, so the
-                // card's original create cwd is not a safe fallback here.
+                // panes. The supported Herdr launch contract does not inherit
+                // workspace cwd, so the card's original create cwd is not a
+                // safe fallback here.
                 Some(id) => {
                     let live = workspace_cwd(client, &id)?;
                     Ok((id, live))
@@ -66,8 +65,9 @@ pub(crate) fn resolve_space(
 
 /// Look up a workspace's cwd via one of its live panes in the session snapshot.
 ///
-/// Protocol 17 placement is pane-first and never inherits a workspace cwd, so
-/// failure to read this value must stop dispatch rather than launch from an
+/// The supported Herdr placement contract is pane-first and never inherits a
+/// workspace cwd, so failure to read this value must stop dispatch rather than
+/// launch from an
 /// implicit daemon/Herdr fallback directory.
 pub(crate) fn workspace_cwd(
     client: &mut HerdrClient,
@@ -147,7 +147,7 @@ pub(crate) fn validate_space_resolvable(
     space_ref: Option<&str>,
     space_cwd: Option<&str>,
 ) -> anyhow::Result<()> {
-    client.require_protocol(HERDR_PROTOCOL).map_err(|error| {
+    client.require_supported_protocol().map_err(|error| {
         let message = error.to_string();
         anyhow::Error::new(error).context(format!(
             "checking Herdr protocol before workspace pre-check: {message}"

@@ -23,7 +23,7 @@ mod supervisor;
 mod testkit;
 mod watchers;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -45,8 +45,13 @@ use crate::store::Store;
 /// table itself so it cannot drift from routing.
 pub use ops::ROUTED_METHODS;
 
-/// The herdr protocol version the daemon requires.
-pub(crate) const HERDR_PROTOCOL: u32 = 17;
+/// Retain a reachable default-session handle without imposing the operation
+/// compatibility gate during startup. Status and notifications perform that
+/// exact gate when they run; all dispatch, event, and mutation paths keep their
+/// checked connection helpers.
+fn initial_herdr_handle(socket: &Path) -> Option<HerdrClient> {
+    HerdrClient::connect(socket).ok()
+}
 
 /// Run the daemon. `foreground` mirrors logs to stderr and is used by
 /// `board daemon --foreground`. Returns `Ok(())` immediately if another daemon
@@ -94,10 +99,14 @@ async fn async_main(db_path: PathBuf, socket_path: PathBuf) -> anyhow::Result<()
     let store = Store::new(db);
 
     // Herdr handle (best effort): used for notifications, liveness, status, and
-    // the default-session event stream. Absence never crashes the daemon.
+    // the default-session event stream. Keep any reachable socket handle even
+    // when its current contract is incompatible; status and notifications
+    // probe the exact supported contract at operation time, so a server that
+    // upgrades in place can recover without restarting boardd. Dispatch,
+    // events, and mutations retain their own checked gates.
     let herdr: Option<HerdrClient> = match settings.spawner {
         SpawnerKind::Local => None,
-        SpawnerKind::Herdr => HerdrClient::connect_default().ok(),
+        SpawnerKind::Herdr => initial_herdr_handle(&board_herdr::default_socket_path()),
     };
 
     // Session registry (herdr spawner only): resolves card sessions to sockets.
