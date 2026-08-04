@@ -62,7 +62,7 @@ pub fn parse_event_line(line: &str) -> Option<HerdrEvent> {
     };
     // The kind lives in `data.type` (underscore names) on some herdr builds and
     // in the top-level `event` key (dotted names) on others (verified live on
-    // protocol 17: {"event":"pane.agent_status_changed","data":{...}} with
+    // protocol 19: {"event":"pane.agent_status_changed","data":{...}} with
     // no data.type). Accept both, normalized to underscores.
     let kind = data
         .get("type")

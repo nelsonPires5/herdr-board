@@ -228,24 +228,55 @@ impl HerdrClient {
     }
 
     /// Require the exact Herdr release and socket protocol supported by this
-    /// client. The explicit protocol argument keeps callers' expected contract
-    /// visible at the gate.
-    pub fn require_protocol(&mut self, expected: u32) -> Result<Pong> {
+    /// client. The supported contract is owned by [`crate::SUPPORTED_HERDR_VERSION`]
+    /// and [`crate::SUPPORTED_HERDR_PROTOCOL`], so callers cannot accidentally
+    /// ask this gate to validate a different contract.
+    pub fn require_supported_protocol(&mut self) -> Result<Pong> {
         let pong = self.ping()?;
-        if pong.version != "0.7.5" || pong.protocol != expected || expected != 17 {
+        if pong.version != crate::SUPPORTED_HERDR_VERSION
+            || pong.protocol != crate::SUPPORTED_HERDR_PROTOCOL
+        {
             return Err(HerdrError::Protocol {
                 code: "incompatible_protocol".to_string(),
                 message: format!(
-                    "Herdr 0.7.5 with protocol 17 is required (found Herdr {} with protocol {})",
-                    pong.version, pong.protocol
+                    "Herdr {} with protocol {} is required (found Herdr {} with protocol {})",
+                    crate::SUPPORTED_HERDR_VERSION,
+                    crate::SUPPORTED_HERDR_PROTOCOL,
+                    pong.version,
+                    pong.protocol
                 ),
             });
         }
         Ok(pong)
     }
 
-    /// True if a `ping` currently succeeds. The daemon uses this to set its
-    /// `herdr_connected` flag.
+    /// Compatibility adapter for callers of the pre-0.8.0 API.
+    ///
+    /// The argument is retained so existing clients continue to compile, but
+    /// it is not a version selector: this crate supports only its exact pinned
+    /// Herdr 0.8.0 / protocol-19 contract. New callers should use
+    /// [`Self::require_supported_protocol`].
+    #[deprecated(
+        note = "use require_supported_protocol; the argument is retained only for source compatibility"
+    )]
+    pub fn require_protocol(&mut self, expected: u32) -> Result<Pong> {
+        if expected != crate::SUPPORTED_HERDR_PROTOCOL {
+            return Err(HerdrError::Protocol {
+                code: "incompatible_protocol".to_string(),
+                message: format!(
+                    "Herdr {} with protocol {} is the only supported contract (requested protocol {})",
+                    crate::SUPPORTED_HERDR_VERSION,
+                    crate::SUPPORTED_HERDR_PROTOCOL,
+                    expected
+                ),
+            });
+        }
+        self.require_supported_protocol()
+    }
+
+    /// True if a raw `ping` currently succeeds, indicating reachability only.
+    /// This does not enforce the supported Herdr version or socket protocol
+    /// contract; use [`Self::require_supported_protocol`] for that check.
     pub fn is_live(&mut self) -> bool {
         self.ping().is_ok()
     }
@@ -350,7 +381,7 @@ impl HerdrClient {
     /// `pane_not_found` error envelope, which is a *negative answer* to a
     /// liveness question rather than a failure, so it is modelled as `None`
     /// here and every other error still propagates. Verified against
-    /// Herdr 0.7.5 / protocol 17: `tests/fixtures/schema.json` types
+    /// Herdr 0.8.0 / protocol 19: `tests/fixtures/schema.json` types
     /// `pane.get`'s params as `PaneTarget {pane_id}` with a
     /// `{"type":"pane_info","pane":PaneInfo}` success result, and a live socket
     /// answers an unknown pane id with

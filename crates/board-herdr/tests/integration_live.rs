@@ -1,11 +1,13 @@
 //! Read-only integration tests against a *live* herdr socket.
 //!
-//! `#[ignore]` by default. Run with a real herdr running:
+//! `#[ignore]` by default. Run with Herdr 0.8.0 / protocol 19 running:
 //!   cargo test -p board-herdr -- --ignored
-//! They also self-skip (pass trivially) if no socket is present, so the
-//! ignored run is safe on machines without herdr.
+//! They self-skip (pass trivially) if no compatible socket is present, so the
+//! ignored run is safe on machines without the supported Herdr.
 
-use board_herdr::{default_socket_path, HerdrClient, ReadSource};
+use board_herdr::{
+    default_socket_path, HerdrClient, ReadSource, SUPPORTED_HERDR_PROTOCOL, SUPPORTED_HERDR_VERSION,
+};
 
 fn client_or_skip() -> Option<HerdrClient> {
     let path = default_socket_path();
@@ -13,10 +15,19 @@ fn client_or_skip() -> Option<HerdrClient> {
         eprintln!("no herdr socket at {}; skipping", path.display());
         return None;
     }
-    match HerdrClient::connect(&path) {
-        Ok(c) => Some(c),
+    let mut client = match HerdrClient::connect(&path) {
+        Ok(c) => c,
         Err(e) => {
             eprintln!("could not connect to herdr: {e}; skipping");
+            return None;
+        }
+    };
+    match client.require_supported_protocol() {
+        Ok(_) => Some(client),
+        Err(e) => {
+            eprintln!(
+                "socket is not Herdr {SUPPORTED_HERDR_VERSION} / protocol {SUPPORTED_HERDR_PROTOCOL}: {e}; skipping"
+            );
             None
         }
     }

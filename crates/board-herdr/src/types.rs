@@ -1,6 +1,6 @@
 //! Typed views over herdr result payloads.
 //!
-//! Field names verified against `herdr api schema --json` (protocol 17,
+//! Field names verified against `herdr api schema --json` (Herdr 0.8.0, protocol 19,
 //! captured in `tests/fixtures/schema.json`). All structs use
 //! `#[serde(default)]` on optional fields and ignore unknown fields so the
 //! client keeps working across minor herdr additions.
@@ -198,7 +198,7 @@ pub struct TabCreated {
     pub root_pane: PaneInfo,
 }
 
-/// Result of protocol-17 `agent.start`. `argv` echoes the launched command line.
+/// Result of protocol-19 `agent.start`. `argv` echoes the launched command line.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AgentStarted {
     pub agent: AgentInfo,

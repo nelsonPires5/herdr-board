@@ -53,7 +53,7 @@ fn request_id(reader: &mut BufReader<UnixStream>) -> String {
 }
 
 #[test]
-fn matching_subscription_ack_requires_protocol_17_typed_result() {
+fn matching_subscription_ack_requires_protocol_19_typed_result() {
     const INITIAL_SECRET: &str = "INITIAL_ACK_PAYLOAD_SECRET_53d1";
     const ADD_SECRET: &str = "ADD_ACK_PAYLOAD_SECRET_9ca2";
 
@@ -66,9 +66,9 @@ fn matching_subscription_ack_requires_protocol_17_typed_result() {
         .finish();
     let _guard = tracing::subscriber::set_default(subscriber);
 
-    // A matching id is not sufficient: protocol 17 requires the typed
+    // A matching id is not sufficient: protocol 19 requires the typed
     // {"type":"subscription_started"} result verified from
-    // `herdr api schema --json` (Herdr 0.7.5, protocol 17).
+    // `herdr api schema --json` (Herdr 0.8.0, protocol 19).
     let (_initial_dir, initial_path, initial_listener) = socket();
     let initial_peer = thread::spawn(move || {
         let (stream, _) = initial_listener.accept().unwrap();
