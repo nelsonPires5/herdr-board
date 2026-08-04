@@ -593,8 +593,8 @@ fn socket_a_pane_exit_does_not_finalize_socket_b_duplicate_pane() {
     );
 }
 
-/// A Herdr socket that answers the protocol gate with `protocol`, recording
-/// every method it is asked for.
+/// A Herdr socket that answers the compatibility gate with `protocol`,
+/// recording every method it is asked for.
 fn fake_herdr_socket(protocol: u32) -> FakeHerdr {
     testkit::herdr_server()
         .protocol(protocol)
@@ -602,17 +602,21 @@ fn fake_herdr_socket(protocol: u32) -> FakeHerdr {
             testkit::reply(
                 req,
                 serde_json::json!({"snapshot": {
-                    "version": "0.7.5", "protocol": 17,
+                    "version": board_herdr::SUPPORTED_HERDR_VERSION,
+                    "protocol": board_herdr::SUPPORTED_HERDR_PROTOCOL,
                     "workspaces": [], "tabs": [], "panes": [], "agents": []
                 }}),
             )
+        })
+        .on("events.subscribe", |req| {
+            testkit::reply(req, serde_json::json!({"type": "subscription_started"}))
         })
         .serve()
 }
 
 #[test]
 fn watch_snapshot_rejects_a_socket_with_the_wrong_protocol() {
-    let herdr = fake_herdr_socket(16);
+    let herdr = fake_herdr_socket(board_herdr::SUPPORTED_HERDR_PROTOCOL - 1);
     let result = HerdrWatchConnector.snapshot(&herdr.socket);
     assert!(result.is_err(), "an incompatible socket must not snapshot");
     // A snapshot that answers is authoritative here — a watched pane missing
@@ -622,10 +626,29 @@ fn watch_snapshot_rejects_a_socket_with_the_wrong_protocol() {
 }
 
 #[test]
-fn watch_snapshot_accepts_the_pinned_protocol() {
-    let herdr = fake_herdr_socket(17);
+fn watch_snapshot_accepts_the_supported_protocol() {
+    let herdr = fake_herdr_socket(board_herdr::SUPPORTED_HERDR_PROTOCOL);
     HerdrWatchConnector
         .snapshot(&herdr.socket)
-        .expect("protocol 17 must pass the gate");
+        .expect("the supported Herdr contract must pass the gate");
     assert_eq!(herdr.methods(), vec!["ping", "session.snapshot"]);
+}
+
+#[test]
+fn watch_subscription_rejects_an_incompatible_socket_before_subscribing() {
+    let herdr = fake_herdr_socket(board_herdr::SUPPORTED_HERDR_PROTOCOL - 1);
+    let result = HerdrWatchConnector.subscribe(&herdr.socket, &[]);
+
+    assert!(result.is_err(), "an incompatible socket must not subscribe");
+    assert_eq!(herdr.methods(), vec!["ping"]);
+}
+
+#[test]
+fn watch_subscription_accepts_the_supported_socket_after_the_gate() {
+    let herdr = fake_herdr_socket(board_herdr::SUPPORTED_HERDR_PROTOCOL);
+    let _events = HerdrWatchConnector
+        .subscribe(&herdr.socket, &[])
+        .expect("the supported Herdr contract must pass before subscribing");
+
+    assert_eq!(herdr.methods(), vec!["ping", "events.subscribe"]);
 }

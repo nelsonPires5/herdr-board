@@ -45,7 +45,9 @@ fn pane_set_title_renames_the_caller_pane_through_herdr() {
 
 #[test]
 fn pane_set_title_rejects_a_socket_with_the_wrong_protocol() {
-    let herdr = testkit::herdr_server().protocol(16).serve();
+    let herdr = testkit::herdr_server()
+        .protocol(board_herdr::SUPPORTED_HERDR_PROTOCOL - 1)
+        .serve();
     let d = test_daemon(Config::default());
 
     let err = handle_request(
@@ -58,7 +60,11 @@ fn pane_set_title_rejects_a_socket_with_the_wrong_protocol() {
     assert_eq!(err.code(), 4);
     let msg = err.to_string();
     assert!(
-        msg.contains("Herdr 0.7.5 with protocol 17 is required"),
+        msg.contains(&format!(
+            "Herdr {} with protocol {} is required",
+            board_herdr::SUPPORTED_HERDR_VERSION,
+            board_herdr::SUPPORTED_HERDR_PROTOCOL
+        )),
         "message: {msg}"
     );
     // The gate is the first and only request: no rename reaches a socket the

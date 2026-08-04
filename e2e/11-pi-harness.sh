@@ -157,6 +157,6 @@ assert x["session_id"] in os.path.basename(x["agent_session_path"])
 assert x["prompt_received_via_stdin"] is True and x["prompt_matches_run_snapshot"] is True
 assert x["prompt"] == show["runs"][-1]["prompt_snapshot"]
 PY
-ok "retry forked $SESSION1 -> $SESSION2 with the same P17 system-file/task split"
+ok "retry forked $SESSION1 -> $SESSION2 with the same managed system-file/task split"
 
 step "11-pi-harness: ALL CHECKS PASSED"

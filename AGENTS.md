@@ -17,7 +17,7 @@ TUI + daemon + CLI. Rust, cargo workspace, edition 2021, all crates share the wo
 Ownership is strict: edit your crate(s) + append to root `[workspace.dependencies]`. Semantics
 source of truth: `docs/protocol.md` + `docs/design.md`. Docs live in `docs/` (index: `docs/README.md`);
 `schema.sql` is the fresh-schema source of truth and `board-core::db` owns upgrades. Final compatibility
-is board protocol v1, SQLite schema v13, and exactly Herdr 0.7.5 / socket protocol 17. The complete
+is board protocol v1, SQLite schema v13, and exactly Herdr 0.8.0 / socket protocol 19. The complete
 live catalog is `e2e/README.md` (scenarios 01–29); `e2e/test-harness.sh` is the provider-free static
 safety gate.
 
@@ -27,7 +27,7 @@ The gate list has one maintained copy: **[`docs/README.md` → Test gates](docs/
 (mirrored by `.github/workflows/ci.yml`; `scripts/tests/test_docs.py` fails if the two drift).
 
 - The Python tier is a CI gate too (`ci.yml`'s `Python tests` step) and is easy to forget:
-  `scripts/tests/test_docs.py` pins the version matrix (schema v13, protocol 17, Herdr 0.7.5)
+  `scripts/tests/test_docs.py` pins the version matrix (schema v13, protocol 19, Herdr 0.8.0)
   and the exact `e2e/NN-*.sh` catalog, so adding a scenario or bumping the schema fails here
   until the docs and that test are updated together.
 
@@ -60,7 +60,7 @@ Full layering, test placement, harness details, and how to add tests live in
   | | `dispatch/` | queue lifecycle; `launch_plan.rs` builds the launch spec, `ownership.rs` decides what this daemon may claim |
   | | `spawner/` | launch and placement; `placement/` (alloc/geometry/race), `herdr/` (managed + configured), `error.rs` |
   | | `watchers/` | timeout/liveness/Herdr observation |
-  | | `herdr_conn.rs` | the gated connect: normalize the socket path, connect, run the 0.7.5/protocol-17 check, in one place. New Herdr work goes through it. The two space-resolution sites that still connect directly (`ops/cards.rs`, `dispatch/launch_plan.rs`) run the same gate inside `dispatch/space.rs` — nothing reaches Herdr ungated |
+  | | `herdr_conn.rs` | the gated connect: normalize the socket path, connect, run the 0.8.0/protocol-19 check, in one place. New placement, discovery, and mutation paths go through it. The two space-resolution sites that still connect directly (`ops/cards.rs`, `dispatch/launch_plan.rs`) run the same gate inside `dispatch/space.rs`; cleanup/observation retain an ungated client only for panes this daemon already owns |
   | | `rescue.rs`, `recovery.rs`, `logging.rs`, `testkit.rs` | run rescue, per-session recovery, tracing setup, and the `cfg(test)` daemon/fake-Herdr builders |
   | `board-tui` | `app/` | the pure reducer — `state`/`effect`/`nav`/`drag` plus one module per screen |
   | | `driver/` | the effect loop (`dispatch`, `load`); `runtime.rs` owns terminal setup/teardown, `origin.rs` the Herdr-plugin origin context |
@@ -119,7 +119,7 @@ Full layering, test placement, harness details, and how to add tests live in
 sources are the installed binary itself — `herdr api schema --json` (methods/types/events +
 protocol number), `herdr <cmd> --help`, `herdr api snapshot`. Never assume a herdr command,
 flag, or JSON shape from memory, and pin the argv you verified in a test comment. Repo herdr
-facts are pinned to exactly **Herdr 0.7.5 / protocol 17**. herdr-board intentionally rejects every
+facts are pinned to exactly **Herdr 0.8.0 / protocol 19**. herdr-board intentionally rejects every
 other Herdr version and protocol; re-verify against `api schema` before changing that gate or any
 wire behavior. **See [`docs/herdr.md`](docs/herdr.md).**
 
@@ -127,12 +127,12 @@ wire behavior. **See [`docs/herdr.md`](docs/herdr.md).**
   against disposable workspaces you created (see `e2e/`). Read-only probes otherwise.
 - **Agent names are exclusive** while a pane is open. Names are `card-<id>-<column-slug>`; on an
   `agent_name_taken` collision the daemon retries with the `-r<run>` fallback.
-- **Panes don't inherit the workspace's env/cwd.** Protocol-17 launch is pane-first:
+- **Panes don't inherit the workspace's env/cwd.** Managed-agent launch is pane-first:
   `tab.create`/`pane.split` establishes cwd + env, then `agent.start` targets that pane with
   `{name, kind, pane_id, args}`. Workspace cwd is read from the workspace's pane snapshot.
 - Current durable runs use stable `card-<id>` tab labels, but reuse only an exact board-owned `tab_id` reconstructed from durable pane identity; labels are never ownership. Legacy `kanban` tabs remain untouched and legacy-only.
 - **Herdr events are a raw-socket stream** (`events.subscribe`, persistent connection); the CLI only
-  has a blocking one-shot `events.wait`. Protocol-17 `pane_agent_status_changed` carries pane,
+  has a blocking one-shot `events.wait`. Protocol-19 `pane_agent_status_changed` carries pane,
   workspace, agent, and status fields; `idle ≠ finished`, and a trailing `idle` may follow `done`
   (completion still needs the explicit `board done` channel). Watcher identity is `(session socket,
   pane id)`, not pane id alone.

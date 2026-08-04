@@ -4,7 +4,7 @@
 //! request/response connection). This module opens that socket, subscribes,
 //! and exposes a blocking [`Iterator`] of [`HerdrEvent`].
 //!
-//! ## Subscription quirk (verified live, protocol 17)
+//! ## Subscription quirk (verified live, protocol 19)
 //! A `pane.agent_status_changed` subscription **requires a concrete `pane_id`**
 //! — herdr validates the pane exists and rejects a wildcard/missing id with
 //! `internal_error`. So the daemon must build one subscription per pane it

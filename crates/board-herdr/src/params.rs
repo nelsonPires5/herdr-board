@@ -1,7 +1,7 @@
 //! Public parameter structs for herdr RPC calls.
 //!
 //! Every struct serializes to the exact field names and shape expected by the
-//! herdr socket protocol (protocol 17). Optional fields use
+//! herdr socket protocol (protocol 19). Optional fields use
 //! `#[serde(skip_serializing_if)]` so they are omitted when absent, matching
 //! the wire behaviour of the `herdr` CLI.
 
@@ -37,7 +37,7 @@ pub struct TabCreateParams {
     pub focus: bool,
 }
 
-/// Protocol-17 params for `agent.start`. Placement, cwd, and environment are
+/// Protocol-19 params for `agent.start`. Placement, cwd, and environment are
 /// established on the target pane before starting the managed agent.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct AgentStartParams {
@@ -78,7 +78,7 @@ pub struct AgentWaitParams {
     pub timeout_ms: Option<u64>,
 }
 
-/// Params for protocol-17 `pane.split`.
+/// Params for protocol-19 `pane.split`.
 #[derive(Debug, Clone, Serialize)]
 pub struct PaneSplitParams {
     #[serde(skip_serializing_if = "Option::is_none")]

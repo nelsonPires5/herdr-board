@@ -25,7 +25,7 @@ pub(crate) use configured::{configured_script, posix_quote, remove_file_if_exist
 pub(crate) use configured::{launch_configured, HerdrCliPaneRunner, PaneRunner};
 pub(crate) use managed::{launch_managed, DelayFn, DEFAULT_AGENT_START_DELAY};
 
-/// Launches managed agents through protocol-17 `agent.start`, and configured
+/// Launches managed agents through the supported Herdr `agent.start` contract, and configured
 /// harnesses through a board-owned split child plus `herdr pane run`.
 ///
 /// New durable card tabs retain their root as a shell anchor; the anchor is
@@ -81,7 +81,14 @@ impl HerdrSpawner {
         }
     }
 
-    /// Open a client on `socket` (the run's session), else the default socket.
+    /// Open an ungated client on `socket` (the run's session), else the
+    /// default socket.
+    ///
+    /// This helper is intentionally reserved for [`Spawner::kill`] and
+    /// [`Spawner::is_alive`]. Cleanup and observation may need to inspect or
+    /// close a pane already owned by this daemon even when Herdr has become
+    /// incompatible; every new placement/mutation path starts with
+    /// [`connect_checked_for`] instead.
     fn client_for(&self, socket: Option<&Path>) -> anyhow::Result<HerdrClient> {
         let target = socket.unwrap_or(&self.socket);
         HerdrClient::connect(target).map_err(|error| {

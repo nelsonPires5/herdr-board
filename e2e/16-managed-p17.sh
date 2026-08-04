@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# 16-managed-p17.sh — protocol-17 managed Pi/Claude launch contract.
+# 16-managed-p17.sh — protocol-19/current managed Pi/Claude launch contract.
+# The p17 filename is retained as a historical catalog name for compatibility.
 #
 # The provider-free terminal fixtures validate the authoritative 0600 system
 # file, report session identity then idle lifecycle against HERDR_PANE_ID, emit
@@ -55,7 +56,7 @@ print(cwds[0])
 printf '  disposable workspace pane cwd: %s\n' "$MANAGED_PANE_CWD"
 EXEC_ID="$(col_create '{"name":"P17 Execute","trigger":"auto"}')"
 
-step "Dispatch fake Pi through managed protocol-17 launch"
+step "Dispatch fake Pi through managed protocol-19/current launch"
 pi_json="$("$BOARD_BIN" card new --title 'P17 Pi' --description $'description with spaces\nand a newline' \
   --harness pi --model p17/pi-model --effort low --space-kind workspace --space-ref "$WS_ID" --json)"
 PI_ID="$(printf '%s' "$pi_json" | jget id)"
@@ -110,7 +111,7 @@ assert not any("description with spaces" in arg or "herdr-board protocol" in arg
 print("  Pi: 0600 system file exact; readiness reported; exact agent.prompt captured on tty")
 PY
 
-step "Dispatch fake Claude through managed protocol-17 launch"
+step "Dispatch fake Claude through managed protocol-19/current launch"
 claude_json="$("$BOARD_BIN" card new --title 'P17 Claude' --description $'claude description with spaces\nand a newline' \
   --harness claude --model p17/claude-model --effort low --permission acceptEdits \
   --space-kind workspace --space-ref "$WS_ID" --json)"

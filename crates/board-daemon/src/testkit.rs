@@ -4,11 +4,11 @@
 //! sibling test modules:
 //!
 //! 1. [`daemon`] — one builder for the twelve-argument [`Daemon::new`].
-//! 2. [`herdr_server`] — one fake protocol-17 Herdr Unix socket server, with a
-//!    configurable protocol/version (so protocol-gate tests can serve a *wrong*
-//!    one), per-method canned responses, an optional accept count, and recorded
-//!    request inspection. The generic protocol-17 JSON constructors used to
-//!    build those responses live here too.
+//! 2. [`herdr_server`] — one fake Herdr 0.8.0 / protocol 19 Unix socket server,
+//!    with a configurable protocol/version (so protocol-gate tests can serve a
+//!    *wrong* one), per-method canned responses, an optional accept count, and
+//!    recorded request inspection. The generic supported-contract JSON
+//!    constructors used to build those responses live here too.
 //! 3. The "nothing escaped" assertions and the armed lifecycle-fault `Db`.
 //!
 //! This module is compiled only under `cfg(test)`; nothing here is production
@@ -29,6 +29,7 @@ use board_core::config::Config;
 use board_core::db::{Db, LifecycleFaultPoint};
 use board_core::protocol::Event;
 use board_core::Error;
+use board_herdr::HerdrClient;
 
 use crate::session::SessionRegistry;
 use crate::settings::DaemonSettings;
@@ -61,6 +62,7 @@ pub(crate) struct DaemonBuilder {
     settings: DaemonSettings,
     spawner: Arc<dyn Spawner>,
     session_registry: Option<SessionRegistry>,
+    herdr: Option<HerdrClient>,
     db_path: PathBuf,
     socket_path: PathBuf,
     events_capacity: usize,
@@ -74,6 +76,7 @@ pub(crate) fn daemon() -> DaemonBuilder {
         settings: DaemonSettings::default(),
         spawner: Arc::new(LocalSpawner::new()),
         session_registry: None,
+        herdr: None,
         db_path: PathBuf::from("/tmp/board-test.db"),
         socket_path: PathBuf::from("/tmp/board-test.sock"),
         events_capacity: 16,
@@ -112,6 +115,11 @@ impl DaemonBuilder {
         self
     }
 
+    pub(crate) fn herdr(mut self, herdr: HerdrClient) -> Self {
+        self.herdr = Some(herdr);
+        self
+    }
+
     /// Point the daemon at a real on-disk database file. The socket path is
     /// derived from it unless [`DaemonBuilder::socket_path`] overrides it.
     pub(crate) fn db_path(mut self, path: PathBuf) -> Self {
@@ -142,7 +150,7 @@ impl DaemonBuilder {
             self.db_path,
             self.socket_path,
             self.spawner,
-            None, // no herdr client
+            self.herdr,
             self.session_registry,
             events_tx,
             dispatch_tx,
@@ -230,11 +238,11 @@ pub(crate) struct FakeHerdrBuilder {
 }
 
 /// Start building a fake Herdr. It answers the `ping` protocol gate itself
-/// (Herdr 0.7.5 / protocol 17 by default) and records every request.
+/// (the supported Herdr release/protocol by default) and records every request.
 pub(crate) fn herdr_server() -> FakeHerdrBuilder {
     FakeHerdrBuilder {
-        version: "0.7.5".to_string(),
-        protocol: crate::HERDR_PROTOCOL,
+        version: board_herdr::SUPPORTED_HERDR_VERSION.to_string(),
+        protocol: board_herdr::SUPPORTED_HERDR_PROTOCOL,
         take: None,
         by_method: HashMap::new(),
         fallback: None,
@@ -348,7 +356,7 @@ impl FakeHerdrBuilder {
 }
 
 // ---------------------------------------------------------------------------
-// Generic protocol-17 JSON constructors
+// Generic supported-contract JSON constructors
 // ---------------------------------------------------------------------------
 
 /// A successful response envelope for `req`.
@@ -364,7 +372,7 @@ pub(crate) fn error(req: &Value, code: &str, message: &str) -> Value {
     })
 }
 
-/// Minimal schema-valid protocol-17 `PaneInfo` fixture. In particular,
+/// Minimal schema-valid `PaneInfo` fixture. In particular,
 /// `focused` and `revision` are required by the authoritative schema.
 pub(crate) fn pane_info(id: &str) -> Value {
     json!({

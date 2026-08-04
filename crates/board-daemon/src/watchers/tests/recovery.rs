@@ -60,10 +60,10 @@ fn pane_exit_becomes_fail_without_transition() {
 }
 
 #[test]
-fn protocol17_idle_after_done_does_not_rearm_an_awaiting_run() {
+fn trailing_idle_after_done_does_not_rearm_an_awaiting_run() {
     let (d, run_id, card_id, _events) = active_daemon();
 
-    // Protocol 17 may emit the terminal turn's `done` followed by `idle`.
+    // Herdr may emit the terminal turn's `done` followed by `idle`.
     // Done is authoritative for board review; the trailing idle must not
     // arm a second grace period while this same run remains awaiting.
     handle_event(&d, status(AgentStatus::Done));
@@ -84,6 +84,6 @@ fn protocol17_idle_after_done_does_not_rearm_an_awaiting_run() {
             .unwrap()
             .idle_since
             .is_none(),
-        "a trailing protocol-17 idle event must not rearm idle expiry while awaiting",
+        "a trailing Herdr idle event must not rearm idle expiry while awaiting",
     );
 }

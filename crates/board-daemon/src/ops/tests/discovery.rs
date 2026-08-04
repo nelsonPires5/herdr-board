@@ -230,7 +230,7 @@ fn run_focus_rescues_a_dead_pane_by_resuming_in_a_new_pane_without_touching_the_
 
 #[test]
 fn run_focus_rescue_gives_the_new_pane_the_board_env_but_never_the_run_credential() {
-    // Protocol-17 placement is pane-first: the run environment arrives on
+    // Pane-first placement puts the run environment on
     // `pane.split`, not `agent.start`. Without it a harness that reads the board
     // env (every checked-in fixture does, under `set -u`) exits immediately.
     let fake = fake_rescue_herdr(RescueFakeFaults::default());
@@ -719,7 +719,7 @@ fn space_list_without_herdr_is_herdr_unavailable() {
 
 #[test]
 fn space_list_rejects_a_socket_with_the_wrong_protocol() {
-    let herdr = fake_herdr_with_protocol(16);
+    let herdr = fake_herdr_with_protocol(board_herdr::SUPPORTED_HERDR_PROTOCOL - 1);
     // Seed the listing: resolving the default session otherwise shells out to
     // `herdr session list --json`, which makes this assert on whatever herdr is
     // on PATH rather than on the protocol gate — green locally, red in CI.
@@ -739,7 +739,11 @@ fn space_list_rejects_a_socket_with_the_wrong_protocol() {
     assert_eq!(err.code(), 4);
     let msg = err.to_string();
     assert!(
-        msg.contains("Herdr 0.7.5 with protocol 17 is required"),
+        msg.contains(&format!(
+            "Herdr {} with protocol {} is required",
+            board_herdr::SUPPORTED_HERDR_VERSION,
+            board_herdr::SUPPORTED_HERDR_PROTOCOL
+        )),
         "message: {msg}"
     );
     // The gate is the first and only request: workspace.list never happens.
@@ -748,7 +752,7 @@ fn space_list_rejects_a_socket_with_the_wrong_protocol() {
 
 #[test]
 fn run_focus_rejects_a_socket_with_the_wrong_protocol() {
-    let herdr = fake_herdr_with_protocol(16);
+    let herdr = fake_herdr_with_protocol(board_herdr::SUPPORTED_HERDR_PROTOCOL - 1);
     let origin_dir = tempfile::tempdir().unwrap();
     let origin = origin_dir.path().join("origin.sock");
     std::os::unix::fs::symlink(&herdr.socket, &origin).unwrap();
@@ -766,7 +770,11 @@ fn run_focus_rejects_a_socket_with_the_wrong_protocol() {
     assert_eq!(err.code(), 4);
     let msg = err.to_string();
     assert!(
-        msg.contains("Herdr 0.7.5 with protocol 17 is required"),
+        msg.contains(&format!(
+            "Herdr {} with protocol {} is required",
+            board_herdr::SUPPORTED_HERDR_VERSION,
+            board_herdr::SUPPORTED_HERDR_PROTOCOL
+        )),
         "message: {msg}"
     );
     // The liveness probe for the recorded pane must not reach an incompatible

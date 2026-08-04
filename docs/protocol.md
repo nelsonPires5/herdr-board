@@ -40,11 +40,36 @@ protocol version.
 
 ## Herdr compatibility gate
 
-boardd supports **exactly Herdr 0.7.5 / protocol 17**; there is no protocol-16 compatibility path.
-For each dispatch, it calls `ping` on the card's selected session socket and requires both exact
-values before workspace discovery or `workspace.create`. The spawner repeats the same check as its
-first socket operation before any tab/pane placement, managed-agent call, or configured-harness
-runner action. A mismatch fails the run before workspace mutation.
+boardd supports **exactly Herdr 0.8.0 / protocol 19**. The board protocol remains v1 and the
+SQLite schema remains v13; neither version is the upstream Herdr socket contract. Because the
+daemon opens a fresh Herdr request connection per operation, the compatibility probe is repeated
+at each operation boundary rather than treated as a one-time startup check:
+
+- `daemon.status` re-pings its configured socket and reports `herdr_connected: true` only for the
+  exact supported version and protocol.
+- The event supervisor gates a request connection before opening its persistent `events.subscribe`
+  stream. The subscription acknowledgement must be the typed `subscription_started` success
+  response, and it completes before the first reconciliation snapshot. An incompatible socket
+  receives neither a subscription
+  nor snapshot work.
+- The detached notification effect gates immediately before `notification.show`; an incompatible
+  but pingable Herdr is not sent even a cosmetic notification.
+- Dispatch and workspace discovery gate before `workspace.list`, `workspace.create`, or a live
+  workspace-cwd snapshot. The spawner repeats the gate as its first call before tab/pane placement,
+  managed-agent launch, or a configured-harness runner. `space.list` and the read-only space
+  preflight are checked the same way. The `herdr session list --json` registry enumeration is a
+  separate CLI discovery step, not a socket call; once it selects a socket, socket operations are
+  gated.
+- New pane operations are checked before `pane.get`/`pane.focus` for `run.focus`, `pane.rename` for
+  `pane.set_title`, and `pane.list`/`pane.layout`/`pane.split`/`pane.rename`, agent calls, and the
+  configured runner used by placement and rescue.
+
+There is one deliberate exception: cleanup and liveness for panes already owned by a daemon run.
+The spawner's `kill`/`pane.close` and `is_alive`/snapshot paths retain an ungated connection so a
+Herdr upgrade or incompatibility cannot prevent the daemon from closing or observing its own
+handle. This exception does not authorize new discovery, placement, focus, notification, or launch;
+supervisor reconciliation and caller-visible focus/rescue operations remain checked. A mismatch on
+a checked dispatch path fails the run before workspace mutation.
 
 ## Auto-start
 
@@ -257,8 +282,8 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
   re-threaded onto a resume without re-sending that task, so it is refused (error 3) rather than
   rewritten.
 
-  **Environment of a rescued pane.** Protocol-17 placement is pane-first, so the environment is
-  established by the `pane.split` that creates the pane. A rescued pane receives the persisted run
+  **Environment of a rescued pane.** Pane-first placement establishes the environment on the
+  `pane.split` that creates the pane. A rescued pane receives the persisted run
   environment plus `BOARD_CARD_ID`, `BOARD_SOCKET`, `BOARD_BIN`, `BOARD_RESCUE=1`,
   `BOARD_RESUME_SESSION_ID=<conversation id>`, and `BOARD_RESCUED_RUN_ID=<run id>`.
   **`BOARD_RUN_ID` is deliberately withheld.** It is not a label but the *actor credential*:
@@ -291,7 +316,7 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
 
   Matching is on the pane **label**, the one field the daemon both sets (`pane.rename`) and reads
   back (`PaneInfo.label`); the same string is also used as the `agent.start` name purely for Herdr's
-  `agent_name_taken` exclusivity backstop. Verified live against Herdr 0.7.5: `agent.start` leaves a
+  `agent_name_taken` exclusivity backstop. Verified live against Herdr 0.8.0 / protocol 19: `agent.start` leaves a
   board-set label untouched, so labelling once before the launch is sufficient. A matching pane only counts as *live* if its harness is
   still there: a Herdr pane label outlives the process, so for a managed harness the pane must still
   have a registered `agent` (a *presence* test — `PaneInfo.agent` is the agent kind, not the chosen
@@ -346,7 +371,7 @@ it, a residual configured-script orphan is an explicitly documented limitation.
   in one pane's border, in the **caller's own** herdr session. `origin_socket` names that session
   exactly as it does for `run.focus` (only the caller knows which Herdr it runs inside); the path is
   canonicalized and then opened through the same gated connect as every other operation, so the
-  pinned Herdr 0.7.5 / protocol 17 check runs before the rename. Maps to herdr `pane.rename`, and
+  pinned Herdr 0.8.0 / protocol 19 check runs before the rename. Maps to herdr `pane.rename`, and
   touches no board state — the daemon exists here only because it owns every Herdr call.
   Error 1 for an empty `pane_id`, error 4 for an unavailable socket, a socket that fails the
   protocol gate, or a `pane.rename` herdr refuses (e.g. an unknown pane). A rename that did not
@@ -388,7 +413,7 @@ decider, and the daemon applies its decision in one place.
 | herdr `working` | `running`; clears `blocked`/`awaiting` (+reason). From `awaiting` this is the review loop: feedback typed into the pane wakes the agent. |
 | herdr `blocked` | `blocked`; run stays active. |
 | herdr `done` (run active, no `board done`) | `awaiting` + `agent_done` (immediate, no grace) + notification. On an already-`awaiting` card it refreshes the reason to `agent_done` without re-notifying. |
-| `idle` past `idle_grace_seconds` (no `board done`) | `awaiting` + `idle_expired` + notification. On an already-`awaiting` card it's a no-op (keeps the more specific reason). Protocol 17 may emit `done` then trailing `idle`; that `idle` does not re-arm the grace timer or replace `agent_done`. |
+| `idle` past `idle_grace_seconds` (no `board done`) | `awaiting` + `idle_expired` + notification. On an already-`awaiting` card it's a no-op (keeps the more specific reason). Herdr may emit `done` then trailing `idle`; that `idle` does not re-arm the grace timer or replace `agent_done`. |
 | herdr `unknown`, or any signal on a non-live card | ignored. |
 | Herdr `pane_exited` without `board done` | run `fail`, card `failed`, **no** transition (unchanged); watcher identity is `(session socket, pane id)`. |
 | configured child returns while its exact run is open (`queued` or `started`) | internal run-id guard records `fail`, card `failed`, **no** transition; callback-before-registration is accepted, while stale/completed and built-in runs are rejected. `board done` likewise requires the exact `BOARD_RUN_ID` during the queued exception, preventing a stale child from completing a replacement. |
@@ -426,9 +451,9 @@ Coarse by design — the TUI refetches only its selected `board.get {board_id}` 
 3. Spawn (daemon, via `Spawner` trait):
    - resolve session: card `session` (null = default) → Herdr socket via the session registry; an unknown/not-running session fails the run with a clear error listing known sessions. The per-session client is used for workspace resolve/create, spawn, kill, and liveness.
    - harness session: resume `card.session_id` unless `column.fresh_session` or none. Pi mint/resume use exact `--session-id`; Pi retry forks old → a newly minted target id. Claude retains mint/`--resume`/`--fork-session`. Existing cards keep their stored harness/session.
-   - **preflight before workspace mutation:** `ping` the selected socket and require exact Herdr 0.7.5/protocol 17. Only then resolve `workspace` by id/case-insensitive label, or resolve `new_workspace` by label and, if absent, call `workspace.create {label,cwd,focus:false}`. Read the workspace cwd from its pane snapshot; snapshot failure or missing live cwd fails dispatch, never falling back to process cwd or a stale snapshot.
+   - **preflight before workspace mutation:** `ping` the selected socket and require exact Herdr 0.8.0 / protocol 19. Only then resolve `workspace` by id/case-insensitive label, or resolve `new_workspace` by label and, if absent, call `workspace.create {label,cwd,focus:false}`. Read the workspace cwd from its pane snapshot; snapshot failure or missing live cwd fails dispatch, never falling back to process cwd or a stale snapshot.
    - **preflight again at the spawner boundary:** this is the spawner's first protocol call, before placement, managed launch, or the configured runner.
-   - build the run-child env `{BOARD_CARD_ID,BOARD_RUN_ID,BOARD_SOCKET,BOARD_BIN}` plus configured-harness prompt env. Current schema v13 runs place each card in a stable short `card-<id>` tab whose `tab.create` root is a shell anchor labeled `card-<id>-anchor`. The anchor receives only stable card identity; every run child is created by `pane.split` from it with the complete run cwd/env. Promotion persists the exact anchor id with the run. The daemon reuses only exact tab/anchor identities reconstructed from the newest matching durable panes in the same session/workspace; labels are display metadata, never ownership. A renamed anchor remains selected by identity; a closed anchor is recreated only by splitting a currently live durable board child, otherwise a fresh tab is created. The initial split targets ratio `0.40` and clamps it on narrow terminals so the anchor remains reusable; later splits use layout geometry. Both fresh and recovered placement fail closed unless the live layout can provide a 24x6 anchor and a 12x8 child. Concurrent first allocations for one `(session,workspace,card)` key are serialized; if multiple historical panes are live, newest run id wins. Legacy rows retain the historical `kanban` lookup. Thus cwd/env/placement exist **before** launch; protocol-17 `agent.start` receives none of them and never receives the anchor pane id.
+   - build the run-child env `{BOARD_CARD_ID,BOARD_RUN_ID,BOARD_SOCKET,BOARD_BIN}` plus configured-harness prompt env. Current schema v13 runs place each card in a stable short `card-<id>` tab whose `tab.create` root is a shell anchor labeled `card-<id>-anchor`. The anchor receives only stable card identity; every run child is created by `pane.split` from it with the complete run cwd/env. Promotion persists the exact anchor id with the run. The daemon reuses only exact tab/anchor identities reconstructed from the newest matching durable panes in the same session/workspace; labels are display metadata, never ownership. A renamed anchor remains selected by identity; a closed anchor is recreated only by splitting a currently live durable board child, otherwise a fresh tab is created. The initial split targets ratio `0.40` and clamps it on narrow terminals so the anchor remains reusable; later splits use layout geometry. Both fresh and recovered placement fail closed unless the live layout can provide a 24x6 anchor and a 12x8 child. Concurrent first allocations for one `(session,workspace,card)` key are serialized; if multiple historical panes are live, newest run id wins. Legacy rows retain the historical `kanban` lookup. Thus cwd/env/placement exist **before** launch; pane-first `agent.start` receives none of them and never receives the anchor pane id.
    - managed Pi/Claude: create a mode-`0600` file containing the snapshotted system prompt; call `agent.start {name,kind,pane_id,args,timeout_ms:30000}` on the newly split child with prompt-free startup args and the harness-specific file flag. A typed `agent_pane_busy` response is treated as a bounded transient on that same child: retry the exact same request on the same pane at most twice, with 100ms then 200ms backoff; do not split or allocate another pane. Persistent busy is terminal and follows child-only cleanup, leaving the anchor. This is distinct from `pane_not_found`, which is a placement race: close the child when present, rediscover from `tab.list`, and retry complete placement once. Poll `agent.get {target:pane_id}` for at most 30s until `interactive_ready && !launch_pending`; then call `agent.prompt {target:pane_id,text:prompt_snapshot}`. Remove the prompt file before returning, including error paths.
    - managed pane name is `card-<id>-<column-slug>` (e.g. `card-14-execute`); `agent_name_taken` retries once on the same pane with `card-<id>-<column-slug>-r<run>`.
    - configured harness: `pane.rename` the owned pane, create one mode-`0700` self-removing script whose POSIX-quoted command is the exact configured argv, and invoke exactly the selected Herdr binary (`HERDR_BIN_PATH` when nonempty, otherwise `herdr`) as `pane run <pane_id> <script_path>` with `HERDR_SOCKET_PATH` set to the selected socket. The script runs the child, preserves its status, then calls hidden `board __pane-exited --run-id "$BOARD_RUN_ID"`; the internal run-id guard accepts only the exact open queued/started configured run (including callback-before-registration), rejects stale/completed and built-in runs, and never applies `on_fail`.
@@ -455,12 +480,12 @@ Their persisted startup argv contains neither system nor card prompt:
   `pi [--model provider/model] [--thinking off|minimal|low|medium|high|xhigh|max] (--session-id ID | --fork OLD --session-id NEW)`
   - omitted model/thinking means Pi uses its configured defaults;
   - no permission, approval, or `--allowedTools` flag is added; Pi project trust is separate;
-  - protocol-17 launch uses `kind:"pi"`, startup args without `pi`, then appends
+  - pane-first managed launch uses `kind:"pi"`, startup args without `pi`, then appends
     `--append-system-prompt <mode-0600-file>`; only after readiness does `agent.prompt` carry the
     unprefixed `prompt_snapshot`.
 - Built-in `claude`:
   `claude [--model M] [--effort E] [--permission-mode P] --allowedTools "Bash(board:*)" (--session-id UUID | --resume ID [--fork-session])`
-  - protocol-17 launch uses `kind:"claude"`, startup args without `claude`, then appends
+  - pane-first managed launch uses `kind:"claude"`, startup args without `claude`, then appends
     `--append-system-prompt-file <mode-0600-file>`; `agent.prompt` separately carries the card task.
 - Config-defined harnesses (`~/.config/herdr-board/config.toml`) remain unmanaged even if their
   executable is named `pi` or `claude`:
@@ -483,7 +508,7 @@ Legacy pre-v7 rows are deliberately not backfilled: NULL built-in rows remain un
 their persisted historical all-in-one argv, avoiding duplicate prompt delivery; NULL configured rows
 retain the historical current-column system-prompt reconstruction at spawn. The local test spawner
 materializes the historical all-in-one Pi/Claude argv from explicit managed metadata, but the Herdr
-path always uses the separated protocol-17 channels.
+path always uses the separated pane-first channels.
 
 Pi lifecycle status comes from Herdr's official Pi integration and the existing event watcher; there
 is no Pi-specific watcher. Without `herdr integration install pi`, explicit `board done`, spawn

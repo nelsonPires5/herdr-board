@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""No-provider terminal shim for protocol-17 managed-agent E2E fixtures.
+"""No-provider terminal shim for protocol-19 managed-agent E2E fixtures.
 
 The real Herdr `agent.prompt` call writes the card task to the managed process's
 terminal.  This helper keeps that terminal interactive, captures the bytes from

@@ -301,11 +301,11 @@ if declare -F claude >/dev/null 2>&1; then
 fi
 
 HERDR_VERSION="$($HERDR_BIN --version 2>&1)"
-[ "$HERDR_VERSION" = "herdr 0.7.5" ] \
-  || fail "requires exactly Herdr 0.7.5 (got: $HERDR_VERSION)"
+[ "$HERDR_VERSION" = "herdr 0.8.0" ] \
+  || fail "requires exactly Herdr 0.8.0 (got: $HERDR_VERSION)"
 HERDR_SCHEMA="$($HERDR_BIN api schema --json)"
-printf '%s' "$HERDR_SCHEMA" | jq -e '.protocol == 17' >/dev/null \
-  || fail "requires Herdr schema protocol 17"
+printf '%s' "$HERDR_SCHEMA" | jq -e '.protocol == 19' >/dev/null \
+  || fail "requires Herdr schema protocol 19"
 CLAUDE_VERSION="$($CLAUDE_BIN --version 2>&1)"
 INTEGRATION_LINE="$($HERDR_BIN integration status | awk '$1 == "claude:" {print; exit}')"
 printf '%s\n' "$INTEGRATION_LINE" \
@@ -361,7 +361,7 @@ printf 'logged_in=yes\nconfig=staged\n' >"$EVIDENCE/auth-preflight.txt"
 
 {
   printf 'herdr_version=%s\n' "$HERDR_VERSION"
-  printf 'herdr_schema_protocol=17\n'
+  printf 'herdr_schema_protocol=19\n'
   printf 'claude_version=%s\n' "$CLAUDE_VERSION"
   printf 'claude_binary=%s\n' "$CLAUDE_BIN"
   printf 'claude_integration=%s\n' "$INTEGRATION_LINE"
@@ -373,8 +373,8 @@ printf '%s\n' "$INTEGRATION_LINE" >"$EVIDENCE/integration.txt"
 # Build and test this checkout's candidate in an isolated target. --locked
 # prevents dependency resolution from changing the checkout.
 CARGO_TARGET_DIR="$TARGET" "$CARGO_BIN" test --locked \
-  --manifest-path "$ROOT/Cargo.toml" -p board-core --test protocol17_spawn \
-  >"$EVIDENCE/protocol17-test.log" 2>&1
+  --manifest-path "$ROOT/Cargo.toml" -p board-core --test managed_spawn \
+  >"$EVIDENCE/protocol19-test.log" 2>&1
 CARGO_TARGET_DIR="$TARGET" "$CARGO_BIN" build --locked --release \
   --manifest-path "$ROOT/Cargo.toml" -p board-cli \
   >"$EVIDENCE/candidate-build.log" 2>&1
@@ -447,8 +447,8 @@ e2e_process_identity_verify "$SERVER_PID" "$SERVER_IDENTITY" \
   || fail "disposable Herdr server failed identity check before socket publication"
 write_state
 PING="$(HERDR_SOCKET_PATH="$SOCK" python3 "$ROOT/e2e/hrpc.py" ping '{}')"
-printf '%s' "$PING" | jq -e '.version == "0.7.5" and .protocol == 17' >/dev/null \
-  || fail "disposable session ping is not Herdr 0.7.5 protocol 17"
+printf '%s' "$PING" | jq -e '.version == "0.8.0" and .protocol == 19' >/dev/null \
+  || fail "disposable session ping is not Herdr 0.8.0 protocol 19"
 printf '%s\n' "$PING" >"$EVIDENCE/herdr-ping.json"
 
 printf 'HERDR MUTATION: create one disposable workspace in %s\n' "$SESSION"

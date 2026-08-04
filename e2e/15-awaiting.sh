@@ -2,22 +2,28 @@
 # 15-awaiting.sh — a live Herdr agent-status signal parks a run in `awaiting`;
 # explicit board confirmation then closes it as `done` in the same column.
 #
-# Herdr 0.7.5 / protocol 17 and Pi integration v6 were verified before
+# Herdr 0.8.0 / protocol 19 and Pi integration v8 were verified before
 # pinning the argv below:
 #   herdr pane report-agent <pane_id> --source ID --agent LABEL
 #     --state idle|working|blocked|unknown [--seq N]
 # `done` is an output AgentStatus but is NOT an accepted pane.report_agent input
-# state, so a supported CLI cannot inject it directly. This scenario emulates
-# the installed Pi integration's public report path (`source=herdr:pi`): prove
-# blocked/working events reach boardd, then report the integration's end-of-turn
-# idle state. On a managed agent.start pane Herdr derives the output status
-# `done`; the scenario asserts that live status and the board's `agent_done` arm.
+# state, so a supported CLI cannot inject it directly. This scenario uses the
+# checked-in managed Pi fixture to emulate the installed Pi integration's public
+# report path (`source=herdr:pi`): prove blocked/working events reach boardd,
+# then report the integration's end-of-turn idle state. On a managed agent.start
+# pane Herdr derives the output status `done`; the scenario asserts that live
+# status and the board's `agent_done` arm.
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/lib.sh"
 
-# Keep the pane alive without board done. Cleanup closes its disposable workspace.
-export E2E_FAKE_ENV="FAKE_AGENT_SLEEP=300"
-
+# Keep the managed Pi pane alive without board done. Cleanup closes its
+# disposable workspace. The trap must be armed before fake-managed roots exist.
+trap e2e_cleanup EXIT
+e2e_enable_fake_pi
+# Herdr launches the managed fixture directly in the pane, so export the
+# hold before its owned server/workspace are created. This keeps it past the
+# awaiting confirmation while preserving the scenario's four-second timeout.
+export FAKE_PI_SLEEP=300
 e2e_init
 e2e_build
 e2e_isolate
@@ -41,9 +47,9 @@ step "Create an auto column with no on_success and a four-second test timeout"
 EXEC_ID="$(col_create '{"name":"Await Execute","trigger":"auto","timeout_minutes":4}')"
 [ -n "$EXEC_ID" ] || fail "could not create Await Execute column"
 
-step "Create and dispatch a held fake-agent card"
+step "Create and dispatch a held managed-Pi card"
 card_json="$("$BOARD_BIN" card new --title "Awaiting Card" \
-  --description "wait for human confirmation" --harness fake \
+  --description "wait for human confirmation" --harness pi --model p17/pi-model --effort low \
   --space-kind workspace --space-ref "$WS_ID" --json)"
 CARD_ID="$(printf '%s' "$card_json" | jget id)" || fail "could not parse card id"
 mut "board move $CARD_ID 'Await Execute' -> agent.start in $WS_ID"
@@ -61,6 +67,18 @@ for _ in $(seq 1 80); do
   sleep .1
 done
 [ -n "$PANE_ID" ] || { fail "run never recorded a live pane"; }
+AGENT_SESSION_PATH=""
+for _ in $(seq 1 80); do
+  AGENT_SESSION_PATH="$(hrpc pane.get "{\"pane_id\":\"$PANE_ID\"}" 2>/dev/null | python3 -c '
+import json, sys
+pane = json.load(sys.stdin).get("pane", {})
+session = pane.get("agent_session") or {}
+print(session.get("value") or "")
+' 2>/dev/null || true)"
+  [ -n "$AGENT_SESSION_PATH" ] && break
+  sleep .1
+done
+[ -n "$AGENT_SESSION_PATH" ] || fail "managed Pi session identity was not recorded"
 clock_ms() { python3 -c 'import time; print(time.time_ns() // 1_000_000)'; }
 RUN_STARTED_OBSERVED_MS="$(clock_ms)"
 ok "run started in live pane $PANE_ID"
@@ -76,13 +94,16 @@ wait_status() {
   fail "card status '$actual' (expected '$expected')"
 }
 
-# Use increasing authoritative-integration sequence numbers.
-SEQ="$(( $(date +%s) * 1000 ))"
+# Herdr orders integration reports by the authoritative source sequence. Start
+# at nanosecond scale so this scenario cannot be rejected as stale after an
+# earlier Pi v8 report on the same pane/source.
+SEQ="$(python3 -c 'import time; print(time.time_ns())')"
 report_agent() {
   local state="$1"
   SEQ=$((SEQ + 1))
   e2e_herdr_mutate -- pane report-agent "$PANE_ID" \
-    --source herdr:pi --agent pi --state "$state" --seq "$SEQ" >/dev/null
+    --source herdr:pi --agent pi --agent-session-path "$AGENT_SESSION_PATH" \
+    --state "$state" --seq "$SEQ" >/dev/null
 }
 
 step "Prove the live pane.agent_status_changed subscription reaches boardd"

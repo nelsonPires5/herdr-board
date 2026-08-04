@@ -1,4 +1,4 @@
-//! Managed protocol-17 launch: `agent.start` on a board-owned pane, with the
+//! Managed Herdr launch: `agent.start` on a board-owned pane, with the
 //! name/busy retry taxonomy and the wait for the agent to become interactive.
 
 use std::fs;

@@ -518,7 +518,7 @@ fn resume_invocation_refuses_a_legacy_all_in_one_command_line() {
             .unwrap_err(),
         HarnessError::ResumeLegacyArgv("claude".into())
     );
-    // The protocol-17 form `build_invocation` actually persists is accepted.
+    // The pane-first managed form `build_invocation` actually persists is accepted.
     let managed = build_invocation(
         "claude",
         &Config::default(),

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # fake-agent.sh — the fake harness the live e2e scenarios dispatch instead of a
-# real coding agent. It receives the board env the daemon injects at agent.start
+# real coding agent. It receives the board env the daemon injects at launch
 # (BOARD_PROMPT / BOARD_CARD_ID / BOARD_RUN_ID / BOARD_SOCKET) and the built
 # `board` binary via BOARD_BIN (passed through the config argv env-wrapper, since
 # herdr panes do NOT inherit workspace-level env). It reports back through the

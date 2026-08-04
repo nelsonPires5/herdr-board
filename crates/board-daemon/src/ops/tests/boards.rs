@@ -11,6 +11,70 @@ fn daemon_stop_triggers_shutdown_and_reports_stopping() {
 }
 
 #[test]
+fn daemon_status_reports_supported_pingable_herdr_as_connected() {
+    let herdr = testkit::herdr_server().serve();
+    let client = board_herdr::HerdrClient::connect(&herdr.socket).unwrap();
+    let d = testkit::daemon().herdr(client).build_daemon();
+
+    let status = handle_request(&d, "daemon.status", json!({})).unwrap();
+
+    assert_eq!(status["herdr_connected"], true);
+    assert_eq!(herdr.methods(), vec!["ping"]);
+}
+
+#[test]
+fn daemon_status_does_not_report_incompatible_pingable_herdr_as_connected() {
+    let herdr = testkit::herdr_server().version("0.8.1").serve();
+    let client = board_herdr::HerdrClient::connect(&herdr.socket).unwrap();
+    let d = testkit::daemon().herdr(client).build_daemon();
+
+    let status = handle_request(&d, "daemon.status", json!({})).unwrap();
+
+    assert_eq!(status["herdr_connected"], false);
+    assert_eq!(herdr.methods(), vec!["ping"]);
+}
+
+#[test]
+fn daemon_status_reprobes_a_reachable_handle_after_an_initial_mismatch() {
+    let probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let probes_for_server = Arc::clone(&probes);
+    let herdr = testkit::herdr_server()
+        .on("ping", move |req| {
+            let supported = probes_for_server.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0;
+            testkit::reply(
+                req,
+                if supported {
+                    json!({
+                        "type": "pong",
+                        "version": board_herdr::SUPPORTED_HERDR_VERSION,
+                        "protocol": board_herdr::SUPPORTED_HERDR_PROTOCOL,
+                        "capabilities": {}
+                    })
+                } else {
+                    json!({
+                        "type": "pong",
+                        "version": "0.8.1",
+                        "protocol": board_herdr::SUPPORTED_HERDR_PROTOCOL,
+                        "capabilities": {}
+                    })
+                },
+            )
+        })
+        .serve();
+    // Reachability is enough to retain the default-session handle. Compatibility
+    // is deliberately checked by each status operation below.
+    let client = crate::initial_herdr_handle(&herdr.socket).expect("reachable Herdr handle");
+    let d = testkit::daemon().herdr(client).build_daemon();
+
+    let first = handle_request(&d, "daemon.status", json!({})).unwrap();
+    let second = handle_request(&d, "daemon.status", json!({})).unwrap();
+
+    assert_eq!(first["herdr_connected"], false);
+    assert_eq!(second["herdr_connected"], true);
+    assert_eq!(herdr.methods(), vec!["ping", "ping"]);
+}
+
+#[test]
 fn board_open_list_get_and_legacy_default_are_scoped() {
     let d = test_daemon(Config::default());
     let alpha = handle_request(&d, "board.open", json!({"scope_path":"/alpha"})).unwrap();

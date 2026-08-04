@@ -1,4 +1,4 @@
-//! Protocol-17 launch metadata contracts.
+//! Managed launch metadata contracts.
 //!
 //! Managed agents expose the authoritative system instructions separately from
 //! the card task. The daemon materializes those instructions as a startup-only

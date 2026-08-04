@@ -51,7 +51,7 @@ fn pane_split_race_rediscovers_tab_and_splits_a_live_replacement() {
             }
         }
         "agent.start" => agent_started(req, "w1:p5", false, true),
-        method => panic!("unexpected protocol-17 method {method}"),
+        method => panic!("unexpected supported-contract method {method}"),
     });
     let spawner = HerdrSpawner::new(fake.socket.clone());
 
@@ -157,7 +157,7 @@ fn name_collision_retries_on_the_same_owned_pane_and_same_prompt_file() {
                 agent_started(req, "w1:p2", false, true)
             }
         }
-        method => panic!("unexpected protocol-17 method {method}"),
+        method => panic!("unexpected supported-contract method {method}"),
     });
     let spawner = HerdrSpawner::new(fake.socket.clone());
 

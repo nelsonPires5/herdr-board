@@ -29,7 +29,7 @@ fn pane(id: &str, width: u64, height: u64) -> LayoutPane {
 }
 
 // -----------------------------------------------------------------------
-// Protocol-17 pane-first launch contracts
+// Pane-first managed launch contracts for the supported Herdr API
 // -----------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
