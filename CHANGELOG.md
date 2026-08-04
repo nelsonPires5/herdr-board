@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
-- Upgrade Herdr compatibility to 0.8.0/socket protocol 19 and centralize the gated client/daemon integration with matching E2E preflight.
+- [#54](https://github.com/nelsonPires5/herdr-board/pull/54) Upgrade Herdr compatibility to 0.8.0/socket protocol 19 and centralize the gated client/daemon integration with matching E2E preflight.
 
 ## [0.10.0] - 2026-07-30
 
