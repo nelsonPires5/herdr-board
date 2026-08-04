@@ -76,14 +76,37 @@ about whether the document is valid.
 ### Herdr compatibility and launch boundary
 
 The public boardd socket protocol remains **v1**. That is independent of the upstream Herdr socket
-contract: this version supports **exactly Herdr 0.7.5 / protocol 17** and has no protocol-16 launch
-path. On the card's selected session socket, dispatch first calls `ping` and requires both exact
-values. This happens before workspace discovery or `workspace.create`; the spawner repeats the gate
-as its first call before `tab.create`, `pane.split`, `agent.start`, or the configured-harness runner.
-A mismatch fails the queued run without mutating the workspace.
+contract: this version supports **exactly Herdr 0.8.0 / protocol 19**. The daemon opens a fresh
+Herdr request connection per operation, so compatibility is checked at each boundary rather than
+only once at startup:
 
-Protocol 17 is pane-first. New durable runs place each card in a stable short `card-<id>` tab. The
-root created by `tab.create` is reserved as a labeled shell anchor (`card-<id>-anchor`); it is never
+- **Status:** `daemon.status` re-pings its configured Herdr socket and reports `herdr_connected`
+  only when both exact values match.
+- **Event subscription:** the per-session supervisor gates a request connection before opening the
+  persistent `events.subscribe` stream. The typed subscription acknowledgement must complete before
+  the supervisor takes its first snapshot; an incompatible socket receives neither subscription
+  nor snapshot work.
+- **Notifications:** the detached `notification.show` effect performs the same compatibility probe
+  immediately before sending the cosmetic notification, so an incompatible Herdr is not mutated.
+- **Dispatch and discovery:** card space resolution pings before `workspace.list` or
+  `workspace.create`; `space.list` and the read-only space preflight use the same gate. The spawner
+  repeats it as the first call before `tab.create`, `pane.split`, a managed-agent launch, or the
+  configured-harness runner. The session registry's `herdr session list --json` enumeration is a
+  separate CLI discovery step; every selected socket is still gated before socket discovery or use.
+- **Pane operations:** caller-targeted focus/title operations, durable placement, rescue discovery,
+  and managed/configured launch all use a checked connection before `pane.get`, `pane.focus`,
+  `pane.rename`, `pane.split`, `agent.start`, `agent.prompt`, or the configured runner.
+
+The deliberate exception is cleanup and liveness for an already-owned pane handle: the spawner's
+`kill`/`pane.close` and `is_alive`/snapshot paths retain an ungated connection so the daemon can
+close or observe its own pane after Herdr becomes incompatible. That exception does not authorize
+new discovery, placement, focus, notification, or launch; supervisor reconciliation and the
+caller-visible focus/rescue paths remain checked. A mismatch on a checked dispatch path fails the
+queued run without mutating the workspace.
+
+The managed launch contract is pane-first. New durable runs place each card in a stable short
+`card-<id>` tab. The root created by `tab.create` is reserved as a labeled shell anchor
+(`card-<id>-anchor`); it is never
 an agent target. Every run, including the first, splits a child from that anchor with the run's `cwd`
 and `env`, and only that child receives `agent.start` or the configured `pane run` bridge. The anchor
 keeps a predictable strip: the prototype targets a 0.40 ratio for the initial split (clamped on
@@ -209,8 +232,8 @@ Cards target a **herdr session** plus a space in it. Because two sessions can ea
 
 ### new_workspace flow
 
-On first dispatch of a `new_workspace` card: preflight the selected socket for exact Herdr
-0.7.5/protocol 17, then list the session's workspaces; if one's label matches `space_ref`
+On first dispatch of a `new_workspace` card: preflight the selected socket for exact Herdr 0.8.0 /
+protocol 19, then list the session's workspaces; if one's label matches `space_ref`
 (case-insensitive) reuse it, else `workspace.create {label:space_ref, cwd:space_cwd, focus:false}`.
 Then proceed identically to a `workspace` card (cwd snapshot, pane-first per-card tab placement). If the reused or existing workspace snapshot fails, or contains no live cwd, dispatch fails; it never falls back to process cwd or a stale snapshot.
 
@@ -365,7 +388,7 @@ that never recorded a pane at all. End to end:
    pane, so quitting would only discard the explanation). Refusals and Herdr errors stay visible as a
    non-fatal toast that leaves the board usable, and never fall back to a different run's pane.
 
-**Credentials: a rescued pane is not the run.** Protocol-17 placement is pane-first, so the pane's
+**Credentials: a rescued pane is not the run.** Pane-first placement means the pane's
 environment comes from the `pane.split` that creates it; the daemon installs the persisted run env
 plus `BOARD_CARD_ID`, `BOARD_SOCKET`, `BOARD_BIN`, `BOARD_RESCUE=1`, `BOARD_RESUME_SESSION_ID` and
 `BOARD_RESCUED_RUN_ID`. `BOARD_RUN_ID` is **withheld on purpose**. It is not documentation but the
@@ -497,7 +520,7 @@ Claude: claude [--model M] [--effort E] [--permission-mode P]
 ```
 
 After pane-first placement, boardd writes `system_prompt` to a temporary mode-`0600` file and calls
-Herdr protocol 17 as follows:
+the supported managed-agent interface as follows:
 
 ```
 agent.start {
@@ -548,8 +571,8 @@ opens the script, the residual configured-script orphan is an accepted asynchron
 2. **User drags card → Plan** (TUI → boardd `card.move`).
 3. Column engine: *Plan* is `trigger=auto` → **enqueue run** on the card's space queue.
 4. Dispatcher (respecting per-space serial queue + global cap):
-   a. Resolve the card's session socket and `ping` it. Anything except exact Herdr 0.7.5/protocol 17 fails before workspace discovery/creation. Then reuse workspace `w4`, or create/reuse the card's labeled `new_workspace`; repository worktree isolation remains an agent prompt responsibility.
-   b. Preflight the selected socket again at the spawner boundary. For a new durable run, the card's **`card-<id>` tab** is resolved by exact owned id (reconstructed from the newest matching durable pane in the same session/workspace when boardd restarts), or `tab.create {workspace_id,cwd,env,…}` supplies a new shell anchor. The anchor is labeled `card-<id>-anchor`, its exact id is persisted on the promoted run, and the run child is always created by `pane.split` from that anchor; `agent.start`/`pane run` never target the root. A renamed anchor is still selected only by exact identity; a closed anchor is recreated only from a durable board-run child in the exact proven tab, and missing proof creates a fresh tab without selecting a duplicate-label user tab. Exact ended children may be reclaimed before a later split so the anchor keeps usable geometry. The child receives the run env; the anchor receives only stable card identity. If multiple historical panes are live, newest run id wins; legacy rows retain their old lookup. There is no protocol-16 placement inside `agent.start`.
+   a. Resolve the card's session socket and `ping` it. Anything except exact Herdr 0.8.0 / protocol 19 fails before workspace discovery/creation. Then reuse workspace `w4`, or create/reuse the card's labeled `new_workspace`; repository worktree isolation remains an agent prompt responsibility.
+   b. Preflight the selected socket again at the spawner boundary. For a new durable run, the card's **`card-<id>` tab** is resolved by exact owned id (reconstructed from the newest matching durable pane in the same session/workspace when boardd restarts), or `tab.create {workspace_id,cwd,env,…}` supplies a new shell anchor. The anchor is labeled `card-<id>-anchor`, its exact id is persisted on the promoted run, and the run child is always created by `pane.split` from that anchor; `agent.start`/`pane run` never target the root. A renamed anchor is still selected only by exact identity; a closed anchor is recreated only from a durable board-run child in the exact proven tab, and missing proof creates a fresh tab without selecting a duplicate-label user tab. Exact ended children may be reclaimed before a later split so the anchor keeps usable geometry. The child receives the run env; the anchor receives only stable card identity. If multiple historical panes are live, newest run id wins; legacy rows retain their old lookup. Placement, cwd, and environment are not `agent.start` fields; the call receives neither the workspace placement nor the anchor pane id.
    c. For Pi/Claude, write the snapshotted system prompt to a mode-`0600` temporary file; issue `agent.start {name,kind,pane_id,args}` on the split child with prompt-free startup args; a typed `agent_pane_busy` retries the exact request on that same child with bounded 100ms/200ms backoff (never another split); poll `agent.get` for readiness; then send only the task snapshot through `agent.prompt`. Remove the file. Card status → `running`; record the exact child pane/workspace ids. The pane is **visible** — you can watch or type into it anytime.
 
    **Pane naming and ownership**: the managed agent name is `card-<id>-<column-slug>` (e.g. `card-42-plan`, `card-42-execute`). Herdr names are exclusive while a pane is open, so `agent_name_taken` retries once on the same pane with `card-<id>-<column-slug>-r<run>`. A persistent `agent_pane_busy` closes only the board-owned child and leaves the pre-existing anchor. If a placement target disappears, boardd closes only the pane it created (a missing pane is already clean), restarts discovery from `tab.list`, and retries the complete placement once. A terminal launch error also closes only that board-owned pane; pre-existing user panes are never cleanup targets.
@@ -695,13 +718,13 @@ boundaries are responsibility-oriented: daemon operations/watchers/dispatch/spaw
 app/forms/view, core engine/client, and Herdr events each own their corresponding implementation
 and private tests. This is guidance for ownership, not an exhaustive file list.
 
-herdr panes are fully drivable from the CLI (`pane send-keys` with named keys, `pane send-text`, `pane read`, `workspace create/close`), so the board can be tested end-to-end inside a real herdr — in a disposable test workspace or an isolated named session.
+herdr panes are fully drivable from the CLI (`pane send-keys` with named keys, `pane send-text`, `pane read`, `workspace create/close`), so the board can be tested end-to-end in a collision-resistant ephemeral named Herdr session plus a disposable workspace created for that test. Every interactive/live test must use both and never a user's live session, workspace, or tab.
 
 | Level | What | How |
 |---|---|---|
 | 1. Unit | column engine, prompt assembly, queue, transitions | plain Rust tests, in-memory SQLite; no herdr |
 | 2. TUI snapshot | every view/modal/keybind incl. `?` help | ratatui `TestBackend` + fed `KeyEvent`s + `insta` snapshots; no herdr, no terminal |
 | 3. Daemon integration | dispatch → run → done → auto-move, without tokens | config fake harness plus built-in Pi adapter tests; real boardd paths, no provider call |
-| 4. Full E2E | real Herdr wiring | disposable named session/workspace; the standard suite uses checked-in fake Pi/Claude/configured harnesses and asserts protocol-17 placement/prompt/argv contracts with zero provider cost. A separate opt-in real-Claude Haiku/low smoke is never in `run-all.sh`; its intended contract is one authorized attempt with no retry or fallback. |
+| 4. Full E2E | real Herdr wiring | collision-resistant ephemeral named Herdr session plus disposable workspace; the standard suite uses checked-in fake Pi/Claude/configured harnesses and asserts pane-first placement/prompt/argv contracts against the current Herdr 0.8.0 / protocol 19 gate with zero provider cost. A separate opt-in real-Claude Haiku/low smoke is never in `run-all.sh`; its intended contract is one authorized attempt with no retry or fallback. |
 
-Isolation rules for level 3–4: `BOARD_DB=/tmp/…` + dedicated daemon socket per test run so tests never touch the real board; prefer a separate `herdr --session board-test` (or headless `herdr server`) in CI so the user's session is untouched; inside an interactive dev loop, a throwaway workspace in the live session is fine.
+Isolation rules for level 3–4: `BOARD_DB=/tmp/…` + dedicated daemon socket per test run so tests never touch the real board; every interactive/live test must create and use a collision-resistant ephemeral named Herdr session plus a disposable workspace, never a user's session, workspace, or tab. The session may run headlessly in CI, but it must retain the same named-session and workspace requirements.

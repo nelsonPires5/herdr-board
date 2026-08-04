@@ -1,7 +1,7 @@
 # Testing
 
 How herdr-board is tested, and how to add tests for a change. The final contract is board
-protocol v1, SQLite schema v13, and Herdr 0.7.5 / protocol 17. Four layers, cheap and hermetic
+protocol v1, SQLite schema v13, and Herdr 0.8.0 / protocol 19. Four layers, cheap and hermetic
 first, expensive and live last:
 
 ```
@@ -14,8 +14,9 @@ unit / pure (per crate)                 no I/O, no daemon        — cargo test
                                            workspaces
 ```
 
-All four layers run in CI. The live job starts only after the cheaper gates pass, installs the
-pinned Herdr 0.7.5 binary, and boots only suite-owned ephemeral servers — see [Running](#running).
+CI is configured to run all four layers. The live job starts only after the cheaper gates pass,
+installs the pinned Herdr 0.8.0 binary, and boots only suite-owned ephemeral servers — see
+[Running](#running).
 
 ## The pyramid
 
@@ -37,10 +38,11 @@ The stable ownership layout is responsibility-oriented, not a file manifest:
 
 The public core suites cover deterministic engine decisions, schema-v13 migrations and atomic
 run units of work, protocol-v1 serde, typed client boundaries, configuration, prompt assembly,
-harness planning, and scoped-board behavior. Herdr suites cover protocol-17 event decoding and
-socket behavior against an in-process fake server. Daemon private suites cover queue claims,
-spawn/finalization atomicity, pane placement, configured and managed launch characterization,
-request routing, watcher signals, timeout handling, per-session recovery, and comment actor policy.
+harness planning, and scoped-board behavior. Herdr suites cover the Herdr 0.8.0 / protocol 19
+event and socket contract against an in-process fake server. Daemon private suites cover queue
+claims, spawn/finalization atomicity, pane placement, configured and managed launch
+characterization, request routing, watcher signals, timeout handling, per-session recovery, and
+comment actor policy.
 TUI suites cover fake-client reducer behavior, forms, and ratatui snapshots. Keep descriptions at
 this ownership level; add a path only when it is a stable boundary or a useful entry point.
 
@@ -52,16 +54,31 @@ a dozen near-identical hand-rolled setups that drift apart and then hide bugs in
 - **`crates/board-daemon/src/testkit.rs`** (`cfg(test)` only) provides three things. `daemon()` is
   one builder for the twelve-argument `Daemon::new`, with an in-memory store, a `LocalSpawner` and
   dummy paths by default; `build()` also hands back the event and dispatch receivers, so a test can
-  prove that a rolled-back operation emitted *nothing*. `herdr_server()` is one fake protocol-17
-  Herdr Unix socket with a settable protocol/version (so the compatibility gate can be served a
-  **wrong** one), per-method canned responses, an optional accept count, and recorded-request
-  inspection, plus the protocol-17 JSON constructors (`pane_info`, `agent_started`, …) used to build
-  those responses. Finally the shared negative assertions `assert_no_events`, `assert_no_effects`,
+  prove that a rolled-back operation emitted *nothing*. `herdr_server()` is one fake Herdr 0.8.0 /
+  protocol 19 Unix socket with a settable protocol/version (so the compatibility gate can be served
+  a **wrong** one), per-method canned responses, an optional accept count, and recorded-request
+  inspection, plus the current-contract JSON constructors (`pane_info`, `agent_started`, …) used to
+  build those responses. Finally the shared negative assertions `assert_no_events`, `assert_no_effects`,
   `assert_no_rollback_effects`, and `fault_db`, the armed lifecycle-fault `Db`.
 - **`crates/board-tui/src/testkit.rs`** (feature `fake-client`) holds `DemoClient`, the driver and
   synthetic-input helpers, and the rendering helpers. It lives in the library rather than in a test
   file because each `tests/*.rs` is its own crate and its own link step — per-file helpers would be
   compiled once per test binary.
+
+### Compatibility-gate coverage
+
+The Herdr 0.8.0 / protocol 19 upgrade is tested at every compatibility-sensitive boundary, not
+only at daemon startup: `daemon.status` checks the reported connection state; the supervisor checks
+compatibility before `events.subscribe` and its acknowledgement/snapshot generation; detached
+notifications check before `notification.show`; dispatch checks before workspace resolution and
+placement; discovery checks include `space.list` and the read-only space preflight; and pane tests
+cover `pane.set_title`, `run.focus`, placement, managed launch, and configured-runner operations.
+The event tests also preserve the required subscribe-ack-before-snapshot order.
+
+Cleanup and liveness for an already-owned pane remain intentionally ungated in the spawner's
+`kill`/`pane.close` and `is_alive`/snapshot paths, so an incompatible Herdr cannot strand a pane the
+daemon already owns. Those paths are not new discovery or launch authority; supervisor recovery
+snapshots and caller-visible focus/rescue operations still use the checked connection.
 
 ### The fake-client ↔ daemon parity guard
 
@@ -102,10 +119,19 @@ The current parity/schema-v13 change is specified test-first:
   `meta.rs` (command-tree refusals, `template apply`, version/status separation, `skill`, and the
   JSON error envelope); `compat.rs` protects top-level aliases and `exit_codes.rs` pins the process
   exit contract.
-- **CLI/E2E boundary:** live scenarios 01, 04, 06, 08, 09, 11, 16, and 17 exercise CLI comment
+- **CLI/E2E boundary:** scenarios 01, 04, 06, 08, 09, 11, 16, and 17 exercise CLI comment
   creation, transition/silent-exit/timeout system comments, comment context in later prompts, and
-  managed/configured comment completion against disposable Herdr. CRUD/audit semantics stay in
-  hermetic core/daemon/CLI tests; the live suite does not duplicate every management RPC.
+  managed/configured comment completion against disposable Herdr. The managed and configured
+  scenarios use the current Herdr 0.8.0 / protocol 19 contract; their files,
+  `16-managed-p17.sh` and `17-configured-p17-runner.sh`, retain the historical `p17` names.
+  CRUD/audit semantics stay in hermetic core/daemon/CLI tests; the live suite does not duplicate
+  every management RPC.
+
+The authoritative [`e2e/README.md`](../e2e/README.md) catalog currently covers scenarios 01–29,
+and `e2e/run-all.sh` includes every numbered script. Scenarios 18–29 extend the live coverage with
+nullable/validation, late-start and recovery, active-run timing, TUI layout and board transfers,
+pane rescue, Pi catalog behavior, and diagnostics. This document describes the intended coverage
+and gate configuration; it does **not** claim that the full live E2E suite has passed.
 
 Nullable update coverage in `board-core` is table-driven across every column/card nullable:
 protocol tests verify omitted/null/value serde states, database tests verify set → clear and reopen
@@ -219,15 +245,15 @@ Deterministic daemon tests cover working→running, blocked, Herdr's output-only
 `awaiting` (`agent_done`), idle grace→`awaiting` (`idle_expired`; never `lost`), timeout paused
 while `awaiting`, pane exit without sleeps, and managed `agent_pane_busy` retry/cleanup without
 allocating a second pane. The busy tests assert exact request preservation, bounded backoff, and
-that persistent failure closes only the owned child rather than its pre-existing anchor. Herdr 0.7.5 / protocol 17 does not accept `done`
+that persistent failure closes only the owned child rather than its pre-existing anchor. Herdr 0.8.0 / protocol 19 does not accept `done`
 as a `pane.report_agent` input (`idle|working|blocked|unknown` only), so the live
-`15-awaiting.sh` scenario uses Pi integration v6's supported report shape; on a managed
+`15-awaiting.sh` scenario uses Pi integration v8's supported report shape; on a managed
 `agent.start` pane Herdr derives output `done` from the end-of-turn idle report. The scenario covers
 blocked → working → Herdr done → `awaiting` → confirm → board `done` end to end. The opt-in real-Pi
 smoke records live status when observable but does not require sampling `working` from a fast run.
 
-Protocol-17 managed launch is covered separately by scenario 16. Its fake Pi and fake Claude
-(via the same launch surface used with Pi integration v6 / Claude integration v7) are interactive
+Pane-first managed launch is covered separately by scenario 16. Its fake Pi and fake Claude
+(via the same launch surface used with Pi integration v8 / Claude integration v7) are interactive
 terminal fixtures, not provider stubs that can pass at process startup: each reports ordered
 session identity then idle, waits for Herdr readiness, and refuses to call `board done` until the
 exact card prompt arrives through `agent.prompt`. Scenario 17 proves configured harnesses remain
@@ -235,9 +261,9 @@ unmanaged and receive exact `BOARD_PROMPT`/`BOARD_SYSTEM_PROMPT` values through 
 `pane run` bridge. Scenario 28 stages only isolated Pi `auth.json`/`models-store.json`, proves the auth-scoped
 `harness.capabilities` result, and cycles the real TUI effort selector without submitting a card or
 starting Pi. The real-Claude smoke is separate: it stages only completed onboarding/theme, exact
-workspace trust, the installed Herdr hook, credentials, and approved `remote-settings.json`,
-so startup dialogs cannot consume `agent.prompt`; no broad personal Claude state is copied.
-Its intended contract is one authorized Haiku/low attempt with no retry or fallback.
+workspace trust, the current Claude integration v7 hook, credentials, and approved
+`remote-settings.json`, so startup dialogs cannot consume `agent.prompt`; no broad personal Claude
+state is copied. Its intended contract is one authorized Haiku/low attempt with no retry or fallback.
 
 `scripts/e2e.sh` is a thin compat wrapper that `exec`s `run-all.sh`.
 
@@ -386,7 +412,7 @@ Checklist:
 | **Tab labels are not unique** | New runs resolve `card-<id>` tabs and shell anchors only by exact ids reconstructed from scoped durable panes; schema v13 retains the anchor id introduced in v12. Duplicate tab/anchor labels and legacy `kanban` are never adopted as ownership proof. A renamed exact anchor remains owned; a missing anchor is recovered only from an exact durable child, otherwise a fresh tab is created. Legacy rows retain their historical lookup. |
 | **Agent names are exclusive** | While a pane is open its agent name is reserved. A collision (e.g. the session already has a `card-1-execute` pane) makes the daemon retry as `card-1-execute-r<run>`. Assertions must accept the optional `-r<n>` suffix. |
 | **A newly split pane can be busy** | Herdr may return typed `agent_pane_busy` while the child still drains prior state. The daemon retries the exact managed `agent.start` request twice on that same owned child with 100ms/200ms backoff; persistent busy closes only that child and leaves the shell anchor. Do not treat it as `pane_not_found`: that error triggers one bounded full placement rediscovery from `tab.list`. |
-| **Managed and configured pane identity differ** | Protocol-17 managed Pi/Claude panes expose the managed kind in `pane.agent`; configured panes are renamed to the daemon-assigned `card-<id>-<column>` label and remain unmanaged. Match the appropriate field and still accept the optional `-r<n>` name suffix. |
+| **Managed and configured pane identity differ** | Pane-first managed Pi/Claude panes expose the managed kind in `pane.agent`; configured panes are renamed to the daemon-assigned `card-<id>-<column>` label and remain unmanaged. Match the appropriate field and still accept the optional `-r<n>` name suffix. |
 | **`pane.layout` nests under `layout`** | `hrpc pane.layout …` returns `{"type":"pane_layout","layout":{…panes,splits…}}`; read `.layout.panes`. |
 | **Never `pkill` by "board daemon"** | That pattern matches your own shell too. Stop only the daemon you started after verifying its signed platform identity token (`e2e_daemon_stop`); PID liveness alone is insufficient. Linux uses `/proc`; Darwin uses native process APIs. Inspect only exact PIDs emitted by the invocation. |
 | **Leaked ephemeral session from an aborted run** | If a run is killed before cleanup, an `hb-e2e-*` session may linger. Remove it wholesale: `herdr session stop <name> && herdr session delete <name>` (this closes its workspaces too). List leftovers with `herdr session list`. |
@@ -406,14 +432,14 @@ E2E_REAL_PI=1 e2e/real-pi-smoke.sh  # explicit real-provider opt-in; may incur c
 E2E_REAL_CLAUDE_HAIKU=1 e2e/real-claude-haiku-smoke.sh  # one authorized Haiku/low attempt; may incur cost
 ```
 
-- Standard suite requires **exactly Herdr 0.7.5 / socket protocol 17**, `python3`, Bash ≥4, and `cargo`. It supports Linux and macOS; `run-all.sh` resolves Herdr and Bash absolutely before narrowing `PATH`. Every scenario preflights both `herdr --version` and a socket `ping`; protocol 16 and unknown/future protocols fail before dispatch. The forced-build standard suite scenarios 01–29 pass with no provider calls. The real-Pi smoke additionally verifies Pi's runtime default model, current Herdr integration, and WezTerm. The real-Claude smoke is an intended-contract validation only: it requires a logged-in real Claude CLI plus current Herdr Claude integration v7, stages minimal completed onboarding/theme, exact workspace trust, the installed Herdr hook, credentials, and approved `remote-settings.json` under `/tmp` so startup dialogs cannot consume `agent.prompt`; no broad personal Claude state is copied, and it has no retry or fallback. Its independent identity implementation remains Linux-only and is outside the portable provider-free gate. Both opt-ins compare user/repository state and clean exact resources. `run-all.sh` builds
+- Standard suite requires **exactly Herdr 0.8.0 / socket protocol 19**, `python3`, Bash ≥4, and `cargo`. It supports Linux and macOS; `run-all.sh` resolves Herdr and Bash absolutely before narrowing `PATH`. Every scenario preflights both `herdr --version` and a socket `ping`; older and unknown/future protocols fail before dispatch. The forced-build standard suite is configured to exercise scenarios 01–29 without provider calls; this is coverage guidance, not a claim that a full live run has passed. The real-Pi smoke additionally verifies Pi's runtime default model, current Herdr integration, and WezTerm. The real-Claude smoke is an intended-contract validation only: it requires a logged-in real Claude CLI plus current Herdr Claude integration v7, stages minimal completed onboarding/theme, exact workspace trust, the current Claude integration hook, credentials, and approved `remote-settings.json` under `/tmp` so startup dialogs cannot consume `agent.prompt`; no broad personal Claude state is copied, and it has no retry or fallback. Its independent identity implementation remains Linux-only and is outside the portable provider-free gate. Both opt-ins compare user/repository state and clean exact resources. `run-all.sh` builds
   the release binary once; scenarios reuse it. Every scenario boots and cleans its own ephemeral
   session; scenario 03 additionally owns an independently tokened secondary session.
 - Exit codes: scenario `0` = PASS, `3` = SKIP, other = FAIL; `run-all.sh` exits
   non-zero if any scenario FAILED.
-- **The provider-free live suite runs in CI.** After the static/Python/Rust jobs succeed,
-  `bash e2e/ci.sh` installs or reuses only the pinned SHA-verified Herdr 0.7.5 Linux x86_64 binary,
-  verifies protocol 17, and runs every standard scenario with `--require-all`. It never enables
+- **The provider-free live suite is a CI gate.** After the static/Python/Rust jobs succeed,
+  `bash e2e/ci.sh` installs or reuses only the pinned SHA-verified Herdr 0.8.0 Linux x86_64 binary,
+  verifies protocol 19, and runs every standard scenario with `--require-all`. It never enables
   the real-Pi or real-Claude opt-ins or propagates provider credentials. The wrapper preserves the
   suite's newly-created private artifact root, copies only that exact validated root into
   `e2e-artifacts/`, and the workflow uploads the evidence under `if: always()` for 30 days. The

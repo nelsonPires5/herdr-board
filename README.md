@@ -1,7 +1,7 @@
 # herdr-board
 
 ![Rust](https://img.shields.io/badge/rust-edition%202021-orange.svg)
-![herdr 0.7.5](https://img.shields.io/badge/herdr-0.7.5-8a2be2)
+![herdr 0.8.0](https://img.shields.io/badge/herdr-0.8.0-8a2be2)
 ![platforms: linux, macOS](https://img.shields.io/badge/platforms-linux%2C%20macOS-informational)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 
@@ -39,13 +39,14 @@ only `Todo`.
 
 ## Install
 
-Requires exactly **Herdr 0.7.5 (protocol 17)**, Git, and a Rust toolchain with `cargo`. Linux
+Requires exactly **Herdr 0.8.0 (protocol 19)**, Git, and a Rust toolchain with `cargo`. Linux
 and macOS are supported. Ensure `~/.local/bin` is on your `PATH`. The board protocol is v1 and the
 current SQLite schema is v13; `schema.sql` defines fresh databases and the daemon applies tested
 upgrades through `board-core::db`.
 
 The daemon checks the selected Herdr socket before workspace discovery and pane launch. It rejects
-any Herdr version other than 0.7.5 and any protocol other than 17; protocol 16 is not supported.
+any Herdr version other than 0.8.0 and any protocol other than 19; older, unknown, and future
+protocols are not supported.
 
 ```bash
 herdr plugin install nelsonPires5/herdr-board --ref v0.10.0
@@ -270,7 +271,7 @@ typed `board_core::client::BoardClient`; only boardd touches SQLite.
 
 ## Status
 
-**v1 board protocol / schema v13 / Herdr 0.7.5 (protocol 17).** Rust with Ratatui, Rusqlite, and
+**v1 board protocol / schema v13 / Herdr 0.8.0 (protocol 19).** Rust with Ratatui, Rusqlite, and
 Tokio. See [`docs/README.md`](docs/README.md) for the full version and source-ownership matrix.
 
 ## License

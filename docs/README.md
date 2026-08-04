@@ -9,7 +9,8 @@ The reference detail behind the [root README](../README.md). Start here to find 
 | Board socket | v1; `board-core::protocol` (additive `active_runs`, error `kind`/`details`) | [protocol.md](protocol.md) |
 | SQLite | schema v13; `schema.sql` + `board-core::db` migrations | [design.md](design.md) |
 | CLI | canonical nested `board board/card/comment/run/column` taxonomy; `board-cli` wiring | [README CLI reference](../README.md#cli-reference), [skill](../skill/SKILL.md) |
-| Herdr client | 0.7.5 / socket protocol 17; `board-herdr` typed calls | [herdr.md](herdr.md) |
+| Herdr client | 0.8.0 / socket protocol 19; `board-herdr` typed calls | [herdr.md](herdr.md) |
+| Herdr integrations | Pi v8; Claude v7 (installed and updated by the user) | [herdr.md](herdr.md), [install.md](install.md) |
 | Runtime launch | daemon-owned `Spawner`, placement, process/pane handles | [implementation.md](implementation.md) |
 | Config | typed `RootConfig`, one parse, environment overrides after parse | [configuration.md](configuration.md), [design.md](design.md) |
 | Live catalog | scenarios 01–29; provider-free fake/safe harness boundary | [e2e/README.md](../e2e/README.md) |
@@ -28,12 +29,12 @@ isolation is an agent prompt concern, not a board space primitive.
 | [implementation.md](implementation.md) | The cargo workspace crate layout, crate ownership, shared dependencies, key traits (`BoardClient`, `Spawner`), and the build phases with their tests. | are navigating the codebase or picking up a build task. |
 | [research.md](research.md) | The verified herdr capability map (commands/events/IDs), prior-art survey of agent-kanban tools, and verified harness invocation flags (Pi/Claude/codex/gemini/opencode). | are scoping a feature that touches herdr or a new harness, and want the background that grounded the design. |
 | [releasing.md](releasing.md) | The release contract: Prepare Release, version bumps, CI-gated tagging/publishing, artifacts, reruns, and tag policy. | are cutting a release or need the repo's release policy. |
-| [herdr.md](herdr.md) | How to learn and verify **Herdr** facts (there is no man page): the live sources of truth (`herdr api schema --json`, `herdr <cmd> --help`, `herdr api snapshot`), per-harness agent integrations, and the exact compatibility gate (Herdr 0.7.5 / protocol 17 only; no protocol-16 path). | hit a Herdr command/shape that misbehaves, or need to confirm what the installed Herdr actually does. |
-| [testing.md](testing.md) | The testing pyramid in this repo (unit/pure → daemon+CLI integration → TUI snapshots → live E2E), how the provider-free fake Pi/Claude suite works (including protocol-17 scenarios 16/17), and how to write a scenario. The use case ↔ scenario catalog lives in [`../e2e/README.md`](../e2e/README.md). | are adding a feature and need to test it, or are writing/running the live E2E suite. |
+| [herdr.md](herdr.md) | How to learn and verify **Herdr** facts (there is no man page): the live sources of truth (`herdr api schema --json`, `herdr <cmd> --help`, `herdr api snapshot`), the Herdr 0.8.0/protocol-19 delta, per-harness integrations, and the exact compatibility gate. | hit a Herdr command/shape that misbehaves, or need to confirm what the installed Herdr actually does. |
+| [testing.md](testing.md) | The testing pyramid in this repo (unit/pure → daemon+CLI integration → TUI snapshots → live E2E), how the provider-free fake Pi/Claude suite works (including the current pane-first scenarios 16/17, whose filenames are historical), and how to write a scenario. The use case ↔ scenario catalog lives in [`../e2e/README.md`](../e2e/README.md). | are adding a feature and need to test it, or are writing/running the live E2E suite. |
 
 The [`schema.sql`](../schema.sql) at the repo root is the fresh SQLite schema; migration behavior
 and upgrade tests live in `board-core::db`. Before handoff, check that docs still point to existing
-files, that the version matrix above says schema v13 / protocol v1 / Herdr 0.7.5-protocol 17, and that
+files, that the version matrix above says board protocol v1 / schema v13 / Herdr 0.8.0 / socket protocol 19, and that
 the scenario catalog lists every `e2e/NN-*.sh` from 01 through 29.
 
 ## Test gates (single source)
@@ -58,7 +59,7 @@ bash e2e/ci.sh
 
 CI runs the fast commands as independent `fmt`, `clippy`, `docs`, `scripts`, `e2e-safety`, and
 `test` jobs split by what each protects. The dependent `live-e2e` job starts only after all six
-succeed, installs SHA-verified Herdr 0.7.5, and runs the wrapper above. This keeps cheap failures
+succeed, installs the SHA-verified Herdr 0.8.0 binary, and runs the wrapper above. This keeps cheap failures
 fast while making the complete live suite part of the same required `CI` workflow. `test_docs.py`
 asserts that every `scripts/tests/test_*.py` is matched by a pattern above, so a new module cannot
 land in no job at all.
@@ -74,6 +75,6 @@ provider, which is why it belongs in CI. It overlaps `test_e2e_safety.py` by des
 implementations of the same checks, which is why they share the `e2e-safety` job.
 
 `e2e/ci.sh` is the CI and local-equivalent live gate. It caches only the exact SHA-verified Herdr
-0.7.5 Linux x86_64 binary, verifies protocol 17, runs `e2e/run-all.sh --require-all`, and exports
+0.8.0 Linux x86_64 binary, verifies socket protocol 19, runs `e2e/run-all.sh --require-all`, and exports
 sanitized runner/scenario evidence to `e2e-artifacts/` for the workflow's always-run 30-day upload.
 The standard suite remains provider-free and uses only suite-owned ephemeral resources.

@@ -25,6 +25,29 @@ Rule of thumb (mirrors [AGENTS.md](../AGENTS.md)): **never assume a herdr
 command, flag, or JSON shape from memory — verify against `api schema` /
 `--help`, and pin the argv you verified in a test comment.**
 
+## Compatibility gate: Herdr 0.8.0 / socket protocol 19
+
+The supported matrix is exact: **Herdr 0.8.0**, **socket protocol 19**, board protocol
+v1, and SQLite schema v13. `board-herdr` rejects a different Herdr version or
+protocol before the daemon performs workspace discovery, pane placement, an agent
+launch, a configured runner action, or a notification mutation. This is a policy
+gate, not a protocol-negotiation fallback.
+
+Use these read-only probes before changing a wire call or debugging a live session:
+
+```bash
+test "$(herdr --version)" = "herdr 0.8.0"
+herdr api schema --json | python3 -c \
+  'import json, sys; s=json.load(sys.stdin); assert s["protocol"] == 19, s'
+herdr api snapshot
+herdr integration status
+```
+
+`herdr api schema --output PATH` saves the same authoritative schema. Use the
+specific command help before pinning an argv: `herdr agent start --help`,
+`herdr agent prompt --help`, `herdr pane report-agent --help`, and
+`herdr integration install --help` are especially relevant to board integration.
+
 ## herdr ships its own agent integrations
 
 herdr can install its **own** per-harness integration hooks so a harness reports
@@ -34,17 +57,34 @@ live agent status (idle / working / blocked / done) back to herdr. Manage them w
 - `herdr integration install <name>` / `herdr integration uninstall <name>`
 - `herdr integration status [--outdated-only]`
 
-As of herdr 0.7.5 the installable integrations are: **pi, omp, claude, codex,
+Herdr 0.8.0's installable integration targets are: **pi, omp, claude, codex,
 copilot, devin, droid, kimi, opencode, kilo, hermes, qodercli, cursor,
-mastracode** (get the current list from `herdr integration install --help`). On the
-2026-07-22 verification host, `herdr integration status` reported Pi **v6** and
-Claude **v7** as current.
+mastracode, antigravity-cli, grok**. Get the authoritative spelling and current
+list from `herdr integration install --help`; the socket schema uses
+`antigravity_cli` for the hyphenated CLI target. On the host inspected for this
+update, `herdr integration status` reports Pi **current (v8)** and Claude
+**current (v7)**.
+
+Herdr 0.8.0 also provides `herdr --skill`, which prints Herdr's own agent-driving
+skill. It is distinct from this repository's `board skill` / `skill/SKILL.md`.
 
 Installing one **writes into that harness's own config** (`pi` installs
 `~/.pi/agent/extensions/herdr-agent-state.ts`; `claude` installs a hook under
 `~/.claude`). Because it mutates personal configuration, **herdr-board never installs or
 updates integrations** — running `herdr integration install <harness>` is a **user
-prerequisite** for live lifecycle signals.
+prerequisite** for live lifecycle signals. Check the reported version with
+`herdr integration status`; the board's current support matrix expects Pi v8 and
+Claude v7 when those harnesses are dispatched.
+
+### 0.8.0 lifecycle implications
+
+Herdr 0.8.0 tightened lifecycle ownership around confirmed process exit. A known
+agent can restart with the same saved session and retain lifecycle state; nested
+or ephemeral Codex sessions do not replace the owning pane's resumable session;
+and Pi RPC/JSON/print processes do not claim lifecycle authority intended for a
+Pi TUI session. These rules reduce false ownership changes, but Herdr status is
+still a signal rather than board completion: `pane.exited` and explicit
+`board done` remain the reliable run boundaries.
 
 What the integration buys you:
 
@@ -65,18 +105,46 @@ To verify what a running herdr actually reports, inspect the live state:
 Pi users who need precise live working/blocked/done status and session references must run
 `herdr integration install pi`; the matching integration is a prerequisite for whichever harness
 is being dispatched. Without it, the board continues in the degraded mode described above. The
-standard E2E uses checked-in fake Pi and Claude executables and tests watcher status mapping
-deterministically rather than changing integrations or calling a provider.
+standard E2E uses checked-in fake Pi and Claude executables and is designed
+to exercise watcher status mapping deterministically rather than changing integrations or calling a provider.
 
-## Protocol 17 launch contract
+## Protocol 19 delta: additive upstream surface
 
-Herdr 0.7.5 uses pane-first managed-agent launch. For a new durable card tab,
-herdr-board first creates a shell root and reserves it as `card-<id>-anchor`.
-It then splits a run child with the required cwd/environment and calls
-`agent.start` with `{name, kind, pane_id, args, timeout_ms}` on that child only.
-The anchor is never an `agent.start` target. `kind` selects Herdr's canonical
-agent executable and `args` contains only that executable's arguments. The old
-workspace/tab/split/env placement fields are not part of `agent.start`.
+The Herdr 0.8.0/protocol-19 schema keeps the RPC shapes herdr-board uses unchanged.
+The board's typed calls still use the same request/result envelopes for `ping`,
+`session.snapshot`, workspace list/create/close, tab create/list, pane
+split/list/get/focus/rename/read/send-text/send-keys/close/layout, agent
+start/get/prompt/wait, `notification.show`, and `events.subscribe`.
+
+The delta is additive and outside the board client surface:
+
+- `workspace.move_block` accepts `workspace_ids` plus an optional
+  `before_workspace_id` for atomic block movement, including worktree groups.
+- `workspace.reordered` is a new emitted event and subscription selector. Its
+  data includes `workspace_ids`, `workspaces`, and an optional
+  `before_workspace_id`.
+- `antigravity_cli` (CLI spelling `antigravity-cli`) and `grok` are new
+  integration targets with session reporting/native restore. They do not add
+  board built-in harnesses.
+
+The client does not call the new workspace method. It preserves unknown additive
+events rather than treating them as a change to the used transport. The current
+schema has 90 request methods, 26 emitted event kinds, and 27 subscription
+selectors; re-check those facts with `herdr api schema --json` rather than
+copying them from this page.
+
+## Pane-first managed launch contract
+
+The stable transport rule is pane-first and intentionally independent of a
+protocol number: create or split the target pane with its cwd/environment first,
+then start the agent in that existing pane. Under the exact Herdr 0.8.0 / socket
+protocol 19 gate, herdr-board first creates a shell root for a new durable card
+tab and reserves it as `card-<id>-anchor`. It then splits a run child with the required
+cwd/environment and calls `agent.start` with `{name, kind, pane_id, args,
+timeout_ms}` on that child only. The anchor is never an `agent.start` target.
+`kind` selects Herdr's canonical agent executable and `args` contains only that
+executable's arguments. Workspace/tab/split/env placement fields are not part of
+`agent.start`.
 
 After start, `agent.get <target>` exposes `interactive_ready` and
 `launch_pending`. herdr-board waits for `interactive_ready=true` and
@@ -95,12 +163,13 @@ Labels are display metadata and never authorize a tab or pane.
 `agent.read` remains a terminal screen/scrollback read, not a semantic result
 channel.
 
-Two protocol-17 facts the rescue depends on, both observed on a live 0.7.5 socket
-via `e2e/27-rescue-dead-pane.sh` rather than assumed: a pane label set with
-`pane.rename` survives a subsequent `agent.start`; and when a managed agent's
-process exits, Herdr **clears** `PaneInfo.agent` while keeping the pane open as a
-plain shell (label included). The second is why "does this pane still have a
-registered agent" is a sound liveness test and a label match alone is not.
+The rescue depends on two runtime facts that are not guaranteed by the request
+shapes: a pane label set with `pane.rename` must survive a subsequent
+`agent.start`; and when a managed agent's process exits, Herdr must **clear**
+`PaneInfo.agent` while keeping the pane open as a plain shell (label included).
+The second is why "does this pane still have a registered agent" is a sound
+liveness test and a label match alone is not. The current validation target is
+Herdr 0.8.0/protocol 19; do not infer either behavior from the schema alone.
 `PaneInfo.agent` is also not the exclusive name passed to `agent.start` — the
 schema carries `agent` and `name` separately — so it is only ever tested for
 presence, never compared to a board-chosen name.
@@ -108,25 +177,56 @@ presence, never compared to a board-chosen name.
 Reopening a run whose pane was closed (`run.focus` rescue) reuses this exact
 contract, not a second one: `board-daemon::spawner::rescue` calls the same
 `allocate_owned_pane` placement (with an empty reclaim list, so reopening one run
-never closes another's pane), the same `require_protocol` gate, and the same
-`agent.start` + `interactive_ready` wait. Three things differ, all
+never closes another's pane), the same `require_supported_protocol` gate, and
+the same `agent.start` + `interactive_ready` wait. Three things differ, all
 deliberate: `agent.prompt` is **not** sent (the conversation already contains the
 task, and re-sending it would re-run the work); the new pane is renamed to
 `card-<id>-r<run>-rescue` before launch so a later reopen can find it again with
 one `pane.list` scan (a name built from stable ids only, never from a column
-name that a user can change — and `agent.start` is verified to leave that label
-intact, so it is set once); and the pane env omits `BOARD_RUN_ID`, since a
-rescued pane must not hold the credential that writes to a finished run. Nothing is persisted for that pane — Herdr's
-own pane label/agent name is the only record of it, which is why the dedup scan
+name that a user can change — the launch contract relies on `agent.start` leaving
+that label intact, so it is set once); and the pane env omits `BOARD_RUN_ID`, since a
+rescued pane must not hold the credential that writes to a finished run. Nothing is persisted for that pane —
+Herdr's own pane label/agent name is the only record of it, which is why the dedup scan
 is a hint rather than proof (see `docs/design.md` → Limitations). The dead
 `pane_id` is never reused or revived.
 
-Configured harnesses are intentionally unmanaged. Protocol 17 has a
-`herdr pane run <PANE_ID> <COMMAND>...` CLI command but no `pane.run` socket
-method, so the daemon invokes that CLI against the selected session socket via
-a temporary runner script. Agents must still use `board comment` and `board
-done`; the configured runner reports a silent child exit back to boardd as a
-failed run with no automatic column transition.
+Configured harnesses are intentionally unmanaged. The current Herdr CLI has a
+`herdr pane run <PANE_ID> <COMMAND>...` command but the socket schema has no
+`pane.run` method, so the daemon invokes that CLI against the selected session
+socket via a temporary runner script. Agents must still use `board comment` and
+`board done`; the configured runner reports a silent child exit back to boardd
+as a failed run with no automatic column transition.
+
+## 0.8.0 runtime behaviors behind live validation
+
+The release notes describe behavior that a schema diff cannot prove. Keep these
+checks separate from the exact compatibility gate and do not treat a local
+read-only probe as an end-to-end test result:
+
+- **Prompt settling:** Herdr waits briefly after sending prompt text before it
+  presses Enter. The board therefore checks readiness first and uses
+  `agent.prompt` for the exact task, rather than sending text and a synthetic
+  key sequence. A managed fixture must observe the multiline task after
+  readiness before it can finish.
+- **Headless resume:** a headless server can resume a restored agent session
+  without a TUI client attaching. `run.focus` rescue and restart recovery must
+  work from the socket/session boundary, not depend on a desktop client being
+  present.
+- **Plugin-root resolution:** relative commands in a plugin manifest resolve
+  from that plugin's root. Install/open validation should therefore use a
+  disposable session and a caller-independent cwd; it should exercise the
+  manifest's relative build/action paths, not only invoke a script from the
+  checkout root.
+- **Read truncation and history:** `pane.read` and `agent.read` report a
+  `truncated` flag when older terminal rows are omitted. Herdr may automatically
+  collect text history for idle alternate-screen agents and restore the
+  application viewport. Board code treats reads as bounded screen/scrollback
+  diagnostics, never as a semantic result or completion channel.
+
+These behaviors motivate the live validation cases around lifecycle signals,
+managed prompt delivery, rescue/resume, plugin opening, and pane reads. The
+provider-free scenarios use disposable sessions and fake harnesses; this page
+makes no claim that a live suite has been run for the current checkout.
 
 ## Socket request and subscription bounds
 
@@ -152,13 +252,19 @@ diagnostics.
 `board-herdr` deliberately exposes only the typed Herdr methods used by the daemon and tests:
 workspace, tab, pane, agent, notification, session, and events. The upstream worktree methods and
 DTOs are not part of this crate's public surface; repository isolation belongs in the agent prompt.
-The checked-in schema fixture remains an upstream reference and is not rewritten during API cleanup.
+The checked-in schema fixture is regenerated from the installed Herdr contract and
+is not rewritten during unrelated API cleanup. The board fixture and typed client
+are currently pinned to **Herdr 0.8.0 / protocol 19**; board protocol v1 and DB
+schema v13 remain independent and unchanged.
 
-This repo's herdr facts — [`docs/research.md`](research.md), [`docs/design.md`](design.md),
-and the wire shapes hard-coded in `board-herdr` — were **verified against
-Herdr 0.7.5 / protocol 17 on 2026-07-22**.
+This repo's current Herdr facts — [`docs/research.md`](research.md),
+[`docs/design.md`](design.md), and the wire shapes hard-coded in `board-herdr` —
+must be rechecked with the installed binary before a support change. The local
+0.8.0 inspection for this update used `herdr api schema --json`, the relevant
+`--help` commands, `herdr api snapshot`, and `herdr integration status`; it did
+not substitute an end-to-end test run.
 
-herdr updates independently of this repo (`herdr update`, stable/preview channels).
+Herdr updates independently of this repo (`herdr update`, stable/preview channels).
 When something that used to work misbehaves on a newer herdr — an unknown method, a
 changed field name, a new error code — **re-verify against `herdr api schema
 --json` FIRST**, before patching board code. Confirm the current `protocol` number
