@@ -68,13 +68,19 @@ fn daemon_child_owns_a_distinct_process_group() {
     command.env("BOARD_TEST_PROCESS_GROUP", &evidence);
     let mut child = command.spawn().expect("spawn probe");
 
-    for _ in 0..100 {
-        if evidence.exists() {
-            break;
+    let values = {
+        let mut complete = None;
+        for _ in 0..100 {
+            if let Ok(values) = fs::read_to_string(&evidence) {
+                if values.split_whitespace().count() == 3 {
+                    complete = Some(values);
+                    break;
+                }
+            }
+            thread::sleep(Duration::from_millis(10));
         }
-        thread::sleep(Duration::from_millis(10));
-    }
-    let values = fs::read_to_string(&evidence).expect("read process-group evidence");
+        complete.expect("process-group evidence did not contain exactly three fields within 1s")
+    };
     let mut fields = values.split_whitespace();
     let pid: i32 = fields.next().expect("pid").parse().expect("numeric pid");
     let pgid: i32 = fields.next().expect("pgid").parse().expect("numeric pgid");
