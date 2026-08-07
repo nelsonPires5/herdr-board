@@ -153,6 +153,8 @@ impl HerdrSpawner {
                     reclaimable_pane_ids: &req.reclaimable_pane_ids,
                     durable_anchor_pane_ids: &req.durable_anchor_pane_ids,
                     remembered_anchor_id,
+                    reuse_pane_id: req.reuse_pane_id.as_deref(),
+                    reuse_agent_kind: req.agent_kind.as_deref(),
                 },
             )
             .with_context(|| format!("placing pane in tab '{tab_label}' for {}", req.name))
@@ -175,12 +177,18 @@ impl HerdrSpawner {
                 }
             }
 
+            // Placement adopted the prior run's pane (`req.reuse_pane_id`) iff
+            // the owned pane id is exactly that candidate. The launch then skips
+            // `agent.start` and only re-prompts the live agent.
+            let reused = req.reuse_pane_id.as_deref() == Some(owned.pane_id.as_str());
+
             let launch_result = match req.agent_kind.as_deref() {
                 Some(kind) => launch_managed(
                     &mut client,
                     req,
                     kind,
                     &owned.pane_id,
+                    reused,
                     self.agent_start_delay.as_ref(),
                 ),
                 None => launch_configured(

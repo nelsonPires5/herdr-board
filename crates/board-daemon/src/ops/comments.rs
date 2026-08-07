@@ -64,22 +64,32 @@ pub(super) fn comment_add(d: &Arc<Daemon>, p: CommentAddParams) -> Result<Value>
     let (comment, card) = {
         let db = d.store.lock();
         let card = db.require_card(p.card_id)?;
-        let author = match p.actor_run_id {
-            Some(run_id) => {
-                let expected = format!("agent:{run_id}");
-                // An explicitly supplied author is checked, while omitting it
-                // gets the identity implied by the actor run. This keeps the
-                // old author-only comment.add call compatible with fake
-                // agents, but prevents a new actor-aware caller from forging
-                // another run's ownership.
-                if let Some(author) = p.author.as_deref() {
-                    require_agent_run(&db, run_id, p.card_id, author)?;
-                } else {
-                    require_agent_run(&db, run_id, p.card_id, &expected)?;
-                }
-                expected
+        let open_run = db.open_run_for_card(p.card_id)?;
+        let author = match (p.actor_pane_id.as_deref(), &open_run) {
+            // A reused agent pane's HERDR_PANE_ID matches the card's open run:
+            // attribute the comment to that run, ignoring a stale
+            // BOARD_RUN_ID/author carried from the pane's first stage. The pane
+            // identity (not the stale credential) vouches for the open run.
+            (Some(pane), Some(run)) if run.herdr_pane_id.as_deref() == Some(pane) => {
+                format!("agent:{}", run.id)
             }
-            None => p.author.unwrap_or_else(|| "user".into()),
+            _ => match p.actor_run_id {
+                Some(run_id) => {
+                    let expected = format!("agent:{run_id}");
+                    // An explicitly supplied author is checked, while omitting it
+                    // gets the identity implied by the actor run. This keeps the
+                    // old author-only comment.add call compatible with fake
+                    // agents, but prevents a new actor-aware caller from forging
+                    // another run's ownership.
+                    if let Some(author) = p.author.as_deref() {
+                        require_agent_run(&db, run_id, p.card_id, author)?;
+                    } else {
+                        require_agent_run(&db, run_id, p.card_id, &expected)?;
+                    }
+                    expected
+                }
+                None => p.author.unwrap_or_else(|| "user".into()),
+            },
         };
         let comment = db.add_comment(card.id, &author, &p.body)?;
         (comment, card)

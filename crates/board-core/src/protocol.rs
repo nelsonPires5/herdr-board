@@ -641,6 +641,9 @@ pub struct CommentAddParams {
     /// comments. It is additive and absent for human callers.
     #[serde(default, skip_serializing_if = "Option::is_none", alias = "run_id")]
     pub actor_run_id: Option<i64>,
+    /// The caller's Herdr pane id (`HERDR_PANE_ID`); see [`RunDoneParams`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_pane_id: Option<String>,
 }
 
 /// `comment.get`, `comment.delete`, and `comment.history` id params.
@@ -690,6 +693,12 @@ pub struct RunDoneParams {
     pub summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<i64>,
+    /// The caller's Herdr pane id (`HERDR_PANE_ID`). When it matches the card's
+    /// open-run pane, the caller is that run's (possibly reused across stages)
+    /// agent pane, so a stale `BOARD_RUN_ID` from the pane's first stage does
+    /// not reject the call. Additive; absent for human/non-pane callers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_pane_id: Option<String>,
 }
 
 /// Internal `run.pane_exited` params.

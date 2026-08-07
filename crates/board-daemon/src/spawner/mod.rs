@@ -56,6 +56,10 @@ pub struct HerdrLaunchPlan {
     pub reclaimable_pane_ids: Vec<String>,
     /// Exact persisted anchor ids, newest first.
     pub durable_anchor_pane_ids: Vec<String>,
+    /// A prior run-child pane id to reuse on a same-conversation resume hop
+    /// (no fresh split, no `agent.start`): the live agent is re-prompted for
+    /// the next stage. `None` keeps the historical always-split behavior.
+    pub reuse_pane_id: Option<String>,
     /// Working directory (resolved workspace cwd, or `LocalSpawner`).
     pub cwd: Option<PathBuf>,
     /// herdr workspace id (for `workspace` / `new_workspace` spaces).

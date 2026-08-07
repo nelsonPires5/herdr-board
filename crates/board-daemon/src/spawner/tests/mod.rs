@@ -167,6 +167,7 @@ fn pi_req(initial_prompt: Option<&str>) -> HerdrLaunchPlan {
         durable_pane_ids: Vec::new(),
         reclaimable_pane_ids: Vec::new(),
         durable_anchor_pane_ids: Vec::new(),
+        reuse_pane_id: None,
         cwd: Some(PathBuf::from("/tmp/card cwd")),
         workspace_ref: Some("w1".into()),
         herdr_socket: None,
@@ -193,6 +194,7 @@ fn claude_req() -> HerdrLaunchPlan {
         durable_pane_ids: Vec::new(),
         reclaimable_pane_ids: Vec::new(),
         durable_anchor_pane_ids: Vec::new(),
+        reuse_pane_id: None,
         cwd: Some(PathBuf::from("/tmp/card cwd")),
         workspace_ref: Some("w1".into()),
         herdr_socket: None,
@@ -252,6 +254,7 @@ fn custom_req(socket: PathBuf, cwd: PathBuf, argv: Vec<String>) -> HerdrLaunchPl
         durable_pane_ids: Vec::new(),
         reclaimable_pane_ids: Vec::new(),
         durable_anchor_pane_ids: Vec::new(),
+        reuse_pane_id: None,
         cwd: Some(cwd),
         workspace_ref: Some("w1".into()),
         herdr_socket: Some(socket.clone()),
@@ -285,6 +288,7 @@ fn managed_req(kind: &str) -> HerdrLaunchPlan {
         durable_pane_ids: Vec::new(),
         reclaimable_pane_ids: Vec::new(),
         durable_anchor_pane_ids: Vec::new(),
+        reuse_pane_id: None,
         cwd: None,
         workspace_ref: None,
         herdr_socket: None,
@@ -429,5 +433,6 @@ mod configured;
 mod failures;
 mod local;
 mod managed;
+mod pane_reuse;
 mod placement;
 mod races;

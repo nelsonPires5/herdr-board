@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context};
 use board_herdr::{
-    AgentInfo, AgentPromptParams, AgentStartParams, AgentStarted, HerdrClient, HerdrError,
+    AgentInfo, AgentPromptParams, AgentStartParams, AgentStarted, AgentStatus, HerdrClient,
+    HerdrError,
 };
 
 use super::super::placement::{RetryablePlacementRace, ERR_PANE_NOT_FOUND};
@@ -32,8 +33,31 @@ pub(crate) fn launch_managed(
     req: &HerdrLaunchPlan,
     kind: &str,
     pane_id: &str,
+    reuse: bool,
     delay: &DelayFn,
 ) -> anyhow::Result<()> {
+    // A same-conversation resume hop reuses the prior run's agent pane. The
+    // conversation + agent are already live there, so there is nothing to
+    // `agent.start`: the pane name is exclusive while open (re-starting would
+    // collide with `agent_name_taken`), the startup system prompt was consumed
+    // by the original start, and the persisted `--resume`/`--session-id` argv
+    // is irrelevant (the conversation is in-process). Just wait for the agent
+    // to finish the previous stage's turn (it may still be Working right after
+    // `board done`) and deliver the new stage's prompt.
+    if reuse {
+        await_reuse_ready(client, pane_id)?;
+        if let Some(text) = &req.initial_prompt {
+            client
+                .agent_prompt(&AgentPromptParams {
+                    target: pane_id.to_string(),
+                    text: text.clone(),
+                    wait: None,
+                })
+                .with_context(|| format!("herdr agent.prompt (reuse) for {}", req.name))?;
+        }
+        return Ok(());
+    }
+
     let flag = match kind {
         "pi" => "--append-system-prompt",
         "claude" => "--append-system-prompt-file",
@@ -193,6 +217,39 @@ fn agent_start_retry_busy(
 
 fn is_interactive(agent: &AgentInfo) -> bool {
     agent.interactive_ready && !agent.launch_pending
+}
+
+/// Wait for a reused pane's already-running agent to be quiescent and
+/// interactive before re-prompting it. Herdr protocol 19 may expose an
+/// end-of-turn agent as either Idle or derived Done; Done still has a live
+/// interactive process and is therefore reusable. The pane proved out the prior
+/// stage, so this covers the brief window where it is still finishing that turn
+/// right after `board done`; a persistently busy pane times out rather than
+/// silently opening a second pane.
+fn await_reuse_ready(client: &mut HerdrClient, pane_id: &str) -> anyhow::Result<()> {
+    let deadline = Instant::now() + READINESS_TIMEOUT;
+    let mut probes = 0_usize;
+    loop {
+        let agent = client
+            .agent_get(pane_id)
+            .with_context(|| format!("herdr agent.get while waiting to reuse pane {pane_id}"))?;
+        if is_interactive(&agent)
+            && matches!(agent.agent_status, AgentStatus::Idle | AgentStatus::Done)
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "timed out waiting for managed agent in pane {pane_id} to become quiescent for reuse"
+            );
+        }
+        probes += 1;
+        if probes >= IMMEDIATE_READINESS_PROBES {
+            thread::sleep(
+                READINESS_BACKOFF.min(deadline.saturating_duration_since(Instant::now())),
+            );
+        }
+    }
 }
 
 fn await_interactive_ready(client: &mut HerdrClient, started: &AgentStarted) -> anyhow::Result<()> {
