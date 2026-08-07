@@ -10,6 +10,7 @@ the fake harness's JSON record.  An absent prompt is a hard fixture failure.
 import json
 import os
 import select
+import socket
 import subprocess
 import sys
 import termios
@@ -38,6 +39,47 @@ def normalize_terminal_prompt(raw: bytes) -> str:
     return text
 
 
+def report_agent_state(record_path: str, state: str) -> None:
+    pane_id = os.environ["HERDR_PANE_ID"]
+    socket_path = os.environ["HERDR_SOCKET_PATH"]
+    agent = os.environ.get("FAKE_MANAGED_KIND", "pi")
+    with open(record_path, encoding="utf-8") as source:
+        record = json.load(source)
+    params = {
+        "pane_id": pane_id,
+        "source": f"herdr:{agent}",
+        "agent": agent,
+        "seq": time.time_ns(),
+        "state": state,
+    }
+    if record.get("agent_session_id"):
+        params["agent_session_id"] = record["agent_session_id"]
+    if record.get("agent_session_path"):
+        params["agent_session_path"] = record["agent_session_path"]
+    envelope = {
+        "id": f"e2e:turn:{agent}:{os.getpid()}:{state}",
+        "method": "pane.report_agent",
+        "params": params,
+    }
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(2.0)
+    try:
+        client.connect(socket_path)
+        client.sendall((json.dumps(envelope, separators=(",", ":")) + "\n").encode())
+        chunks = bytearray()
+        while b"\n" not in chunks:
+            chunk = client.recv(65536)
+            if not chunk:
+                break
+            chunks.extend(chunk)
+    finally:
+        client.close()
+    line = bytes(chunks).splitlines()[0] if chunks else b""
+    reply = json.loads(line) if line else {}
+    if "error" in reply or "result" not in reply:
+        raise RuntimeError(f"pane.report_agent {state} failed: {reply!r}")
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print("managed terminal shim: expected RECORD path", file=sys.stderr)
@@ -55,7 +97,9 @@ def main() -> int:
     timeout = float(os.environ.get("FAKE_MANAGED_PROMPT_TIMEOUT", "35"))
     idle = float(os.environ.get("FAKE_MANAGED_PROMPT_IDLE", "0.75"))
     deadline = time.monotonic() + timeout
-    data = bytearray()
+    prompt = None
+    prompt_raw = b""
+    saw_transport_bytes = False
 
     # This visible marker plus the harness's pane report makes the executable as
     # readiness-capable as a provider-free terminal process can be. The E2E does
@@ -63,45 +107,68 @@ def main() -> int:
     print("HERDR_FAKE_MANAGED_INTERACTIVE_READY", flush=True)
     try:
         tty.setraw(fd)
-        while True:
-            remaining = (idle if data else deadline - time.monotonic())
-            if remaining <= 0:
+        try:
+            # A real managed client is only idle once its input loop is ready.
+            # This also prevents the next hop's prompt from racing the prior
+            # stage's still-foreground `board done` subprocess.
+            report_agent_state(record_path, "idle")
+        except Exception as error:
+            update(record_path, prompt_error=f"idle report failed: {error}")
+            print(f"managed terminal shim: idle report failed: {error}", file=sys.stderr)
+            return 2
+        while prompt is None and time.monotonic() < deadline:
+            data = bytearray()
+            while True:
+                remaining = idle if data else deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                readable, _, _ = select.select([fd], [], [], remaining)
+                if not readable:
+                    break
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                data.extend(chunk)
+            if not data:
                 break
-            readable, _, _ = select.select([fd], [], [], remaining)
-            if not readable:
-                break
-            chunk = os.read(fd, 65536)
-            if not chunk:
-                break
-            data.extend(chunk)
+            saw_transport_bytes = True
+            try:
+                candidate = normalize_terminal_prompt(bytes(data))
+            except UnicodeDecodeError as error:
+                update(record_path, prompt_raw_hex=bytes(data).hex(), prompt_error=str(error))
+                print(f"managed terminal shim: prompt was not UTF-8: {error}", file=sys.stderr)
+                return 2
+            # A subsequent turn can begin with a residual Enter/framing batch
+            # from the prior prompt. Ignore transport-only empty batches and
+            # keep waiting for this turn's substantive agent.prompt payload.
+            if candidate:
+                prompt = candidate
+                prompt_raw = bytes(data)
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_attributes)
 
-    if not data:
-        update(record_path, prompt_error=f"no agent.prompt bytes within {timeout:g}s")
-        print(
-            f"managed terminal shim: no agent.prompt bytes within {timeout:g}s",
-            file=sys.stderr,
+    if prompt is None:
+        reason = (
+            "only empty terminal framing received"
+            if saw_transport_bytes
+            else f"no agent.prompt bytes within {timeout:g}s"
         )
-        return 2
-
-    try:
-        prompt = normalize_terminal_prompt(bytes(data))
-    except UnicodeDecodeError as error:
-        update(record_path, prompt_raw_hex=bytes(data).hex(), prompt_error=str(error))
-        print(f"managed terminal shim: prompt was not UTF-8: {error}", file=sys.stderr)
-        return 2
-    if not prompt:
-        update(record_path, prompt_raw_hex=bytes(data).hex(), prompt_error="normalized prompt empty")
-        print("managed terminal shim: normalized prompt is empty", file=sys.stderr)
+        update(record_path, prompt_error=reason)
+        print(f"managed terminal shim: {reason}", file=sys.stderr)
         return 2
 
     update(
         record_path,
         prompt=prompt,
-        prompt_raw_hex=bytes(data).hex(),
+        prompt_raw_hex=prompt_raw.hex(),
         prompt_received_via_stdin=True,
     )
+    try:
+        report_agent_state(record_path, "working")
+    except Exception as error:
+        update(record_path, prompt_error=f"working report failed: {error}")
+        print(f"managed terminal shim: working report failed: {error}", file=sys.stderr)
+        return 2
 
     # Never let the fake harness reach board done merely because some terminal
     # bytes arrived. Wait until the daemon has committed this exact run, then
@@ -122,7 +189,17 @@ def main() -> int:
         if result.returncode == 0:
             try:
                 show = json.loads(result.stdout)
-                run = next((item for item in show.get("runs", []) if item.get("id") == run_id), None)
+                runs = show.get("runs", [])
+                # A reused pane keeps the process's original BOARD_RUN_ID. The
+                # authoritative target for each later agent.prompt is therefore
+                # the card's sole open run; use the startup id only as fallback
+                # while the first launch is being committed.
+                open_runs = [
+                    item for item in runs if item.get("outcome") in (None, "null")
+                ]
+                run = open_runs[-1] if open_runs else next(
+                    (item for item in runs if item.get("id") == run_id), None
+                )
                 if run is not None:
                     expected = run.get("prompt_snapshot")
                     break

@@ -1738,6 +1738,11 @@ e2e_ws_create() {
       --env "BASH_FUNC_pi%%=() { exec \"$E2E_FAKE_PI_BIN_DIR/pi\" \"\$@\"; }"
       --env "BASH_FUNC_claude%%=() { exec \"$E2E_FAKE_PI_BIN_DIR/claude\" \"\$@\"; }"
     )
+    # Opt-in fixture behavior must be explicit workspace env: Herdr panes do
+    # not inherit the scenario shell's environment.
+    if [ "${FAKE_PI_LOOP:-0}" = "1" ]; then
+      extra_env+=(--env "FAKE_PI_LOOP=1")
+    fi
   fi
   e2e_session_target_verify "$pid" "$identity" "${sock:-${E2E_SESSION_SOCKET:-}}" \
     || fail "refusing workspace create: session identity/socket does not match"
