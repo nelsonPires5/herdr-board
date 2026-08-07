@@ -1,0 +1,28 @@
+---
+source: crates/board-tui/tests/snapshots.rs
+expression: output
+---
+"┌ Edit card  ·  f: fullscreen  ·  Tab: field · Enter: save · Esc: cancel ──────┐"
+"│┌───────────────────────────────────────────────────────────────────────────┐▲│"
+"│  title                                                                      █│"
+"│Long description demo                                                        █│"
+"│▌ description (base prompt) [$EDITOR]                                        █│"
+"│▏This is the first paragraph of an intentionally long card description that  █│"
+"│must word-wrap across many rendered rows instead of being cut off, which is  █│"
+"│exactly the bug this change fixes for multiline text fields inside the edit  █│"
+"│form.                                                                        █│"
+"│┌───────────────────────────────────────────────────────────────────────────┐█│"
+"│  harness                                                                    █│"
+"│[‹]  claude  [›]                                                             ││"
+"│  model                                                                      ││"
+"│[‹]  (default)  [›]                                                          ││"
+"│  effort                                                                     ││"
+"│[‹]  (default)  [›]                                                          ││"
+"│  permission                                                                 ││"
+"│[‹]  (default)  [›]                                                          ││"
+"│┌───────────────────────────────────────────────────────────────────────────┐││"
+"│  session                                                                    ││"
+"│[‹]  (default)  [›]                                                          ▼│"
+"│               [ Save ]                              [ Cancel ]               │"
+"└──────────────────────────────────────────────────────────────────────────────┘"
+"Tab fields · Enter save · Esc cancel                                            "

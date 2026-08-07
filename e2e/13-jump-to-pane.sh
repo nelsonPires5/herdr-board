@@ -142,7 +142,7 @@ detail_ready=0
 for _ in $(seq 1 50); do
   detail_screen="$("$HERDR_BIN" pane read "$BOARD_PANE" --source recent-unwrapped --lines 100 2>/dev/null || true)"
   if printf '%s\n' "$detail_screen" | grep -q 'focus this run' \
-    && printf '%s\n' "$detail_screen" | grep -q 'runs'; then
+    && printf '%s\n' "$detail_screen" | grep -qi 'runs'; then
     detail_ready=1
     break
   fi

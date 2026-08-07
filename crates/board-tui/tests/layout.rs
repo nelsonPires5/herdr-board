@@ -102,7 +102,7 @@ fn regular_and_wide_expose_no_compact_header() {
 }
 
 #[test]
-fn compact_card_height_3_for_short_title_4_for_wrapped_title() {
+fn compact_card_height_6_for_short_title_7_for_wrapped_title() {
     let mut c = FakeBoardClient::new().unwrap();
     let todo = c.board_get().unwrap().columns[0].id;
     c.card_create(&card("Short", todo)).unwrap();
@@ -122,9 +122,9 @@ fn compact_card_height_3_for_short_title_4_for_wrapped_title() {
     let (ci0, r0) = col.cards[0];
     let (ci1, r1) = col.cards[1];
     assert_eq!(ci0, 0);
-    assert_eq!(r0.height, 3, "single-line title -> 3 rows");
+    assert_eq!(r0.height, 6, "single-line title -> 6 rows");
     assert_eq!(ci1, 1);
-    assert_eq!(r1.height, 4, "wrapped title -> 4 rows");
+    assert_eq!(r1.height, 7, "wrapped title -> 7 rows");
 }
 
 // -- vertical scroll clamp -----------------------------------------------------
@@ -138,7 +138,7 @@ fn compact_card_height_3_for_short_title_4_for_wrapped_title() {
 fn compact_scroll_keeps_the_selected_card_always_rendered() {
     let n = 12;
     let mut app = app_with_cards(n);
-    for &h in &[8u16, 12, 20, 30] {
+    for &h in &[16u16, 22, 30, 40] {
         let area = Rect::new(0, 0, 40, h);
         for sel in 0..n {
             app.sel_card = sel;
@@ -157,7 +157,7 @@ fn compact_scroll_keeps_the_selected_card_always_rendered() {
 fn compact_scroll_last_card_scrolls_forward_first_card_scrolls_back() {
     let n = 12;
     let mut app = app_with_cards(n);
-    let area = Rect::new(0, 0, 40, 10);
+    let area = Rect::new(0, 0, 40, 22);
 
     app.sel_card = n - 1;
     let layout = board_layout(&app, area);
@@ -187,7 +187,7 @@ fn compact_scroll_last_card_scrolls_forward_first_card_scrolls_back() {
 fn zero_visible_slots_yields_no_card_rects_and_correct_scroll_state() {
     let n = 5;
     let mut app = app_with_cards(n);
-    // Compact: main_area height 3, header 2 -> inner_h 1 < COMPACT_CARD_H (4).
+    // Compact: body area is empty at this height -> no card can fit.
     let area = Rect::new(0, 0, 40, 4);
     for sel in 0..n {
         app.sel_card = sel;
@@ -378,7 +378,7 @@ fn runs_selection_stays_inside_the_rendered_runs_viewport() {
         let len = app.detail.as_ref().unwrap().runs.len();
         let visible = {
             let layout = detail_layout(&app, app.last_area);
-            (layout.runs.height.saturating_sub(1) as usize).max(1)
+            board_tui::view::runs_viewport_height(&layout).max(1)
         };
         assert!(
             len > visible,

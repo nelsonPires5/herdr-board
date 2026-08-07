@@ -6,13 +6,15 @@
 //! board/detail hit-testing (`view::board_layout`, `view::detail_layout`)
 //! is untouched.
 
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use ratatui::widgets::{
     Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
 use ratatui::Frame;
+
+use crate::app::CardFilter;
 
 /// The one vertical scrollbar every overflowing list in the TUI draws: board
 /// columns, the form's field list, and the Compact help sheet. Same track/thumb
@@ -36,9 +38,71 @@ pub fn vertical_scrollbar(
     f.render_stateful_widget(scrollbar, rect, &mut state);
 }
 
+/// Semantic user actions exposed by visual controls.
+///
+/// A zone never executes I/O. `app::mouse` validates the active screen and
+/// translates the action to the exact existing key/reducer path, preserving
+/// all guards, pickers, confirmations, effects, return screens, and toasts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UiAction {
+    Help,
+    Quit,
+    SwitchBoard,
+    NewCard,
+    NewColumn,
+    EditCard,
+    EditColumn,
+    ArchiveCard,
+    CycleFilter,
+    DeleteCard,
+    DeleteColumn,
+    MoveCard,
+    MoveColumn,
+    ShoveCardLeft,
+    ShoveCardRight,
+    OpenCard,
+    ApplyTemplate,
+    Refresh,
+    ConfirmAwaiting,
+    AddComment,
+    DeleteComment,
+    CommentHistory,
+    ToggleDetail,
+    FocusRunPane,
+    CancelRun,
+    RetryRun,
+    CloseDetail,
+    SubmitForm,
+    CancelForm,
+    EditInExternalEditor,
+    ChoosePickerRow,
+    PickerOtherBoard,
+    CancelPicker,
+    ConfirmYes,
+    ConfirmNo,
+    StageColumnLeft,
+    StageColumnRight,
+    CommitColumnMove,
+    CancelColumnMove,
+    ChooseSwitcherRow,
+    CloseSwitcher,
+    CloseCommentHistory,
+    CloseHelp,
+}
+
 /// Interactive zones registered by the new Compact-mode widgets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Zone {
+    /// A screen-validated action routed through the existing key reducer.
+    Action(UiAction),
+    /// One of the three directly selectable board visibility filters.
+    Filter(CardFilter),
+    /// An action rendered inside a specific board card.
+    CardAction {
+        col_idx: usize,
+        card_idx: usize,
+        action: UiAction,
+    },
     /// Compact board header: previous column `‹`.
     HeaderPrev,
     /// Compact board header: next column `›`.
@@ -52,6 +116,19 @@ pub enum Zone {
     /// The switcher's trailing "apply template" row (level 1 only), after
     /// `SwitcherSwitchBoard`.
     SwitcherApplyTemplate,
+    /// A visible form field, by stable `form.fields` index.
+    FormField(usize),
+    FormChoicePrev(usize),
+    FormChoiceNext(usize),
+    FormEditor(usize),
+    /// A visible picker option, by absolute model index.
+    PickerRow(usize),
+    HelpScrollUp,
+    HelpScrollDown,
+    HistoryScrollUp,
+    HistoryScrollDown,
+    /// Modal background shield; child zones are pushed later and win.
+    Shield,
     /// `ButtonBar` save action.
     BarSave,
     /// `ButtonBar` cancel action.
@@ -61,6 +138,8 @@ pub enum Zone {
     /// A rendered comment row in the card detail's comments section, by index
     /// into `CardDetail::comments`.
     CommentRow(usize),
+    /// A rendered run row in the card detail runs section, by index.
+    RunRow(usize),
     /// Card detail comments action bar: edit the focused comment.
     CommentEdit,
     /// Card detail comments action bar: delete the focused comment.
@@ -94,6 +173,130 @@ impl HitMap {
             }
         }
         None
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActionTone {
+    Normal,
+    Primary,
+    Destructive,
+}
+
+/// One visual control backed by an existing semantic action.
+pub struct ActionButton<'a> {
+    pub label: &'a str,
+    pub compact_label: &'a str,
+    pub action: UiAction,
+    pub tone: ActionTone,
+}
+
+/// Equal-width, click-first action row used by board/detail/forms/sheets.
+///
+/// The bar only draws and registers zones. The reducer path is selected later
+/// by `app::mouse`, so a click cannot bypass an existing guard or confirmation.
+pub struct ActionBar<'a> {
+    pub buttons: &'a [ActionButton<'a>],
+}
+
+impl<'a> ActionBar<'a> {
+    pub fn render(&self, f: &mut Frame, area: Rect, hit_map: &mut HitMap) {
+        if self.buttons.is_empty() || area.is_empty() {
+            return;
+        }
+        let count = self.buttons.len() as u32;
+        let constraints = self
+            .buttons
+            .iter()
+            .map(|_| Constraint::Ratio(1, count))
+            .collect::<Vec<_>>();
+        let rects = Layout::horizontal(constraints).spacing(1).split(area);
+        for (button, rect) in self.buttons.iter().zip(rects.iter().copied()) {
+            if rect.is_empty() {
+                continue;
+            }
+            let compact = rect.width < button.label.chars().count() as u16 + 4;
+            let label = if compact {
+                button.compact_label
+            } else {
+                button.label
+            };
+            // Button aesthetic: white background, black text; the semantic
+            // color lives only on the label text inside the brackets.
+            let (_label_fg, modifier) = match button.tone {
+                ActionTone::Normal => (Color::Black, Modifier::empty()),
+                ActionTone::Primary => (Color::Rgb(0, 90, 200), Modifier::BOLD),
+                ActionTone::Destructive => (Color::Rgb(190, 30, 30), Modifier::BOLD),
+            };
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Gray))
+                .style(Style::default().bg(Color::White));
+            let text = format!("[ {label} ]");
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    text,
+                    Style::default().fg(Color::Black).add_modifier(modifier),
+                ))
+                .style(Style::default().bg(Color::White))
+                .block(block),
+                rect,
+            );
+            hit_map.push(rect, Zone::Action(button.action));
+        }
+    }
+}
+
+/// Dense one-row companion to [`ActionBar`] for secondary operations.
+/// Every segment remains a complete hit target; narrow layouts use the
+/// shortcut-sized compact label rather than clipping the full action name.
+pub struct ActionStrip<'a> {
+    pub buttons: &'a [ActionButton<'a>],
+}
+
+impl<'a> ActionStrip<'a> {
+    pub fn render(&self, f: &mut Frame, area: Rect, hit_map: &mut HitMap) {
+        if self.buttons.is_empty() || area.is_empty() {
+            return;
+        }
+        let count = self.buttons.len() as u32;
+        let rects = Layout::horizontal(
+            self.buttons
+                .iter()
+                .map(|_| Constraint::Ratio(1, count))
+                .collect::<Vec<_>>(),
+        )
+        .split(area);
+        for (button, rect) in self.buttons.iter().zip(rects.iter().copied()) {
+            if rect.is_empty() {
+                continue;
+            }
+            let full = format!("[ {} ]", button.label);
+            let compact = format!("[{}]", button.compact_label);
+            let label = if full.chars().count() as u16 <= rect.width {
+                full
+            } else {
+                crate::view::truncate(&compact, rect.width as usize)
+            };
+            // White background, black text; the semantic tone is carried only
+            // by the label characters inside the brackets.
+            let label_style = match button.tone {
+                ActionTone::Normal => Style::default().fg(Color::Black),
+                ActionTone::Primary => Style::default()
+                    .fg(Color::Rgb(0, 90, 200))
+                    .add_modifier(Modifier::BOLD),
+                ActionTone::Destructive => Style::default()
+                    .fg(Color::Rgb(190, 30, 30))
+                    .add_modifier(Modifier::BOLD),
+            };
+            f.render_widget(
+                Paragraph::new(Span::styled(label, label_style))
+                    .alignment(ratatui::layout::Alignment::Center)
+                    .style(Style::default().bg(Color::White)),
+                rect,
+            );
+            hit_map.push(rect, Zone::Action(button.action));
+        }
     }
 }
 
@@ -242,4 +445,38 @@ pub fn windowed_rows(heights: &[u16], focus_pos: usize, avail: u16) -> (usize, u
         }
     }
     (start, end)
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    use super::*;
+
+    #[test]
+    fn action_bar_registers_one_semantic_zone_per_visible_button() {
+        let buttons = [
+            ActionButton {
+                label: "New card",
+                compact_label: "New",
+                action: UiAction::NewCard,
+                tone: ActionTone::Primary,
+            },
+            ActionButton {
+                label: "Delete card",
+                compact_label: "Delete",
+                action: UiAction::DeleteCard,
+                tone: ActionTone::Destructive,
+            },
+        ];
+        let mut terminal = Terminal::new(TestBackend::new(40, 3)).unwrap();
+        let mut hit_map = HitMap::default();
+        terminal
+            .draw(|f| ActionBar { buttons: &buttons }.render(f, f.area(), &mut hit_map))
+            .unwrap();
+
+        assert_eq!(hit_map.hit(1, 1), Some(Zone::Action(UiAction::NewCard)));
+        assert_eq!(hit_map.hit(21, 1), Some(Zone::Action(UiAction::DeleteCard)));
+    }
 }

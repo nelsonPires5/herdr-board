@@ -45,7 +45,7 @@ impl App {
         let comments_total = crate::view::comment_wrapped_rows(detail, layout.comments.width);
         let runs_total = detail.runs.len();
         let (_, comments_visible) = crate::view::comments_viewport(self, &layout);
-        let runs_visible = layout.runs.height.saturating_sub(1) as usize;
+        let runs_visible = crate::view::runs_viewport_height(&layout);
         self.detail_comments_scroll = comments_total.saturating_sub(comments_visible.max(1));
         self.detail_runs_scroll = runs_total.saturating_sub(runs_visible.max(1));
     }
@@ -61,7 +61,7 @@ impl App {
         let (_, comments_visible) = crate::view::comments_viewport(self, &layout);
         let comments_total = crate::view::comment_wrapped_rows(detail, layout.comments.width);
         let runs_total = detail.runs.len();
-        let runs_visible = layout.runs.height.saturating_sub(1) as usize;
+        let runs_visible = crate::view::runs_viewport_height(&layout);
         let (offset, total, visible) = match self.detail_scroll_target {
             // Row-based: comments wrap, so total/visible are wrapped rows.
             DetailScrollTarget::Comments => (
@@ -151,7 +151,7 @@ impl App {
         };
         self.detail_run_sel = self.detail_run_sel.min(len - 1);
         let layout = crate::view::detail_layout(self, self.last_area);
-        let visible = (layout.runs.height.saturating_sub(1) as usize).max(1);
+        let visible = crate::view::runs_viewport_height(&layout).max(1);
         let sel = self.detail_run_sel;
         let mut scroll = self.detail_runs_scroll.min(len - 1);
         if sel < scroll {
@@ -205,7 +205,7 @@ impl App {
                     Some(d) if !d.runs.is_empty() => d.runs.len(),
                     _ => return,
                 };
-                let visible = (layout.runs.height.saturating_sub(1) as usize).max(1);
+                let visible = crate::view::runs_viewport_height(&layout).max(1);
                 let first = self.detail_runs_scroll.min(len - 1);
                 let last = (first + visible - 1).min(len - 1);
                 self.detail_run_sel = self.detail_run_sel.min(len - 1).clamp(first, last);

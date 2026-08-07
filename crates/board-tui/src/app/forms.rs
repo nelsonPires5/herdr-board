@@ -10,6 +10,32 @@ pub(super) fn form_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
         return vec![];
     }
 
+    // `f`: toggle a card/column form between the centered sheet and fullscreen
+    // (mirrors the card-detail toggle).
+    if k.code == KeyCode::Char('f')
+        && k.modifiers.is_empty()
+        && matches!(app.screen, Screen::CardForm | Screen::ColumnForm)
+    {
+        app.form_fullscreen = !app.form_fullscreen;
+        return vec![];
+    }
+
+    // Multiline textareas: Shift+Enter or Ctrl+J inserts a newline (plain
+    // Enter keeps submitting the form).
+    let newline = (k.code == KeyCode::Enter && k.modifiers.contains(KeyModifiers::SHIFT))
+        || (matches!(k.code, KeyCode::Char('j') | KeyCode::Char('J'))
+            && k.modifiers.contains(KeyModifiers::CONTROL));
+    if newline {
+        if let Some(form) = app.form.as_mut() {
+            if form.focused_is_multiline() {
+                if let FieldKind::Text(ta) = &mut form.focused_mut().kind {
+                    ta.input(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                }
+                return vec![];
+            }
+        }
+    }
+
     // Ctrl+E: hand a multiline text field to $EDITOR.
     if k.code == KeyCode::Char('e') && k.modifiers.contains(KeyModifiers::CONTROL) {
         let multiline = app

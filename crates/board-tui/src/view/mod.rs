@@ -11,8 +11,26 @@ use ratatui::Frame;
 use crate::app::{App, CardFilter, Screen};
 
 const MIN_COL_W: u16 = 26;
-const CARD_H: u16 = 3;
-const COMPACT_CARD_H: u16 = 4;
+const CARD_H: u16 = 5;
+const COMPACT_CARD_H: u16 = 6;
+const BOARD_ACTION_COUNT: u16 = 9;
+
+fn board_action_columns(width: u16) -> u16 {
+    match width {
+        0..=59 => 3,
+        60..=119 => 5,
+        _ => BOARD_ACTION_COUNT,
+    }
+}
+
+fn board_action_rows(width: u16) -> u16 {
+    BOARD_ACTION_COUNT.div_ceil(board_action_columns(width))
+}
+
+fn board_header_height(_width: u16) -> u16 {
+    // identity/navigation + direct visibility controls + bottom divider
+    3
+}
 const MAX_SCOPE_LABEL: usize = 32;
 const NARROW_DETAIL_WIDTH: u16 = 100;
 const HELP_GUTTER_WIDTH: u16 = 2;
@@ -83,6 +101,42 @@ fn main_area(area: Rect) -> Rect {
     Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1))
 }
 
+/// Board-only top chrome, above the card viewport.
+fn board_header_area(area: Rect) -> Rect {
+    Rect::new(
+        area.x,
+        area.y,
+        area.width,
+        board_header_height(area.width).min(area.height.saturating_sub(1)),
+    )
+}
+
+/// Card viewport between the board header, action row, and global toast/footer.
+fn board_body_area(area: Rect) -> Rect {
+    let footer_h = 1;
+    let header_h = board_header_height(area.width);
+    let reserved = header_h
+        .saturating_add(board_action_rows(area.width))
+        .saturating_add(footer_h);
+    Rect::new(
+        area.x,
+        area.y.saturating_add(header_h.min(area.height)),
+        area.width,
+        area.height.saturating_sub(reserved),
+    )
+}
+
+/// Board-only click-first action row, immediately above the global footer.
+fn board_action_area(area: Rect) -> Rect {
+    let height = board_action_rows(area.width).min(area.height.saturating_sub(1));
+    Rect::new(
+        area.x,
+        area.bottom().saturating_sub(1 + height),
+        area.width,
+        height,
+    )
+}
+
 mod board;
 mod detail;
 mod form;
@@ -135,6 +189,9 @@ pub const HELP_KEYS: &[(Screen, &str, &str)] = &[
     (Screen::CardForm, "Shift+Tab", "previous field"),
     (Screen::CardForm, "←/→ Space", "cycle a picker field"),
     (Screen::CardForm, "Ctrl+E", "edit textarea in $EDITOR"),
+    (Screen::CardForm, "S+Enter", "newline in textarea"),
+    (Screen::CardForm, "Ctrl+J", "newline in textarea"),
+    (Screen::CardForm, "f", "toggle popup / fullscreen"),
     (Screen::CardForm, "Enter", "submit"),
     (Screen::CardForm, "Esc", "cancel"),
     (Screen::Picker, "--", "-- picker / confirm --"),
@@ -166,7 +223,7 @@ mod overlays;
 
 pub use detail::{
     comment_row_spans, comment_wrapped_rows, comments_action_bar_shown, comments_viewport,
-    detail_layout, detail_toggle_rect, DetailLayout,
+    detail_layout, detail_toggle_rect, runs_viewport_height, DetailLayout,
 };
 pub use layout::{board_layout, BoardLayout, ColLayout, CompactHeader, ScrollInfo};
 pub use overlays::{

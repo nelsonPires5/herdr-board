@@ -6,7 +6,7 @@
 # used to check by accident (at whatever width the host window happened to
 # have) and that the `b` regression fix (b => Boards level directly, not
 # Columns) depends on:
-#   - the compact header renders: `⇄` + the focused column name + `n/N`;
+#   - the compact header renders the focused column + `n/N` + the running count;
 #   - `b` reaches the board list directly (a known board name appears);
 #   - the header/switcher sheet shows the `[×]` close affordance;
 #   - a card title in the focused column is visible.
@@ -43,9 +43,11 @@ wait_for() {
   return 1
 }
 
-step "Compact header renders: ⇄, the focused column name, and n/N"
-wait_for '⇄ Todo  1/1' || fail "Compact header did not show '⇄ Todo  1/1' at 40 cols -- got: $(read_pane)"
-ok "Compact header shows the focused column and position"
+step "Compact header renders the focused column, position, and 0 running"
+wait_for 'Todo · 1/1' || fail "Compact header did not show the focused column and position at 40 cols -- got: $(read_pane)"
+printf '%s
+' "$(read_pane)" | grep -Fq '▶0'   || fail "Compact header did not show the running count (0) -- got: $(read_pane)"
+ok "Compact header shows the focused column, position, and running count"
 
 step "The focused column's card title is visible"
 printf '%s\n' "$(read_pane)" | grep -Fq 'Compact Mobile Card' \
@@ -65,7 +67,7 @@ ok "[×] close affordance present"
 
 step "Esc closes the sheet outright (opened directly via 'b', nothing to back out to)"
 e2e_herdr_mutate -- pane send-keys "$TUI_PANE" esc >/dev/null
-wait_for '⇄ Todo  1/1' || fail "board view did not return after Esc"
+wait_for 'Todo · 1/1' || fail "board view did not return after Esc"
 printf '%s\n' "$(read_pane)" | grep -Fq 'Compact Mobile Card' \
   || fail "board view lost its card after closing the switcher"
 ok "Esc closed the sheet and returned to the Compact board view"

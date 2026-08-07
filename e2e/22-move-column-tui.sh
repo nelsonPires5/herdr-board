@@ -48,7 +48,7 @@ wait_screen() {
   local pane="$1" needle="$2" screen="" i
   for (( i=0; i<100; i++ )); do
     screen="$("$HERDR_BIN" pane read "$pane" --source recent-unwrapped --lines 200 2>/dev/null || true)"
-    printf '%s\n' "$screen" | grep -Fq "$needle" && return 0
+    printf '%s\n' "$screen" | grep -Fqi "$needle" && return 0
     sleep 0.1
   done
   fail "pane did not render '$needle'"

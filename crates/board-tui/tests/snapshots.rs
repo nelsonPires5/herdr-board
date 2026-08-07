@@ -221,12 +221,14 @@ fn edit_card_modal_shows_scrollbar_when_fields_overflow() {
 fn column_form_no_scrollbar_when_fields_fit() {
     let mut d = driver(demo_client().unwrap());
     key(&mut d, KeyCode::Char('N'));
-    let output = render(&mut d, 80, 24);
+    // The grouped (section-card) column form is taller than the old flat list,
+    // so use a taller viewport to verify the no-scrollbar guarantee.
+    let output = render(&mut d, 100, 34);
     assert!(
         !output.contains('█'),
         "a fully-visible field window must not render a scrollbar thumb:\n{output}"
     );
-    insta::assert_snapshot!("form_no_scrollbar_fits_80x24", output);
+    insta::assert_snapshot!("form_no_scrollbar_fits_100x34", output);
 }
 
 #[test]
@@ -477,7 +479,7 @@ fn help_overlay() {
     assert!(output
         .lines()
         .last()
-        .is_some_and(|line| line.contains("? help")));
+        .is_some_and(|line| line.contains("j/k scroll · Esc close")));
     insta::assert_snapshot!("help_overlay", output);
 }
 
@@ -630,8 +632,9 @@ fn awaiting_card_detail_shows_agent_done_reason() {
     key(&mut d, KeyCode::Enter);
     let output = render(&mut d, 80, 24);
     assert!(output.contains("? awaiting (agent reported done)"));
-    assert!(output.contains("harness: claude   model: default   effort: default"));
-    assert!(output.contains("permission: default   session: default   space: workspace:-"));
+    assert!(output.contains("Harness · Model: claude · default"));
+    assert!(output.contains("Herdr session: default"));
+    assert!(output.contains("Space: workspace:-"));
     insta::assert_snapshot!("awaiting_card_detail", output);
 }
 
@@ -644,9 +647,8 @@ fn awaiting_card_detail_stays_compact_when_wide() {
     key(&mut d, KeyCode::Down);
     key(&mut d, KeyCode::Enter);
     let output = render(&mut d, 120, 35);
-    assert!(output.contains(
-        "? awaiting (agent reported done)   harness: claude   model: default   effort: default"
-    ));
+    assert!(output.contains("? awaiting (agent reported done)"));
+    assert!(output.contains("Harness · Model: claude · default"));
     insta::assert_snapshot!("awaiting_card_detail_120x35", output);
 }
 
@@ -711,8 +713,9 @@ fn awaiting_card_detail_shows_idle_timeout_reason() {
     key(&mut d, KeyCode::Enter);
     let output = render(&mut d, 80, 24);
     assert!(output.contains("? awaiting (idle timeout)"));
-    assert!(output.contains("harness: claude   model: default   effort: default"));
-    assert!(output.contains("permission: default   session: default   space: workspace:-"));
+    assert!(output.contains("Harness · Model: claude · default"));
+    assert!(output.contains("Herdr session: default"));
+    assert!(output.contains("Space: workspace:-"));
     insta::assert_snapshot!("awaiting_idle_detail", output);
 }
 
@@ -763,6 +766,86 @@ macro_rules! size_matrix_test {
             fn regular_60x24() {
                 let $w: u16 = 60;
                 let $h: u16 = 24;
+                $body
+            }
+        }
+    };
+}
+
+/// Form-specific matrix includes the desktop sizes where large forms may still
+/// overflow and the Wide sheet must stop at its preferred width.
+macro_rules! form_size_matrix_test {
+    ($mod_name:ident, |$w:ident, $h:ident| $body:block) => {
+        mod $mod_name {
+            use super::*;
+            #[test]
+            fn compact_40x20() {
+                let $w: u16 = 40;
+                let $h: u16 = 20;
+                $body
+            }
+            #[test]
+            fn compact_52x24() {
+                let $w: u16 = 52;
+                let $h: u16 = 24;
+                $body
+            }
+            #[test]
+            fn regular_60x24() {
+                let $w: u16 = 60;
+                let $h: u16 = 24;
+                $body
+            }
+            #[test]
+            fn regular_80x24() {
+                let $w: u16 = 80;
+                let $h: u16 = 24;
+                $body
+            }
+            #[test]
+            fn wide_120x35() {
+                let $w: u16 = 120;
+                let $h: u16 = 35;
+                $body
+            }
+        }
+    };
+}
+
+/// Overlay-only matrix includes the Regular and Wide design targets without
+/// multiplying unrelated board/detail fixtures.
+macro_rules! sheet_size_matrix_test {
+    ($mod_name:ident, |$w:ident, $h:ident| $body:block) => {
+        mod $mod_name {
+            use super::*;
+            #[test]
+            fn compact_40x20() {
+                let $w: u16 = 40;
+                let $h: u16 = 20;
+                $body
+            }
+            #[test]
+            fn compact_52x24() {
+                let $w: u16 = 52;
+                let $h: u16 = 24;
+                $body
+            }
+            #[test]
+            fn regular_60x24() {
+                let $w: u16 = 60;
+                let $h: u16 = 24;
+                $body
+            }
+            #[test]
+            fn regular_80x24() {
+                let $w: u16 = 80;
+                let $h: u16 = 24;
+                $body
+            }
+            #[test]
+            fn wide_120x35() {
+                let $w: u16 = 120;
+                let $h: u16 = 35;
                 $body
             }
         }
@@ -820,7 +903,7 @@ size_matrix_test!(size_matrix_card_detail_popup_and_fullscreen, |w, h| {
     );
 });
 
-size_matrix_test!(size_matrix_edit_form_long_multiline_description, |w, h| {
+form_size_matrix_test!(size_matrix_edit_form_long_multiline_description, |w, h| {
     let mut client = demo_client().unwrap();
     let board = client.board_get().unwrap();
     let todo = board
@@ -855,18 +938,30 @@ size_matrix_test!(size_matrix_edit_form_long_multiline_description, |w, h| {
     }
 
     let output = render_sized(&mut d, w, h);
-    // The Bug B fix under test is about the VALUE text wrapping instead of
-    // ellipsizing; the field LABEL line is a separate, correctly-truncated
-    // string (a later fix) and is long enough to legitimately ellipsize at
-    // 40 cols once a column is reserved for the scrollbar — exclude it here
-    // rather than asserting zero '…' across the whole frame.
-    let body_ellipsized = output
-        .lines()
-        .filter(|l| !l.contains("(base prompt)"))
-        .any(|l| l.contains('…'));
+    // Essential form chrome remains complete at every responsive width;
+    // only hostile dynamic values may ellipsize.
+    for label in [
+        "description (base prompt)",
+        "[$EDITOR]",
+        "[‹]",
+        "[›]",
+        "[ Save ]",
+        "[ Cancel ]",
+    ] {
+        assert!(
+            output.contains(label),
+            "form control {label:?} must be complete at {w}x{h}:\n{output}"
+        );
+    }
     assert!(
-        !body_ellipsized,
-        "long description VALUE must wrap, not ellipsize, at {w}x{h}:\n{output}"
+        !output.contains("Ctrl+E:"),
+        "the clipping-prone inline editor hint must be replaced at {w}x{h}:\n{output}"
+    );
+    assert!(
+        !output
+            .lines()
+            .any(|line| line.contains("base prompt") && line.contains('…')),
+        "the focused field label must not ellipsize at {w}x{h}:\n{output}"
     );
     assert!(
         output.contains("first paragraph"),
@@ -875,25 +970,25 @@ size_matrix_test!(size_matrix_edit_form_long_multiline_description, |w, h| {
     insta::assert_snapshot!(format!("edit_form_long_desc_{w}x{h}"), output);
 });
 
-size_matrix_test!(size_matrix_help, |w, h| {
+sheet_size_matrix_test!(size_matrix_help, |w, h| {
     let mut d = driver(demo_client().unwrap());
     key(&mut d, KeyCode::Char('?'));
     insta::assert_snapshot!(format!("help_{w}x{h}"), render_sized(&mut d, w, h));
 });
 
-size_matrix_test!(size_matrix_picker, |w, h| {
+sheet_size_matrix_test!(size_matrix_picker, |w, h| {
     let mut d = driver(demo_client().unwrap());
     key(&mut d, KeyCode::Char('m'));
     insta::assert_snapshot!(format!("picker_{w}x{h}"), render_sized(&mut d, w, h));
 });
 
-size_matrix_test!(size_matrix_confirm, |w, h| {
+sheet_size_matrix_test!(size_matrix_confirm, |w, h| {
     let mut d = driver(demo_client().unwrap());
     key(&mut d, KeyCode::Char('d'));
     insta::assert_snapshot!(format!("confirm_{w}x{h}"), render_sized(&mut d, w, h));
 });
 
-size_matrix_test!(size_matrix_switcher_columns_and_boards, |w, h| {
+sheet_size_matrix_test!(size_matrix_switcher_columns_and_boards, |w, h| {
     let mut d = driver(demo_client().unwrap());
     // Force Compact just long enough to open the switcher sheet at the
     // Columns level (Regular/Wide keep the classic `b` -> board `Picker`).

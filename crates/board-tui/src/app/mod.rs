@@ -133,6 +133,8 @@ pub struct App {
     pub detail: Option<CardDetail>,
     /// Card detail opens as a contextual popup; users can expand it in place.
     pub detail_fullscreen: bool,
+    /// Whether the card/column form fills the screen (toggle via `f`).
+    pub form_fullscreen: bool,
     pub detail_scroll_target: DetailScrollTarget,
     pub detail_comments_scroll: usize,
     pub detail_runs_scroll: usize,
@@ -197,6 +199,7 @@ impl App {
             card_filter: CardFilter::Active,
             detail: None,
             detail_fullscreen: false,
+            form_fullscreen: false,
             detail_scroll_target: DetailScrollTarget::Comments,
             detail_comments_scroll: 0,
             detail_runs_scroll: 0,

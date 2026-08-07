@@ -133,6 +133,19 @@ placement and recovery rules are in [`docs/design.md`](docs/design.md).
   <img src="docs/assets/readme/agent-panes.png" alt="Herdr workspace with board agents in separate per-card tabs" width="100%">
 </p>
 
+## Mobile-first TUI
+
+The `board tui` surface is responsive: **Compact (< 60 cols)** shows one
+full-width column with a switcher header + direct visibility filters; **Regular
+(60–119)** and **Wide (≥ 120)** show the multi-column board. Cards are compact
+boxed rows that always carry their real status glyph, an active-run timer, and
+card-local `[Edit]`/`[Delete]` controls. The header shows the live **running
+count**, and `Visible:` filters (`Active` / `All` / `Archived`) are independent
+buttons in every layout. Card movement is drag-and-drop on the card body; the
+reduced bottom action row covers New card, Open, Archive, column ops, Template,
+and `? Help` (Refresh/Quit/Move-card remain keyboard `r`/`q`/`m`). All original
+keyboard shortcuts are preserved.
+
 ## Everyday controls
 
 | Key | Action | Key | Action |

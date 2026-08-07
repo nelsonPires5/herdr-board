@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+- [](https://github.com/nelsonPires5/herdr-board/pull/?) Redesign the board TUI mobile-first: boxed cards, direct visibility filters, running count, card-local Edit/Delete, drag-only card movement, and a reduced bottom action row (PR link pending).
+
 ## [0.11.0] - 2026-08-04
 
 - [#54](https://github.com/nelsonPires5/herdr-board/pull/54) Upgrade Herdr compatibility to 0.8.0/socket protocol 19 and centralize the gated client/daemon integration with matching E2E preflight.

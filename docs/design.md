@@ -1,5 +1,12 @@
 # herdr-board — design
 
+Responsive TUI: the board is Compact `< 60` (one column, switcher header, running
+count, direct Active/All/Archived filters, card-local Edit/Delete), Regular
+`60..=119` and Wide `>= 120` (multi-column). Cards are 4/5-row boxed rows with
+status glyph, active-run timer, and inline `[Edit]`/`[Delete]`; card movement is
+drag-only (keyboard `m`/`H`/`L` remain), and Refresh/Quit are keyboard-only
+(`r`/`q`). The footer never duplicates `? help` on the board.
+
 ## 1. Concepts
 
 | Entity | What it is |

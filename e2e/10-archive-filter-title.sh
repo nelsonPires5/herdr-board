@@ -55,9 +55,10 @@ e2e_herdr_mutate -- pane send-keys "$PANE_ID" v
 wait_label "Board [$SCOPE_LABEL · ARCHIVED]"
 ok "archive filter stays synchronized with the Herdr pane title"
 
-step "Assert the board footer is minimal"
+step "Assert the board footer is minimal (no redundant '? help' — the action row has the button)"
 screen="$("$HERDR_BIN" pane read "$PANE_ID" --source recent-unwrapped --lines 200 || true)"
-printf '%s\n' "$screen" | grep -q "? help" || fail "minimal '? help' footer missing"
+printf '%s\n' "$screen" | grep -q "? help" && fail "legacy '? help' footer label still visible"
+printf '%s\n' "$screen" | grep -q "Visible:" || fail "direct visibility filter row not rendered"
 printf '%s\n' "$screen" | grep -q "shown" && fail "legacy shown count still visible"
 printf '%s\n' "$screen" | grep -q "archived ·" && fail "legacy archived count still visible"
 printf '%s\n' "$screen" | grep -q "column [0-9]" && fail "legacy column counter still visible"

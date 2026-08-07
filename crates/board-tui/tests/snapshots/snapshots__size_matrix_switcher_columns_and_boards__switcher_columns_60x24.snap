@@ -2,12 +2,12 @@
 source: crates/board-tui/tests/snapshots.rs
 expression: "render_sized(&mut d, w, h)"
 ---
-"┌ Todo · 1 · manual ─────────┐┌ Plan · 1 · auto ───────────┐"
-"│▌ Update docs               ││▌ Add retry to MELI scraper │"
-"│  · idle · claude           ││  ▶ running · 2m0s · claude/│"
-"│                            ││                            │"
-"│       ┌ Columns (j/k move · Enter open · Esc clos┐       │"
-"│       │ Todo  1                                  │       │"
+"┌ TODO · MANUAL · 1 ─────────┐┌ PLAN · AUTO · 1 ───────────┐"
+"│┌──────────────────────────┐││┌──────────────────────────┐│"
+"││· #1 Update docs──────────││││▶ #2 Add retry to MELI sc…││"
+"││· idle                    ││││▶ running · 2m0s          ││"
+"││claude┌ Columns (j/k move · Enter open · [Close]s┐elete]││"
+"│└──────│ Todo  1                                  │──────┘│"
 "│       │ Plan  1                                  │       │"
 "│       │ Execute  2                               │       │"
 "│       │ Review  2                                │       │"
