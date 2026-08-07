@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+- [#56](https://github.com/nelsonPires5/herdr-board/pull/56) Reuse the managed agent pane on same-conversation resume hops while fresh columns still mint and manual landings stay open.
+
 ## [0.11.0] - 2026-08-04
 
 - [#54](https://github.com/nelsonPires5/herdr-board/pull/54) Upgrade Herdr compatibility to 0.8.0/socket protocol 19 and centralize the gated client/daemon integration with matching E2E preflight.

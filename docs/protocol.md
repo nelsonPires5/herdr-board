@@ -216,10 +216,14 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
 
 ### comments / runs
 
-- `comment.add {card_id, body, author?, actor_run_id?}` → `Comment`. CLI `board comment` and
-  `board card comment add` set `author` to `agent:<BOARD_RUN_ID>` and send `actor_run_id` when
-  `$BOARD_RUN_ID` is set; otherwise the author defaults to `user`. The additive actor field is
-  checked against the comment author, card, and open run.
+- `comment.add {card_id, body, author?, actor_run_id?, actor_pane_id?}` → `Comment`. CLI `board
+  comment` and `board card comment add` set `author` to `agent:<BOARD_RUN_ID>`, send `actor_run_id`
+  when `$BOARD_RUN_ID` is set, and forward `$HERDR_PANE_ID` as `actor_pane_id` when present;
+  otherwise the author defaults to `user`. Ordinarily the actor run is checked against the comment
+  author, card, and open run. A managed same-conversation resume keeps one process/pane, whose
+  immutable `BOARD_RUN_ID` names its first stage: when `actor_pane_id` exactly matches the card's
+  current open run pane, that pane is the credential and the comment is attributed to the current
+  run. A missing/different pane id retains the strict actor-run check.
 - `comment.get {id}` → `CommentRecord` (`id,card_id,author,body,created_at,deleted_at`). It returns
   the current row even after a soft delete.
 - `comment.update {id,body,actor_run_id?}` → `CommentRecord`. It preserves the original author and
@@ -232,18 +236,22 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
   insert creates the initial snapshot; edits append a snapshot; deletion marks the final snapshot's
   `deleted_at` without changing its body. System comments are immutable at the database boundary and
   cannot be edited or deleted by any actor.
-- `run.done {card_id, outcome:"ok"|"fail", summary?, run_id?}` → `{run, card}` — backend of
-  `board done`. `run_id` is optional for compatibility: manual and TUI callers may omit it,
-  and an omitted id completes the current active run. When supplied, it must exactly match the
-  current active run, so a stale child cannot complete a replacement run. The CLI forwards
-  `BOARD_RUN_ID` when present and omits `run_id` otherwise. It closes the active run, posts a
-  `system` comment, and applies the column transition (`ok`→on_success, `fail`→on_fail; no
-  target → card stays, status `done`/`failed`). It is also the confirm channel for an `awaiting`
-  card (TUI `Enter` and `card run confirm` send the same request). The only queued exception is a
-  configured harness: its `board done` must provide the exact queued run id and may arrive before
-  runner registration. A queued built-in Pi/Claude run is rejected because managed completion
-  requires a registered pane. A mismatched id, missing id for the queued exception, or otherwise
-  ineligible run returns an error.
+- `run.done {card_id, outcome:"ok"|"fail", summary?, run_id?, actor_pane_id?}` → `{run, card}` —
+  backend of `board done`. `run_id` is optional for compatibility: manual and TUI callers may omit
+  it, and an omitted id completes the current active run. When supplied, it ordinarily must exactly
+  match the current active run, so a stale child cannot complete a replacement run. The CLI forwards
+  `BOARD_RUN_ID` and `$HERDR_PANE_ID` when present. A managed same-conversation resume keeps one
+  process/pane, whose immutable `BOARD_RUN_ID` names its first stage: when `actor_pane_id` exactly
+  matches the current open run's recorded pane, the pane is the actor credential and `run.done`
+  applies to that current run. This intentionally makes all commands from that still-live pane act
+  as its current stage; a missing/different pane id retains exact run-id rejection. It closes the
+  active run, posts a `system` comment, and applies the column transition (`ok`→on_success,
+  `fail`→on_fail; no target → card stays, status `done`/`failed`). It is also the confirm channel for
+  an `awaiting` card (TUI `Enter` and `card run confirm` send the same request). The only queued
+  exception is a configured harness: its `board done` must provide the exact queued run id and may
+  arrive before runner registration. A queued built-in Pi/Claude run is rejected because managed
+  completion requires a registered pane. A mismatched id/pane, missing id for the queued exception,
+  or otherwise ineligible run returns an error.
 - `run.cancel {card_id}` → `{run, card}` — kills the pane (herdr `pane.close`), outcome `cancelled`, card status `failed`, no transition.
 - `run.retry {card_id}` → `{run, card}` — re-enqueue in the current column as a fresh run. Claude
   resumes with `--fork-session`; Pi uses `--fork <old-id> --session-id <new-id>` and persists it.

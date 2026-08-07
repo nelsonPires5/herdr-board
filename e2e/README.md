@@ -9,7 +9,7 @@ exercises the herdr wire integration end to end.
 For the layers below this one (unit, daemon+CLI integration, TUI snapshots), the
 isolation/safety design, and the **how-to-write-a-scenario** guide, see
 [`../docs/testing.md`](../docs/testing.md). This file is the authoritative use-case catalog for board protocol v1 / SQLite schema v13:
-every numbered scenario from **01 through 29** must appear here and in `run-all.sh`. The provider-free
+every numbered scenario from **01 through 30** must appear here and in `run-all.sh`. The provider-free
 safe boundary is `fake-agent.sh`,
 `fake-bin/{pi,claude}`, and `test-harness.sh`; prompt/system-prompt contents are never logged.
 Scenario 21 is the active-run timer/event-refresh characterization. The CI live gate is configured to
@@ -48,6 +48,7 @@ exercise the complete catalog after the cheaper static checks succeed.
 | A run whose pane was closed is reopened by resuming its harness conversation in a new ephemeral pane in the card tab (`action=rescued`), a second focus reuses that pane (`action=focused_rescued_pane`) without creating a second one, the `runs` row stays byte-for-byte unchanged, and a run that cannot be resumed is refused non-destructively | `27-rescue-dead-pane.sh` | live, zero provider cost |
 | Pi's authenticated file catalog applies sparse/null `thinkingLevelMap` semantics in `harness.capabilities`, and the real TUI cycles the exact corrected effort order without submitting a card or launching Pi | `28-pi-effort-catalog.sh` | live, provider-free; no model invocation |
 | Private daily NDJSON diagnostics prune only exact owned files beyond 30 days and record redacted board/Herdr success, error, and subscription metadata | `29-diagnostic-logs.sh` | live, provider-free; no payloads or model invocation |
+| A non-fresh auto chain reuses ONE managed agent pane (and one conversation) across stages via `agent.prompt` (no new `pane.split`/`agent.start`); a fresh column still mints a new pane, and a manual landing keeps the pane open | `30-pane-reuse.sh` | live, checked-in fake `pi`, zero provider cost |
 
 ### How the live scenario produces Herdr `done`
 
@@ -120,7 +121,7 @@ unmarked, or out-of-root paths. Named-session sockets must be at most 92 bytes, 
 short `/tmp/hb-e2e.XXXXXX` isolated root. `TMPDIR` is pinned to that exact marker-owned root, so
 generated configured-harness scripts remain contained even if asynchronous `pane run` never opens
 their normal self-removing script. The forced-build standard suite is configured and required to exercise
-scenarios 01–29 without provider calls; this is a coverage requirement, not a claim that a live run
+scenarios 01–30 without provider calls; this is a coverage requirement, not a claim that a live run
 has completed. Scenarios 18–29 use only the configured or managed
 fake harnesses and never record prompt or system-prompt bodies.
 
@@ -179,13 +180,14 @@ personal Claude state. Its intended contract is one authorized attempt with no r
 | `27-rescue-dead-pane.sh` | `run.focus` rescue of a run whose pane is gone: resume-mode relaunch of the managed fixture with the recorded conversation id (no re-sent task), idempotent second focus, a byte-for-byte unchanged `runs` row, and an explicit non-destructive refusal for an unresumable run; provider-free. |
 | `28-pi-effort-catalog.sh` | Auth-scoped Pi file discovery plus exact board-RPC and real-TUI proof of sparse/null thinking-level semantics; never starts Pi or submits a card. |
 | `29-diagnostic-logs.sh` | Daily NDJSON validity, private modes, exact 30-day retention boundary, board/Herdr completion metadata, sentinel absence, and exact cleanup. |
+| `30-pane-reuse.sh` | Non-fresh auto-chain pane reuse: one managed agent pane + one conversation across resume hops (no second `pane.split`/`agent.start`), fresh column still mints, manual landing keeps the pane open; checked-in fake `pi`. |
 | `real-pi-smoke.sh` | Fail-closed real-provider poem smoke. Detects Pi's runtime default model, passes low thinking, isolates board/Pi session output under `/tmp`, verifies the current Pi integration v8/WezTerm, poem/comments/argv/git/settings, and supports keep mode for visual audit. Not in `run-all.sh`. |
 | `real-claude-haiku-smoke.sh` | Fail-closed intended-contract smoke. Requires exact opt-in, authorizes one Claude Haiku/low attempt with no retry/fallback, stages only completed onboarding/theme, exact workspace trust, the installed current Claude integration v7 hook, credentials, and approved remote-settings bytes under `/tmp` so startup dialogs cannot consume `agent.prompt`; no broad personal Claude state is copied. Independently identity-gates the daemon and Herdr server and cleans exact resources. Not in `run-all.sh`. |
 | `hrpc.py` | One-shot raw **herdr** socket RPC (honours `HERDR_SOCKET_PATH`) for structural asserts (`tab.list`/`pane.list`/`pane.layout`). |
 | `12-cwd-boards.sh` | Scoped board identity/isolation plus real TUI title/picker. |
 | `13-jump-to-pane.sh` | Canonical CLI and same-session TUI focus of a deliberately selected run through a real plugin overlay. |
 | `NN-*.sh` | The scenarios above. |
-| `run-all.sh` | Builds once, runs scenarios 01–29 as environment-scrubbed children with their own sessions, captures artifacts, and prints the summary (`--require-all` forbids skips). |
+| `run-all.sh` | Builds once, runs scenarios 01–30 as environment-scrubbed children with their own sessions, captures artifacts, and prints the summary (`--require-all` forbids skips). |
 | `ci.sh` | Pins, caches, and verifies Herdr for Linux x86_64; runs the complete suite with `--require-all`; exports only its exact private artifact root to `e2e-artifacts/`. |
 
 Columns have no `board` CLI verb, so scenarios configure them over the boardd

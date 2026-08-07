@@ -137,6 +137,48 @@ fn fake_harness_missing_actor_run_is_rejected_when_card_has_open_run() {
 }
 
 #[test]
+fn reused_pane_comment_maps_stale_run_identity_only_when_pane_matches() {
+    let d = test_daemon(Config::default());
+    let (card_id, stale_run_id, current_run_id) = add_reused_pane_runs(&d);
+
+    let added = handle_request(
+        &d,
+        "comment.add",
+        json!({
+            "card_id": card_id,
+            "body": "current stage result",
+            "author": format!("agent:{stale_run_id}"),
+            "actor_run_id": stale_run_id,
+            "actor_pane_id": "w1:p-shared"
+        }),
+    )
+    .unwrap();
+    assert_eq!(added["author"], format!("agent:{current_run_id}"));
+
+    let other = test_daemon(Config::default());
+    let (other_card_id, other_stale_run_id, _) = add_reused_pane_runs(&other);
+    let denied = handle_request(
+        &other,
+        "comment.add",
+        json!({
+            "card_id": other_card_id,
+            "body": "must not cross panes",
+            "author": format!("agent:{other_stale_run_id}"),
+            "actor_run_id": other_stale_run_id,
+            "actor_pane_id": "w1:p-different"
+        }),
+    )
+    .unwrap_err();
+    assert!(denied.to_string().contains("no longer open"), "{denied}");
+    assert!(other
+        .store
+        .lock()
+        .list_comments(other_card_id)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn comment_routes_authorize_agents_and_hide_soft_deleted_comments() {
     let d = test_daemon(Config::default());
     let card = handle_request(&d, "card.create", json!({"title":"comments"})).unwrap();

@@ -5,7 +5,8 @@ use board_core::protocol::RunFocusAction;
 use crate::args::{CommentCmd, RunCmd};
 use crate::context::Ctx;
 use crate::helpers::{
-    actor_author, actor_run_id, env_card_id, origin_socket as resolve_origin_socket, parse_outcome,
+    actor_author, actor_pane_id, actor_run_id, env_card_id, origin_socket as resolve_origin_socket,
+    parse_outcome,
 };
 use crate::render::{emit, emit_line};
 
@@ -23,12 +24,17 @@ pub(crate) fn cmd_comment(first: String, body: Option<String>, ctx: &mut Ctx) ->
 pub(crate) fn cmd_card_comment(sub: CommentCmd, ctx: &mut Ctx) -> Result<()> {
     let json = ctx.json();
     let actor = actor_run_id()?;
+    let pane_id = actor_pane_id();
     let result: Result<()> = (|| match sub {
         CommentCmd::Add { card_id, body } => {
             let author = actor_author(actor);
-            let comment =
-                ctx.client()?
-                    .comment_add_for_run(card_id, &body, author.as_deref(), actor)?;
+            let comment = ctx.client()?.comment_add_for_run(
+                card_id,
+                &body,
+                author.as_deref(),
+                actor,
+                pane_id.as_deref(),
+            )?;
             emit_line(
                 &comment,
                 json,
@@ -68,9 +74,14 @@ pub(crate) fn cmd_done(
     };
     let outcome = parse_outcome(&outcome)?;
     let run_id = actor_run_id()?;
-    let result = ctx
-        .client()?
-        .run_done_for_run(card_id, outcome, summary.as_deref(), run_id)?;
+    let pane_id = actor_pane_id();
+    let result = ctx.client()?.run_done_for_run(
+        card_id,
+        outcome,
+        summary.as_deref(),
+        run_id,
+        pane_id.as_deref(),
+    )?;
     emit_line(
         &result,
         json,

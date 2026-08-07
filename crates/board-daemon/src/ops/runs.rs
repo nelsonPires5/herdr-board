@@ -17,7 +17,15 @@ pub(super) fn run_done(d: &Arc<Daemon>, p: RunDoneParams) -> Result<Value> {
             .open_run_for_card(p.card_id)?
             .ok_or_else(|| Error::NotFound(format!("no active run for card {}", p.card_id)))?;
         let card = db.require_card(p.card_id)?;
-        let facts = lifecycle_facts(&run, &card, p.run_id);
+        // A reused agent pane keeps its first stage's BOARD_RUN_ID (a running
+        // process's env cannot change); when its HERDR_PANE_ID matches this
+        // open run's pane, the caller is this run's pane, so the stale id is
+        // treated as this run instead of being rejected as a mismatch.
+        let actor_run_id = match p.actor_pane_id.as_deref() {
+            Some(pane) if run.herdr_pane_id.as_deref() == Some(pane) => Some(run.id),
+            _ => p.run_id,
+        };
+        let facts = lifecycle_facts(&run, &card, actor_run_id);
         let plan = match decide_lifecycle(&facts, LifecycleAction::Done { outcome: p.outcome }) {
             LifecycleDecision::Finalize(plan) => plan,
             LifecycleDecision::Reject(rejection) => {

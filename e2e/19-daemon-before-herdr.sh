@@ -38,6 +38,17 @@ for _ in $(seq 1 100); do
 done
 [ -n "$PANE_ID" ] || fail "late-connected daemon never dispatched a pane"
 
+# Recording the pane and starting the event subscription are separate daemon
+# steps. Require the late-connected stream before closing the pane so this
+# scenario tests live watcher finalization, not the slower reconcile fallback.
+for _ in $(seq 1 50); do
+  PROXY_STATUS="$(e2e_proxy_command status)"
+  SUBSCRIPTIONS="$(printf '%s' "$PROXY_STATUS" | jget subscriptions)"
+  [ "$SUBSCRIPTIONS" -gt 0 ] && break
+  sleep 0.1
+done
+[ "${SUBSCRIPTIONS:-0}" -gt 0 ] || fail "late watcher never subscribed through proxy"
+
 step "Close the exact owned pane and require watcher finalization"
 e2e_herdr_mutate -- pane close "$PANE_ID" >/dev/null
 for _ in $(seq 1 100); do

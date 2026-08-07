@@ -249,6 +249,10 @@ pub(crate) fn rescue_run_pane(plan: &RescuePlan<'_>) -> anyhow::Result<RescueOut
             remembered_anchor_id: remembered
                 .as_ref()
                 .map(|owned| owned.anchor_pane_id.as_str()),
+            // A rescue always splits a fresh pane (the run's pane is dead);
+            // it never reuses a prior pane.
+            reuse_pane_id: None,
+            reuse_agent_kind: None,
         },
     )
     .with_context(|| {
@@ -339,6 +343,7 @@ fn launch_rescue(
         durable_pane_ids: Vec::new(),
         reclaimable_pane_ids: Vec::new(),
         durable_anchor_pane_ids: Vec::new(),
+        reuse_pane_id: None,
         cwd: Some(cwd.to_path_buf()),
         workspace_ref: Some(plan.workspace_id.to_string()),
         herdr_socket: Some(plan.socket.to_path_buf()),
@@ -347,7 +352,14 @@ fn launch_rescue(
     };
 
     match req.agent_kind.as_deref() {
-        Some(kind) => launch_managed(client, &req, kind, pane_id, DEFAULT_AGENT_START_DELAY),
+        Some(kind) => launch_managed(
+            client,
+            &req,
+            kind,
+            pane_id,
+            false,
+            DEFAULT_AGENT_START_DELAY,
+        ),
         None => {
             let runner = HerdrCliPaneRunner;
             launch_configured(

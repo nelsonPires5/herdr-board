@@ -264,7 +264,7 @@ typed `board_core::client::BoardClient`; only boardd touches SQLite.
 - `scripts/` — `build.sh` (release build used by plugin installation), `install-cli.sh` (managed
   CLI copy), `install.sh` (local-development setup), `open-board.sh` (open-or-focus plugin
   action), and `board-rpc.py` (raw daemon protocol client);
-- `e2e/` — scenarios 01–29 against disposable Herdr sessions/workspaces; checked-in fake Pi,
+- `e2e/` — scenarios 01–30 against disposable Herdr sessions/workspaces; checked-in fake Pi,
   Claude, and configured harnesses keep the standard suite provider-free. `e2e/test-harness.sh`
   performs static ownership/safety checks without starting Herdr; the live suite is a separate
   gate. The catalog is [`e2e/README.md`](e2e/README.md).

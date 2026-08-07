@@ -138,6 +138,7 @@ pub(super) async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result
         durable_pane_ids: Vec::new(),
         reclaimable_pane_ids: Vec::new(),
         durable_anchor_pane_ids: Vec::new(),
+        reuse_pane_id: None,
         cwd: None,
         workspace_ref: None,
         herdr_socket: None,
@@ -185,6 +186,10 @@ pub(super) async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result
         };
         let card_tab = run.launch_spec.is_some();
         let run_session = launch_session.map(str::to_owned);
+        // The reuse candidate is resolved from the persisted run rows (the
+        // current queued run has no pane yet, so it cannot be its own match).
+        let self_run_id = run.id;
+        let self_session_id = run.session_id.clone();
         let resolved = tokio::task::spawn_blocking(move || {
             let mut client = HerdrClient::connect(&socket)
                 .map_err(|e| anyhow::anyhow!("herdr unavailable: {e}"))?;
@@ -219,6 +224,26 @@ pub(super) async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result
             } else {
                 None
             };
+            // Reuse the prior run's pane iff this hop resumes the SAME harness
+            // conversation: a non-fresh resume keeps the card's `session_id`,
+            // so a prior durable run in this session/workspace that recorded
+            // that id is the source pane to re-prompt. Mint (fresh column) and
+            // Fork (retry) mint a new id and therefore find no match.
+            let reuse_pane_id = self_session_id.as_deref().and_then(|sid| {
+                prior_runs
+                    .iter()
+                    .filter(|r| {
+                        r.id != self_run_id
+                            && r.ended_at.is_some()
+                            && r.launch_spec.is_some()
+                            && r.session.as_deref() == session
+                            && r.herdr_workspace_id.as_deref() == Some(workspace_id.as_str())
+                            && r.session_id.as_deref() == Some(sid)
+                    })
+                    .max_by_key(|r| r.id)
+                    .and_then(|r| r.herdr_pane_id.clone())
+                    .filter(|pane| !pane.is_empty())
+            });
             Ok::<_, anyhow::Error>((
                 workspace_id,
                 cwd,
@@ -226,6 +251,7 @@ pub(super) async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result
                 prior_pane_ids,
                 reclaimable_pane_ids,
                 anchor_pane_ids,
+                reuse_pane_id,
             ))
         })
         .await
@@ -238,6 +264,7 @@ pub(super) async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result
                 durable_pane_ids,
                 reclaimable_pane_ids,
                 durable_anchor_pane_ids,
+                reuse_pane_id,
             )) => {
                 req.workspace_ref = Some(id);
                 req.cwd = Some(PathBuf::from(cwd));
@@ -245,6 +272,7 @@ pub(super) async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result
                 req.durable_pane_ids = durable_pane_ids;
                 req.reclaimable_pane_ids = reclaimable_pane_ids;
                 req.durable_anchor_pane_ids = durable_anchor_pane_ids;
+                req.reuse_pane_id = reuse_pane_id;
             }
             Err(e) => {
                 fail_queued_run(d, run.id, &format!("{e:#}"))?;

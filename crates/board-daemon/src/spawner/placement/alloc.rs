@@ -27,11 +27,20 @@ pub(crate) struct CardOwnership<'a> {
     /// Exact anchor ids remembered by the daemon or persisted on prior runs.
     pub(crate) durable_anchor_pane_ids: &'a [String],
     pub(crate) remembered_anchor_id: Option<&'a str>,
+    /// A prior run-child pane to reuse on a same-conversation resume hop
+    /// (instead of splitting a fresh child). `None` keeps the historical
+    /// always-split behavior.
+    pub(crate) reuse_pane_id: Option<&'a str>,
+    /// Expected managed-agent kind (`pi`/`claude`) on the reuse candidate.
+    /// Pane identity alone must not redirect a stage prompt to a different
+    /// agent a user started after the prior run.
+    pub(crate) reuse_agent_kind: Option<&'a str>,
 }
 
 #[derive(Debug)]
 pub(crate) struct OwnedPane {
-    /// The newly split pane that is safe to launch/close for this run.
+    /// The pane that is safe to launch/close for this run. On a reuse hop this
+    /// is the prior run's still-live agent pane rather than a freshly split one.
     pub(crate) pane_id: String,
     pub(crate) workspace_id: String,
     pub(crate) tab_id: String,
@@ -164,6 +173,8 @@ fn allocate_card_pane(
         reclaimable_pane_ids,
         durable_anchor_pane_ids,
         remembered_anchor_id,
+        reuse_pane_id,
+        reuse_agent_kind,
     } = ownership;
     let cwd_string = cwd.map(|path| path.to_string_lossy().into_owned());
     let tabs = client
@@ -207,11 +218,54 @@ fn allocate_card_pane(
         });
 
     if let Some(anchor) = anchor {
+        // A same-conversation resume hop reuses the prior run's still-live
+        // agent pane: the conversation + agent are already there, so the next
+        // stage is delivered with `agent.prompt` on this pane rather than a
+        // fresh `pane.split` + `agent.start`. Only an exact prior durable child
+        // in this tab/workspace that still holds its agent qualifies; the
+        // candidate's live status is re-checked here. Herdr's derived Done is a
+        // live, quiescent end-of-turn state (not a missing pane). A briefly
+        // Working/Blocked pane is still adopted — launch waits for it to become
+        // quiescent before prompting.
+        if let Some(reuse_id) = reuse_pane_id {
+            if let Some(reuse_pane) = panes.iter().find(|pane| {
+                pane.pane_id == reuse_id
+                    && pane.workspace_id == workspace_id
+                    && pane.tab_id == tab.tab_id
+                    && reuse_agent_kind.is_some()
+                    && pane.agent.as_deref() == reuse_agent_kind
+                    && matches!(
+                        pane.agent_status,
+                        AgentStatus::Idle
+                            | AgentStatus::Working
+                            | AgentStatus::Blocked
+                            | AgentStatus::Done
+                    )
+            }) {
+                // Close any *other* ended children (e.g. leftovers from a fresh
+                // column) so the tab keeps one agent child; the reuse pane is
+                // protected and stays open.
+                reclaim_prior_children(
+                    client,
+                    &panes,
+                    anchor.pane_id.as_str(),
+                    reclaimable_pane_ids,
+                    Some(reuse_id),
+                )?;
+                return Ok(OwnedPane {
+                    pane_id: reuse_pane.pane_id.clone(),
+                    workspace_id: workspace_id.to_string(),
+                    tab_id: tab.tab_id.clone(),
+                    anchor_pane_id: Some(anchor.pane_id.clone()),
+                });
+            }
+        }
         reclaim_prior_children(
             client,
             &panes,
             anchor.pane_id.as_str(),
             reclaimable_pane_ids,
+            None,
         )?;
         return split_run_child(
             client,
@@ -272,7 +326,7 @@ fn allocate_card_pane(
         })
         .map_err(mark_retryable_placement_race)
         .context("labeling recreated card-tab anchor")?;
-    reclaim_prior_children(client, &panes, &anchor_id, reclaimable_pane_ids)?;
+    reclaim_prior_children(client, &panes, &anchor_id, reclaimable_pane_ids, None)?;
 
     split_run_child(
         client,
@@ -424,9 +478,13 @@ fn reclaim_prior_children(
     panes: &[PaneInfo],
     anchor_id: &str,
     reclaimable_ids: &[String],
+    // A board-owned child to keep open even when it is ended/idle (the reuse
+    // pane). It is never closed here; it is re-prompted by the launch instead.
+    protect: Option<&str>,
 ) -> anyhow::Result<()> {
     for pane in panes.iter().filter(|pane| {
         pane.pane_id != anchor_id
+            && Some(pane.pane_id.as_str()) != protect
             && reclaimable_ids.iter().any(|id| id == &pane.pane_id)
             && !matches!(
                 pane.agent_status,

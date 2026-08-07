@@ -230,7 +230,7 @@ pub trait BoardClient {
         body: &str,
         author: Option<&str>,
     ) -> anyhow::Result<Comment> {
-        self.comment_add_for_run(card_id, body, author, None)
+        self.comment_add_for_run(card_id, body, author, None, None)
     }
     fn comment_add_for_run(
         &mut self,
@@ -238,12 +238,14 @@ pub trait BoardClient {
         body: &str,
         author: Option<&str>,
         actor_run_id: Option<i64>,
+        pane_id: Option<&str>,
     ) -> anyhow::Result<Comment> {
         let p = CommentAddParams {
             card_id,
             body: body.to_string(),
             author: author.map(str::to_string),
             actor_run_id,
+            actor_pane_id: pane_id.map(str::to_string),
         };
         Ok(serde_json::from_value(
             self.call("comment.add", serde_json::to_value(p)?)?,
@@ -294,7 +296,7 @@ pub trait BoardClient {
         outcome: RunOutcome,
         summary: Option<&str>,
     ) -> anyhow::Result<RunActionResult> {
-        self.run_done_for_run(card_id, outcome, summary, None)
+        self.run_done_for_run(card_id, outcome, summary, None, None)
     }
     fn run_done_for_run(
         &mut self,
@@ -302,12 +304,14 @@ pub trait BoardClient {
         outcome: RunOutcome,
         summary: Option<&str>,
         run_id: Option<i64>,
+        pane_id: Option<&str>,
     ) -> anyhow::Result<RunActionResult> {
         let p = RunDoneParams {
             card_id,
             outcome,
             summary: summary.map(str::to_string),
             run_id,
+            actor_pane_id: pane_id.map(str::to_string),
         };
         Ok(serde_json::from_value(
             self.call("run.done", serde_json::to_value(p)?)?,
