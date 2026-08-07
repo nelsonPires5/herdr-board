@@ -29,7 +29,7 @@ board wire DTOs; `board-herdr` owns only the verified Herdr socket surface; and 
 and `docs/protocol.md` explain behavior rather than defining duplicate serde shapes. Schema v13 adds
 soft-deleted comments and immutable comment-history snapshots; the CLI exposes their nested CRUD
 and history commands while boardd remains the sole SQLite writer. The complete live use-case catalog
-is [`../e2e/README.md`](../e2e/README.md), scenarios **01–29**; the safe
+is [`../e2e/README.md`](../e2e/README.md), scenarios **01–30**; the safe
 static harness is `e2e/test-harness.sh`, while `e2e/run-all.sh` is the opt-in live gate.
 
 The current Herdr boundary is deliberately narrower than the upstream schema. The 0.8.0/protocol-19
@@ -116,8 +116,13 @@ FIFO-queued and active-open run indexes; daemon queue reads use direct SQL pairs
 every card's run history. v11 adds nullable `runs.launch_spec_json`: v10 rows remain NULL, while new
 runs persist a version-1 tagged materialization of exact argv, env, managed prompt channels, and the
 run's Herdr session. Unsupported spec versions fail decoding. Current placement consumes
-`runs.session`; pre-v11 rows explicitly retain current-card session lookup. v12 adds durable anchor
-identity, while v13 adds `comments.deleted_at`, `comment_history`, and its immutable insert-audit
+`runs.session`; pre-v11 rows explicitly retain current-card session lookup. Consecutive managed
+resume hops whose durable conversation id, session, workspace, tab, pane, and agent kind still match
+reuse that live child: placement protects it from reclaim, waits for protocol-19 `Idle` or derived
+`Done`, skips `pane.split`/`agent.start`, and sends only the new run's exact `initial_prompt` through
+`agent.prompt`. Mint/fork (including fresh columns and retries) retain new-pane startup, and a manual
+landing leaves the last pane open. v12 adds durable anchor identity, while v13 adds
+`comments.deleted_at`, `comment_history`, and its immutable insert-audit
 trigger. The launch spec and system snapshot are both private DB state omitted from board wire DTOs;
 comment history is exposed only through `comment.history`. The typed `SpaceKey` preserves
 session/kind/ref null identity. A per-daemon async pass lock prevents competing passes from duplicating
@@ -131,7 +136,9 @@ The completion race is harness-specific: `RunDoneParams.run_id` is optional so m
 completion remains compatible, while the CLI forwards `BOARD_RUN_ID` when present. An immediate
 configured-harness `board done` may finalize only its exact queued run before runner registration;
 a queued built-in Pi/Claude run is rejected until its managed pane is registered. A supplied
-mismatched id is rejected, preventing stale children from completing replacement runs. The
+mismatched id is rejected unless `actor_pane_id` exactly identifies the managed pane shared with the
+current open resume run; that pane credential resolves the process's immutable first-stage
+`BOARD_RUN_ID` to the current stage. A different/missing pane never grants that remap. The
 Herdr-neutral eligibility and finalizer policy is centralized in
 `board_core::engine::{LifecycleDecision, FinalizePlan}`; boardd remains responsible for gathering
 facts and applying one `finalize_run_uow`. It prepares transition and auto-hop inputs before that
@@ -169,7 +176,7 @@ A (core+scaffold) → B (herdr client) ∥ C (TUI) → D (daemon+CLI+integration
 - C: insta snapshots via `ratatui::backend::TestBackend` + synthetic key events + FakeBoardClient: empty board (Todo only + hints), board with example pipeline & cards (status glyphs), new-card modal, column form, card detail w/ comments+runs, `?` help, delete-column prompt, move flow.
 - Restart recovery (`board-daemon::supervisor`) is a conservative one-pass classifier. Session resolution and snapshot I/O are injectable and happen before mutation. `Alive` adopts scheduler/watch intent and replays terminal status, `Gone` uses the existing pane-exit finalizer, and `Unknown` does nothing. The apply phase re-reads the open run/card, making duplicate passes idempotent and rejecting stale observations. Startup constructs/runs this pass for the Herdr spawner regardless of whether its initial best-effort client connected. The always-on supervisor then maintains independent per-socket streams and backoff, subscribes before taking a fresh bounded snapshot, and periodically reconciles missed events without resetting healthy sockets.
 - D: integration test (no herdr): start daemon on temp socket + temp DB with LocalSpawner + fake harness script → create card → move to auto column → fake agent comments + done → assert auto-transition, comments, run rows, statuses; timeout path; cancel path; queue serialization (two cards same space key run serially). The daemon comment suite also checks actor ownership, system-comment immutability, soft deletion, audit history, and event routing.
-- E: scenarios `e2e/01-core.sh` through `e2e/29-diagnostic-logs.sh` (real Herdr 0.8.0 / socket
+- E: scenarios `e2e/01-core.sh` through `e2e/30-pane-reuse.sh` (real Herdr 0.8.0 / socket
   protocol 19, fake harnesses): disposable workspaces, pane-first placement, typed prompt delivery,
   bounded same-pane `agent_pane_busy` retry, supervisor recovery, timer refresh, and
   identity-gated cleanup. The managed fixtures use Pi integration v8 and Claude integration v7
