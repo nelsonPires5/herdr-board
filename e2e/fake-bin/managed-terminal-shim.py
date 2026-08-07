@@ -94,6 +94,7 @@ def main() -> int:
 
     fd = sys.stdin.fileno()
     old_attributes = termios.tcgetattr(fd)
+    multi_turn = os.environ.get("FAKE_PI_LOOP", "0") == "1"
     timeout = float(os.environ.get("FAKE_MANAGED_PROMPT_TIMEOUT", "35"))
     idle = float(os.environ.get("FAKE_MANAGED_PROMPT_IDLE", "0.75"))
     deadline = time.monotonic() + timeout
@@ -107,15 +108,18 @@ def main() -> int:
     print("HERDR_FAKE_MANAGED_INTERACTIVE_READY", flush=True)
     try:
         tty.setraw(fd)
-        try:
-            # A real managed client is only idle once its input loop is ready.
-            # This also prevents the next hop's prompt from racing the prior
-            # stage's still-foreground `board done` subprocess.
-            report_agent_state(record_path, "idle")
-        except Exception as error:
-            update(record_path, prompt_error=f"idle report failed: {error}")
-            print(f"managed terminal shim: idle report failed: {error}", file=sys.stderr)
-            return 2
+        if multi_turn:
+            try:
+                # A real managed client is only idle once its input loop is
+                # ready. Multi-turn reuse needs this explicit lifecycle so the
+                # next prompt cannot race the prior stage's still-foreground
+                # `board done` subprocess. Single-turn fixtures retain their
+                # historical integration-driven lifecycle.
+                report_agent_state(record_path, "idle")
+            except Exception as error:
+                update(record_path, prompt_error=f"idle report failed: {error}")
+                print(f"managed terminal shim: idle report failed: {error}", file=sys.stderr)
+                return 2
         while prompt is None and time.monotonic() < deadline:
             data = bytearray()
             while True:
@@ -163,12 +167,13 @@ def main() -> int:
         prompt_raw_hex=prompt_raw.hex(),
         prompt_received_via_stdin=True,
     )
-    try:
-        report_agent_state(record_path, "working")
-    except Exception as error:
-        update(record_path, prompt_error=f"working report failed: {error}")
-        print(f"managed terminal shim: working report failed: {error}", file=sys.stderr)
-        return 2
+    if multi_turn:
+        try:
+            report_agent_state(record_path, "working")
+        except Exception as error:
+            update(record_path, prompt_error=f"working report failed: {error}")
+            print(f"managed terminal shim: working report failed: {error}", file=sys.stderr)
+            return 2
 
     # Never let the fake harness reach board done merely because some terminal
     # bytes arrived. Wait until the daemon has committed this exact run, then
