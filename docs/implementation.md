@@ -155,7 +155,7 @@ or other external I/O occurs inside the SQLite transaction.
   tier CI also runs) before an agent reports done. No `unwrap()` outside tests; anyhow at edges,
   thiserror in core.
 - No `Date.now`-style flakiness in tests: inject clocks where needed (engine takes `now: i64`).
-- Paths via `directories::BaseDirs` + env overrides (`BOARD_DB`, `BOARD_SOCKET`).
+- Paths via `directories::BaseDirs` + env overrides (`BOARD_DB`, `BOARD_SOCKET`, `BOARD_LOG_DIR`).
 - `board-daemon::logging` owns private daily NDJSON, startup/periodic exact-prefix retention, and
   foreground mirroring. `board-herdr` emits metadata-only call/subscription completions into that
   subscriber; neither transport records payloads.
