@@ -36,9 +36,12 @@ pub fn socket_path() -> PathBuf {
     }
 }
 
-/// Structured daemon log directory: `<data>/logs`.
+/// Structured daemon log directory: `$BOARD_LOG_DIR` else `<data>/logs`.
 pub fn log_dir() -> PathBuf {
-    data_dir().join("logs")
+    match std::env::var_os("BOARD_LOG_DIR") {
+        Some(p) => PathBuf::from(p),
+        None => data_dir().join("logs"),
+    }
 }
 
 /// Bounded pre-subscriber diagnostics for an auto-started daemon.

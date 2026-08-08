@@ -105,14 +105,39 @@ caller-visible focus/rescue paths remain checked. A mismatch on a checked dispat
 queued run without mutating the workspace.
 
 The managed launch contract is pane-first. New durable runs place each card in a stable short
-`card-<id>` tab. The root created by `tab.create` is reserved as a labeled shell anchor
-(`card-<id>-anchor`); it is never
+`card-<id>` tab. When the dispatch itself just created the workspace (`new_workspace` with no
+matching open workspace), the workspace's own initial tab is **adopted** as the card tab: the
+first card-tab allocation verifies the exact bootstrap tab/root ids are still live (root is the
+tab's sole pane and carries no agent), renames the tab to `card-<id>` and the root to
+`card-<id>-anchor`, and splits the run child from it — so a daemon-created workspace has no
+unused initial tab. Any verification mismatch falls back to a fresh `tab.create` and never
+touches that root; reused/existing/user workspaces never supply a hint.
+
+The root of a card tab is reserved as a labeled shell anchor (`card-<id>-anchor`); it is never
 an agent target. Every run, including the first, splits a child from that anchor with the run's `cwd`
 and `env`, and only that child receives `agent.start` or the configured `pane run` bridge. The anchor
 keeps a predictable strip: the prototype targets a 0.40 ratio for the initial split (clamped on
 narrow terminals so the anchor remains reusable) and uses live geometry thereafter. Placement fails
 closed below the minimum of 24x6 for the shell and 12x8 for the agent; it never launches an agent
 on an undersized root or child.
+
+**Managed tabs are deliberately anchorless.** After a *successful* managed (Pi/Claude) launch —
+fresh, same-conversation reuse, or a `run.focus` rescue — the daemon closes the anchor pane, which
+is live-verified safe
+for its split child, so the tab holds exactly the one harness pane. The promoted run then persists
+`herdr_anchor_pane_id` as NULL, and the shared registry's stale anchor entry is never treated as
+live because anchor selection requires the exact pane to still exist. A failed launch never closes
+the anchor (child-only cleanup, unchanged). A later fresh managed run in the converged tab
+recovers from the exact durable prior child: it creates a temporary anchor by splitting that
+child, splits the new run child (with its new `BOARD_RUN_ID` env), launches it, then closes the
+temporary anchor and reclaims the ended prior child — one harness pane remains. Same-conversation
+reuse eligibility is checked before anchor selection, so an anchorless managed tab still re-prompts
+its exact prior harness pane. If the user closes the sole managed harness pane, Herdr removes the
+tab and, when it was the last tab, the workspace; the next `new_workspace` dispatch then recreates
+the workspace and adopts its fresh root. Configured (unmanaged) harnesses keep their persistent
+anchor unchanged: `pane run` exits close their child, so the anchor is what the next run splits
+from. Old live anchors from earlier releases converge on the next successful managed launch;
+old durable child evidence remains valid tab proof.
 Herdr labels are not unique, so neither tab nor anchor ownership is inferred from one. The current
 schema v13 retains the exact anchor pane id introduced by v12 with each promoted run; after restart,
 the daemon reconstructs the exact tab and anchor only from scoped durable pane identities in the same
@@ -235,7 +260,22 @@ Cards target a **herdr session** plus a space in it. Because two sessions can ea
 On first dispatch of a `new_workspace` card: preflight the selected socket for exact Herdr 0.8.0 /
 protocol 19, then list the session's workspaces; if one's label matches `space_ref`
 (case-insensitive) reuse it, else `workspace.create {label:space_ref, cwd:space_cwd, focus:false}`.
-Then proceed identically to a `workspace` card (cwd snapshot, pane-first per-card tab placement). If the reused or existing workspace snapshot fails, or contains no live cwd, dispatch fails; it never falls back to process cwd or a stale snapshot.
+Then proceed identically to a `workspace` card (cwd snapshot, pane-first per-card tab placement). If the reused or existing workspace snapshot fails, or contains no live cwd, dispatch fails; it never falls back to process cwd or a stale snapshot. A workspace this dispatch **created** additionally
+threads its exact initial tab/root pane as a one-shot bootstrap hint: the first card-tab
+allocation adopts that tab (renamed to `card-<id>`, root renamed to `card-<id>-anchor`) instead
+of leaving an unused initial tab beside a fresh one. Verification is exact (workspace/tab/root
+still exist, root is the sole pane, no agent); any mismatch falls back to `tab.create` without
+touching the root. The hint's exact tab/root is remembered in the daemon's per-card registry
+under the allocation lock **before** the first allocation, so a failed adoption split or launch —
+or a later retry in the same daemon — recovers the adopted tab by exact id instead of creating a
+second one; the allocator still revalidates the exact ids live on every use, so this memory is
+never ownership on its own. The one residual edge is a daemon crash between the adoption rename
+and the durable run promotion: the memory and the run row die together, no durable pane id proves
+the adopted tab, and the next daemon process creates a fresh card tab next to it — the accepted
+cost of identity-only ownership. If the user later closes the sole pane of a managed card
+tab, Herdr removes
+the tab and, if it was the workspace's last tab, the whole workspace — the next dispatch then
+recreates the workspace and adopts its fresh root again.
 
 ### Worktree removal
 
@@ -381,7 +421,10 @@ that never recorded a pane at all. End to end:
    earlier rescue left (`action=focused_rescued_pane` if found), closes dead remains carrying this
    run's marker, else splits a new child in the card tab using the same placement helpers as dispatch
    — with `reclaimable_pane_ids` deliberately empty, so reopening one run never closes another's pane
-   — labels it, launches the harness, and focuses it (`action=rescued`). A failed launch closes the
+   — labels it, launches the harness, and focuses it (`action=rescued`). A managed rescue then closes
+   the anchor too, with exactly the dispatch semantics: only after launch success, `pane_not_found`
+   counts as closed, and any other close failure warns and keeps the successful rescue (configured
+   rescues keep their persistent anchor). A failed launch closes the
    pane it created, plus the tab anchor when placement had to create the tab; it also registers the
    exact tab/anchor it kept, so a later dispatch reuses that tab instead of making another;
 8. the TUI toasts what happened and **stays up** on a rescue (Herdr already moved focus to the new
@@ -572,7 +615,7 @@ opens the script, the residual configured-script orphan is an accepted asynchron
 3. Column engine: *Plan* is `trigger=auto` → **enqueue run** on the card's space queue.
 4. Dispatcher (respecting per-space serial queue + global cap):
    a. Resolve the card's session socket and `ping` it. Anything except exact Herdr 0.8.0 / protocol 19 fails before workspace discovery/creation. Then reuse workspace `w4`, or create/reuse the card's labeled `new_workspace`; repository worktree isolation remains an agent prompt responsibility.
-   b. Preflight the selected socket again at the spawner boundary. For a new durable run, the card's **`card-<id>` tab** is resolved by exact owned id (reconstructed from the newest matching durable pane in the same session/workspace when boardd restarts), or `tab.create {workspace_id,cwd,env,…}` supplies a new shell anchor. The anchor is labeled `card-<id>-anchor`, its exact id is persisted on the promoted run, and the run child is always created by `pane.split` from that anchor; `agent.start`/`pane run` never target the root. A renamed anchor is still selected only by exact identity; a closed anchor is recreated only from a durable board-run child in the exact proven tab, and missing proof creates a fresh tab without selecting a duplicate-label user tab. Exact ended children may be reclaimed before a later split so the anchor keeps usable geometry. The child receives the run env; the anchor receives only stable card identity. If multiple historical panes are live, newest run id wins; legacy rows retain their old lookup. Placement, cwd, and environment are not `agent.start` fields; the call receives neither the workspace placement nor the anchor pane id.
+   b. Preflight the selected socket again at the spawner boundary. For a new durable run, the card's **`card-<id>` tab** is resolved by exact owned id (reconstructed from the newest matching durable pane in the same session/workspace when boardd restarts), or `tab.create {workspace_id,cwd,env,…}` supplies a new shell anchor — unless the dispatch just created the workspace, in which case the workspace's own initial tab is adopted (verified, then renamed) instead of leaving an unused tab. The anchor is labeled `card-<id>-anchor`, its exact id is persisted on the promoted run (NULL for managed runs, whose anchor is closed after a successful launch), and the run child is always created by `pane.split` from that anchor; `agent.start`/`pane run` never target the root. A renamed anchor is still selected only by exact identity; a closed anchor is recreated only from a durable board-run child in the exact proven tab, and missing proof creates a fresh tab without selecting a duplicate-label user tab. Exact ended children may be reclaimed before a later split so the anchor keeps usable geometry. The child receives the run env; the anchor receives only stable card identity. If multiple historical panes are live, newest run id wins; legacy rows retain their old lookup. Placement, cwd, and environment are not `agent.start` fields; the call receives neither the workspace placement nor the anchor pane id.
    c. For Pi/Claude, write the snapshotted system prompt to a mode-`0600` temporary file; issue `agent.start {name,kind,pane_id,args}` on the split child with prompt-free startup args; a typed `agent_pane_busy` retries the exact request on that same child with bounded 100ms/200ms backoff (never another split); poll `agent.get` for readiness; then send only the task snapshot through `agent.prompt`. Remove the file. Card status → `running`; record the exact child pane/workspace ids. The pane is **visible** — you can watch or type into it anytime.
 
    **Pane naming and ownership**: the managed agent name is `card-<id>-<column-slug>` (e.g. `card-42-plan`, `card-42-execute`). Herdr names are exclusive while a pane is open, so `agent_name_taken` retries once on the same pane with `card-<id>-<column-slug>-r<run>`. A persistent `agent_pane_busy` closes only the board-owned child and leaves the pre-existing anchor. If a placement target disappears, boardd closes only the pane it created (a missing pane is already clean), restarts discovery from `tab.list`, and retries the complete placement once. A terminal launch error also closes only that board-owned pane; pre-existing user panes are never cleanup targets.

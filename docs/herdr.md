@@ -112,7 +112,7 @@ to exercise watcher status mapping deterministically rather than changing integr
 
 The Herdr 0.8.0/protocol-19 schema keeps the RPC shapes herdr-board uses unchanged.
 The board's typed calls still use the same request/result envelopes for `ping`,
-`session.snapshot`, workspace list/create/close, tab create/list, pane
+`session.snapshot`, workspace list/create/close, tab create/list/rename, pane
 split/list/get/focus/rename/read/send-text/send-keys/close/layout, agent
 start/get/prompt/wait, `notification.show`, and `events.subscribe`.
 
@@ -139,12 +139,30 @@ The stable transport rule is pane-first and intentionally independent of a
 protocol number: create or split the target pane with its cwd/environment first,
 then start the agent in that existing pane. Under the exact Herdr 0.8.0 / socket
 protocol 19 gate, herdr-board first creates a shell root for a new durable card
-tab and reserves it as `card-<id>-anchor`. It then splits a run child with the required
+tab and reserves it as `card-<id>-anchor`. When the dispatch itself just created
+the workspace (`new_workspace` with no matching open workspace), the workspace's
+own initial tab/root is adopted instead: the exact bootstrap ids are verified
+(still live, sole pane, no agent), the tab is renamed to `card-<id>` via
+`tab.rename` and the root to `card-<id>-anchor` via `pane.rename`, then the run
+child is split from it — a daemon-created workspace therefore has no unused
+initial tab. The adopted tab/root ids are remembered in the daemon's per-card registry under the
+allocation lock before the first allocation, so a failed split/launch or a later retry in the same
+daemon recovers the adopted tab by exact id instead of creating a second one. It then splits a run child with the required
 cwd/environment and calls `agent.start` with `{name, kind, pane_id, args,
 timeout_ms}` on that child only. The anchor is never an `agent.start` target.
 `kind` selects Herdr's canonical agent executable and `args` contains only that
 executable's arguments. Workspace/tab/split/env placement fields are not part of
 `agent.start`.
+
+After a **successful** managed launch the daemon closes the anchor pane, leaving
+exactly the harness pane visible (closing a split parent is live-verified safe:
+the child keeps its process and environment), and persists no anchor id with the
+run — and a successful `run.focus` rescue of a managed run does the same, with
+the same `pane_not_found`-counts-as-closed / warn-and-keep semantics. Same-conversation reuse hops re-prompt that one harness pane; a later fresh
+managed run recovers from the exact durable prior child with a temporary anchor
+that is closed again after launch. Configured (unmanaged) harnesses keep their
+persistent anchor, because `pane run` exits close their child. A failed managed
+launch never closes the anchor.
 
 After start, `agent.get <target>` exposes `interactive_ready` and
 `launch_pending`. herdr-board waits for `interactive_ready=true` and

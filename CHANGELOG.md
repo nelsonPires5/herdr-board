@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+- [#57](https://github.com/nelsonPires5/herdr-board/pull/57) Let managed card tabs adopt new-workspace roots and run without visible anchors.
+
 - [#56](https://github.com/nelsonPires5/herdr-board/pull/56) Reuse the managed agent pane on same-conversation resume hops while fresh columns still mint and manual landings stay open.
 
 ## [0.11.0] - 2026-08-04

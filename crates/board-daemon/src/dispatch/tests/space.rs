@@ -37,6 +37,65 @@ fn new_workspace_create_when_absent() {
 }
 
 #[test]
+fn new_workspace_create_carries_the_initial_tab_and_root_as_bootstrap() {
+    // When `resolve_space` itself creates the workspace, the exact initial
+    // tab/root pane of that brand-new workspace is returned as a one-shot
+    // bootstrap hint for the first card-tab allocation. Reuse and existing
+    // workspace resolution never carry one.
+    let snapshot = serde_json::json!({
+        "panes": [{
+            "pane_id": "created-ws:p1",
+            "workspace_id": "created-ws",
+            "tab_id": "created-ws:t1",
+            "cwd": "/repo",
+            "focused": false,
+            "revision": 1
+        }]
+    });
+    let herdr = new_workspace_resolution_server_take(Some(snapshot), 5);
+    let mut client = HerdrClient::connect(&herdr.socket).unwrap();
+    let resolved = resolve_space(
+        &mut client,
+        SpaceKind::NewWorkspace,
+        Some("Created"),
+        Some("/requested-but-unverified"),
+    )
+    .expect("a created workspace with a live cwd resolves");
+    assert_eq!(resolved.workspace_id, "created-ws");
+    assert_eq!(resolved.cwd, "/repo");
+    let bootstrap = resolved
+        .bootstrap
+        .expect("a workspace this resolution created must carry its initial tab");
+    assert_eq!(bootstrap.tab_id, "created-ws:t1");
+    assert_eq!(bootstrap.root_pane_id, "created-ws:p1");
+
+    // The same label once open resolves by reuse and must NOT carry a hint.
+    let herdr = workspace_resolution_server_take(
+        Some(serde_json::json!({
+            "panes": [{
+                "pane_id": "w1:p1", "workspace_id": "w1", "tab_id": "w1:t1",
+                "cwd": "/repo", "focused": false, "revision": 1
+            }]
+        })),
+        4,
+    );
+    let mut client = HerdrClient::connect(&herdr.socket).unwrap();
+    let reused = resolve_space(
+        &mut client,
+        SpaceKind::NewWorkspace,
+        Some("feature"),
+        Some("/repo"),
+    )
+    .expect("a label-matched open workspace resolves");
+    assert_eq!(reused.workspace_id, "w1");
+    assert_eq!(reused.cwd, "/repo");
+    assert!(
+        reused.bootstrap.is_none(),
+        "a reused workspace must never supply a bootstrap hint"
+    );
+}
+
+#[test]
 fn existing_workspace_resolution_fails_when_snapshot_fails() {
     let herdr = workspace_resolution_server(None);
     let mut client = HerdrClient::connect(&herdr.socket).unwrap();

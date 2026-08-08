@@ -4,6 +4,7 @@
 //! `agent_pane_busy` / name-collision retry budget.
 
 use super::*;
+use serde_json::json;
 
 #[test]
 fn herdr_protocol_gate_rejects_mismatches_before_any_spawn_or_placement_call() {
@@ -193,6 +194,185 @@ fn managed_claude_uses_file_specific_flag_after_unchanged_startup_tail() {
     let requests = fake.requests.lock().unwrap();
     assert_eq!(requests[3]["params"]["kind"], "claude");
     assert!(requests.iter().all(|r| r["method"] != "agent.prompt"));
+}
+
+#[test]
+fn managed_fresh_launch_closes_the_anchor_leaving_only_the_harness_pane() {
+    // A fresh managed launch in a card tab ends anchorless: after a successful
+    // `agent.start` (and prompt), the anchor pane is closed so the tab holds
+    // exactly the harness pane. The handle therefore persists anchor_pane_id
+    // as None.
+    let closed = Arc::new(Mutex::new(Vec::<String>::new()));
+    let closed_for_server = Arc::clone(&closed);
+    let fake = serve_recording_herdr(move |req, _| match req["method"].as_str().unwrap() {
+        "tab.list" => reply(
+            req,
+            json!({"type":"tab_list","tabs":[{
+                "tab_id":"w1:t1","workspace_id":"w1","number":1,
+                "label":"card-42","pane_count":2
+            }]}),
+        ),
+        "pane.list" => reply(
+            req,
+            json!({"type":"pane_list","panes":[
+                pane_info("w1:p-anchor"),
+                pane_info("w1:p-prior")
+            ]}),
+        ),
+        "pane.layout" => reply(
+            req,
+            json!({"type":"pane_layout","layout":{
+                "workspace_id":"w1","tab_id":"w1:t1","zoomed":false,
+                "area":{"x":0,"y":0,"width":200,"height":40},
+                "focused_pane_id":"w1:p-anchor",
+                "panes":[{"pane_id":"w1:p-anchor","focused":true,
+                    "rect":{"x":0,"y":0,"width":200,"height":40}}],"splits":[]
+            }}),
+        ),
+        "pane.split" => pane_result(req, "w1:p-fresh"),
+        "agent.start" => agent_started(req, "w1:p-fresh", false, true),
+        "pane.close" => {
+            closed_for_server
+                .lock()
+                .unwrap()
+                .push(req["params"]["pane_id"].as_str().unwrap().to_string());
+            pane_result(req, req["params"]["pane_id"].as_str().unwrap())
+        }
+        method => panic!("unexpected managed-close method {method}"),
+    });
+    let spawner = HerdrSpawner::new(fake.socket.clone());
+    let mut request = pi_req(None);
+    request.tab_label = Some("card-42".into());
+    request.owned_tab_id = Some("w1:t1".into());
+    request.durable_anchor_pane_ids = vec!["w1:p-anchor".into()];
+    request.durable_pane_ids = vec!["w1:p-prior".into()];
+    request.reclaimable_pane_ids = vec!["w1:p-prior".into()];
+    request.reuse_pane_id = None;
+
+    let handle = spawner.spawn(&request).unwrap();
+    assert_eq!(handle.pane_id.as_deref(), Some("w1:p-fresh"));
+    assert_eq!(
+        handle.anchor_pane_id.as_deref(),
+        None,
+        "a successful fresh managed launch must not persist a closed anchor"
+    );
+    assert_eq!(
+        *closed.lock().unwrap(),
+        vec!["w1:p-prior", "w1:p-anchor"],
+        "the ended child is reclaimed and the anchor is closed after launch"
+    );
+    assert!(
+        !closed.lock().unwrap().contains(&"w1:p-fresh".to_string()),
+        "the harness pane itself must survive"
+    );
+    let requests = fake.requests.lock().unwrap();
+    let methods: Vec<_> = requests
+        .iter()
+        .map(|r| r["method"].as_str().unwrap())
+        .collect();
+    let last = methods.last().copied().unwrap();
+    assert_eq!(last, "pane.close");
+    assert_eq!(
+        requests[requests.len() - 1]["params"]["pane_id"],
+        "w1:p-anchor"
+    );
+}
+
+#[test]
+fn managed_fresh_recovery_closes_the_temporary_anchor_leaving_one_harness_pane() {
+    // Later fresh managed run in an anchorless tab: the temporary anchor is
+    // recreated from the exact durable prior child, the new child is split and
+    // launched, then the temporary anchor is closed and the prior ended child
+    // is reclaimed — one harness pane remains.
+    let splits = Arc::new(Mutex::new(Vec::<String>::new()));
+    let splits_for_server = Arc::clone(&splits);
+    let closed = Arc::new(Mutex::new(Vec::<String>::new()));
+    let closed_for_server = Arc::clone(&closed);
+    let fake = serve_recording_herdr(move |req, _| match req["method"].as_str().unwrap() {
+        "tab.list" => reply(
+            req,
+            json!({"type":"tab_list","tabs":[{
+                "tab_id":"w1:t1","workspace_id":"w1","number":1,
+                "label":"card-42","pane_count":1
+            }]}),
+        ),
+        "pane.list" => reply(
+            req,
+            json!({"type":"pane_list","panes":[{
+                "pane_id":"w1:p-prior","terminal_id":"term-prior","workspace_id":"w1",
+                "tab_id":"w1:t1","label":"card-42-execute","agent":null,
+                "agent_status":"idle","focused":false,"revision":2
+            }]}),
+        ),
+        "pane.layout" => {
+            let target = req["params"]["pane_id"].as_str().unwrap().to_string();
+            let (width, height) = if target == "w1:p-prior" {
+                (240, 40)
+            } else {
+                (100, 40)
+            };
+            reply(
+                req,
+                json!({"type":"pane_layout","layout":{
+                    "workspace_id":"w1","tab_id":"w1:t1","zoomed":false,
+                    "area":{"x":0,"y":0,"width":width,"height":height},
+                    "focused_pane_id":target,
+                    "panes":[{"pane_id":target,"focused":true,
+                        "rect":{"x":0,"y":0,"width":width,"height":height}}],"splits":[]
+                }}),
+            )
+        }
+        "pane.split" => {
+            let target = req["params"]["target_pane_id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let mut splits = splits_for_server.lock().unwrap();
+            splits.push(target.clone());
+            let child = if target == "w1:p-prior" {
+                "w1:p-temp-anchor"
+            } else {
+                "w1:p-new-child"
+            };
+            pane_result(req, child)
+        }
+        "pane.rename" => pane_result(req, "w1:p-temp-anchor"),
+        "agent.start" => agent_started(req, "w1:p-new-child", false, true),
+        "pane.close" => {
+            let pane_id = req["params"]["pane_id"].as_str().unwrap().to_string();
+            closed_for_server.lock().unwrap().push(pane_id.clone());
+            pane_result(req, &pane_id)
+        }
+        method => panic!("unexpected managed-recovery method {method}"),
+    });
+    let spawner = HerdrSpawner::new(fake.socket.clone());
+    let mut request = pi_req(None);
+    request.tab_label = Some("card-42".into());
+    request.owned_tab_id = Some("w1:t1".into());
+    request.durable_pane_ids = vec!["w1:p-prior".into()];
+    request.reclaimable_pane_ids = vec!["w1:p-prior".into()];
+    request.reuse_pane_id = None;
+
+    let handle = spawner.spawn(&request).unwrap();
+    assert_eq!(handle.pane_id.as_deref(), Some("w1:p-new-child"));
+    assert_eq!(handle.anchor_pane_id.as_deref(), None);
+    assert_eq!(
+        *splits.lock().unwrap(),
+        vec!["w1:p-prior".to_string(), "w1:p-temp-anchor".to_string()],
+        "recovery splits the temporary anchor from the durable child, then the child"
+    );
+    assert_eq!(
+        *closed.lock().unwrap(),
+        vec!["w1:p-prior".to_string(), "w1:p-temp-anchor".to_string()],
+        "the prior ended child is reclaimed and the temporary anchor is closed"
+    );
+    assert!(
+        !closed
+            .lock()
+            .unwrap()
+            .contains(&"w1:p-new-child".to_string()),
+        "the new harness pane must survive"
+    );
 }
 
 #[test]

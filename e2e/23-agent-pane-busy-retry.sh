@@ -86,10 +86,13 @@ assert status["busy_injections"] == 1
 assert len(starts) == 2
 assert starts == [sys.argv[2], sys.argv[2]]
 assert len(status["pane_splits"]) == 1
-assert not status["pane_closes"]
+# A successful fresh managed launch closes its anchor, leaving exactly the
+# harness pane; only that anchor may have been closed.
+assert len(status["pane_closes"]) == 1
+assert status["pane_closes"][0] != sys.argv[2]
 PY
 TRANSIENT_LAYOUT="$(hrpc pane.layout "{\"pane_id\":\"$TRANSIENT_PANE\"}")"
-layout_check "$TRANSIENT_LAYOUT" "$TRANSIENT_PANE" 2 1 "$TRANSIENT_PANE"
+layout_check "$TRANSIENT_LAYOUT" "$TRANSIENT_PANE" 1 0 "$TRANSIENT_PANE"
 ok "transient busy retried agent.start on one newly allocated child"
 
 step "Persistent agent_pane_busy must clean the owned child"

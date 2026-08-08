@@ -20,13 +20,31 @@ env -u WEZTERM_UNIX_SOCKET wezterm cli list --format json >/dev/null \
 SETTINGS_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
 SETTINGS="$SETTINGS_DIR/settings.json"
 [ -f "$SETTINGS" ] || { echo "real-pi-smoke: missing $SETTINGS" >&2; exit 2; }
-PROVIDER="$(jq -er '.defaultProvider' "$SETTINGS")"
-MODEL="$(jq -er '.defaultModel' "$SETTINGS")"
+# Model: the detected runtime default, or an explicit E2E_REAL_PI_MODEL=
+# '<provider>/<model>' override. Either way the exact row must exist in
+# `pi --list-models` before any launch.
+if [ -n "${E2E_REAL_PI_MODEL:-}" ]; then
+  case "$E2E_REAL_PI_MODEL" in
+    */*) ;;
+    *) echo "real-pi-smoke: E2E_REAL_PI_MODEL must be '<provider>/<model>'" >&2; exit 2;;
+  esac
+  PROVIDER="${E2E_REAL_PI_MODEL%%/*}"
+  MODEL="${E2E_REAL_PI_MODEL#*/}"
+else
+  PROVIDER="$(jq -er '.defaultProvider' "$SETTINGS")"
+  MODEL="$(jq -er '.defaultModel' "$SETTINGS")"
+fi
 DEFAULT_MODEL="$PROVIDER/$MODEL"
+# Effort override (default low), used identically in card create + evidence.
+EFFORT="${E2E_REAL_PI_EFFORT:-low}"
+[ -n "$EFFORT" ] || { echo "real-pi-smoke: empty E2E_REAL_PI_EFFORT" >&2; exit 2; }
+# Opt-in mode where the card itself creates its workspace via `new_workspace`
+# (the daemon calls workspace.create) instead of this script precreating it.
+NEW_WORKSPACE="${E2E_REAL_PI_NEW_WORKSPACE:-0}"
 DEFAULT_THINKING="$(jq -er '.defaultThinkingLevel' "$SETTINGS")"
 PI_VERSION="$(pi --version)"
 MODEL_ROW="$(pi --list-models "$DEFAULT_MODEL" | awk -v p="$PROVIDER" -v m="$MODEL" '$1==p && $2==m {print; found=1} END{if(!found) exit 1}')" \
-  || { echo "real-pi-smoke: default model $DEFAULT_MODEL not in pi --list-models" >&2; exit 2; }
+  || { echo "real-pi-smoke: model $DEFAULT_MODEL not in pi --list-models" >&2; exit 2; }
 HERDR_VERSION="$("$HERDR_BIN" --version 2>&1)"
 [ "$HERDR_VERSION" = "herdr 0.8.0" ] \
   || { echo "real-pi-smoke: requires exactly Herdr 0.8.0 (got: $HERDR_VERSION)" >&2; exit 2; }
@@ -108,8 +126,8 @@ printf '%s\n' "$DEFAULT_THINKING" >"$EVIDENCE/persisted-thinking.txt"
 printf '%s\n' "$MODEL_ROW" >"$EVIDENCE/model-row.txt"
 printf '%s\n' "$INTEGRATION" >"$EVIDENCE/integration.txt"
 
-printf 'real-pi-smoke: pi=%s model=%s persisted-thinking=%s invocation-thinking=low\n' \
-  "$PI_VERSION" "$DEFAULT_MODEL" "$DEFAULT_THINKING"
+printf 'real-pi-smoke: pi=%s model=%s persisted-thinking=%s invocation-thinking=%s\n' \
+  "$PI_VERSION" "$DEFAULT_MODEL" "$DEFAULT_THINKING" "$EFFORT"
 
 CARGO_TARGET_DIR="$TARGET" "$HOME/.cargo/bin/cargo" build \
   --manifest-path "$ROOT/Cargo.toml" --release -p board-cli
@@ -155,13 +173,20 @@ printf 'HERDR_SOCKET_PATH=%q\n' "$SOCK" >>"$STATE"
 
 printf 'HERDR MUTATION: link candidate plugin only in %s\n' "$SESSION"
 "$HERDR_BIN" --session "$SESSION" plugin link "$ROOT" >/dev/null
-printf 'HERDR MUTATION: create empty disposable workspace\n'
-ws_json="$(HERDR_SOCKET_PATH="$SOCK" "$HERDR_BIN" workspace create \
-  --cwd "$WORKSPACE_DIR" --label real-pi-smoke --no-focus \
-  --env "BOARD_DB=$DB" --env "BOARD_SOCKET=$SOCKET" \
-  --env "HERDR_BOARD_CONFIG=$CONFIG" --env "BOARD_SCOPE_PATH=$WORKSPACE_DIR")"
-WS_ID="$(printf '%s' "$ws_json" | jq -er '.result.workspace.workspace_id')"
-printf 'WS_ID=%q\n' "$WS_ID" >>"$STATE"
+if [ "$NEW_WORKSPACE" = "1" ]; then
+  # The daemon creates the workspace itself on first dispatch (new_workspace
+  # space with label real-pi-smoke and cwd WORKSPACE_DIR). WS_ID is discovered
+  # from the promoted run row below and registered for cleanup once known.
+  :
+else
+  printf 'HERDR MUTATION: create empty disposable workspace\n'
+  ws_json="$(HERDR_SOCKET_PATH="$SOCK" "$HERDR_BIN" workspace create \
+    --cwd "$WORKSPACE_DIR" --label real-pi-smoke --no-focus \
+    --env "BOARD_DB=$DB" --env "BOARD_SOCKET=$SOCKET" \
+    --env "HERDR_BOARD_CONFIG=$CONFIG" --env "BOARD_SCOPE_PATH=$WORKSPACE_DIR")"
+  WS_ID="$(printf '%s' "$ws_json" | jq -er '.result.workspace.workspace_id')"
+  printf 'WS_ID=%q\n' "$WS_ID" >>"$STATE"
+fi
 
 export BOARD_DB="$DB" BOARD_SOCKET="$SOCKET" HERDR_BOARD_CONFIG="$CONFIG"
 export HERDR_SOCKET_PATH="$SOCK" BOARD_SPAWNER=herdr BOARD_SCOPE_PATH="$WORKSPACE_DIR"
@@ -182,12 +207,32 @@ O arquivo deve ter exatamente quatro linhas não vazias e conter a palavra \"lua
 (case-insensitive). Não altere nenhum arquivo do repositório. Depois valide você
 mesmo que o arquivo existe e atende às regras. Comente no card o caminho e o
 resultado da validação antes de finalizar a atividade."
+if [ "$NEW_WORKSPACE" = "1" ]; then
+  space_args=(--space-kind new-workspace --space-ref real-pi-smoke --space-cwd "$WORKSPACE_DIR")
+else
+  space_args=(--space-kind workspace --space-ref "$WS_ID")
+fi
+printf 'HERDR MUTATION: dispatch real Pi card into isolated workspace mode=%s\n' "$NEW_WORKSPACE"
 card_json="$("$BOARD_BIN" card new --title "Poema temporário Pi" -d "$DESCRIPTION" \
-  --column "$EXEC_ID" --harness pi --model "$DEFAULT_MODEL" --effort low \
-  --space-kind workspace --space-ref "$WS_ID" --json)"
+  --column "$EXEC_ID" --harness pi --model "$DEFAULT_MODEL" --effort "$EFFORT" \
+  "${space_args[@]}" --json)"
 CARD_ID="$(printf '%s' "$card_json" | jq -er '.id')"
 printf 'CARD_ID=%q\n' "$CARD_ID" >>"$STATE"
 printf '%s\n' "$card_json" >"$EVIDENCE/card-created.json"
+
+if [ "$NEW_WORKSPACE" = "1" ]; then
+  # Discover the daemon-created workspace from the promoted run row and
+  # register it for cleanup (the trap closes it before session teardown).
+  for _ in $(seq 1 100); do
+    WS_ID="$("$BOARD_BIN" card show "$CARD_ID" --json 2>/dev/null \
+      | jq -r '.runs[-1].herdr_workspace_id // empty')"
+    [ -n "$WS_ID" ] && break
+    sleep .1
+  done
+  [ -n "$WS_ID" ] || { echo "real-pi-smoke: daemon never recorded a workspace for the card" >&2; exit 1; }
+  printf 'WS_ID=%q\n' "$WS_ID" >>"$STATE"
+  echo "real-pi-smoke: daemon created workspace $WS_ID (label real-pi-smoke); registered for cleanup"
+fi
 
 echo "real-pi-smoke: card=$CARD_ID session=$SESSION workspace=$WS_ID state=$STATE"
 OBSERVED_WORKING=0
@@ -212,19 +257,19 @@ HERDR_SOCKET_PATH="$SOCK" "$HERDR_BIN" api snapshot >"$EVIDENCE/herdr-snapshot.j
 cp "$TMP/daemon.log" "$EVIDENCE/daemon.log"
 cp "$TMP/herdr-server.log" "$EVIDENCE/herdr-server.log"
 
-python3 - "$EVIDENCE/card-final.json" "$DEFAULT_MODEL" "$POEM" <<'PY'
+python3 - "$EVIDENCE/card-final.json" "$DEFAULT_MODEL" "$EFFORT" "$POEM" <<'PY'
 import json, pathlib, re, sys
-card_path, model, poem_path = sys.argv[1:]
+card_path, model, effort, poem_path = sys.argv[1:]
 x = json.load(open(card_path, encoding="utf-8"))
 card, run, comments = x["card"], x["runs"][-1], x["comments"]
 assert card["harness"] == "pi"
 assert card["model"] == model
-assert card["effort"] == "low"
+assert card["effort"] == effort
 assert run["harness"] == "pi"
 assert run["outcome"] == "ok"
 argv = json.loads(run["argv_json"])
 assert argv[argv.index("--model") + 1] == model
-assert argv[argv.index("--thinking") + 1] == "low"
+assert argv[argv.index("--thinking") + 1] == effort
 assert any(c["author"] == f"agent:{run['id']}" and poem_path in c["body"] for c in comments)
 poem = pathlib.Path(poem_path)
 assert poem.is_file()
@@ -233,6 +278,28 @@ assert len(lines) == 4
 assert all(line.strip() for line in lines)
 assert re.search(r"lua", "\n".join(lines), re.I)
 PY
+
+if [ "$NEW_WORKSPACE" = "1" ]; then
+  # The daemon-created workspace adopted its own initial tab as the card tab
+  # and the managed launch closed the anchor: the workspace must hold exactly
+  # one `card-<id>` tab and exactly one Pi harness pane — no anchor, no unused
+  # initial tab.
+  python3 - "$EVIDENCE/herdr-snapshot.json" "$WS_ID" "$CARD_ID" "$POEM" <<'PY'
+import json, pathlib, sys
+snap = json.load(open(sys.argv[1], encoding="utf-8")).get("result", {}).get("snapshot", {})
+ws_id, card, poem_path = sys.argv[2:]
+tabs = [t for t in snap.get("tabs", []) if t.get("workspace_id") == ws_id]
+assert len(tabs) == 1
+assert tabs[0].get("label") == f"card-{card}"
+panes = [p for p in snap.get("panes", []) if p.get("workspace_id") == ws_id]
+assert len(panes) == 1
+assert panes[0].get("agent") == "pi"
+assert not any(p.get("label") == f"card-{card}-anchor" for p in panes)
+poem = pathlib.Path(poem_path)
+assert poem.is_file()
+print(f"  [ok] workspace {ws_id}: one card-{card} tab, one Pi harness pane, no anchor/unused tab", file=sys.stderr)
+PY
+fi
 
 FINAL_STATUS="$(git -C "$ROOT" status --short)"
 [ "$FINAL_STATUS" = "$BASE_STATUS" ] || {
@@ -248,9 +315,11 @@ PASS
 pi_version=$PI_VERSION
 default_model=$DEFAULT_MODEL
 persisted_default_thinking=$DEFAULT_THINKING
-invocation_thinking=low
+invocation_thinking=$EFFORT
 card_id=$CARD_ID
 observed_working=$OBSERVED_WORKING
+new_workspace_mode=$NEW_WORKSPACE
+workspace_id=$WS_ID
 poem_validated=$POEM
 repo_status_unchanged=yes
 pi_settings_unchanged=yes

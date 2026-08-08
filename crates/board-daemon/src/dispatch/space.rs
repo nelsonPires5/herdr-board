@@ -1,19 +1,36 @@
 use board_core::protocol::SpaceKind;
 use board_herdr::{HerdrClient, WorkspaceCreateParams, WorkspaceInfo};
 
-/// Resolve a card's space within its session to `(workspace_id, cwd)`.
+use crate::spawner::WorkspaceBootstrapHint;
+
+/// What a card's space resolved to, plus the one-shot bootstrap evidence when
+/// this resolution actually created the workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedSpace {
+    pub(crate) workspace_id: String,
+    pub(crate) cwd: String,
+    /// `Some` only when [`resolve_space`] called `workspace.create` in this
+    /// very resolution: the exact initial tab/root pane of the brand-new
+    /// workspace. Reused/existing/user workspaces never carry a hint.
+    pub(crate) bootstrap: Option<WorkspaceBootstrapHint>,
+}
+
+/// Resolve a card's space within its session to [`ResolvedSpace`]
+/// `(workspace_id, cwd, bootstrap)`.
 ///
 /// - [`SpaceKind::Workspace`]: `space_ref` is an existing workspace id or a
 ///   case-insensitive label; cwd comes from the workspace's pane snapshot.
 /// - [`SpaceKind::NewWorkspace`]: reuse an open workspace whose label matches
 ///   `space_ref`, else `workspace.create {label, cwd}`; in either case cwd is
-///   verified from the resulting workspace's live pane snapshot.
+///   verified from the resulting workspace's live pane snapshot. A freshly
+///   created workspace additionally reports its exact initial tab/root pane
+///   as a bootstrap hint for the first card-tab allocation.
 pub(crate) fn resolve_space(
     client: &mut HerdrClient,
     kind: SpaceKind,
     space_ref: Option<&str>,
     space_cwd: Option<&str>,
-) -> anyhow::Result<(String, String)> {
+) -> anyhow::Result<ResolvedSpace> {
     // Dispatch performs workspace discovery before handing off to the spawner,
     // so the selected socket must be gated here as well as in HerdrSpawner.
     client.require_supported_protocol().map_err(|error| {
@@ -29,7 +46,11 @@ pub(crate) fn resolve_space(
                 space_ref.ok_or_else(|| anyhow::anyhow!("workspace space requires a space_ref"))?;
             let id = resolve_workspace_ref(&workspaces, ws_ref).map_err(|m| anyhow::anyhow!(m))?;
             let cwd = workspace_cwd(client, &id)?;
-            Ok((id, cwd))
+            Ok(ResolvedSpace {
+                workspace_id: id,
+                cwd,
+                bootstrap: None,
+            })
         }
         SpaceKind::NewWorkspace => {
             let label = space_ref.filter(|s| !s.trim().is_empty()).ok_or_else(|| {
@@ -45,7 +66,11 @@ pub(crate) fn resolve_space(
                 // safe fallback here.
                 Some(id) => {
                     let live = workspace_cwd(client, &id)?;
-                    Ok((id, live))
+                    Ok(ResolvedSpace {
+                        workspace_id: id,
+                        cwd: live,
+                        bootstrap: None,
+                    })
                 }
                 None => {
                     let created = client.workspace_create(&WorkspaceCreateParams {
@@ -56,7 +81,17 @@ pub(crate) fn resolve_space(
                     })?;
                     let id = created.workspace_id().to_string();
                     let live = workspace_cwd(client, &id)?;
-                    Ok((id, live))
+                    let bootstrap = (!created.tab.tab_id.is_empty()
+                        && !created.root_pane.pane_id.is_empty())
+                    .then(|| WorkspaceBootstrapHint {
+                        tab_id: created.tab.tab_id.clone(),
+                        root_pane_id: created.root_pane.pane_id.clone(),
+                    });
+                    Ok(ResolvedSpace {
+                        workspace_id: id,
+                        cwd: live,
+                        bootstrap,
+                    })
                 }
             }
         }

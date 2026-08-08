@@ -7,7 +7,9 @@
 # each client's idle terminal markers, and stay attached to an interactive tty.
 # They refuse to finish until agent.prompt's exact card prompt arrives on stdin;
 # readiness or delivery failure therefore remains a hard failure, never a
-# startup-only pass or an early board-done bypass.
+# startup-only pass or an early board-done bypass. Every successful managed
+# launch closes its tab anchor, so each managed tab converges to exactly one
+# harness pane with no anchor.
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/lib.sh"
 
@@ -184,11 +186,13 @@ assert by_id[pi_id].get("tab_id") == pi_tab[0]["tab_id"]
 assert by_id[claude_id].get("tab_id") == claude_tab[0]["tab_id"]
 assert by_id[pi_id].get("agent") == "pi"
 assert by_id[claude_id].get("agent") == "claude"
-for card, tab in ((pi_card, pi_tab[0]), (claude_card, claude_tab[0])):
+for card, tab, harness_id in ((pi_card, pi_tab[0], pi_id), (claude_card, claude_tab[0], claude_id)):
     owned=[p for p in panes if p.get("tab_id") == tab["tab_id"]]
-    anchors=[p for p in owned if p.get("label") == f"card-{card}-anchor" and not p.get("agent")]
-    assert len(anchors) == 1
-    assert anchors[0]["pane_id"] not in {pi_id, claude_id}
+    # A successful fresh managed launch closes its anchor: the tab holds
+    # exactly the harness pane and nothing else.
+    assert len(owned) == 1
+    assert owned[0]["pane_id"] == harness_id
+    assert not any(p.get("label") == f"card-{card}-anchor" for p in owned)
 PY
 for managed_pane in "$PI_PANE_ID" "$CLAUDE_PANE_ID"; do
   layout_json="$(hrpc pane.layout "{\"pane_id\":\"$managed_pane\"}")"

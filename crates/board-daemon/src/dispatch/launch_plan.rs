@@ -142,6 +142,7 @@ pub(super) async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result
         cwd: None,
         workspace_ref: None,
         herdr_socket: None,
+        bootstrap: None,
         env,
         argv,
     };
@@ -193,12 +194,15 @@ pub(super) async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result
         let resolved = tokio::task::spawn_blocking(move || {
             let mut client = HerdrClient::connect(&socket)
                 .map_err(|e| anyhow::anyhow!("herdr unavailable: {e}"))?;
-            let (workspace_id, cwd) = resolve_space(
+            let space = resolve_space(
                 &mut client,
                 kind,
                 space_ref.as_deref(),
                 space_cwd.as_deref(),
             )?;
+            let workspace_id = space.workspace_id;
+            let cwd = space.cwd;
+            let bootstrap = space.bootstrap;
             let session = run_session.as_deref();
             let prior_pane_ids = owned_pane_ids(
                 &prior_runs,
@@ -247,6 +251,7 @@ pub(super) async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result
             Ok::<_, anyhow::Error>((
                 workspace_id,
                 cwd,
+                bootstrap,
                 owned_tab_id,
                 prior_pane_ids,
                 reclaimable_pane_ids,
@@ -260,6 +265,7 @@ pub(super) async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result
             Ok((
                 id,
                 cwd,
+                bootstrap,
                 owned_tab_id,
                 durable_pane_ids,
                 reclaimable_pane_ids,
@@ -268,6 +274,7 @@ pub(super) async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result
             )) => {
                 req.workspace_ref = Some(id);
                 req.cwd = Some(PathBuf::from(cwd));
+                req.bootstrap = bootstrap;
                 req.owned_tab_id = owned_tab_id;
                 req.durable_pane_ids = durable_pane_ids;
                 req.reclaimable_pane_ids = reclaimable_pane_ids;

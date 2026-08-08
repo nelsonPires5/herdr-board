@@ -8,7 +8,9 @@
 # session/space-scoped paths against it:
 #   - space list scoped per session (A/default vs B differ),
 #   - a `workspace` card dispatched into B (pane lands in its card tab),
-#   - a `new-workspace` card (label + cwd) the daemon creates in B,
+#   - a `new-workspace` card (label + cwd) the daemon creates in B; the
+#     workspace's own initial tab is adopted as the card tab, so no unused
+#     initial tab is left behind,
 #   - validation error when --space-cwd is missing for new-workspace,
 #   - unknown-session error.
 # The daemon reaches B by name (`--session B`): session enumeration shells out to
@@ -116,7 +118,19 @@ print(next((w["workspace_id"] for w in ws if w.get("label") == "bsess-new"), "")
 e2e_ws_defer_close "$NEW_WS" "$SESS_SOCK" "$SESS_B_PID" "$SESS_B_IDENTITY"
 echo "  daemon-created workspace: $NEW_WS"
 assert_card_tab_pane "$NEW_WS" "$CARD_NEW"
-ok "new-workspace card created a workspace in '$SESS' with a card tab pane"
+# The daemon-created workspace must have NO unused initial tab: the card's
+# first allocation adopted the workspace's own initial tab as the card tab
+# (renamed to card-<id>) instead of leaving it empty beside a new one.
+python3 - "$(hrpc_sess tab.list "{\"workspace_id\":\"$NEW_WS\"}")" "$CARD_NEW" <<'PY' || fail "adopted card tab assertion failed (ws $NEW_WS)"
+import json, sys
+tabs = json.loads(sys.argv[1]).get("tabs", [])
+card = sys.argv[2]
+labels = [t.get("label") for t in tabs]
+assert len(tabs) == 1
+assert labels[0] == f"card-{card}"
+print(f"  [ok] daemon-created workspace has no unused initial tab; card tab {tabs[0]['tab_id']} adopted", file=sys.stderr)
+PY
+ok "new-workspace card created a workspace in '$SESS' with an adopted card tab pane"
 
 # --- validation & error paths -----------------------------------------------
 step "Validation: new-workspace WITHOUT --space-cwd must error"

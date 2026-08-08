@@ -56,6 +56,7 @@ BOARD_HERDR_METHODS = (
     "session.snapshot",
     "tab.create",
     "tab.list",
+    "tab.rename",
     "workspace.close",
     "workspace.create",
     "workspace.list",

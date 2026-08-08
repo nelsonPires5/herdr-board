@@ -92,8 +92,30 @@ recorded="$(printf '%s' "$rescue_json" | jget recorded_pane_id)"
 [ "$RESCUED_PANE" != "$DEAD_PANE" ] || fail "the dead pane id must never be revived"
 hrpc pane.get "{\"pane_id\":\"$RESCUED_PANE\"}" >/dev/null \
   || fail "rescued pane $RESCUED_PANE does not exist"
-[ "$(pane_field "$RESCUED_PANE" tab_id)" = "$TAB_ID" ] \
-  || fail "rescued pane landed outside the card's tab $TAB_ID"
+# Managed tabs are anchorless: the daemon closed the anchor after the launch,
+# so closing the run's sole pane removed the whole tab (verified live: Herdr
+# removes a tab when its last pane closes). The rescue therefore recreates the
+# card tab under the same `card-<id>` label instead of the exact old tab id —
+# and because this is a MANAGED rescue, it then closes that tab's anchor too,
+# so the recreated tab converges to exactly the one rescued harness pane.
+RESCUED_TAB="$(pane_field "$RESCUED_PANE" tab_id)"
+[ -n "$RESCUED_TAB" ] || fail "rescued pane is not in any tab"
+python3 - "$(hrpc tab.list "{\"workspace_id\":\"$WS_ID\"}")" \
+  "$(hrpc pane.list "{\"workspace_id\":\"$WS_ID\"}")" \
+  "$RESCUED_TAB" "$TAB_ID" "$CARD_ID" "$RESCUED_PANE" <<'PY' \
+  || fail "rescued pane landed outside a converged card tab (old tab $TAB_ID)"
+import json, sys
+tabs = json.loads(sys.argv[1]).get("tabs", [])
+panes = json.loads(sys.argv[2]).get("panes", [])
+rescued_tab, old_tab, card, rescued_pane = sys.argv[3:7]
+match = next((t for t in tabs if t.get("tab_id") == rescued_tab), None)
+assert match is not None
+assert match.get("label") == f"card-{card}"
+owned = [p for p in panes if p.get("tab_id") == rescued_tab]
+assert owned == [p for p in owned if p.get("pane_id") == rescued_pane]
+assert not any(p.get("label") == f"card-{card}-anchor" for p in owned)
+print(f"  [ok] rescued pane landed in card tab {rescued_tab} (old tab {old_tab} was removed with its sole pane); the managed rescue closed the new tab's anchor, leaving exactly one harness pane", file=sys.stderr)
+PY
 rescue_label="$(pane_field "$RESCUED_PANE" label)"
 # The dedup correlator must depend only on STABLE identity (card id + run id).
 # With no database row permitted, a marker derived from the column's current name

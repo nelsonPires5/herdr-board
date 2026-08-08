@@ -169,7 +169,10 @@ fn runs_fingerprint(d: &Arc<Daemon>, card_id: i64) -> String {
 
 #[test]
 fn run_focus_rescues_a_dead_pane_by_resuming_in_a_new_pane_without_touching_the_db() {
-    // The card's tab and shell anchor survive; only the run's pane is gone.
+    // The card's tab and shell anchor survive the dead pane; the rescue splits
+    // a fresh child from the anchor, and because this is a MANAGED rescue the
+    // anchor is then closed too (the same anchorless convergence dispatch
+    // applies), leaving exactly the rescued harness pane in the card tab.
     let fake = fake_rescue_herdr(RescueFakeFaults::default());
     let d = test_daemon_with_herdr_spawner(Config::default(), fake.socket.clone());
     let (card_id, run_id) = add_rescuable_run(&d, "claude", Some("claude"), Some("conv-1"), true);
@@ -188,6 +191,26 @@ fn run_focus_rescues_a_dead_pane_by_resuming_in_a_new_pane_without_touching_the_
     assert_eq!(result["pane_id"], "w1:rescued1");
     assert_eq!(result["run_id"].as_i64().unwrap(), run_id);
     assert_eq!(result["session_id"], "conv-1");
+
+    // A managed rescue converges its tab to exactly one harness pane: the
+    // pre-existing shell anchor is closed once the resume launch succeeded
+    // (`pane_not_found` would count as closed; any other failure warns and
+    // keeps the successful rescue). The unrelated user pane and the rescued
+    // harness pane are the only panes left.
+    let closes = fake.herdr.requests_for("pane.close");
+    assert_eq!(
+        closes
+            .iter()
+            .map(|request| request["params"]["pane_id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["w1:anchor"],
+        "the successful managed rescue closes exactly the card-tab anchor"
+    );
+    assert_eq!(
+        fake.pane_ids(),
+        vec!["w1:foreign".to_string(), "w1:rescued1".to_string()],
+        "the rescued harness pane and the unrelated user pane survive"
+    );
 
     // The harness was started in *resume* mode with the persisted conversation
     // id, and the original task was NOT re-sent (no agent.prompt at all).
@@ -571,8 +594,8 @@ fn run_focus_rescue_closes_its_pane_when_the_harness_will_not_start() {
     assert_eq!(fake.count("pane.close"), 1);
     assert_eq!(
         fake.pane_ids(),
-        vec!["w1:anchor".to_string()],
-        "only the pre-existing card-tab anchor may survive"
+        vec!["w1:anchor".to_string(), "w1:foreign".to_string()],
+        "only the pre-existing card-tab anchor and the unrelated user pane may survive"
     );
     assert_eq!(runs_fingerprint(&d, card_id), before);
 }
