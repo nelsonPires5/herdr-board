@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-08-08
+
 - [#59](https://github.com/nelsonPires5/herdr-board/pull/59) Redesign the board TUI mobile-first: boxed cards with one semantic glyph on each dedicated status row, direct visibility filters, persistent chrome around content overlays, transparent white `[ NAME ]` controls, icon detail toggles, no Board-card Edit/Delete controls (keyboard `e`/`d` preserved), drag-only card movement, and a reduced bottom action row.
 - [#59](https://github.com/nelsonPires5/herdr-board/pull/59) Keep Compact detail actions fully named across wrapped rows, reserve Runs action rows before history content, and contextualize filter-empty copy.
 - [#59](https://github.com/nelsonPires5/herdr-board/pull/59) Tighten the responsive TUI chrome: one-line desktop headers, three-row Compact navigation, `[ X ]` close chips, field-visible multiline editors, and no persistent footer hint row.
@@ -343,7 +345,8 @@ a visible herdr pane. Ships as a single `board` binary (TUI + daemon + CLI) and 
 - **Packaging.** `herdr-plugin.toml` manifest, and `scripts/` for build, install (guarded behind
   `--yes`), the open-or-focus launcher, a raw protocol client, and a live-herdr e2e smoke test.
 
-[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.11.1...HEAD
+[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.12.0
 [0.11.1]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.11.1
 [0.11.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.11.0
 [0.10.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.10.0
