@@ -8,7 +8,7 @@
 # Columns) depends on:
 #   - the compact header renders the focused column + `n/N` + the running count;
 #   - `b` reaches the board list directly (a known board name appears);
-#   - the header/switcher sheet shows the `[×]` close affordance;
+#   - the header/switcher sheet shows the `[ X ]` close affordance;
 #   - a card title in the focused column is visible.
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/lib.sh"
@@ -45,12 +45,14 @@ wait_for() {
 
 step "Compact header renders the focused column, position, and 0 running"
 wait_for 'Todo · 1/1' || fail "Compact header did not show the focused column and position at 40 cols -- got: $(read_pane)"
-printf '%s
-' "$(read_pane)" | grep -Fq '▶0'   || fail "Compact header did not show the running count (0) -- got: $(read_pane)"
+screen="$(read_pane)"
+grep -Fq '▶0' <<<"$screen" \
+  || fail "Compact header did not show the running count (0) -- got: $screen"
 ok "Compact header shows the focused column, position, and running count"
 
 step "The focused column's card title is visible"
-printf '%s\n' "$(read_pane)" | grep -Fq 'Compact Mobile Card' \
+screen="$(read_pane)"
+grep -Fq 'Compact Mobile Card' <<<"$screen" \
   || fail "focused column's card title not visible in the Compact board view"
 ok "card title visible in the focused (only) column"
 
@@ -60,15 +62,17 @@ wait_for 'Boards' || fail "switcher sheet did not open after 'b'"
 wait_for 'Global' || fail "board list did not show the known board name 'Global' -- got: $(read_pane)"
 ok "'b' opened the switcher sheet directly at the board list"
 
-step "The switcher sheet shows the [x] close affordance"
-printf '%s\n' "$(read_pane)" | grep -Fq '[×]' \
-  || fail "switcher sheet did not show the [×] close affordance"
-ok "[×] close affordance present"
+step "The switcher sheet shows the [ X ] close affordance"
+screen="$(read_pane)"
+grep -Fq '[ X ]' <<<"$screen" \
+  || fail "switcher sheet did not show the [ X ] close affordance"
+ok "[ X ] close affordance present"
 
 step "Esc closes the sheet outright (opened directly via 'b', nothing to back out to)"
 e2e_herdr_mutate -- pane send-keys "$TUI_PANE" esc >/dev/null
 wait_for 'Todo · 1/1' || fail "board view did not return after Esc"
-printf '%s\n' "$(read_pane)" | grep -Fq 'Compact Mobile Card' \
+screen="$(read_pane)"
+grep -Fq 'Compact Mobile Card' <<<"$screen" \
   || fail "board view lost its card after closing the switcher"
 ok "Esc closed the sheet and returned to the Compact board view"
 

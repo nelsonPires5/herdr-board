@@ -53,7 +53,12 @@ echo "  card column_id=$col_now status=$st_now (want column=$EXEC_ID status=fail
 ok "card did not transition (still in Execute), status failed"
 
 step "Assert the 'pane exited without board done' system comment"
-"$BOARD_BIN" card show "$CARD_ID" --json | grep -q "pane exited without board done" \
+# Capture first, then grep: `grep -q` exits on the first match and closes the
+# pipe, and the CLI reports the resulting EPIPE as a fatal error (code 64),
+# which `set -o pipefail` turns into a false scenario failure even when the
+# comment is present.
+show="$("$BOARD_BIN" card show "$CARD_ID" --json)"
+grep -q "pane exited without board done" <<<"$show" \
   || { e2e_card_failure_diag "$CARD_ID"; fail "missing 'pane exited without board done' comment"; }
 ok "system comment records the silent exit"
 

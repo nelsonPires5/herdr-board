@@ -53,7 +53,10 @@ echo "  card column_id=$col_now (want Backlog $BACKLOG_ID)"
 ok "timed-out run applied on_fail -> Backlog"
 
 step "Assert a system comment mentions the timeout"
-"$BOARD_BIN" card show "$CARD_ID" --json | grep -q "timed out" \
+# Capture first, then grep — see 06-silent-exit: piping straight into `grep -q`
+# makes the CLI's EPIPE-on-early-close a false pipefail failure.
+show="$("$BOARD_BIN" card show "$CARD_ID" --json)"
+grep -q "timed out" <<<"$show" \
   || { e2e_card_failure_diag "$CARD_ID"; fail "no 'timed out' comment recorded"; }
 ok "timeout recorded in a system comment"
 
