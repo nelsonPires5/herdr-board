@@ -48,7 +48,7 @@ any Herdr version other than 0.8.0 and any protocol other than 19; older, unknow
 protocols are not supported.
 
 ```bash
-herdr plugin install nelsonPires5/herdr-board --ref v0.11.0
+herdr plugin install nelsonPires5/herdr-board --ref v0.11.1
 ```
 
 Precise live lifecycle status also requires Herdr's integration for the harness you dispatch (for
