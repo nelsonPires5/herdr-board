@@ -136,21 +136,24 @@ placement and recovery rules are in [`docs/design.md`](docs/design.md).
 ## Mobile-first TUI
 
 The `board tui` surface is responsive: **Compact (< 60 cols)** shows one
-full-width column with persistent product/board identity, direct visibility
-filters, and a column switcher; **Regular (60–119)** and **Wide (≥ 120)** show
-the multi-column board. Cards are compact boxed rows that always carry their
-real status glyph, an active-run timer, and harness/model metadata; Board cards
-have no Edit/Delete controls, while keyboard `e`/`d` remains available. Every
+full-width column with a three-row mobile header — product/running count, a
+board dropdown plus visibility chips, then the column navigator — while
+**Regular (60–119)** and **Wide (≥ 120)** show the multi-column board with all
+header controls balanced on one line. Compact navigation shows the column
+trigger as `(M)` or `(A)` and never repeats the global running count. Filter
+chips shorten only when needed; they never add a redundant `Board:` or
+`Visible:` label. Cards are compact boxed rows that always carry their real
+status glyph, an active-run timer, and harness/model metadata; Board cards have
+no Edit/Delete controls, while keyboard `e`/`d` remains available. Every
 visible button is a transparent `[ NAME ]` chip with bold white text and
-brackets; selected chips add an underline, and primary/destructive tone does not
-recolor it. The header shows the live
-**running count**, and `Visible:` filters (`[ Active ]` / `[ All ]` /
-`[ Archived ]`) are independent buttons in every layout. Card detail, forms,
-and picker sheets occupy only the board content region, leaving persistent top
-and bottom chrome visible. Card movement is drag-and-drop on the card body; the
-reduced bottom action row covers New card, Open, Archive, column ops, Template,
-and `? Help` (Refresh/Quit/Move-card remain keyboard `r`/`q`/`m`). All original
-keyboard shortcuts are preserved.
+brackets; close controls are always `[ X ]`, selected chips add an underline,
+and primary/destructive tone does not recolor them. Card detail, forms, and
+picker sheets occupy only the board content region, leaving persistent top and
+bottom action rails visible. Multiline description and system-prompt fields
+retain wrapped editing and `$EDITOR` support while using the same focused and
+unfocused value treatment as title/name fields. The old persistent footer hint
+row is gone; only transient toasts use its former space. All original keyboard
+shortcuts are preserved.
 
 ## Everyday controls
 

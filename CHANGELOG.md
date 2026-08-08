@@ -8,6 +8,7 @@ All notable changes to this project are documented here. The format is based on
 
 - [](https://github.com/nelsonPires5/herdr-board/pull/?) Redesign the board TUI mobile-first: boxed cards with one semantic glyph on each dedicated status row, direct visibility filters, persistent chrome around content overlays, transparent white `[ NAME ]` controls, icon detail toggles, no Board-card Edit/Delete controls (keyboard `e`/`d` preserved), drag-only card movement, and a reduced bottom action row (PR link pending).
 - [](https://github.com/nelsonPires5/herdr-board/pull/?) Keep Compact detail actions fully named across wrapped rows, reserve Runs action rows before history content, and contextualize filter-empty copy (PR link pending).
+- [](https://github.com/nelsonPires5/herdr-board/pull/?) Tighten the responsive TUI chrome: one-line desktop headers, three-row Compact navigation, `[ X ]` close chips, field-visible multiline editors, and no persistent footer hint row (PR link pending).
 
 ## [0.11.0] - 2026-08-04
 
