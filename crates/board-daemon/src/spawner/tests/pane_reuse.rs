@@ -25,6 +25,73 @@ fn reuse_agent_ready(req: &Value, pane_id: &str, kind: &str, status: &str) -> Va
 
 // T1 + T5: a same-conversation resume hop reuses the prior run's pane.
 #[test]
+fn resume_hop_reuses_the_harness_pane_in_an_anchorless_managed_tab() {
+    // A managed tab that already converged to one harness pane has NO anchor
+    // (the previous launch closed it). Reuse eligibility must come before
+    // anchor selection, so this anchorless tab still reuses the exact prior
+    // child: no split, no agent.start, just agent.get + agent.prompt.
+    let fake = serve_recording_herdr(|req, _| match req["method"].as_str().unwrap() {
+        "tab.list" => reply(
+            req,
+            json!({"type":"tab_list","tabs":[{
+                "tab_id":"w1:t1","workspace_id":"w1","number":1,
+                "label":"card-42","pane_count":1
+            }]}),
+        ),
+        "pane.list" => {
+            let mut prior = pane_info("w1:p-prior");
+            prior["label"] = json!("card-42-setup");
+            prior["agent"] = json!("pi");
+            prior["agent_status"] = json!("done");
+            reply(req, json!({"type":"pane_list","panes":[prior]}))
+        }
+        "agent.get" => reuse_agent_ready(req, "w1:p-prior", "pi", "done"),
+        "agent.prompt" => agent_prompted(req, "w1:p-prior", "pi"),
+        method => panic!("unexpected anchorless-reuse method {method}"),
+    });
+    let spawner = HerdrSpawner::new(fake.socket.clone());
+    let mut request = pi_req(Some("next stage task"));
+    request.tab_label = Some("card-42".into());
+    request.owned_tab_id = Some("w1:t1".into());
+    request.durable_pane_ids = vec!["w1:p-prior".into()];
+    request.reclaimable_pane_ids = vec!["w1:p-prior".into()];
+    request.reuse_pane_id = Some("w1:p-prior".into());
+    // Deliberately NO durable/remembered anchor ids: the tab is anchorless.
+
+    let handle = spawner.spawn(&request).unwrap();
+    assert_eq!(handle.pane_id.as_deref(), Some("w1:p-prior"));
+    assert_eq!(handle.anchor_pane_id.as_deref(), None);
+
+    let requests = fake.requests.lock().unwrap();
+    let methods: Vec<&str> = requests
+        .iter()
+        .map(|request| request["method"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        methods,
+        ["ping", "tab.list", "pane.list", "agent.get", "agent.prompt"],
+        "anchorless reuse must re-prompt the live agent without splitting"
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request["method"] == "pane.split")
+            .count(),
+        0,
+        "anchorless reuse must not split a new pane"
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request["method"] == "agent.start")
+            .count(),
+        0,
+        "anchorless reuse must not start a new agent"
+    );
+}
+
+// T1 + T5: a same-conversation resume hop reuses the prior run's pane.
+#[test]
 fn resume_hop_reuses_the_prior_run_pane_without_split_or_agent_start() {
     let fake = serve_recording_herdr(|req, _| match req["method"].as_str().unwrap() {
         "tab.list" => reply(
@@ -46,6 +113,7 @@ fn resume_hop_reuses_the_prior_run_pane_without_split_or_agent_start() {
         }
         "agent.get" => reuse_agent_ready(req, "w1:p-prior", "pi", "done"),
         "agent.prompt" => agent_prompted(req, "w1:p-prior", "pi"),
+        "pane.close" => pane_result(req, "w1:p-anchor"),
         method => panic!("unexpected reuse method {method}"),
     });
     let spawner = HerdrSpawner::new(fake.socket.clone());
@@ -59,7 +127,11 @@ fn resume_hop_reuses_the_prior_run_pane_without_split_or_agent_start() {
 
     let handle = spawner.spawn(&request).unwrap();
     assert_eq!(handle.pane_id.as_deref(), Some("w1:p-prior"));
-    assert_eq!(handle.anchor_pane_id.as_deref(), Some("w1:p-anchor"));
+    assert_eq!(
+        handle.anchor_pane_id.as_deref(),
+        None,
+        "a managed reuse hop converges to one harness pane and no anchor"
+    );
 
     let requests = fake.requests.lock().unwrap();
     let methods: Vec<&str> = requests
@@ -68,8 +140,15 @@ fn resume_hop_reuses_the_prior_run_pane_without_split_or_agent_start() {
         .collect();
     assert_eq!(
         methods,
-        ["ping", "tab.list", "pane.list", "agent.get", "agent.prompt"],
-        "reuse re-prompts the live agent; it neither splits nor starts"
+        [
+            "ping",
+            "tab.list",
+            "pane.list",
+            "agent.get",
+            "agent.prompt",
+            "pane.close"
+        ],
+        "reuse re-prompts the live agent; the anchor is closed afterwards"
     );
     assert_eq!(
         requests
@@ -92,9 +171,10 @@ fn resume_hop_reuses_the_prior_run_pane_without_split_or_agent_start() {
             .iter()
             .filter(|request| request["method"] == "pane.close")
             .count(),
-        0,
-        "reuse must not close the prior pane"
+        1,
+        "reuse closes only the anchor, never the reused harness pane"
     );
+    assert_eq!(requests.last().unwrap()["params"]["pane_id"], "w1:p-anchor");
     let prompt = requests
         .iter()
         .find(|request| request["method"] == "agent.prompt")
@@ -174,7 +254,11 @@ fn fresh_hop_with_no_reuse_candidate_splits_a_new_pane_and_reclaims_the_prior() 
         1,
         "a fresh hop starts a new agent on the new pane"
     );
-    assert_eq!(*closed.lock().unwrap(), vec!["w1:p-prior"]);
+    assert_eq!(
+        *closed.lock().unwrap(),
+        vec!["w1:p-prior", "w1:p-anchor"],
+        "the ended child is reclaimed, then the anchor is closed after the fresh launch"
+    );
 }
 
 #[test]
@@ -228,7 +312,8 @@ fn reuse_candidate_with_a_different_agent_kind_is_reclaimed_and_replaced() {
             .iter()
             .filter(|request| request["method"] == "pane.close")
             .count(),
-        1
+        2,
+        "the wrong-kind prior child is reclaimed and the anchor is closed after launch"
     );
     assert_eq!(
         requests
@@ -352,12 +437,18 @@ fn a_non_fresh_chain_keeps_one_agent_pane_reusing_it_each_hop() {
         "each resume hop re-prompts the same pane"
     );
     let requests = fake.requests.lock().unwrap();
+    let closes: Vec<&str> = requests
+        .iter()
+        .filter(|request| request["method"] == "pane.close")
+        .map(|request| request["params"]["pane_id"].as_str().unwrap())
+        .collect();
     assert_eq!(
-        requests
-            .iter()
-            .filter(|request| request["method"] == "pane.close")
-            .count(),
-        0,
-        "the reused pane is never closed across the chain"
+        closes,
+        ["w1:p-anchor", "w1:p-anchor", "w1:p-anchor"],
+        "each hop converges the tab to one harness pane: the anchor is closed after the fresh launch and after each reuse"
+    );
+    assert!(
+        !closes.contains(&"w1:p-child"),
+        "the reused harness pane is never closed across the chain"
     );
 }

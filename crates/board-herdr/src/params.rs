@@ -96,6 +96,13 @@ pub struct PaneSplitParams {
     pub focus: bool,
 }
 
+/// Protocol-19 params for `tab.rename`: rename a tab by exact id.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct TabRenameParams {
+    pub tab_id: String,
+    pub label: String,
+}
+
 /// Params for `pane.rename`.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct PaneRenameParams {

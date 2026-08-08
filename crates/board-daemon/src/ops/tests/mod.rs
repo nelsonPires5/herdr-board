@@ -318,7 +318,11 @@ fn fake_rescue_herdr(faults: RescueFakeFaults) -> RescueFake {
 
     // (pane_id, tab_id, label, agent). The anchor survives its run's pane,
     // exactly as a real card tab's shell anchor does — unless the fault says the
-    // whole tab is gone, in which case placement must create a new one.
+    // whole tab is gone, in which case placement must create a new one. An
+    // unrelated user pane (the workspace's own initial tab root, as a real
+    // workspace keeps) is always present: it is what keeps the workspace cwd
+    // lookup answerable once a successful managed rescue closes the card tab's
+    // anchor.
     let initial: Vec<FakePane> = if faults.anchor_missing {
         vec![(
             "w1:foreign".to_string(),
@@ -327,12 +331,20 @@ fn fake_rescue_herdr(faults: RescueFakeFaults) -> RescueFake {
             None,
         )]
     } else {
-        vec![(
-            "w1:anchor".to_string(),
-            "w1:t1".to_string(),
-            Some(format!("{tab_label}-anchor")),
-            None,
-        )]
+        vec![
+            (
+                "w1:anchor".to_string(),
+                "w1:t1".to_string(),
+                Some(format!("{tab_label}-anchor")),
+                None,
+            ),
+            (
+                "w1:foreign".to_string(),
+                "w1:t9".to_string(),
+                Some("someone-elses-pane".to_string()),
+                None,
+            ),
+        ]
     };
     let panes: Arc<Mutex<Vec<FakePane>>> = Arc::new(Mutex::new(initial));
     let panes2 = Arc::clone(&panes);

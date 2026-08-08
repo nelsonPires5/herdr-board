@@ -8,7 +8,7 @@ use std::path::Path;
 use anyhow::Context;
 use board_herdr::{
     AgentStatus, HerdrClient, HerdrError, LayoutPane, PaneInfo, PaneRenameParams, PaneSplitParams,
-    SplitDirection, TabCreateParams,
+    SplitDirection, TabCreateParams, TabRenameParams,
 };
 
 use super::geometry::{initial_split_geometry, recovery_target_ratio, split_geometry};
@@ -16,9 +16,14 @@ use super::race::{
     cleanup_new_card_tab, close_owned_for_retry, mark_retryable_placement_race, ERR_EMPTY_LAYOUT,
     ERR_EMPTY_TAB,
 };
+use crate::spawner::WorkspaceBootstrapHint;
 
 pub(crate) struct CardOwnership<'a> {
     pub(crate) owned_tab_id: Option<&'a str>,
+    /// One-shot bootstrap hint from a workspace this launch just created.
+    /// Only the first card-tab allocation may adopt it, and only after strict
+    /// verification; any mismatch falls back to a fresh `tab.create`.
+    pub(crate) bootstrap: Option<&'a WorkspaceBootstrapHint>,
     /// Exact prior run-child ids, newest first. These are tab-proof fallback
     /// evidence, never anchor candidates.
     pub(crate) durable_pane_ids: &'a [String],
@@ -169,6 +174,7 @@ fn allocate_card_pane(
 ) -> anyhow::Result<OwnedPane> {
     let CardOwnership {
         owned_tab_id,
+        bootstrap,
         durable_pane_ids,
         reclaimable_pane_ids,
         durable_anchor_pane_ids,
@@ -177,6 +183,7 @@ fn allocate_card_pane(
         reuse_agent_kind,
     } = ownership;
     let cwd_string = cwd.map(|path| path.to_string_lossy().into_owned());
+    let cwd_owned = cwd_string.clone();
     let tabs = client
         .tab_list(Some(workspace_id))
         .map_err(anyhow::Error::new)?;
@@ -184,6 +191,25 @@ fn allocate_card_pane(
         tabs.iter()
             .find(|tab| tab.tab_id == tab_id && tab.workspace_id == workspace_id)
     });
+
+    // A workspace this dispatch just created starts with exactly one initial
+    // tab whose root is an idle shell. Adopt it as this card's first tab
+    // instead of leaving an unused initial tab next to a fresh `card-<id>`
+    // one: verify the exact ids are still live, that the root is the tab's
+    // sole pane, and that it carries no agent — then rename tab and root and
+    // use the ordinary anchor split path. Any verification mismatch falls
+    // back to a fresh `tab.create` and never touches that root. The hint is
+    // one-shot: reused/existing/user workspaces never produce one.
+    if let Some(bootstrap) = bootstrap {
+        if let Some(owned) =
+            adopt_bootstrap_tab(client, workspace_id, tab_label, bootstrap, cwd_owned, env)
+                .with_context(|| {
+                    format!("adopting the created workspace's initial tab for '{tab_label}'")
+                })?
+        {
+            return Ok(owned);
+        }
+    }
 
     let Some(tab) = exact_tab else {
         return create_card_tab(client, workspace_id, tab_label, cwd_string, env);
@@ -217,49 +243,56 @@ fn allocate_card_pane(
                 .find(|pane| pane.pane_id == id && usable_anchor(pane))
         });
 
-    if let Some(anchor) = anchor {
-        // A same-conversation resume hop reuses the prior run's still-live
-        // agent pane: the conversation + agent are already there, so the next
-        // stage is delivered with `agent.prompt` on this pane rather than a
-        // fresh `pane.split` + `agent.start`. Only an exact prior durable child
-        // in this tab/workspace that still holds its agent qualifies; the
-        // candidate's live status is re-checked here. Herdr's derived Done is a
-        // live, quiescent end-of-turn state (not a missing pane). A briefly
-        // Working/Blocked pane is still adopted — launch waits for it to become
-        // quiescent before prompting.
-        if let Some(reuse_id) = reuse_pane_id {
-            if let Some(reuse_pane) = panes.iter().find(|pane| {
-                pane.pane_id == reuse_id
-                    && pane.workspace_id == workspace_id
-                    && pane.tab_id == tab.tab_id
-                    && reuse_agent_kind.is_some()
-                    && pane.agent.as_deref() == reuse_agent_kind
-                    && matches!(
-                        pane.agent_status,
-                        AgentStatus::Idle
-                            | AgentStatus::Working
-                            | AgentStatus::Blocked
-                            | AgentStatus::Done
-                    )
-            }) {
-                // Close any *other* ended children (e.g. leftovers from a fresh
-                // column) so the tab keeps one agent child; the reuse pane is
-                // protected and stays open.
-                reclaim_prior_children(
-                    client,
-                    &panes,
-                    anchor.pane_id.as_str(),
-                    reclaimable_pane_ids,
-                    Some(reuse_id),
-                )?;
-                return Ok(OwnedPane {
-                    pane_id: reuse_pane.pane_id.clone(),
-                    workspace_id: workspace_id.to_string(),
-                    tab_id: tab.tab_id.clone(),
-                    anchor_pane_id: Some(anchor.pane_id.clone()),
-                });
-            }
+    // A same-conversation resume hop reuses the prior run's still-live
+    // agent pane: the conversation + agent are already there, so the next
+    // stage is delivered with `agent.prompt` on this pane rather than a
+    // fresh `pane.split` + `agent.start`. Only an exact prior durable child
+    // in this tab/workspace that still holds its agent qualifies; the
+    // candidate's live status is re-checked here. Herdr's derived Done is a
+    // live, quiescent end-of-turn state (not a missing pane). A briefly
+    // Working/Blocked pane is still adopted — launch waits for it to become
+    // quiescent before prompting.
+    //
+    // Eligibility deliberately comes BEFORE anchor selection: managed tabs
+    // converge to exactly one harness pane and no anchor, so a tab with no
+    // usable anchor must still reuse its harness pane on the next hop.
+    if let Some(reuse_id) = reuse_pane_id {
+        if let Some(reuse_pane) = panes.iter().find(|pane| {
+            pane.pane_id == reuse_id
+                && pane.workspace_id == workspace_id
+                && pane.tab_id == tab.tab_id
+                && reuse_agent_kind.is_some()
+                && pane.agent.as_deref() == reuse_agent_kind
+                && matches!(
+                    pane.agent_status,
+                    AgentStatus::Idle
+                        | AgentStatus::Working
+                        | AgentStatus::Blocked
+                        | AgentStatus::Done
+                )
+        }) {
+            // Close any *other* ended children (e.g. leftovers from a fresh
+            // column) so the tab keeps one agent child; the reuse pane is
+            // protected and stays open. The anchor (when one still exists) is
+            // not a reclaim candidate either way.
+            let protected = anchor.map(|pane| pane.pane_id.as_str()).unwrap_or(reuse_id);
+            reclaim_prior_children(
+                client,
+                &panes,
+                protected,
+                reclaimable_pane_ids,
+                Some(reuse_id),
+            )?;
+            return Ok(OwnedPane {
+                pane_id: reuse_pane.pane_id.clone(),
+                workspace_id: workspace_id.to_string(),
+                tab_id: tab.tab_id.clone(),
+                anchor_pane_id: anchor.map(|pane| pane.pane_id.clone()),
+            });
         }
+    }
+
+    if let Some(anchor) = anchor {
         reclaim_prior_children(
             client,
             &panes,
@@ -336,6 +369,77 @@ fn allocate_card_pane(
         cwd_string.as_deref(),
         env,
     )
+}
+
+/// Try to adopt a workspace this launch just created as the card's first tab.
+///
+/// Returns `Ok(None)` when the exact bootstrap ids no longer verify (tab or
+/// root missing, the root is not the tab's sole pane, or the root carries an
+/// agent) — the caller then falls back to a fresh `tab.create` and the
+/// workspace root is left completely untouched. Returns `Ok(Some(owned))`
+/// after renaming tab and root and splitting the run child from the adopted
+/// root. Post-verification Herdr errors (renames/split) propagate so the
+/// caller's existing retry/cleanup taxonomy applies; the workspace root is
+/// never closed here — unlike a `tab.create` root, it predates this card and
+/// must survive a failed run.
+fn adopt_bootstrap_tab(
+    client: &mut HerdrClient,
+    workspace_id: &str,
+    tab_label: &str,
+    bootstrap: &WorkspaceBootstrapHint,
+    cwd: Option<String>,
+    env: &BTreeMap<String, String>,
+) -> anyhow::Result<Option<OwnedPane>> {
+    // Verification: the exact tab still exists in the exact workspace.
+    let tabs = client
+        .tab_list(Some(workspace_id))
+        .map_err(anyhow::Error::new)?;
+    if !tabs
+        .iter()
+        .any(|tab| tab.tab_id == bootstrap.tab_id && tab.workspace_id == workspace_id)
+    {
+        return Ok(None);
+    }
+    // Verification: the exact root still exists, is the tab's SOLE pane, and
+    // carries no agent. Anything else means the workspace is no longer the
+    // pristine shell it was created as; adopt nothing.
+    let panes: Vec<_> = client
+        .pane_list(Some(workspace_id))
+        .map_err(anyhow::Error::new)?
+        .into_iter()
+        .filter(|pane| pane.tab_id == bootstrap.tab_id && pane.workspace_id == workspace_id)
+        .collect();
+    if panes.len() != 1 || panes[0].pane_id != bootstrap.root_pane_id || panes[0].agent.is_some() {
+        return Ok(None);
+    }
+    let root_id = panes[0].pane_id.clone();
+
+    // Adoption: this tab/root is now this card's tab/anchor. The tab label
+    // becomes `card-<id>` and the root becomes `card-<id>-anchor`, then the
+    // ordinary anchor split path supplies the run child.
+    client
+        .tab_rename(&TabRenameParams {
+            tab_id: bootstrap.tab_id.clone(),
+            label: tab_label.to_string(),
+        })
+        .map_err(mark_retryable_placement_race)
+        .context("renaming the adopted workspace tab to the card tab")?;
+    client
+        .pane_rename(&PaneRenameParams {
+            pane_id: root_id.clone(),
+            label: anchor_label(tab_label),
+        })
+        .map_err(mark_retryable_placement_race)
+        .context("labeling the adopted workspace root as the card-tab anchor")?;
+    let owned = split_run_child(
+        client,
+        workspace_id,
+        &bootstrap.tab_id,
+        &root_id,
+        cwd.as_deref(),
+        env,
+    )?;
+    Ok(Some(owned))
 }
 
 fn create_card_tab(
