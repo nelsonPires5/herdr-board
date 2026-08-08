@@ -23,8 +23,7 @@ only `Todo`.
 
 ## Why herdr-board?
 
-- **Agents stay visible.** New runs open in a stable per-card `card-<id>` Herdr tab, one split child
-  per stage/retry, so each card's panes stay together while they work.
+- **Agents stay visible.** New runs open in a stable per-card `card-<id>` Herdr tab. A managed tab converges to exactly its one harness pane — the shell anchor is closed once the launch succeeds — while configured harnesses keep a persistent anchor because their child exits with the run.
 - **Pipelines, not just a queue.** Each column can prepend a system prompt and route successful or
   failed runs to another stage.
 - **Human gates where they matter.** Automatic stages keep moving; manual columns stop the pipeline
@@ -124,10 +123,14 @@ All board state lives under `~/.local/share/herdr-board/`; Herdr's own state is 
 
 ### Agents run in visible Herdr panes
 
-The daemon creates one stable `card-<id>` tab per new card, reserves its root as a labeled
-`card-<id>-anchor` shell, and splits every run into a child from that anchor. Ownership is proven
-from durable pane identity, never from a matching label, so a user tab is never adopted. The full
-placement and recovery rules are in [`docs/design.md`](docs/design.md).
+The daemon creates one stable `card-<id>` tab per new card. For a workspace the daemon itself
+just created (`new_workspace`), that workspace's own initial tab is adopted as the card tab —
+renamed to `card-<id>` — so no unused initial tab is left behind. The tab's root is reserved as a
+labeled `card-<id>-anchor` shell and every run is split into a child from it. A successful
+**managed** (Pi/Claude) launch then closes the anchor, leaving exactly the harness pane visible;
+**configured** harnesses keep the anchor because their child exits with the run. Ownership is
+proven from durable pane identity, never from a matching label, so a user tab is never adopted.
+The full placement and recovery rules are in [`docs/design.md`](docs/design.md).
 
 <p align="center">
   <img src="docs/assets/readme/agent-panes.png" alt="Herdr workspace with board agents in separate per-card tabs" width="100%">
