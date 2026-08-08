@@ -11,7 +11,8 @@ e2e_build
 e2e_isolate
 
 step "Create retention fixtures before boardd starts"
-LOG_DIR="$HOME/.local/share/herdr-board/logs"
+LOG_DIR="$E2E_TMP/logs"
+export BOARD_LOG_DIR="$LOG_DIR"
 mkdir -p "$LOG_DIR"
 chmod 700 "$LOG_DIR"
 python3 - "$LOG_DIR" <<'PY'
