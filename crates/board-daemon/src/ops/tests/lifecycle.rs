@@ -195,6 +195,52 @@ fn run_done_rejects_queued_configured_runs_without_or_with_stale_run_id() {
 }
 
 #[test]
+fn reused_pane_done_maps_stale_run_identity_only_when_pane_matches() {
+    let d = test_daemon(Config::default());
+    let (card_id, stale_run_id, current_run_id) = add_reused_pane_runs(&d);
+
+    let result = handle_request(
+        &d,
+        "run.done",
+        json!({
+            "card_id": card_id,
+            "run_id": stale_run_id,
+            "actor_pane_id": "w1:p-shared",
+            "outcome": "ok"
+        }),
+    )
+    .unwrap();
+    assert_eq!(result["run"]["id"], current_run_id);
+    assert_eq!(result["run"]["outcome"], "ok");
+    assert_eq!(
+        d.store.lock().get_run(stale_run_id).unwrap().outcome,
+        Some(RunOutcome::Ok)
+    );
+
+    let other = test_daemon(Config::default());
+    let (other_card_id, other_stale_run_id, other_current_run_id) = add_reused_pane_runs(&other);
+    let denied = handle_request(
+        &other,
+        "run.done",
+        json!({
+            "card_id": other_card_id,
+            "run_id": other_stale_run_id,
+            "actor_pane_id": "w1:p-different",
+            "outcome": "ok"
+        }),
+    )
+    .unwrap_err();
+    assert!(denied.to_string().contains("run"), "{denied}");
+    assert!(other
+        .store
+        .lock()
+        .get_run(other_current_run_id)
+        .unwrap()
+        .outcome
+        .is_none());
+}
+
+#[test]
 fn run_done_rejects_mismatching_run_id_for_a_different_active_replacement() {
     let mut config = Config::default();
     config.harness.insert(

@@ -1,4 +1,8 @@
-//! Pure path parsing (env-reading resolvers stay out of the unit tier).
+//! Path resolution tests. Pure parsing stays in-process; env-reading
+//! resolvers are exercised through a child process so the parent test process
+//! never mutates global environment state.
+
+use std::process::Command;
 
 use board_core::paths::session_name_from_socket;
 
@@ -34,4 +38,32 @@ fn malformed_socket_paths_fall_back_to_the_default_session() {
             "expected {path:?} to read as the default session"
         );
     }
+}
+
+#[test]
+fn log_dir_honors_the_board_log_dir_override() {
+    const CHILD_ENV: &str = "BOARD_CORE_PATHS_CHILD";
+    if std::env::var_os(CHILD_ENV).is_some() {
+        println!("{}", board_core::paths::log_dir().display());
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "log_dir_honors_the_board_log_dir_override",
+            "--nocapture",
+        ])
+        .env(CHILD_ENV, "1")
+        .env("BOARD_LOG_DIR", dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line == dir.path().to_str().unwrap()),
+        "log_dir() must resolve to the BOARD_LOG_DIR override verbatim; got: {stdout:?}"
+    );
 }

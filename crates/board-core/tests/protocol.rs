@@ -123,7 +123,7 @@ fn run_pane_exited_params_serialize_exact_internal_wire_shape() {
 }
 
 #[test]
-fn run_done_params_run_id_is_optional_and_serializes_when_present() {
+fn run_done_actor_identity_fields_are_optional_and_serialize_when_present() {
     let missing: RunDoneParams = serde_json::from_value(json!({
         "card_id": 42,
         "outcome": "ok"
@@ -140,10 +140,11 @@ fn run_done_params_run_id_is_optional_and_serializes_when_present() {
         outcome: RunOutcome::Ok,
         summary: None,
         run_id: Some(7),
+        actor_pane_id: Some("w1:p3".into()),
     };
     assert_eq!(
         serde_json::to_value(&provided).unwrap(),
-        json!({"card_id": 42, "outcome": "ok", "run_id": 7})
+        json!({"card_id": 42, "outcome": "ok", "run_id": 7, "actor_pane_id": "w1:p3"})
     );
     roundtrip(&provided);
 }

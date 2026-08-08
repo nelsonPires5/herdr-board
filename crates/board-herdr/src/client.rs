@@ -16,7 +16,7 @@ use crate::envelope::{Request, Response};
 use crate::error::{diagnostic_protocol_code, HerdrError, Result};
 use crate::params::{
     AgentPromptParams, AgentStartParams, AgentWaitParams, PaneRenameParams, PaneSplitParams,
-    TabCreateParams, WorkspaceCreateParams,
+    TabCreateParams, TabRenameParams, WorkspaceCreateParams,
 };
 use crate::transport::{self, connect_with_deadline, SocketDeadlines};
 use crate::types::{
@@ -46,6 +46,7 @@ fn diagnostic_method(method: &str) -> &'static str {
         "workspace.close" => "workspace.close",
         "tab.create" => "tab.create",
         "tab.list" => "tab.list",
+        "tab.rename" => "tab.rename",
         "agent.start" => "agent.start",
         "agent.get" => "agent.get",
         "agent.prompt" => "agent.prompt",
@@ -305,6 +306,15 @@ impl HerdrClient {
     /// List tabs, optionally scoped to one workspace (`None` = all workspaces).
     pub fn tab_list(&mut self, workspace_id: Option<&str>) -> Result<Vec<TabInfo>> {
         self.call_field("tab.list", json!({ "workspace_id": workspace_id }), "tabs")
+    }
+
+    /// Rename a tab by exact id (protocol-19 `tab.rename`). The response
+    /// payload is deliberately ignored: the board only needs confirmation that
+    /// the rename happened, and the result type is not part of the pinned
+    /// success surface.
+    pub fn tab_rename(&mut self, p: &TabRenameParams) -> Result<()> {
+        self.call("tab.rename", serde_json::to_value(p)?)?;
+        Ok(())
     }
 
     // -- agent ---------------------------------------------------------------

@@ -291,8 +291,8 @@ mod tests {
 
     #[test]
     fn daily_ndjson_is_private_redacted_and_prunes_only_expired_owned_files() {
-        let home = tempfile::tempdir().unwrap();
-        let log_dir = home.path().join(".local/share/herdr-board/logs");
+        let dir = tempfile::tempdir().unwrap();
+        let log_dir = dir.path().join("logs");
         fs::create_dir_all(&log_dir).unwrap();
         let expired = log_dir.join("daemon.2000-01-01.ndjson");
         let boundary = log_dir.join("daemon.2999-01-01.ndjson");
@@ -332,8 +332,7 @@ mod tests {
                 "--nocapture",
             ])
             .env("BOARD_LOGGING_CHILD", "1")
-            .env("HOME", home.path())
-            .env_remove("XDG_DATA_HOME")
+            .env("BOARD_LOG_DIR", &log_dir)
             .status()
             .unwrap();
         assert!(status.success());
@@ -424,13 +423,13 @@ mod tests {
     fn failed_daily_writer_has_a_bounded_private_detached_fallback() {
         use std::process::Stdio;
 
-        let home = tempfile::tempdir().unwrap();
-        let log_dir = home.path().join(".local/share/herdr-board/logs");
+        let dir = tempfile::tempdir().unwrap();
+        let log_dir = dir.path().join("logs");
         fs::create_dir_all(&log_dir).unwrap();
-        let target = home.path().join("symlink-target");
+        let target = dir.path().join("symlink-target");
         fs::write(&target, "untouched").unwrap();
         symlink(&target, super::daily_path(&log_dir, super::unix_now())).unwrap();
-        let bootstrap = home.path().join("bootstrap.log");
+        let bootstrap = dir.path().join("bootstrap.log");
         let stderr = fs::File::create(&bootstrap).unwrap();
         let status = Command::new(std::env::current_exe().unwrap())
             .args([
@@ -440,8 +439,7 @@ mod tests {
             ])
             .env("BOARD_LOGGING_CHILD", "1")
             .env("BOARD_LOGGING_CHILD_EVENTS", "40")
-            .env("HOME", home.path())
-            .env_remove("XDG_DATA_HOME")
+            .env("BOARD_LOG_DIR", &log_dir)
             .stderr(Stdio::from(stderr))
             .status()
             .unwrap();

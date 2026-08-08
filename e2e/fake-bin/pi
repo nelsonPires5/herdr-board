@@ -127,12 +127,57 @@ if [ "${BOARD_RESCUE:-0}" = "1" ]; then
   exit 0
 fi
 
-FAKE_MANAGED_KIND=pi \
-  python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/managed-terminal-shim.py" "$record"
-
 # Spawn registration commits only after readiness polling + agent.prompt return.
-# Keep the pre-done delay, then retain the pane for bounded structural asserts.
-sleep "${FAKE_PI_SLEEP:-1.5}"
-"${BOARD_BIN:?BOARD_BIN required}" comment "fake pi: protocol-19 system file and agent.prompt validated"
-"$BOARD_BIN" done --outcome ok
-sleep "${FAKE_MANAGED_HOLD:-60}"
+# A same-conversation resume hop re-prompts this SAME process on its pane (no
+# new agent.start), so when FAKE_PI_LOOP=1 the fixture loops: read one stage's
+# prompt, comment, done, then block on the next prompt. Single-stage scenarios
+# leave it unset and retain the historical single prompt + bounded hold.
+trace=""
+if [ "${FAKE_PI_LOOP:-0}" = "1" ]; then
+  trace="$(dirname "$BOARD_SOCKET")/fake-pi-loop-$RUN_LABEL.log"
+  printf 'pid=%s loop=1 pane=%s record=%s\n' "$$" "${HERDR_PANE_ID:-<unset>}" "$record" >>"$trace"
+fi
+
+run_one_pi_stage() {
+  [ -z "$trace" ] || printf 'stage: shim start\n' >>"$trace"
+  FAKE_MANAGED_KIND=pi \
+    python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/managed-terminal-shim.py" "$record" || {
+      rc=$?
+      if [ -n "$trace" ]; then
+        printf 'stage: shim fail rc=%s\n' "$rc" >>"$trace"
+        python3 - "$record" >>"$trace" <<'PY' || true
+import hashlib, json, sys
+try:
+    x=json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception as e:
+    print(f"record_error={type(e).__name__}")
+else:
+    for key in ("prompt_error", "prompt_received_via_stdin", "prompt_matches_run_snapshot"):
+        print(f"{key}={x.get(key)!r}")
+    for key in ("prompt", "expected_prompt"):
+        value=(x.get(key) or "").encode()
+        print(f"{key}_len={len(value)} {key}_sha256={hashlib.sha256(value).hexdigest()}")
+PY
+      fi
+      return "$rc"
+    }
+  [ -z "$trace" ] || printf 'stage: shim ok\n' >>"$trace"
+  sleep "${FAKE_PI_SLEEP:-1.5}"
+  "${BOARD_BIN:?BOARD_BIN required}" comment "fake pi: protocol-19 system file and agent.prompt validated" || {
+    rc=$?; [ -z "$trace" ] || printf 'stage: comment fail rc=%s\n' "$rc" >>"$trace"; return "$rc"
+  }
+  [ -z "$trace" ] || printf 'stage: comment ok\n' >>"$trace"
+  "$BOARD_BIN" done --outcome ok || {
+    rc=$?; [ -z "$trace" ] || printf 'stage: done fail rc=%s\n' "$rc" >>"$trace"; return "$rc"
+  }
+  [ -z "$trace" ] || printf 'stage: done ok\n' >>"$trace"
+}
+
+if [ "${FAKE_PI_LOOP:-0}" = "1" ]; then
+  while true; do
+    run_one_pi_stage
+  done
+else
+  run_one_pi_stage
+  sleep "${FAKE_MANAGED_HOLD:-60}"
+fi

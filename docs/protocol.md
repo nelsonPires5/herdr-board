@@ -10,6 +10,7 @@ protocol version.
 - Unix socket. Path resolution (both daemon and clients): `$BOARD_SOCKET` if set, else
   `~/.local/share/herdr-board/boardd.sock`.
 - DB path resolution (daemon only): `$BOARD_DB` if set, else `~/.local/share/herdr-board/board.db`.
+- Log directory resolution (daemon only): `$BOARD_LOG_DIR` if set, else `<data>/logs`.
 - Newline-delimited JSON (NDJSON), UTF-8. One JSON object per line, both directions.
 - Request: `{"id":"<string>","method":"<name>","params":{...}}` (params may be omitted = `{}`).
 - Response: `{"id":"<same>","result":<any>}` or `{"id":"<same>","error":{"code":<int>,"message":"..."}}`.
@@ -216,10 +217,14 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
 
 ### comments / runs
 
-- `comment.add {card_id, body, author?, actor_run_id?}` → `Comment`. CLI `board comment` and
-  `board card comment add` set `author` to `agent:<BOARD_RUN_ID>` and send `actor_run_id` when
-  `$BOARD_RUN_ID` is set; otherwise the author defaults to `user`. The additive actor field is
-  checked against the comment author, card, and open run.
+- `comment.add {card_id, body, author?, actor_run_id?, actor_pane_id?}` → `Comment`. CLI `board
+  comment` and `board card comment add` set `author` to `agent:<BOARD_RUN_ID>`, send `actor_run_id`
+  when `$BOARD_RUN_ID` is set, and forward `$HERDR_PANE_ID` as `actor_pane_id` when present;
+  otherwise the author defaults to `user`. Ordinarily the actor run is checked against the comment
+  author, card, and open run. A managed same-conversation resume keeps one process/pane, whose
+  immutable `BOARD_RUN_ID` names its first stage: when `actor_pane_id` exactly matches the card's
+  current open run pane, that pane is the credential and the comment is attributed to the current
+  run. A missing/different pane id retains the strict actor-run check.
 - `comment.get {id}` → `CommentRecord` (`id,card_id,author,body,created_at,deleted_at`). It returns
   the current row even after a soft delete.
 - `comment.update {id,body,actor_run_id?}` → `CommentRecord`. It preserves the original author and
@@ -232,18 +237,22 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
   insert creates the initial snapshot; edits append a snapshot; deletion marks the final snapshot's
   `deleted_at` without changing its body. System comments are immutable at the database boundary and
   cannot be edited or deleted by any actor.
-- `run.done {card_id, outcome:"ok"|"fail", summary?, run_id?}` → `{run, card}` — backend of
-  `board done`. `run_id` is optional for compatibility: manual and TUI callers may omit it,
-  and an omitted id completes the current active run. When supplied, it must exactly match the
-  current active run, so a stale child cannot complete a replacement run. The CLI forwards
-  `BOARD_RUN_ID` when present and omits `run_id` otherwise. It closes the active run, posts a
-  `system` comment, and applies the column transition (`ok`→on_success, `fail`→on_fail; no
-  target → card stays, status `done`/`failed`). It is also the confirm channel for an `awaiting`
-  card (TUI `Enter` and `card run confirm` send the same request). The only queued exception is a
-  configured harness: its `board done` must provide the exact queued run id and may arrive before
-  runner registration. A queued built-in Pi/Claude run is rejected because managed completion
-  requires a registered pane. A mismatched id, missing id for the queued exception, or otherwise
-  ineligible run returns an error.
+- `run.done {card_id, outcome:"ok"|"fail", summary?, run_id?, actor_pane_id?}` → `{run, card}` —
+  backend of `board done`. `run_id` is optional for compatibility: manual and TUI callers may omit
+  it, and an omitted id completes the current active run. When supplied, it ordinarily must exactly
+  match the current active run, so a stale child cannot complete a replacement run. The CLI forwards
+  `BOARD_RUN_ID` and `$HERDR_PANE_ID` when present. A managed same-conversation resume keeps one
+  process/pane, whose immutable `BOARD_RUN_ID` names its first stage: when `actor_pane_id` exactly
+  matches the current open run's recorded pane, the pane is the actor credential and `run.done`
+  applies to that current run. This intentionally makes all commands from that still-live pane act
+  as its current stage; a missing/different pane id retains exact run-id rejection. It closes the
+  active run, posts a `system` comment, and applies the column transition (`ok`→on_success,
+  `fail`→on_fail; no target → card stays, status `done`/`failed`). It is also the confirm channel for
+  an `awaiting` card (TUI `Enter` and `card run confirm` send the same request). The only queued
+  exception is a configured harness: its `board done` must provide the exact queued run id and may
+  arrive before runner registration. A queued built-in Pi/Claude run is rejected because managed
+  completion requires a registered pane. A mismatched id/pane, missing id for the queued exception,
+  or otherwise ineligible run returns an error.
 - `run.cancel {card_id}` → `{run, card}` — kills the pane (herdr `pane.close`), outcome `cancelled`, card status `failed`, no transition.
 - `run.retry {card_id}` → `{run, card}` — re-enqueue in the current column as a fresh run. Claude
   resumes with `--fork-session`; Pi uses `--fork <old-id> --session-id <new-id>` and persists it.
@@ -451,10 +460,10 @@ Coarse by design — the TUI refetches only its selected `board.get {board_id}` 
 3. Spawn (daemon, via `Spawner` trait):
    - resolve session: card `session` (null = default) → Herdr socket via the session registry; an unknown/not-running session fails the run with a clear error listing known sessions. The per-session client is used for workspace resolve/create, spawn, kill, and liveness.
    - harness session: resume `card.session_id` unless `column.fresh_session` or none. Pi mint/resume use exact `--session-id`; Pi retry forks old → a newly minted target id. Claude retains mint/`--resume`/`--fork-session`. Existing cards keep their stored harness/session.
-   - **preflight before workspace mutation:** `ping` the selected socket and require exact Herdr 0.8.0 / protocol 19. Only then resolve `workspace` by id/case-insensitive label, or resolve `new_workspace` by label and, if absent, call `workspace.create {label,cwd,focus:false}`. Read the workspace cwd from its pane snapshot; snapshot failure or missing live cwd fails dispatch, never falling back to process cwd or a stale snapshot.
+   - **preflight before workspace mutation:** `ping` the selected socket and require exact Herdr 0.8.0 / protocol 19. Only then resolve `workspace` by id/case-insensitive label, or resolve `new_workspace` by label and, if absent, call `workspace.create {label,cwd,focus:false}`. Read the workspace cwd from its pane snapshot; snapshot failure or missing live cwd fails dispatch, never falling back to process cwd or a stale snapshot. When this dispatch itself created the workspace, its exact initial tab/root pane ids travel as a one-shot bootstrap hint: the first card-tab allocation verifies them (tab exists in that workspace, root is the tab's sole pane, root carries no agent), renames the tab to `card-<id>` and the root to `card-<id>-anchor`, and splits the run child from that root — so a daemon-created workspace has no unused initial tab. Any verification mismatch falls back to a fresh `tab.create` and never touches that root; reused/existing/user workspaces never carry a hint.
    - **preflight again at the spawner boundary:** this is the spawner's first protocol call, before placement, managed launch, or the configured runner.
-   - build the run-child env `{BOARD_CARD_ID,BOARD_RUN_ID,BOARD_SOCKET,BOARD_BIN}` plus configured-harness prompt env. Current schema v13 runs place each card in a stable short `card-<id>` tab whose `tab.create` root is a shell anchor labeled `card-<id>-anchor`. The anchor receives only stable card identity; every run child is created by `pane.split` from it with the complete run cwd/env. Promotion persists the exact anchor id with the run. The daemon reuses only exact tab/anchor identities reconstructed from the newest matching durable panes in the same session/workspace; labels are display metadata, never ownership. A renamed anchor remains selected by identity; a closed anchor is recreated only by splitting a currently live durable board child, otherwise a fresh tab is created. The initial split targets ratio `0.40` and clamps it on narrow terminals so the anchor remains reusable; later splits use layout geometry. Both fresh and recovered placement fail closed unless the live layout can provide a 24x6 anchor and a 12x8 child. Concurrent first allocations for one `(session,workspace,card)` key are serialized; if multiple historical panes are live, newest run id wins. Legacy rows retain the historical `kanban` lookup. Thus cwd/env/placement exist **before** launch; pane-first `agent.start` receives none of them and never receives the anchor pane id.
-   - managed Pi/Claude: create a mode-`0600` file containing the snapshotted system prompt; call `agent.start {name,kind,pane_id,args,timeout_ms:30000}` on the newly split child with prompt-free startup args and the harness-specific file flag. A typed `agent_pane_busy` response is treated as a bounded transient on that same child: retry the exact same request on the same pane at most twice, with 100ms then 200ms backoff; do not split or allocate another pane. Persistent busy is terminal and follows child-only cleanup, leaving the anchor. This is distinct from `pane_not_found`, which is a placement race: close the child when present, rediscover from `tab.list`, and retry complete placement once. Poll `agent.get {target:pane_id}` for at most 30s until `interactive_ready && !launch_pending`; then call `agent.prompt {target:pane_id,text:prompt_snapshot}`. Remove the prompt file before returning, including error paths.
+   - build the run-child env `{BOARD_CARD_ID,BOARD_RUN_ID,BOARD_SOCKET,BOARD_BIN}` plus configured-harness prompt env. Current schema v13 runs place each card in a stable short `card-<id>` tab whose root is a shell anchor labeled `card-<id>-anchor`. The anchor receives only stable card identity; every run child is created by `pane.split` from it with the complete run cwd/env. Promotion persists the exact anchor id with the run **except** for managed launches, whose anchor is closed after a successful launch (see below), leaving the tab with exactly the harness pane and a NULL persisted anchor. The daemon reuses only exact tab/anchor identities reconstructed from the newest matching durable panes in the same session/workspace; labels are display metadata, never ownership. A renamed anchor remains selected by identity; a closed anchor is recreated only by splitting a currently live durable board child, otherwise a fresh tab is created. Same-conversation reuse eligibility is checked **before** anchor selection, so an anchorless managed tab still reuses its exact prior harness pane on the next hop. The initial split targets ratio `0.40` and clamps it on narrow terminals so the anchor remains reusable; later splits use layout geometry. Both fresh and recovered placement fail closed unless the live layout can provide a 24x6 anchor and a 12x8 child. Concurrent first allocations for one `(session,workspace,card)` key are serialized; if multiple historical panes are live, newest run id wins. Legacy rows retain the historical `kanban` lookup. Thus cwd/env/placement exist **before** launch; pane-first `agent.start` receives none of them and never receives the anchor pane id.
+   - managed Pi/Claude: create a mode-`0600` file containing the snapshotted system prompt; call `agent.start {name,kind,pane_id,args,timeout_ms:30000}` on the newly split child with prompt-free startup args and the harness-specific file flag. A typed `agent_pane_busy` response is treated as a bounded transient on that same child: retry the exact same request on the same pane at most twice, with 100ms then 200ms backoff; do not split or allocate another pane. Persistent busy is terminal and follows child-only cleanup, leaving the anchor. This is distinct from `pane_not_found`, which is a placement race: close the child when present, rediscover from `tab.list`, and retry complete placement once. Poll `agent.get {target:pane_id}` for at most 30s until `interactive_ready && !launch_pending`; then call `agent.prompt {target:pane_id,text:prompt_snapshot}`. Remove the prompt file before returning, including error paths. **After a successful managed launch** (fresh or reuse), the daemon closes the tab anchor with `pane.close` — closing a split parent is live-verified safe, and the harness pane keeps its process/env — so the tab converges to exactly one harness pane; the promoted run persists a NULL anchor. If that close fails, the anchor is kept (and persisted) rather than failing the already-successful launch. A failed launch never closes the anchor: it remains for the next allocation, per the child-only cleanup rule.
    - managed pane name is `card-<id>-<column-slug>` (e.g. `card-14-execute`); `agent_name_taken` retries once on the same pane with `card-<id>-<column-slug>-r<run>`.
    - configured harness: `pane.rename` the owned pane, create one mode-`0700` self-removing script whose POSIX-quoted command is the exact configured argv, and invoke exactly the selected Herdr binary (`HERDR_BIN_PATH` when nonempty, otherwise `herdr`) as `pane run <pane_id> <script_path>` with `HERDR_SOCKET_PATH` set to the selected socket. The script runs the child, preserves its status, then calls hidden `board __pane-exited --run-id "$BOARD_RUN_ID"`; the internal run-id guard accepts only the exact open queued/started configured run (including callback-before-registration), rejects stale/completed and built-in runs, and never applies `on_fail`.
    - a disappearing selected/owned child restarts discovery at `tab.list` and retries the complete placement once. Retry/terminal cleanup closes only the board-created run child; the shell anchor and pre-existing panes are never closed. `pane_not_found` means cleanup already won. This placement rediscovery path is separate from the bounded same-child `agent_pane_busy` retry above. A synchronous configured-runner failure also removes its script; after successful scheduling, the script owns self-removal.

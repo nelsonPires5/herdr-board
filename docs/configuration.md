@@ -50,6 +50,7 @@ override values also prevent daemon startup.
 |---|---|
 | `BOARD_DB` | SQLite path. Default: `~/.local/share/herdr-board/board.db`. |
 | `BOARD_SOCKET` | Daemon socket. Default: `~/.local/share/herdr-board/boardd.sock`. |
+| `BOARD_LOG_DIR` | Structured diagnostic log directory. Default: `~/.local/share/herdr-board/logs`. |
 | `HERDR_BOARD_CONFIG` | Configuration path override. |
 | `BOARD_SCOPE_PATH` | Canonicalizable scope override for CLI/TUI automation. |
 | `BOARD_SPAWNER` | `herdr` or `local`; overrides `[daemon] spawner`. |

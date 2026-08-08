@@ -59,6 +59,15 @@ pub(crate) fn actor_author(run_id: Option<i64>) -> Option<String> {
     run_id.map(|id| format!("agent:{id}"))
 }
 
+/// The caller's Herdr pane id (`HERDR_PANE_ID`) when this CLI runs inside a
+/// Herdr-managed pane. Identifies a reused agent pane across stages so a stale
+/// `BOARD_RUN_ID` does not reject the call.
+pub(crate) fn actor_pane_id() -> Option<String> {
+    std::env::var("HERDR_PANE_ID")
+        .ok()
+        .filter(|value| !value.is_empty())
+}
+
 /// One shape for every enum-valued option: `invalid <kind> '<value>' (expected:
 /// a, b, c)`. Parsing itself always belongs to `board-core`'s `parse_str`; only
 /// the message and the advertised value list are the CLI's business (the CLI

@@ -242,6 +242,7 @@ pub(crate) fn rescue_run_pane(plan: &RescuePlan<'_>) -> anyhow::Result<RescueOut
         &env,
         CardOwnership {
             owned_tab_id: owned_tab_id.as_deref(),
+            bootstrap: None,
             durable_pane_ids: plan.ownership.durable_pane_ids,
             // A rescue never reclaims (closes) another run's pane.
             reclaimable_pane_ids: &[],
@@ -249,6 +250,10 @@ pub(crate) fn rescue_run_pane(plan: &RescuePlan<'_>) -> anyhow::Result<RescueOut
             remembered_anchor_id: remembered
                 .as_ref()
                 .map(|owned| owned.anchor_pane_id.as_str()),
+            // A rescue always splits a fresh pane (the run's pane is dead);
+            // it never reuses a prior pane.
+            reuse_pane_id: None,
+            reuse_agent_kind: None,
         },
     )
     .with_context(|| {
@@ -286,6 +291,28 @@ pub(crate) fn rescue_run_pane(plan: &RescuePlan<'_>) -> anyhow::Result<RescueOut
             created_tab,
             error,
         ));
+    }
+
+    // Managed card tabs converge to exactly one harness pane for a rescue too:
+    // once the resumed harness launched successfully, close the anchor — the
+    // same rule dispatch applies, with the same semantics. `pane_not_found`
+    // counts as closed (the anchor was already gone, e.g. a concurrent close
+    // removed it); any other close failure must not fail an already-successful
+    // rescue, so warn and keep the anchor — the registry's remembered id is
+    // never treated as live because the allocator revalidates exact ids.
+    // Configured harnesses keep their persistent anchor unchanged: `pane run`
+    // exits close their child, so the anchor is what the next run splits from.
+    if plan.execution.agent_kind.is_some() {
+        if let Some(anchor) = owned.anchor_pane_id.as_deref() {
+            if let Err(error) = close_owned_for_retry(&mut client, anchor) {
+                tracing::warn!(
+                    pane_id = anchor,
+                    error_category = "herdr",
+                    error = %format!("{error:#}"),
+                    "managed rescue succeeded but closing the tab anchor failed; keeping it"
+                );
+            }
+        }
     }
 
     // The rescue has already succeeded here: the pane exists and the
@@ -339,15 +366,24 @@ fn launch_rescue(
         durable_pane_ids: Vec::new(),
         reclaimable_pane_ids: Vec::new(),
         durable_anchor_pane_ids: Vec::new(),
+        reuse_pane_id: None,
         cwd: Some(cwd.to_path_buf()),
         workspace_ref: Some(plan.workspace_id.to_string()),
         herdr_socket: Some(plan.socket.to_path_buf()),
+        bootstrap: None,
         env: plan.execution.env.clone(),
         argv: plan.execution.argv.clone(),
     };
 
     match req.agent_kind.as_deref() {
-        Some(kind) => launch_managed(client, &req, kind, pane_id, DEFAULT_AGENT_START_DELAY),
+        Some(kind) => launch_managed(
+            client,
+            &req,
+            kind,
+            pane_id,
+            false,
+            DEFAULT_AGENT_START_DELAY,
+        ),
         None => {
             let runner = HerdrCliPaneRunner;
             launch_configured(

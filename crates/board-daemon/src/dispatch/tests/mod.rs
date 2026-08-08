@@ -213,8 +213,13 @@ fn ws(id: &str, label: &str) -> WorkspaceInfo {
 /// single-purpose makes cwd failure tests deterministic and independent of
 /// a real Herdr process.
 fn workspace_resolution_server(snapshot: Option<Value>) -> FakeHerdr {
+    workspace_resolution_server_take(snapshot, 3)
+}
+
+/// [`workspace_resolution_server`] with a configurable connection budget.
+fn workspace_resolution_server_take(snapshot: Option<Value>, take: usize) -> FakeHerdr {
     testkit::herdr_server()
-        .take(3)
+        .take(take)
         .on("workspace.list", |req| {
             testkit::reply(
                 req,
@@ -234,8 +239,16 @@ fn workspace_resolution_server(snapshot: Option<Value>) -> FakeHerdr {
 /// Serve the four calls made while creating a missing `new_workspace`:
 /// protocol gate, workspace discovery, create, and live pane snapshot.
 fn new_workspace_resolution_server(snapshot: Option<Value>) -> FakeHerdr {
+    new_workspace_resolution_server_take(snapshot, 4)
+}
+
+/// [`new_workspace_resolution_server`] with a configurable connection budget.
+/// `take` counts probe/request connections (`HerdrClient::connect` probes once
+/// plus one connection per call), so a test that needs the live snapshot to
+/// *succeed* must budget for it.
+fn new_workspace_resolution_server_take(snapshot: Option<Value>, take: usize) -> FakeHerdr {
     testkit::herdr_server()
-        .take(4)
+        .take(take)
         .on("workspace.list", |req| {
             testkit::reply(req, serde_json::json!({"workspaces": []}))
         })

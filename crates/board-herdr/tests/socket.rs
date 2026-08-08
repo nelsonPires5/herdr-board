@@ -17,7 +17,7 @@ use std::time::Duration;
 use board_herdr::{
     AgentPromptParams, AgentStartParams, AgentStatus, AgentWaitParams, HerdrClient, HerdrError,
     HerdrEvent, HerdrEvents, PaneRenameParams, PaneSplitParams, ReadSource, SocketDeadlines,
-    SplitDirection, Subscription, WorkspaceCreateParams, SUPPORTED_HERDR_PROTOCOL,
+    SplitDirection, Subscription, TabRenameParams, WorkspaceCreateParams, SUPPORTED_HERDR_PROTOCOL,
     SUPPORTED_HERDR_VERSION,
 };
 use serde_json::Value;
@@ -395,6 +395,33 @@ fn agent_wait_sends_target_until_and_timeout() {
         target: "w1:p2".into(),
         until: vec![AgentStatus::Idle, AgentStatus::Done],
         timeout_ms: Some(30000),
+    })
+    .unwrap();
+}
+
+#[test]
+fn tab_rename_serializes_typed_params_and_accepts_any_success_payload() {
+    // `tab.rename` is protocol-19 additive surface (schema fixture
+    // `TabRenameParams {tab_id, label}`; `herdr tab rename <TAB_ID> <LABEL>`
+    // is the CLI spelling). The board only needs the rename to have
+    // succeeded, so the client deliberately does not decode the result
+    // payload, whatever its shape.
+    let path = serve_calls(|req| {
+        assert_eq!(req["method"], "tab.rename");
+        assert_eq!(
+            req["params"],
+            serde_json::json!({"tab_id": "w1:t1", "label": "card-42"})
+        );
+        Action::Reply(format!(
+            "{{\"id\":\"{}\",\"result\":{{\"type\":\"ok\"}}}}",
+            req["id"].as_str().unwrap()
+        ))
+    });
+
+    let mut c = HerdrClient::connect(&path).unwrap();
+    c.tab_rename(&TabRenameParams {
+        tab_id: "w1:t1".into(),
+        label: "card-42".into(),
     })
     .unwrap();
 }

@@ -10,7 +10,7 @@ Re-run the install command to update — Herdr has no separate update command, s
 existing plugin:
 
 ```bash
-herdr plugin install nelsonPires5/herdr-board --ref v0.11.0 --yes
+herdr plugin install nelsonPires5/herdr-board --ref v0.11.1 --yes
 ```
 
 The build step requests a graceful stop (`board daemon --stop`) before recompiling, so the new
@@ -31,7 +31,8 @@ process-name kill.
 
 boardd writes one JSON object per line to private daily files in the XDG data directory:
 `~/.local/share/herdr-board/logs/daemon.YYYY-MM-DD.ndjson` on Linux (the platform data
-directory equivalent on macOS). The directory is mode `0700` and regular log files are mode
+directory equivalent on macOS; override the directory with `BOARD_LOG_DIR`). The directory is
+mode `0700` and regular log files are mode
 `0600`. `board daemon --foreground` mirrors the same structured events to stderr.
 
 Each board RPC and outbound Herdr RPC/subscription completion records its method, duration,

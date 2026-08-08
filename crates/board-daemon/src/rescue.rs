@@ -325,10 +325,13 @@ fn rescue_run(
         socket: target_socket,
         ownership: CardOwnership {
             owned_tab_id: owned_tab_id.as_deref(),
+            bootstrap: None,
             durable_pane_ids: &durable_pane_ids,
             reclaimable_pane_ids: &[],
             durable_anchor_pane_ids: &durable_anchor_pane_ids,
             remembered_anchor_id: None,
+            reuse_pane_id: None,
+            reuse_agent_kind: None,
         },
         execution,
         // Serialize against dispatch and against another concurrent rescue of

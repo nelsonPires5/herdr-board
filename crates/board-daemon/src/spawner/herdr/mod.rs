@@ -29,9 +29,12 @@ pub(crate) use managed::{launch_managed, DelayFn, DEFAULT_AGENT_START_DELAY};
 /// harnesses through a board-owned split child plus `herdr pane run`.
 ///
 /// New durable card tabs retain their root as a shell anchor; the anchor is
-/// never started or closed as a run. Every operation opens a client bound to
-/// the run's selected socket. Handles retain the run's explicit socket
-/// override so kill/liveness stay in-session.
+/// never started or closed as a run. Managed (Pi/Claude) launches close the
+/// anchor after they succeed, so a managed tab converges to exactly one harness
+/// pane; configured harnesses keep the persistent anchor because `pane run`
+/// exits close their child. Every operation opens a client bound to the run's
+/// selected socket. Handles retain the run's explicit socket override so
+/// kill/liveness stay in-session.
 #[derive(Clone)]
 pub struct HerdrSpawner {
     socket: PathBuf,
@@ -131,6 +134,25 @@ impl HerdrSpawner {
             .lock()
             .map_err(|_| anyhow!("card-tab allocation lock poisoned"))?;
 
+        // A bootstrap hint is this daemon's own exact record of a workspace it
+        // just created (`resolve_space` -> `workspace.create`). Remember its
+        // exact tab/root under the per-card lock BEFORE allocating: if the
+        // adoption split or the launch fails, the next placement attempt — or a
+        // later retry in this same daemon — still finds the adopted tab/root by
+        // exact id and recovers it instead of creating a second `card-<id>`
+        // tab. This memory is never ownership on its own: the allocator
+        // revalidates the exact ids against the live session before every
+        // split, so a stale or foreign id can never be adopted by label.
+        if tab_label.starts_with("card-") {
+            if let Some(bootstrap) = req.bootstrap.as_ref() {
+                self.card_tabs.remember(
+                    tab_key.clone(),
+                    bootstrap.tab_id.clone(),
+                    bootstrap.root_pane_id.clone(),
+                )?;
+            }
+        }
+
         let mut last_placement_race = None;
         for attempt in 0..2 {
             let remembered = self.card_tabs.remembered(&tab_key)?;
@@ -149,10 +171,13 @@ impl HerdrSpawner {
                 &env,
                 CardOwnership {
                     owned_tab_id: remembered_tab_id.as_deref(),
+                    bootstrap: req.bootstrap.as_ref(),
                     durable_pane_ids: &req.durable_pane_ids,
                     reclaimable_pane_ids: &req.reclaimable_pane_ids,
                     durable_anchor_pane_ids: &req.durable_anchor_pane_ids,
                     remembered_anchor_id,
+                    reuse_pane_id: req.reuse_pane_id.as_deref(),
+                    reuse_agent_kind: req.agent_kind.as_deref(),
                 },
             )
             .with_context(|| format!("placing pane in tab '{tab_label}' for {}", req.name))
@@ -175,12 +200,18 @@ impl HerdrSpawner {
                 }
             }
 
+            // Placement adopted the prior run's pane (`req.reuse_pane_id`) iff
+            // the owned pane id is exactly that candidate. The launch then skips
+            // `agent.start` and only re-prompts the live agent.
+            let reused = req.reuse_pane_id.as_deref() == Some(owned.pane_id.as_str());
+
             let launch_result = match req.agent_kind.as_deref() {
                 Some(kind) => launch_managed(
                     &mut client,
                     req,
                     kind,
                     &owned.pane_id,
+                    reused,
                     self.agent_start_delay.as_ref(),
                 ),
                 None => launch_configured(
@@ -194,10 +225,39 @@ impl HerdrSpawner {
 
             match launch_result {
                 Ok(()) => {
+                    // Managed card tabs converge to exactly one harness pane:
+                    // once the fresh launch (or the reuse re-prompt) succeeded,
+                    // close the anchor so no shell strip is left beside the
+                    // agent. Closing the split parent is live-verified safe —
+                    // the child keeps its process and environment — and the
+                    // handle persists anchor_pane_id as None so the registry
+                    // and the durable run never treat the closed anchor as
+                    // live. Configured harnesses keep their persistent anchor
+                    // unchanged: `pane run` exits close their child, so the
+                    // anchor is what the next run splits from. A failed anchor
+                    // close must not fail an already-successful launch: keep
+                    // the anchor live (and persisted) so the next allocation
+                    // still finds it by identity.
+                    let mut anchor_pane_id = owned.anchor_pane_id.clone();
+                    if req.agent_kind.is_some() {
+                        if let Some(anchor) = owned.anchor_pane_id.as_deref() {
+                            match close_owned_for_retry(&mut client, anchor) {
+                                Ok(()) => anchor_pane_id = None,
+                                Err(error) => {
+                                    tracing::warn!(
+                                        pane_id = anchor,
+                                        error_category = "herdr",
+                                        error = %format!("{error:#}"),
+                                        "managed launch succeeded but closing the tab anchor failed; keeping it"
+                                    );
+                                }
+                            }
+                        }
+                    }
                     return Ok(RuntimeHandle {
                         pane_id: Some(owned.pane_id),
                         workspace_id: Some(owned.workspace_id),
-                        anchor_pane_id: owned.anchor_pane_id,
+                        anchor_pane_id,
                         pid: None,
                         herdr_socket: req.herdr_socket.clone(),
                     });

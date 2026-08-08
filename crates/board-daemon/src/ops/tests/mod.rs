@@ -59,6 +59,50 @@ fn add_run_with_pane(d: &Arc<Daemon>, pane: Option<&str>) -> (i64, i64) {
     (card.id, run.id)
 }
 
+/// Create a finished first run and an open replacement run on the same pane,
+/// exactly as a managed same-conversation resume hop appears durably. The live
+/// process still carries `first.id` in BOARD_RUN_ID while HERDR_PANE_ID remains
+/// `w1:p-shared` for the open run.
+fn add_reused_pane_runs(d: &Arc<Daemon>) -> (i64, i64, i64) {
+    let db = d.store.lock();
+    let card = db
+        .create_card(&CardCreateParams {
+            title: "reused pane actor".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let enqueue = |prompt: &'static str| EnqueueRun {
+        card_id: card.id,
+        column_id: card.column_id,
+        harness: "pi",
+        argv_json: "[]",
+        prompt_snapshot: prompt,
+        system_prompt_snapshot: None,
+        launch_spec_json: None,
+        session_id: Some("conversation-1"),
+        session: None,
+    };
+    let first = db.enqueue_run_uow(&enqueue("first")).unwrap();
+    db.promote_run_uow(first.id, Some("w1"), Some("w1:p-shared"), None)
+        .unwrap();
+    db.finalize_run_uow(&FinalizeRun {
+        run_id: first.id,
+        outcome: RunOutcome::Ok,
+        summary: Some("first stage done"),
+        comments: &[],
+        target_column_id: None,
+        final_status: CardStatus::Done,
+        final_awaiting_reason: None,
+        next: None,
+    })
+    .unwrap();
+
+    let current = db.enqueue_run_uow(&enqueue("current")).unwrap();
+    db.promote_run_uow(current.id, Some("w1"), Some("w1:p-shared"), None)
+        .unwrap();
+    (card.id, first.id, current.id)
+}
+
 /// A fake Herdr for `run.focus`: `pane.get` reports the recorded pane as still
 /// existing, and `pane.focus` answers with `reply` (a raw `"result":…` or
 /// `"error":…` fragment). One reply per connection, like real herdr.
@@ -274,7 +318,11 @@ fn fake_rescue_herdr(faults: RescueFakeFaults) -> RescueFake {
 
     // (pane_id, tab_id, label, agent). The anchor survives its run's pane,
     // exactly as a real card tab's shell anchor does — unless the fault says the
-    // whole tab is gone, in which case placement must create a new one.
+    // whole tab is gone, in which case placement must create a new one. An
+    // unrelated user pane (the workspace's own initial tab root, as a real
+    // workspace keeps) is always present: it is what keeps the workspace cwd
+    // lookup answerable once a successful managed rescue closes the card tab's
+    // anchor.
     let initial: Vec<FakePane> = if faults.anchor_missing {
         vec![(
             "w1:foreign".to_string(),
@@ -283,12 +331,20 @@ fn fake_rescue_herdr(faults: RescueFakeFaults) -> RescueFake {
             None,
         )]
     } else {
-        vec![(
-            "w1:anchor".to_string(),
-            "w1:t1".to_string(),
-            Some(format!("{tab_label}-anchor")),
-            None,
-        )]
+        vec![
+            (
+                "w1:anchor".to_string(),
+                "w1:t1".to_string(),
+                Some(format!("{tab_label}-anchor")),
+                None,
+            ),
+            (
+                "w1:foreign".to_string(),
+                "w1:t9".to_string(),
+                Some("someone-elses-pane".to_string()),
+                None,
+            ),
+        ]
     };
     let panes: Arc<Mutex<Vec<FakePane>>> = Arc::new(Mutex::new(initial));
     let panes2 = Arc::clone(&panes);

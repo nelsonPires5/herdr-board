@@ -10,6 +10,12 @@ All notable changes to this project are documented here. The format is based on
 - [](https://github.com/nelsonPires5/herdr-board/pull/?) Keep Compact detail actions fully named across wrapped rows, reserve Runs action rows before history content, and contextualize filter-empty copy (PR link pending).
 - [](https://github.com/nelsonPires5/herdr-board/pull/?) Tighten the responsive TUI chrome: one-line desktop headers, three-row Compact navigation, `[ X ]` close chips, field-visible multiline editors, and no persistent footer hint row (PR link pending).
 
+## [0.11.1] - 2026-08-08
+
+- [#57](https://github.com/nelsonPires5/herdr-board/pull/57) Let managed card tabs adopt new-workspace roots and run without visible anchors.
+
+- [#56](https://github.com/nelsonPires5/herdr-board/pull/56) Reuse the managed agent pane on same-conversation resume hops while fresh columns still mint and manual landings stay open.
+
 ## [0.11.0] - 2026-08-04
 
 - [#54](https://github.com/nelsonPires5/herdr-board/pull/54) Upgrade Herdr compatibility to 0.8.0/socket protocol 19 and centralize the gated client/daemon integration with matching E2E preflight.
@@ -337,7 +343,8 @@ a visible herdr pane. Ships as a single `board` binary (TUI + daemon + CLI) and 
 - **Packaging.** `herdr-plugin.toml` manifest, and `scripts/` for build, install (guarded behind
   `--yes`), the open-or-focus launcher, a raw protocol client, and a live-herdr e2e smoke test.
 
-[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.11.1
 [0.11.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.11.0
 [0.10.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.10.0
 [0.9.1]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.9.1

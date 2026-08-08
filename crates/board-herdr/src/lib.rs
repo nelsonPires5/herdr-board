@@ -36,7 +36,7 @@ pub use events::{
 };
 pub use params::{
     AgentPromptParams, AgentPromptWaitOptions, AgentStartParams, AgentWaitParams, PaneRenameParams,
-    PaneSplitParams, TabCreateParams, WorkspaceCreateParams,
+    PaneSplitParams, TabCreateParams, TabRenameParams, WorkspaceCreateParams,
 };
 pub use transport::{default_socket_path, SocketDeadlines};
 pub use types::{

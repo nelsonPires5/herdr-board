@@ -20,6 +20,16 @@ pub use local::LocalSpawner;
 pub(crate) use placement::CardOwnership;
 pub(crate) use rescue::{rescue_run_pane, RescueOutcome, RescuePlan};
 
+/// One-shot bootstrap placement evidence from a workspace this dispatch just
+/// created: the exact initial tab and root pane of the brand-new workspace.
+/// Only the first card-tab allocation may adopt it (after strict verification);
+/// reused/existing/user workspaces never produce a hint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceBootstrapHint {
+    pub tab_id: String,
+    pub root_pane_id: String,
+}
+
 /// A request to launch one agent process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HerdrLaunchPlan {
@@ -56,6 +66,10 @@ pub struct HerdrLaunchPlan {
     pub reclaimable_pane_ids: Vec<String>,
     /// Exact persisted anchor ids, newest first.
     pub durable_anchor_pane_ids: Vec<String>,
+    /// A prior run-child pane id to reuse on a same-conversation resume hop
+    /// (no fresh split, no `agent.start`): the live agent is re-prompted for
+    /// the next stage. `None` keeps the historical always-split behavior.
+    pub reuse_pane_id: Option<String>,
     /// Working directory (resolved workspace cwd, or `LocalSpawner`).
     pub cwd: Option<PathBuf>,
     /// herdr workspace id (for `workspace` / `new_workspace` spaces).
@@ -63,6 +77,10 @@ pub struct HerdrLaunchPlan {
     /// herdr socket to spawn on, resolved from the card's session. `None` =
     /// the spawner's default socket (`LocalSpawner` ignores it).
     pub herdr_socket: Option<PathBuf>,
+    /// One-shot bootstrap hint from a workspace this dispatch just created.
+    /// The first card-tab allocation verifies and adopts its exact tab/root;
+    /// any mismatch falls back to a fresh `tab.create` without touching it.
+    pub bootstrap: Option<WorkspaceBootstrapHint>,
     /// Environment pairs to set on the child.
     pub env: Vec<(String, String)>,
     /// The command line.
