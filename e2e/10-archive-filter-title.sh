@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 10-archive-filter-title.sh — the TUI archive filter renames its Herdr pane
-# border and keeps the board footer minimal.
+# border and keeps the board chrome minimal (no footer hint row or redundant
+# header labels).
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/lib.sh"
 
@@ -18,7 +19,7 @@ PANE_ID="$(printf '%s' "$tab_json" | jget pane_id)"
 # Verified against Herdr 0.8.0 / protocol 19: `pane rename <pane_id> <label>`.
 # The plugin variables reproduce the real pane context without linking a plugin
 # into anything except this disposable session/workspace.
-e2e_launch_tui "$PANE_ID" \
+E2E_TUI_COLS=52 e2e_launch_tui "$PANE_ID" \
   "HERDR_PLUGIN_ID=herdr-board HERDR_PANE_ID=$PANE_ID HERDR_BIN_PATH=$HERDR_BIN HERDR_SOCKET_PATH=$HERDR_SOCKET_PATH BOARD_SOCKET=$BOARD_SOCKET BOARD_DB=$BOARD_DB HERDR_BOARD_CONFIG=$HERDR_BOARD_CONFIG BOARD_SCOPE_PATH=$BOARD_SCOPE_PATH"
 
 pane_label() {
@@ -55,12 +56,15 @@ e2e_herdr_mutate -- pane send-keys "$PANE_ID" v
 wait_label "Board [$SCOPE_LABEL · ARCHIVED]"
 ok "archive filter stays synchronized with the Herdr pane title"
 
-step "Assert the board footer is minimal"
-screen="$("$HERDR_BIN" pane read "$PANE_ID" --source recent-unwrapped --lines 200 || true)"
-printf '%s\n' "$screen" | grep -q "? help" || fail "minimal '? help' footer missing"
+step "Assert board chrome has direct filters and no persistent footer hint"
+screen="$("$HERDR_BIN" pane read "$PANE_ID" --source visible --lines 200 || true)"
+printf '%s\n' "$screen" | grep -q "? help" && fail "legacy '? help' footer label still visible"
+printf '%s\n' "$screen" | grep -Eq '\[ (Active|Act|A) \].*\[ All \].*\[ (Archived|Arc|R) \]' \
+  || fail "direct visibility filter chips not rendered"
+printf '%s\n' "$screen" | grep -Eq 'Board:|Visible:' && fail "redundant Board:/Visible: header label still visible"
 printf '%s\n' "$screen" | grep -q "shown" && fail "legacy shown count still visible"
 printf '%s\n' "$screen" | grep -q "archived ·" && fail "legacy archived count still visible"
 printf '%s\n' "$screen" | grep -q "column [0-9]" && fail "legacy column counter still visible"
-ok "footer contains only the help affordance"
+ok "board chrome has direct filters and no persistent footer hint"
 
 step "10-archive-filter-title: ALL CHECKS PASSED"

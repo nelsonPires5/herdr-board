@@ -23,7 +23,7 @@ use std::collections::HashMap;
 
 use board_core::engine::{validate_card_archive, ValidationError};
 use board_core::protocol::{BoardSnapshot, CardDetail, CardStatus};
-use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use ratatui::layout::Rect;
 
 use crate::forms::Form;
@@ -133,6 +133,8 @@ pub struct App {
     pub detail: Option<CardDetail>,
     /// Card detail opens as a contextual popup; users can expand it in place.
     pub detail_fullscreen: bool,
+    /// Whether the card/column form fills the screen (toggle via `f`).
+    pub form_fullscreen: bool,
     pub detail_scroll_target: DetailScrollTarget,
     pub detail_comments_scroll: usize,
     pub detail_runs_scroll: usize,
@@ -197,6 +199,7 @@ impl App {
             card_filter: CardFilter::Active,
             detail: None,
             detail_fullscreen: false,
+            form_fullscreen: false,
             detail_scroll_target: DetailScrollTarget::Comments,
             detail_comments_scroll: 0,
             detail_runs_scroll: 0,
@@ -362,6 +365,25 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
 }
 
 fn on_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
+    // Chord guard: the forms are the only screens with modifier-key bindings
+    // (`Ctrl+E`, `Ctrl+J`, `Shift+Enter`); every other binding is a bare key
+    // matched on `KeyCode` alone, so a chorded press would fire the plain key
+    // arm. Terminals deliver `Esc` followed quickly by another key as a
+    // single `Alt+<key>` sequence, which made a stray `Esc M` read as `M` and
+    // open "move column" unprompted. `Shift` stays allowed (it is the
+    // natural modifier of the uppercase letters the board binds, and the
+    // click path synthesizes `Char('M')` with `SHIFT`).
+    if !matches!(app.screen, Screen::CardForm | Screen::ColumnForm)
+        && k.modifiers.intersects(
+            KeyModifiers::CONTROL
+                | KeyModifiers::ALT
+                | KeyModifiers::META
+                | KeyModifiers::SUPER
+                | KeyModifiers::HYPER,
+        )
+    {
+        return vec![];
+    }
     // `?` is global (B4): every screen that is not swallowing text input can
     // reach help, and each one comes back to itself. The forms are excluded
     // because `?` is a literal character there, and Help itself is excluded

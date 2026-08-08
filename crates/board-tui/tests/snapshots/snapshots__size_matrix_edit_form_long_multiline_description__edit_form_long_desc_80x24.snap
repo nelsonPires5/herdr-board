@@ -1,0 +1,28 @@
+---
+source: crates/board-tui/tests/snapshots.rs
+expression: output
+---
+" ◈ herdr-board ● 1 running     [ Global ▾ ]      [ Active ] [ All ] [ Archived ]"
+"────────────────────────────────────────────────────────────────────────────────"
+"┌ Edit card  ·  f: fullscreen  ·  Tab: field · Enter: save · Esc: cancel ──────┐"
+"│┌ Task ─────────────────────────────────────────────────────────────────────┐▲│"
+"││  title                                                                    │█│"
+"││Long description demo                                                      │█│"
+"││▌ description (base prompt) [ $EDITOR ]                                    │█│"
+"││▏This is the first paragraph of an intentionally long card description that│█│"
+"││must word-wrap across many rendered rows instead of being cut off, which is│█│"
+"││exactly the bug this change fixes for multiline text fields inside the edit│││"
+"││form.                                                                      │││"
+"│└───────────────────────────────────────────────────────────────────────────┘││"
+"│                                                                             ││"
+"│                                                                             ││"
+"│                                                                             ││"
+"│                                                                             ││"
+"│                                                                             ││"
+"│                                                                             ││"
+"│                                                                             ││"
+"│                                                                             ▼│"
+"│               [ Save ]                              [ Cancel ]               │"
+"└──────────────────────────────────────────────────────────────────────────────┘"
+" [ + New card ]  [ Open card ]  [ Archive card ][ + New column ][ Edit column ] "
+" [ Delete column ]    [ Move column ]       [ Template ]         [ ? Help ]     "

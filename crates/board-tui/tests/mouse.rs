@@ -10,12 +10,12 @@
 //! a test-only accessor to production code.
 
 use board_core::client::BoardClient;
-use board_tui::app::{Screen, SwitcherLevel};
+use board_tui::app::{update, Effect, Msg, Screen, SwitcherLevel};
 use board_tui::forms::FieldId;
 use board_tui::testkit::{
     demo_client, demo_driver, driver_with_editor, key as key_msg, left_down, mouse, render_at,
 };
-use board_tui::widgets::Zone;
+use board_tui::widgets::{UiAction, Zone};
 use board_tui::Driver;
 use crossterm::event::{KeyCode, MouseEventKind};
 use ratatui::layout::Rect;
@@ -203,7 +203,12 @@ fn compact_board_header_zones_present_and_wrap_both_ends() {
         "Compact board header must register hit zones"
     );
 
-    for ((x, y), zone) in zones {
+    for ((x, y), zone) in zones.into_iter().filter(|(_, zone)| {
+        matches!(
+            zone,
+            Zone::HeaderPrev | Zone::HeaderNext | Zone::HeaderSwitch
+        )
+    }) {
         let mut d = setup_board();
         render_at(&mut d, w, h);
         let before_col = d.app.sel_col;
@@ -233,7 +238,10 @@ fn regular_board_draws_no_compact_header_zones() {
     let mut d = setup_board();
     render_at(&mut d, w, h);
     assert!(
-        hit_zones(&d, w, h).is_empty(),
+        hit_zones(&d, w, h).into_iter().all(|(_, zone)| !matches!(
+            zone,
+            Zone::HeaderPrev | Zone::HeaderNext | Zone::HeaderSwitch
+        )),
         "Regular board must not register the Compact-only header zones"
     );
 }
@@ -251,7 +259,15 @@ fn switcher_columns_level_rows_select_and_close() {
             "switcher (columns level) must register hit zones at {w}x{h}"
         );
 
-        for ((x, y), zone) in zones {
+        for ((x, y), zone) in zones.into_iter().filter(|(_, zone)| {
+            matches!(
+                zone,
+                Zone::SwitcherRow(_)
+                    | Zone::SwitcherSwitchBoard
+                    | Zone::SwitcherApplyTemplate
+                    | Zone::SheetClose
+            )
+        }) {
             let mut d = setup_switcher_columns();
             let n = d.app.board.columns.len();
             render_at(&mut d, w, h);
@@ -303,7 +319,10 @@ fn switcher_boards_level_rows_switch_board_and_back_button_restores_columns_sel(
             "switcher (boards level) must register hit zones at {w}x{h}"
         );
 
-        for ((x, y), zone) in zones {
+        for ((x, y), zone) in zones
+            .into_iter()
+            .filter(|(_, zone)| matches!(zone, Zone::SwitcherRow(_) | Zone::SheetClose))
+        {
             let mut d = setup_switcher_boards();
             render_at(&mut d, w, h);
             let expected_board_id = d.app.switcher.as_ref().and_then(|s| match zone {
@@ -348,7 +367,10 @@ fn switcher_boards_level_reached_via_b_closes_outright_on_sheet_close() {
             "switcher (boards level via `b`) must register hit zones at {w}x{h}"
         );
 
-        for ((x, y), zone) in zones {
+        for ((x, y), zone) in zones
+            .into_iter()
+            .filter(|(_, zone)| matches!(zone, Zone::SwitcherRow(_) | Zone::SheetClose))
+        {
             let mut d = setup_switcher_boards_via_b();
             render_at(&mut d, w, h);
             d.handle(left_down(x, y));
@@ -389,7 +411,10 @@ fn form_bar_save_submits_and_bar_cancel_closes() {
             "form must register at least the ButtonBar zones at {w}x{h}"
         );
 
-        for ((x, y), zone) in zones {
+        for ((x, y), zone) in zones
+            .into_iter()
+            .filter(|(_, zone)| matches!(zone, Zone::BarSave | Zone::BarCancel | Zone::SheetClose))
+        {
             let mut d = setup_form();
             render_at(&mut d, w, h);
             d.handle(left_down(x, y));
@@ -438,7 +463,10 @@ fn picker_sheet_close_cancels_without_choosing() {
                 "Compact picker must register a sheet-close zone"
             );
         }
-        for ((x, y), zone) in zones {
+        for ((x, y), zone) in zones
+            .into_iter()
+            .filter(|(_, zone)| matches!(zone, Zone::SheetClose))
+        {
             let mut d = setup_picker();
             render_at(&mut d, w, h);
             d.handle(left_down(x, y));
@@ -469,7 +497,10 @@ fn confirm_sheet_close_cancels_without_confirming() {
                 "Compact confirm must register a sheet-close zone"
             );
         }
-        for ((x, y), zone) in zones {
+        for ((x, y), zone) in zones
+            .into_iter()
+            .filter(|(_, zone)| matches!(zone, Zone::SheetClose))
+        {
             let mut d = setup_confirm();
             render_at(&mut d, w, h);
             d.handle(left_down(x, y));
@@ -500,7 +531,10 @@ fn help_sheet_close_returns_to_board() {
                 "Compact help must register a sheet-close zone"
             );
         }
-        for ((x, y), zone) in zones {
+        for ((x, y), zone) in zones
+            .into_iter()
+            .filter(|(_, zone)| matches!(zone, Zone::SheetClose))
+        {
             let mut d = setup_help();
             render_at(&mut d, w, h);
             d.handle(left_down(x, y));
@@ -528,7 +562,15 @@ fn card_detail_comment_zones_row_edit_delete_history() {
             "card detail must register at least the comment zones at {w}x{h}"
         );
 
-        for ((x, y), zone) in zones {
+        for ((x, y), zone) in zones.into_iter().filter(|(_, zone)| {
+            matches!(
+                zone,
+                Zone::CommentRow(_)
+                    | Zone::CommentEdit
+                    | Zone::CommentDelete
+                    | Zone::CommentHistory
+            )
+        }) {
             let mut d = setup_card_detail_non_system_focus();
             render_at(&mut d, w, h);
             d.handle(left_down(x, y));
@@ -565,8 +607,8 @@ fn card_detail_comment_zones_row_edit_delete_history() {
     }
 }
 
-/// System comments are immutable (`docs/protocol.md`): tapping `[Edit]`/
-/// `[Del]` while a `[system]` comment is focused must toast rather than open
+/// System comments are immutable (`docs/protocol.md`): tapping `[ Edit ]`/
+/// `[ Delete ]` while a `[system]` comment is focused must toast rather than open
 /// the form/confirm — the zone stays tappable (not a dead zone), it just
 /// routes to the same toast the `e`/`d` keys produce.
 #[test]
@@ -617,7 +659,10 @@ fn comment_history_sheet_close_returns_to_detail_not_board() {
             );
         }
 
-        for ((x, y), zone) in zones {
+        for ((x, y), zone) in zones
+            .into_iter()
+            .filter(|(_, zone)| matches!(zone, Zone::SheetClose))
+        {
             let mut d = setup_card_detail();
             d.handle(key_msg(KeyCode::Char('h')));
             render_at(&mut d, w, h);
@@ -807,16 +852,558 @@ fn wheel_over_a_column_with_zero_visible_slots_does_not_panic() {
 // -- click in a zone-less area is a no-op ------------------------------------
 
 #[test]
-fn click_on_the_footer_row_is_a_no_op() {
-    let mut d = driver();
+fn idle_board_footer_is_inert_and_help_stays_in_the_header_and_action_row() {
+    let mut blank = driver();
+    let output = render_at(&mut blank, 80, 24);
+    let before_col = blank.app.sel_col;
+    let before_card = blank.app.sel_card;
+    assert!(
+        output
+            .lines()
+            .all(|line| { !line.contains("drag card to move") && !line.contains("? help") }),
+        "no persistent footer hint may be rendered:\n{output}"
+    );
+    // The old footer row is now reclaimed. A blank cell immediately above the
+    // action rail remains inert, while the rail itself stays clickable.
+    blank.handle(left_down(20, 21));
+    assert_eq!(blank.app.screen, Screen::Board);
+    assert_eq!(blank.app.sel_col, before_col);
+    assert_eq!(blank.app.sel_card, before_card);
+    // Help remains reachable from the rendered action row instead.
+    let mut help = driver();
+    render_at(&mut help, 80, 24);
+    let (x, y) = hit_zones(&help, 80, 24)
+        .into_iter()
+        .find_map(|(point, zone)| (zone == Zone::Action(UiAction::Help)).then_some(point))
+        .expect("Help action must be rendered");
+    help.handle(left_down(x, y));
+    assert_eq!(help.app.screen, Screen::Help);
+}
+
+// -- shared semantic action zones --------------------------------------------
+
+fn click_semantic_action(d: &mut Driver, action: UiAction) {
+    let rect = Rect::new(2, 2, 8, 1);
+    d.app.hit_map.borrow_mut().push(rect, Zone::Action(action));
+    d.handle(left_down(3, 2));
+}
+
+#[test]
+fn semantic_board_action_zones_follow_the_existing_key_paths() {
+    let mut new_by_click = setup_board();
+    click_semantic_action(&mut new_by_click, UiAction::NewCard);
+    assert_eq!(new_by_click.app.screen, Screen::CardForm);
+
+    let mut open_by_click = setup_board();
+    click_semantic_action(&mut open_by_click, UiAction::OpenCard);
+    assert_eq!(open_by_click.app.screen, Screen::CardDetail);
+
+    let mut help_by_click = setup_board();
+    click_semantic_action(&mut help_by_click, UiAction::Help);
+    assert_eq!(help_by_click.app.screen, Screen::Help);
+
+    let mut filter_by_click = setup_board();
+    let before = filter_by_click.app.card_filter;
+    click_semantic_action(&mut filter_by_click, UiAction::CycleFilter);
+    assert_ne!(filter_by_click.app.card_filter, before);
+}
+
+#[test]
+fn semantic_detail_action_zones_follow_the_existing_key_paths() {
+    let mut close_by_click = setup_card_detail();
+    click_semantic_action(&mut close_by_click, UiAction::CloseDetail);
+    assert_eq!(close_by_click.app.screen, Screen::Board);
+
+    let mut comment_by_click = setup_card_detail();
+    click_semantic_action(&mut comment_by_click, UiAction::AddComment);
+    assert_eq!(comment_by_click.app.screen, Screen::CardForm);
+}
+
+#[test]
+fn semantic_action_is_inert_on_the_wrong_screen() {
+    let mut d = setup_board();
+    click_semantic_action(&mut d, UiAction::DeleteComment);
+    assert_eq!(d.app.screen, Screen::Board);
+}
+
+#[test]
+fn board_chrome_exposes_the_reduced_creation_and_column_actions_at_every_breakpoint() {
+    let expected = [
+        UiAction::NewCard,
+        UiAction::OpenCard,
+        UiAction::ArchiveCard,
+        UiAction::Help,
+        UiAction::NewColumn,
+        UiAction::EditColumn,
+        UiAction::DeleteColumn,
+        UiAction::MoveColumn,
+        UiAction::ApplyTemplate,
+    ];
+    let expected_wide = [UiAction::SwitchBoard];
+    for (w, h) in [(40, 20), (80, 24), (120, 35)] {
+        let mut d = setup_board();
+        render_at(&mut d, w, h);
+        let zones = hit_zones(&d, w, h);
+        for action in expected {
+            assert!(
+                zones.iter().any(|(_, zone)| *zone == Zone::Action(action)),
+                "{w}x{h} must expose {action:?}"
+            );
+        }
+        if w >= 80 {
+            for action in expected_wide {
+                assert!(
+                    zones.iter().any(|(_, zone)| *zone == Zone::Action(action)),
+                    "{w}x{h} must expose {action:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn rendered_board_actions_reuse_keyboard_behavior() {
+    for (action, expected_screen) in [
+        (UiAction::NewCard, Screen::CardForm),
+        (UiAction::OpenCard, Screen::CardDetail),
+        (UiAction::Help, Screen::Help),
+    ] {
+        let mut d = setup_board();
+        render_at(&mut d, 40, 20);
+        let (x, y) = hit_zones(&d, 40, 20)
+            .into_iter()
+            .find_map(|(point, zone)| (zone == Zone::Action(action)).then_some(point))
+            .unwrap_or_else(|| panic!("missing rendered {action:?}"));
+        d.handle(left_down(x, y));
+        assert_eq!(d.app.screen, expected_screen, "action={action:?}");
+    }
+}
+
+#[test]
+fn mandatory_board_breakpoints_keep_filter_labels_complete_and_action_zone_tight() {
+    use board_tui::app::CardFilter;
+    for (w, h) in [(40, 20), (52, 24), (60, 24), (80, 24), (120, 35)] {
+        let mut d = setup_board();
+        let output = render_at(&mut d, w, h);
+        let expected_filters = match w {
+            0..=47 => ["[ Act ]", "[ All ]", "[ Arc ]"],
+            48..=59 => ["[ Active ]", "[ All ]", "[ Archived ]"],
+            60..=71 => ["[ A ]", "[ All ]", "[ R ]"],
+            _ => ["[ Active ]", "[ All ]", "[ Archived ]"],
+        };
+        for filter in expected_filters {
+            assert!(
+                output.contains(filter),
+                "filter {filter:?} clipped at {w}x{h}"
+            );
+        }
+        assert!(
+            !output.contains("Board:"),
+            "redundant Board label at {w}x{h}"
+        );
+        assert!(
+            !output.contains("Visible:"),
+            "redundant Visible label at {w}x{h}"
+        );
+        for label in ["Edit col", "Del col", "Move col", "Template", "? Help"] {
+            let label = if label == "Del col" && output.contains("Delete column") {
+                "Delete column"
+            } else {
+                label
+            };
+            assert!(
+                output.contains(label),
+                "semantic board action {label:?} clipped at {w}x{h}"
+            );
+        }
+        assert!(
+            output.contains("New card") || output.contains("+ Card"),
+            "New card action clipped at {w}x{h}"
+        );
+        for action in [UiAction::Refresh, UiAction::Quit] {
+            assert!(
+                !output
+                    .lines()
+                    .any(|l| l.contains("Refresh") || l.contains("Quit")),
+                "{action:?} must not be rendered at {w}x{h}"
+            );
+        }
+        for filter in [CardFilter::Active, CardFilter::All, CardFilter::Archived] {
+            let cells = (0..h)
+                .flat_map(|y| (0..w).map(move |x| (x, y)))
+                .filter(|(x, y)| d.app.hit_map.borrow().hit(*x, *y) == Some(Zone::Filter(filter)))
+                .collect::<Vec<_>>();
+            assert!(!cells.is_empty(), "filter {filter:?} missing at {w}x{h}");
+        }
+    }
+}
+
+#[test]
+fn rendered_board_actions_follow_existing_guards_and_screens() {
+    for (action, expected_screen) in [
+        (UiAction::NewColumn, Screen::ColumnForm),
+        (UiAction::DeleteColumn, Screen::Picker),
+        (UiAction::MoveColumn, Screen::MoveColumn),
+        (UiAction::EditColumn, Screen::ColumnForm),
+        (UiAction::ApplyTemplate, Screen::Board),
+    ] {
+        let mut d = setup_board();
+        render_at(&mut d, 80, 24);
+        let (x, y) = hit_zones(&d, 80, 24)
+            .into_iter()
+            .find_map(|(point, zone)| (zone == Zone::Action(action)).then_some(point))
+            .unwrap_or_else(|| panic!("missing rendered {action:?}"));
+        d.handle(left_down(x, y));
+        assert_eq!(d.app.screen, expected_screen, "action={action:?}");
+    }
+}
+
+#[test]
+fn card_detail_run_row_click_focuses_runs_and_selects_exact_older_run() {
+    let mut d = setup_card_detail();
+    let runs = &mut d.app.detail.as_mut().unwrap().runs;
+    assert!(!runs.is_empty(), "demo failed card must have a run");
+    let mut older = runs[0].clone();
+    older.id = 90_001;
+    let mut newer = runs[0].clone();
+    newer.id = 90_002;
+    *runs = vec![older, newer];
+    d.app.detail_run_sel = 1;
+    d.app.detail_runs_scroll = 0;
+    d.app.detail_scroll_target = board_tui::app::DetailScrollTarget::Comments;
+
+    render_at(&mut d, 120, 35);
+    let (x, y) = hit_zones(&d, 120, 35)
+        .into_iter()
+        .find_map(|(point, zone)| (zone == Zone::RunRow(0)).then_some(point))
+        .expect("older run row must be clickable");
+    d.handle(left_down(x, y));
+    assert_eq!(
+        d.app.detail_scroll_target,
+        board_tui::app::DetailScrollTarget::Runs
+    );
+    assert_eq!(d.app.detail_run_sel, 0);
+    let effects = update(
+        &mut d.app,
+        Msg::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('o'),
+            crossterm::event::KeyModifiers::NONE,
+        )),
+    );
+    assert!(
+        matches!(effects.as_slice(), [Effect::FocusRun(card_id, 90_001)]
+        if *card_id == d.app.detail.as_ref().unwrap().card.id)
+    );
+}
+
+#[test]
+fn card_detail_title_close_and_toggle_actions_follow_keyboard_paths() {
+    let mut toggle = setup_card_detail();
+    render_at(&mut toggle, 80, 24);
+    let point = hit_zones(&toggle, 80, 24)
+        .into_iter()
+        .find_map(|(p, z)| (z == Zone::Action(UiAction::ToggleDetail)).then_some(p))
+        .expect("toggle title action");
+    toggle.handle(left_down(point.0, point.1));
+    assert!(toggle.app.detail_fullscreen);
+
+    let mut close = setup_card_detail();
+    render_at(&mut close, 80, 24);
+    let point = hit_zones(&close, 80, 24)
+        .into_iter()
+        .find_map(|(p, z)| (z == Zone::Action(UiAction::CloseDetail)).then_some(p))
+        .expect("close title action");
+    close.handle(left_down(point.0, point.1));
+    assert_eq!(close.app.screen, Screen::Board);
+    assert!(close.app.detail.is_none());
+}
+
+#[test]
+fn card_detail_exposes_card_comment_and_run_action_zones_at_all_breakpoints() {
+    let expected = [
+        UiAction::EditCard,
+        UiAction::ArchiveCard,
+        UiAction::AddComment,
+        UiAction::FocusRunPane,
+        UiAction::RetryRun,
+        UiAction::CancelRun,
+        UiAction::CloseDetail,
+        UiAction::ToggleDetail,
+    ];
+    for (w, h) in [(40, 20), (52, 24), (60, 24), (80, 24), (120, 35)] {
+        let mut d = setup_card_detail_non_system_focus();
+        render_at(&mut d, w, h);
+        let zones = hit_zones(&d, w, h);
+        for action in expected {
+            assert!(
+                zones.iter().any(|(_, z)| *z == Zone::Action(action)),
+                "{w}x{h} missing {action:?}"
+            );
+        }
+        // The persistent chrome leaves no run-row viewport at 40x20 or
+        // 80x24; the run actions remain in the card rail/section action row.
+        // The wide three-pane detail keeps a rendered clickable run row.
+        if w >= 120 {
+            assert!(zones.iter().any(|(_, z)| matches!(z, Zone::RunRow(_))));
+        }
+        // At 40x20 the comments card collapses to a hint without the in-card
+        // action bar, so the Edit/Delete/History bar is only guaranteed where
+        // the section has room for it.
+        if w >= 80 {
+            assert!(
+                zones.iter().any(|(_, z)| matches!(z, Zone::CommentEdit)),
+                "{w}x{h} missing CommentEdit"
+            );
+        }
+    }
+}
+
+#[test]
+fn card_detail_awaiting_confirm_zone_is_conditional_and_uses_run_done_path() {
+    for (w, h) in [(40, 20), (80, 24)] {
+        let mut d = setup_card_detail();
+        assert!(!hit_zones_after_render(&mut d, w, h)
+            .iter()
+            .any(|(_, z)| *z == Zone::Action(UiAction::ConfirmAwaiting)));
+        d.app.detail.as_mut().unwrap().card.status = board_core::protocol::CardStatus::Awaiting;
+        let zones = hit_zones_after_render(&mut d, w, h);
+        let point = zones
+            .into_iter()
+            .find_map(|(p, z)| (z == Zone::Action(UiAction::ConfirmAwaiting)).then_some(p))
+            .expect("awaiting confirm");
+        let card_id = d.app.detail.as_ref().unwrap().card.id;
+        // HitMap routing itself is covered by title/actions above; use the same
+        // reducer event here so the exact completion effect stays observable.
+        let effects = update(
+            &mut d.app,
+            Msg::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            )),
+        );
+        assert!(
+            matches!(effects.as_slice(), [Effect::RunDone(id, board_core::protocol::RunOutcome::Ok)] if *id == card_id)
+        );
+        assert!(point.0 < w);
+    }
+}
+
+fn hit_zones_after_render(d: &mut Driver, w: u16, h: u16) -> Vec<((u16, u16), Zone)> {
+    render_at(d, w, h);
+    hit_zones(d, w, h)
+}
+
+#[test]
+fn rendered_form_fields_and_choice_arrows_update_the_real_form_focus_and_value() {
+    let mut d = setup_form();
     render_at(&mut d, 80, 24);
-    let before_screen = d.app.screen;
-    let before_col = d.app.sel_col;
-    let before_card = d.app.sel_card;
-    // The footer row (last row) is outside `main_area`, so board_layout and
-    // the HitMap both have nothing registered there.
-    d.handle(left_down(0, 23));
-    assert_eq!(d.app.screen, before_screen);
-    assert_eq!(d.app.sel_col, before_col);
-    assert_eq!(d.app.sel_card, before_card);
+    let zones = hit_zones(&d, 80, 24);
+    let (field_point, field_idx) = zones
+        .iter()
+        .find_map(|(point, zone)| match zone {
+            Zone::FormField(idx) if *idx != d.app.form.as_ref().unwrap().focus => {
+                Some((*point, *idx))
+            }
+            _ => None,
+        })
+        .expect("a second visible form field");
+    d.handle(left_down(field_point.0, field_point.1));
+    assert_eq!(d.app.form.as_ref().unwrap().focus, field_idx);
+
+    render_at(&mut d, 80, 24);
+    let (next_point, choice_idx) = hit_zones(&d, 80, 24)
+        .into_iter()
+        .find_map(|(point, zone)| match zone {
+            Zone::FormChoiceNext(idx) => Some((point, idx)),
+            _ => None,
+        })
+        .expect("visible choice next control");
+    let before = d.app.form.as_ref().unwrap().fields[choice_idx].display();
+    d.handle(left_down(next_point.0, next_point.1));
+    let form = d.app.form.as_ref().unwrap();
+    assert_eq!(form.focus, choice_idx);
+    assert_ne!(form.fields[choice_idx].display(), before);
+}
+
+#[test]
+fn rendered_picker_rows_and_confirm_buttons_use_existing_reducers() {
+    let mut picker = setup_picker();
+    render_at(&mut picker, 80, 24);
+    let (point, selected) = hit_zones(&picker, 80, 24)
+        .into_iter()
+        .find_map(|(point, zone)| match zone {
+            Zone::PickerRow(idx) if idx > 0 => Some((point, idx)),
+            _ => None,
+        })
+        .expect("second picker row");
+    picker.handle(left_down(point.0, point.1));
+    assert_eq!(picker.app.screen, Screen::Board);
+    assert!(
+        picker.app.picker.is_none(),
+        "row {selected} must activate through Enter"
+    );
+
+    let mut no = setup_confirm();
+    render_at(&mut no, 80, 24);
+    let no_point = hit_zones(&no, 80, 24)
+        .into_iter()
+        .find_map(|(point, zone)| (zone == Zone::Action(UiAction::ConfirmNo)).then_some(point))
+        .expect("No control");
+    no.handle(left_down(no_point.0, no_point.1));
+    assert_eq!(no.app.screen, Screen::Board);
+    assert!(no.app.confirm.is_none());
+
+    let mut yes = setup_confirm();
+    render_at(&mut yes, 80, 24);
+    let yes_point = hit_zones(&yes, 80, 24)
+        .into_iter()
+        .find_map(|(point, zone)| (zone == Zone::Action(UiAction::ConfirmYes)).then_some(point))
+        .expect("Yes control");
+    yes.handle(left_down(yes_point.0, yes_point.1));
+    assert_eq!(yes.app.screen, Screen::Board);
+    assert!(yes.app.confirm.is_none());
+}
+
+#[test]
+fn move_column_controls_and_contextual_footer_help_follow_keyboard_paths() {
+    let mut moving = setup_board();
+    moving.handle(key_msg(KeyCode::Char('M')));
+    assert_eq!(moving.app.screen, Screen::MoveColumn);
+    render_at(&mut moving, 80, 24);
+    let right = hit_zones(&moving, 80, 24)
+        .into_iter()
+        .find_map(|(point, zone)| {
+            (zone == Zone::Action(UiAction::StageColumnRight)).then_some(point)
+        })
+        .expect("Right control");
+    moving.handle(left_down(right.0, right.1));
+    assert_eq!(moving.app.screen, Screen::MoveColumn);
+    render_at(&mut moving, 80, 24);
+    let commit = hit_zones(&moving, 80, 24)
+        .into_iter()
+        .find_map(|(point, zone)| {
+            (zone == Zone::Action(UiAction::CommitColumnMove)).then_some(point)
+        })
+        .expect("Confirm control");
+    moving.handle(left_down(commit.0, commit.1));
+    assert_eq!(moving.app.screen, Screen::Board);
+
+    let mut picker = setup_picker();
+    render_at(&mut picker, 80, 24);
+    let help = hit_zones(&picker, 80, 24)
+        .into_iter()
+        .find_map(|(point, zone)| (zone == Zone::Action(UiAction::Help)).then_some(point))
+        .expect("contextual footer Help");
+    picker.handle(left_down(help.0, help.1));
+    assert_eq!(picker.app.screen, Screen::Help);
+    picker.handle(key_msg(KeyCode::Esc));
+    assert_eq!(picker.app.screen, Screen::Picker);
+}
+
+#[test]
+fn help_pointer_scroll_uses_the_existing_clamped_scroll_reducer() {
+    let mut d = setup_help();
+    render_at(&mut d, 40, 20);
+    assert_eq!(d.app.help_scroll, 0);
+    d.handle(mouse(MouseEventKind::ScrollDown, 5, 5));
+    assert!(d.app.help_scroll > 0);
+    for _ in 0..200 {
+        d.handle(mouse(MouseEventKind::ScrollUp, 5, 5));
+    }
+    assert_eq!(d.app.help_scroll, 0);
+}
+
+#[test]
+fn form_editor_control_focuses_multiline_field_and_uses_existing_editor_effect() {
+    let mut d = driver();
+    d.handle(key_msg(KeyCode::Char('n')));
+    assert_eq!(d.app.screen, Screen::CardForm);
+    render_at(&mut d, 80, 24);
+    let (point, idx) = hit_zones(&d, 80, 24)
+        .into_iter()
+        .find_map(|(point, zone)| match zone {
+            Zone::FormEditor(idx) => Some((point, idx)),
+            _ => None,
+        })
+        .expect("visible $EDITOR control");
+    d.handle(left_down(point.0, point.1));
+    let form = d.app.form.as_ref().unwrap();
+    assert_eq!(form.focus, idx);
+    assert_eq!(form.fields[idx].get_text(), EDITED);
+}
+
+#[test]
+fn board_visible_filters_are_independent_click_targets() {
+    use board_tui::app::CardFilter;
+    for filter in [CardFilter::Active, CardFilter::All, CardFilter::Archived] {
+        let mut d = setup_board();
+        render_at(&mut d, 80, 24);
+        let (x, y) = hit_zones(&d, 80, 24)
+            .into_iter()
+            .find_map(|(point, zone)| (zone == Zone::Filter(filter)).then_some(point))
+            .unwrap_or_else(|| panic!("missing direct {filter:?} filter target"));
+        d.handle(left_down(x, y));
+        assert_eq!(d.app.card_filter, filter);
+    }
+}
+
+#[test]
+fn board_cards_have_no_edit_delete_controls_or_mouse_hit_zones() {
+    for (w, h) in [(40, 20), (80, 24), (120, 35)] {
+        let mut d = setup_board();
+        let output = render_at(&mut d, w, h);
+        assert!(
+            !output.contains("[ Edit ]"),
+            "Board cards must not render an Edit chip at {w}x{h}:\n{output}"
+        );
+        assert!(
+            !output.contains("[ Delete ]"),
+            "Board cards must not render a Delete chip at {w}x{h}:\n{output}"
+        );
+        assert!(
+            hit_zones(&d, w, h).iter().all(|(_, zone)| {
+                !matches!(zone, Zone::CardAction { .. })
+                    && !matches!(
+                        zone,
+                        Zone::Action(UiAction::EditCard | UiAction::DeleteCard)
+                    )
+            }),
+            "Board cards must not expose Edit/Delete mouse zones at {w}x{h}"
+        );
+    }
+
+    // Removing the visual controls must not remove the established keyboard
+    // paths: e opens the card form and d opens the confirmation.
+    let mut edit = setup_board();
+    edit.handle(key_msg(KeyCode::Char('e')));
+    assert!(matches!(
+        edit.app.form.as_ref().map(|form| form.kind),
+        Some(board_tui::forms::FormKind::CardEdit { .. })
+    ));
+
+    let mut delete = setup_board();
+    delete.handle(key_msg(KeyCode::Char('d')));
+    assert_eq!(delete.app.screen, Screen::Confirm);
+}
+
+#[test]
+fn board_chrome_omits_actions_that_are_keyboard_or_gesture_only() {
+    let hidden = [
+        UiAction::MoveCard,
+        UiAction::ShoveCardLeft,
+        UiAction::ShoveCardRight,
+        UiAction::Refresh,
+        UiAction::Quit,
+    ];
+    for (w, h) in [(40, 20), (80, 24), (120, 35)] {
+        let mut d = setup_board();
+        render_at(&mut d, w, h);
+        let zones = hit_zones(&d, w, h);
+        for action in hidden {
+            assert!(
+                zones.iter().all(|(_, zone)| *zone != Zone::Action(action)),
+                "{action:?} must not be rendered at {w}x{h}"
+            );
+        }
+    }
 }

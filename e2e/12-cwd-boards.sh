@@ -84,9 +84,14 @@ sleep 0.5
 screen="$("$HERDR_BIN" pane read "$PANE_ID" --source recent-unwrapped --lines 200 || true)"
 grep -Fq 'Switch board' <<<"$screen" || fail "board picker did not open"
 grep -Fq 'Global' <<<"$screen" || fail "Global missing from board picker"
-VISIBLE_REPO_PREFIX="project-one — $(dirname "$REPO")/project-on"
+# The picker wraps long board rows (label + repo path split across lines at
+# narrow widths), so the label and the canonical repo path are asserted
+# separately rather than as one contiguous prefix.
+grep -Fq 'project-one —' <<<"$screen" \
+  || fail "board label missing from narrow board picker"
+VISIBLE_REPO_PREFIX="$(dirname "$REPO")/project"
 grep -Fq "$VISIBLE_REPO_PREFIX" <<<"$screen" \
-  || fail "canonical repo path/prefix missing from narrow board picker"
+  || fail "canonical repo path prefix missing from narrow board picker -- got: $screen"
 ok "TUI uses focused pane Git root and picker includes Global"
 
 step "12-cwd-boards: ALL CHECKS PASSED"

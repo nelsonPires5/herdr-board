@@ -7,8 +7,8 @@ use crate::view::LayoutMode;
 
 use super::nav::nav_delta;
 use super::{
-    column_options, App, Confirm, ConfirmPurpose, Effect, MoveColumnState, Picker, PickerPurpose,
-    Screen, SwitcherLevel, SwitcherState,
+    column_options, App, CardFilter, Confirm, ConfirmPurpose, Effect, MoveColumnState, Picker,
+    PickerPurpose, Screen, SwitcherLevel, SwitcherState,
 };
 
 pub(super) fn board_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
@@ -72,12 +72,7 @@ pub(super) fn board_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
             }
         }
         KeyCode::Char('a') => return archive_selected_card(app),
-        KeyCode::Char('v') => {
-            app.card_filter = app.card_filter.next();
-            app.sel_card = 0;
-            app.clamp_card();
-            return vec![Effect::SetPaneTitle(app.card_filter)];
-        }
+        KeyCode::Char('v') => return set_card_filter(app, app.card_filter.next()),
         KeyCode::Char('d') => {
             if let Some(id) = app.selected_card_id() {
                 app.confirm = Some(Confirm {
@@ -107,6 +102,15 @@ pub(super) fn board_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
         _ => {}
     }
     vec![]
+}
+
+/// Apply an explicit visibility filter through the same state/effect path as
+/// the legacy `v` cycle binding.
+pub(super) fn set_card_filter(app: &mut App, filter: CardFilter) -> Vec<Effect> {
+    app.card_filter = filter;
+    app.sel_card = 0;
+    app.clamp_card();
+    vec![Effect::SetPaneTitle(app.card_filter)]
 }
 
 fn archive_selected_card(app: &mut App) -> Vec<Effect> {

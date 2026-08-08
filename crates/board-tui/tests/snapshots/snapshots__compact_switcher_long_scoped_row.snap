@@ -1,0 +1,25 @@
+---
+source: crates/board-tui/tests/snapshots.rs
+assertion_line: 853
+expression: output
+---
+" ◈ herdr-board ● 1 running              "
+"  [ Global ▾ ]   [ Act ] [ All ] [ Arc ]"
+"[ ‹ ] [ Todo (M) · 1/6 · 1 cards ] [ › ]"
+"────────────────────────────────────────"
+"┌ Boards ────────────────────────[ X ]─┐"
+"│ Global                               │"
+"│ project — /Volumes/archive/project   │"
+"│ scope — /private/tmp/hb-visual.HWoE… │"
+"│ project — /work/alpha/project        │"
+"│                                      │"
+"│                                      │"
+"│                                      │"
+"│                                      │"
+"│                                      │"
+"│                                      │"
+"│                                      │"
+"└──────────────────────────────────────┘"
+" [ + Card ]  [ Open card ]  [ Archive ] "
+"[ + Column ]  [ Edit col ]  [ Del col ] "
+"[ Move col ]  [ Template ]  [ ? Help ]  "

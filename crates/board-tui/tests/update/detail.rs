@@ -159,6 +159,11 @@ fn driver_with_detail_open(
         .unwrap();
     d.handle(key(KeyCode::Enter));
     assert_eq!(d.app.screen, Screen::CardDetail);
+    // The section-card detail needs more vertical room for its in-card action
+    // bars; give the behavior tests a taller frame than the 80x24 default and
+    // re-anchor the histories to the new geometry.
+    d.app.last_area = Rect::new(0, 0, 110, 44);
+    d.app.scroll_detail_to_latest();
     d
 }
 
@@ -248,7 +253,7 @@ fn detail_runs_selection_moves_with_arrows_and_jk_and_saturates() {
     let len = d.app.detail.as_ref().unwrap().runs.len();
     let visible = {
         let layout = board_tui::view::detail_layout(&d.app, d.app.last_area);
-        (layout.runs.height.saturating_sub(1) as usize).max(1)
+        board_tui::view::runs_viewport_height(&layout).max(1)
     };
     assert!(len > visible, "fixture must overflow the runs viewport");
 
@@ -417,7 +422,7 @@ fn wheel_scrolling_the_runs_section_carries_the_selection_into_the_window() {
         .map(|r| r.id)
         .collect();
     let layout = board_tui::view::detail_layout(&d.app, d.app.last_area);
-    let visible = (layout.runs.height.saturating_sub(1) as usize).max(1);
+    let visible = board_tui::view::runs_viewport_height(&layout).max(1);
     assert!(
         ids.len() > visible,
         "fixture must overflow the runs viewport"
@@ -965,13 +970,13 @@ fn opening_detail_starts_comments_and_runs_at_latest() {
     let detail = driver.app.detail.as_ref().unwrap();
     let layout = board_tui::view::detail_layout(&driver.app, driver.app.last_area);
     let (_, comments_visible) = board_tui::view::comments_viewport(&driver.app, &layout);
-    let runs_visible = layout.runs.height.saturating_sub(1) as usize;
+    let runs_visible = board_tui::view::runs_viewport_height(&layout);
     assert_eq!(
-        driver.app.detail_comments_scroll + comments_visible,
+        driver.app.detail_comments_scroll + comments_visible.max(1),
         detail.comments.len()
     );
     assert_eq!(
-        driver.app.detail_runs_scroll + runs_visible,
+        driver.app.detail_runs_scroll + runs_visible.max(1),
         detail.runs.len()
     );
     assert_eq!(
@@ -1040,12 +1045,21 @@ fn shrinking_detail_to_popup_reanchors_history_to_latest() {
     let detail = app.detail.as_ref().unwrap();
     let layout = board_tui::view::detail_layout(&app, app.last_area);
     let (_, comments_visible) = board_tui::view::comments_viewport(&app, &layout);
-    let runs_visible = layout.runs.height.saturating_sub(1) as usize;
+    let runs_visible = board_tui::view::runs_viewport_height(&layout);
+    // Comments word-wrap, so the re-anchor is row-based (see
+    // `App::scroll_detail_to_latest`): the wrapped total at the popup's
+    // column width, not the comment count, is what must fit the viewport.
+    let comments_total = board_tui::view::comment_wrapped_rows(detail, layout.comments.width);
     assert_eq!(
-        app.detail_comments_scroll + comments_visible,
-        detail.comments.len()
+        app.detail_comments_scroll,
+        comments_total.saturating_sub(comments_visible.max(1)),
+        "comments re-anchor to the latest visible row"
     );
-    assert_eq!(app.detail_runs_scroll + runs_visible, detail.runs.len());
+    assert_eq!(
+        app.detail_runs_scroll,
+        detail.runs.len().saturating_sub(runs_visible),
+        "runs re-anchor to the latest visible row"
+    );
 }
 
 #[test]

@@ -66,7 +66,7 @@ wait_for() {
   local needle="$1" screen i
   for (( i=0; i<100; i++ )); do
     screen="$(read_pane)"
-    printf '%s\n' "$screen" | grep -Fq "$needle" && return 0
+    printf '%s\n' "$screen" | grep -Fqi "$needle" && return 0
     sleep 0.1
   done
   return 1
@@ -91,12 +91,12 @@ wait_for "gpt-effort-e2e" || {
   fail "Pi catalog model did not appear in the real TUI"
 }
 e2e_herdr_mutate -- pane send-keys "$TUI_PANE" tab >/dev/null
-wait_for "< (default) >" || fail "effort field did not start at (default)"
+wait_for "[ ‹ ]  (default)  [ › ]" || fail "effort field did not start at (default)"
 
 step "Cycle the real TUI effort field through the exact corrected ordering"
 for level in off minimal low medium high xhigh max; do
   e2e_herdr_mutate -- pane send-keys "$TUI_PANE" right >/dev/null
-  wait_for "< $level >" || {
+  wait_for "[ ‹ ]  $level  [ › ]" || {
     read_pane >>"$PANE_EVIDENCE"
     fail "effort selector did not expose '$level' in order"
   }

@@ -45,7 +45,11 @@ impl App {
         let comments_total = crate::view::comment_wrapped_rows(detail, layout.comments.width);
         let runs_total = detail.runs.len();
         let (_, comments_visible) = crate::view::comments_viewport(self, &layout);
-        let runs_visible = layout.runs.height.saturating_sub(1) as usize;
+        let runs_visible = crate::view::runs_viewport_height(&layout);
+        // Keep one logical row as the latest anchor even when the frame has
+        // only title/action/bottom rows. The renderer paints no body at a
+        // zero-row viewport, and the anchor becomes useful immediately after
+        // a resize reveals rows.
         self.detail_comments_scroll = comments_total.saturating_sub(comments_visible.max(1));
         self.detail_runs_scroll = runs_total.saturating_sub(runs_visible.max(1));
     }
@@ -61,7 +65,7 @@ impl App {
         let (_, comments_visible) = crate::view::comments_viewport(self, &layout);
         let comments_total = crate::view::comment_wrapped_rows(detail, layout.comments.width);
         let runs_total = detail.runs.len();
-        let runs_visible = layout.runs.height.saturating_sub(1) as usize;
+        let runs_visible = crate::view::runs_viewport_height(&layout);
         let (offset, total, visible) = match self.detail_scroll_target {
             // Row-based: comments wrap, so total/visible are wrapped rows.
             DetailScrollTarget::Comments => (
@@ -78,7 +82,7 @@ impl App {
     /// Whether the focused comment can be edited/deleted: system comments are
     /// immutable (`Db::update_comment`/`soft_delete_comment` reject
     /// `author == "system"`; see `docs/protocol.md`), so `e`/`d` and the
-    /// action bar's `[Edit]`/`[Del]` labels must treat it as read-only.
+    /// action bar's `[ Edit ]`/`[ Delete ]` labels must treat it as read-only.
     /// `comment.history` is unaffected — history stays available regardless.
     pub fn focused_comment_is_system(&self) -> bool {
         self.focused_comment().is_some_and(Comment::is_system)
@@ -111,6 +115,13 @@ impl App {
         let spans =
             crate::view::comment_row_spans(self.detail.as_ref().unwrap(), layout.comments.width);
         let (_, visible) = crate::view::comments_viewport(self, &layout);
+        // A compact content region can retain the title/action/bottom rows
+        // while leaving zero history rows. Do not move the scroll anchor to a
+        // hidden comment in that case; the action rail remains usable and the
+        // next resize can reveal the same latest anchor.
+        if visible == 0 {
+            return;
+        }
         let Some(&(start, span_len)) = spans.get(self.detail_comment_sel) else {
             return;
         };
@@ -121,10 +132,14 @@ impl App {
         if start + span_len > scroll + visible {
             scroll = (start + span_len).saturating_sub(visible);
         }
-        if scroll > start {
-            scroll = start;
-        }
-        self.detail_comments_scroll = scroll;
+        // Do not pull a valid bottom anchor back toward the comment's start:
+        // the final comment may itself span more than one viewport row, and
+        // the latest position is the only one that keeps its tail visible.
+        let total = crate::view::comment_wrapped_rows(
+            self.detail.as_ref().expect("detail exists"),
+            layout.comments.width,
+        );
+        self.detail_comments_scroll = scroll.min(total.saturating_sub(visible));
     }
 
     /// The selected run — what `o` jumps to. `Some` whenever a detail with at
@@ -151,7 +166,7 @@ impl App {
         };
         self.detail_run_sel = self.detail_run_sel.min(len - 1);
         let layout = crate::view::detail_layout(self, self.last_area);
-        let visible = (layout.runs.height.saturating_sub(1) as usize).max(1);
+        let visible = crate::view::runs_viewport_height(&layout).max(1);
         let sel = self.detail_run_sel;
         let mut scroll = self.detail_runs_scroll.min(len - 1);
         if sel < scroll {
@@ -184,6 +199,9 @@ impl App {
                 // span must intersect — not a comment index range.
                 let spans = crate::view::comment_row_spans(detail, layout.comments.width);
                 let (_, visible) = crate::view::comments_viewport(self, &layout);
+                if visible == 0 {
+                    return;
+                }
                 let lo = self.detail_comments_scroll;
                 let hi = lo + visible.max(1);
                 let visible_idx: Vec<usize> = spans
@@ -205,7 +223,7 @@ impl App {
                     Some(d) if !d.runs.is_empty() => d.runs.len(),
                     _ => return,
                 };
-                let visible = (layout.runs.height.saturating_sub(1) as usize).max(1);
+                let visible = crate::view::runs_viewport_height(&layout).max(1);
                 let first = self.detail_runs_scroll.min(len - 1);
                 let last = (first + visible - 1).min(len - 1);
                 self.detail_run_sel = self.detail_run_sel.min(len - 1).clamp(first, last);

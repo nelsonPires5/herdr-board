@@ -2,7 +2,9 @@ use ratatui::layout::Rect;
 
 use crate::app::App;
 
-use super::{main_area, LayoutMode, CARD_H, COMPACT_CARD_H, MIN_COL_W};
+use super::{
+    board_body_area_for, board_header_area, LayoutMode, CARD_H, COMPACT_CARD_H, MIN_COL_W,
+};
 
 // -- layout / hit-testing ----------------------------------------------------
 
@@ -80,7 +82,11 @@ pub fn board_layout(app: &App, area: Rect) -> BoardLayout {
     if mode == LayoutMode::Compact {
         return board_layout_compact(app, area);
     }
-    let main = main_area(area);
+    // Keep the board viewport below the persistent top chrome and above the
+    // bottom action rail (and a transient toast row, when present) even while
+    // a sheet or detail view is open. Overlays are drawn later into this same
+    // content region.
+    let main = board_body_area_for(app, area);
     let n = app.board.columns.len();
     let mut cols = Vec::new();
     if n == 0 || main.width == 0 {
@@ -115,36 +121,49 @@ pub fn board_layout(app: &App, area: Rect) -> BoardLayout {
     }
 }
 
-/// Compact: exactly one column at full main width, with a 2-row header that
-/// carries prev/switch/next hit zones instead of the plain bordered title.
+/// Compact: exactly one column at full content width, with a three-control
+/// navigator below the persistent identity/filter rows.
 fn board_layout_compact(app: &App, area: Rect) -> BoardLayout {
-    let main = main_area(area);
+    let main = board_body_area_for(app, area);
     let n = app.board.columns.len();
-    if n == 0 || main.width == 0 {
+    if main.width == 0 {
         return BoardLayout {
             cols: Vec::new(),
             compact_header: None,
         };
     }
-    let idx = app.sel_col.min(n - 1);
-    let header_h = 2u16.min(main.height);
     let rect = Rect::new(main.x, main.y, main.width, main.height);
+    let header_area = board_header_area(area);
+    // Compact's column navigator is the third content row, below the
+    // identity row and the board/visibility controls row.
+    let prev_w = 5.min(header_area.width);
+    let next_w = 5.min(header_area.width.saturating_sub(prev_w));
     let header = CompactHeader {
-        prev: Rect::new(main.x, main.y, 3.min(main.width), 1),
+        prev: Rect::new(header_area.x, header_area.y + 2, prev_w, 1),
         switch: Rect::new(
-            main.x + 3.min(main.width),
-            main.y,
-            main.width.saturating_sub(6),
+            header_area.x + prev_w,
+            header_area.y + 2,
+            header_area
+                .width
+                .saturating_sub(prev_w)
+                .saturating_sub(next_w),
             1,
         ),
         next: Rect::new(
-            main.x + main.width.saturating_sub(3),
-            main.y,
-            3.min(main.width),
+            header_area.right().saturating_sub(next_w),
+            header_area.y + 2,
+            next_w,
             1,
         ),
     };
-    let col = col_layout_with_header(app, idx, rect, COMPACT_CARD_H, header_h, 0, true);
+    if n == 0 {
+        return BoardLayout {
+            cols: Vec::new(),
+            compact_header: Some(header),
+        };
+    }
+    let idx = app.sel_col.min(n - 1);
+    let col = col_layout_with_header(app, idx, rect, COMPACT_CARD_H, 0, 0, true);
     BoardLayout {
         cols: vec![col],
         compact_header: Some(header),
@@ -156,22 +175,25 @@ fn col_layout(app: &App, idx: usize, rect: Rect, card_h: u16) -> ColLayout {
     col_layout_with_header(app, idx, rect, card_h, 1, 1, false)
 }
 
-/// Rows a Compact card needs: 3 when its title fits on one line, 4 when the
-/// title wraps to two (1/2 title rows + 1 status row + 1 spare row, matching
-/// how `board::draw_card` splits the rect). `content_w` is the card's content
-/// width (after the "▌ " glyph prefix it's actually rendered at).
-fn compact_card_height(title: &str, content_w: u16) -> u16 {
+/// Rows a Compact card needs: 6 when its title/id fits on one line, 7 when
+/// the title wraps to two (borders + title rows + status + two metadata rows,
+/// matching how `board::draw_card` splits the rect). Board cards deliberately
+/// have no Edit/Delete action row; keyboard `e`/`d` remains the compact route.
+fn compact_card_height(id: i64, title: &str, content_w: u16) -> u16 {
     let usable = content_w.saturating_sub(2).max(1);
-    let lines = super::detail::wrapped_row_count(title, usable).clamp(1, 2) as u16;
-    lines + 2
+    let title = format!("#{id} {title}");
+    let lines = super::detail::wrapped_row_count(&title, usable).clamp(1, 2) as u16;
+    // Title rows + status + harness/permission and model/effort, with two
+    // borders.
+    lines + 5
 }
 
 /// Shared card-rect + scroll computation. `header_h` is how many rows at the
 /// top of `rect` are consumed by a title/header (1 for the bordered box, 2 for
 /// the Compact header); `reserve_bottom` is extra rows reserved below the card
 /// list (1 for the bordered box's bottom border, 0 for the borderless Compact
-/// column which already sits inside `main_area`). `compact` selects the
-/// variable 3/4-row Compact card sizing over the fixed `card_h`.
+/// column which already sits inside the board content region). `compact` selects the
+/// variable 6/7-row Compact card sizing over the fixed `card_h`.
 fn col_layout_with_header(
     app: &App,
     idx: usize,
@@ -205,49 +227,87 @@ fn col_layout_with_header(
     // visible when the render loop below draws none (the "selected card
     // always has a rect" invariant only holds while `visible_count > 0`;
     // `tests/layout.rs` asserts the degenerate case separately).
-    let visible_count = inner_h.checked_div(card_h).unwrap_or(0) as usize;
-
     let sel = if idx == app.sel_col {
         app.sel_card.min(total.saturating_sub(1))
     } else {
         0
     };
-    let mut offset = app.col_scroll.get(&column.id).copied().unwrap_or(0);
-    if visible_count == 0 {
-        // Nothing fits regardless of offset; report no scroll rather than an
-        // arbitrary clamped value.
-        offset = 0;
-    } else {
-        let max_offset = total.saturating_sub(visible_count);
-        offset = offset.min(max_offset);
-        if idx == app.sel_col && total > 0 {
-            if sel < offset {
-                offset = sel;
-            } else if sel >= offset + visible_count {
-                offset = sel + 1 - visible_count;
-            }
-        }
-    }
 
-    let mut card_rects = Vec::new();
-    let show_scrollbar = total > visible_count && rect.width > 2;
+    // Compact cards have real variable heights (6/7 rows). Derive overflow,
+    // offsets, visible count and rendered rects from the same height vector so
+    // the scrollbar and wheel logic can never disagree with the frame.
+    let base_content_w = rect.width.saturating_sub(2);
+    let heights_for = |width: u16| {
+        cards
+            .iter()
+            .map(|card| {
+                if compact {
+                    compact_card_height(card.id, &card.title, width)
+                } else {
+                    card_h
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut heights = heights_for(base_content_w);
+    let total_height = heights.iter().copied().fold(0u16, u16::saturating_add);
+    let show_scrollbar = total_height > inner_h && rect.width > 2;
     let content_w = if show_scrollbar {
         rect.width.saturating_sub(3)
     } else {
-        rect.width.saturating_sub(2)
+        base_content_w
     };
-    let mut cy = inner_y;
-    for (ci, card) in cards.iter().enumerate().take(total).skip(offset) {
-        let h = if compact {
-            compact_card_height(&card.title, content_w)
-        } else {
-            card_h
-        };
-        if cy + h > inner_y + inner_h {
-            break;
+    if show_scrollbar {
+        heights = heights_for(content_w);
+    }
+
+    let page_end = |start: usize| {
+        let mut used = 0u16;
+        let mut end = start;
+        while end < total && used.saturating_add(heights[end]) <= inner_h {
+            used = used.saturating_add(heights[end]);
+            end += 1;
         }
+        end
+    };
+    let mut last_page_start = total;
+    let mut used = 0u16;
+    while last_page_start > 0 && used.saturating_add(heights[last_page_start - 1]) <= inner_h {
+        last_page_start -= 1;
+        used = used.saturating_add(heights[last_page_start]);
+    }
+
+    let any_fits = heights.iter().any(|height| *height <= inner_h);
+    let mut offset = if any_fits {
+        app.col_scroll
+            .get(&column.id)
+            .copied()
+            .unwrap_or(0)
+            .min(last_page_start)
+    } else {
+        0
+    };
+    if idx == app.sel_col && total > 0 && any_fits {
+        if sel < offset {
+            offset = sel;
+        } else if sel >= page_end(offset) {
+            let mut start = sel;
+            let mut selected_page_height = heights[sel];
+            while start > 0 && selected_page_height.saturating_add(heights[start - 1]) <= inner_h {
+                start -= 1;
+                selected_page_height = selected_page_height.saturating_add(heights[start]);
+            }
+            offset = start;
+        }
+    }
+    let end = page_end(offset);
+    let visible_count = end.saturating_sub(offset);
+
+    let mut card_rects = Vec::with_capacity(visible_count);
+    let mut cy = inner_y;
+    for (ci, h) in heights.iter().copied().enumerate().take(end).skip(offset) {
         card_rects.push((ci, Rect::new(rect.x + 1, cy, content_w, h)));
-        cy += h;
+        cy = cy.saturating_add(h);
     }
 
     let scrollbar_rect = if show_scrollbar {

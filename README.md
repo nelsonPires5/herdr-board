@@ -10,7 +10,7 @@ prompts, columns define pipeline stages, and moving work across the board can pl
 and stop at human gates automatically.
 
 <p align="center">
-  <img src="docs/assets/readme/board-overview.png" alt="herdr-board showing a six-column pipeline with idle, running, queued, blocked, and failed cards" width="100%">
+  <img src="docs/assets/readme/board-overview.png" alt="Wide herdr-board view with boxed cards, colored statuses, a single-line header, and a persistent action rail" width="100%">
 </p>
 
 ```text
@@ -119,7 +119,7 @@ All board state lives under `~/.local/share/herdr-board/`; Herdr's own state is 
 
 | Guided card creation | Card context and run history |
 |:--:|:--:|
-| <img src="docs/assets/readme/new-card.png" alt="New card form with harness, model, effort, permission, session, and workspace fields" width="820"> | <img src="docs/assets/readme/card-detail.png" alt="Card detail popup showing status, description, comments, and run history" width="820"> |
+| <img src="docs/assets/readme/new-card.png" alt="Current New card form with a description editor, agent settings, execution target, and persistent action rail" width="820"> | <img src="docs/assets/readme/card-detail.png" alt="Current card detail sheet showing idle status, task configuration, description, runs and comments sections, and actions" width="820"> |
 
 ### Agents run in visible Herdr panes
 
@@ -133,7 +133,38 @@ proven from durable pane identity, never from a matching label, so a user tab is
 The full placement and recovery rules are in [`docs/design.md`](docs/design.md).
 
 <p align="center">
-  <img src="docs/assets/readme/agent-panes.png" alt="Herdr workspace with board agents in separate per-card tabs" width="100%">
+  <img src="docs/assets/readme/agent-panes.png" alt="Retained Herdr workspace view with visible board agent panes labeled per card" width="100%">
+</p>
+
+## Mobile-first TUI
+
+The `board tui` surface is responsive: **Compact (< 60 cols)** shows one
+full-width column with a three-row mobile header — product/running count, a
+board dropdown plus visibility chips, then the column navigator — while
+**Regular (60–119)** and **Wide (≥ 120)** show the multi-column board with all
+header controls balanced on one line. Compact navigation shows the column
+trigger as `(M)` or `(A)` and never repeats the global running count. Filter
+chips shorten only when needed; they never add a redundant `Board:` or
+`Visible:` label. Cards are compact boxed rows that always carry their real
+status glyph, an active-run timer, and harness/model metadata; Board cards have
+no Edit/Delete controls, while keyboard `e`/`d` remains available. Every
+visible button is a transparent `[ NAME ]` chip with bold white text and
+brackets; close controls are always `[ X ]`, selected chips add an underline,
+and primary/destructive tone does not recolor them. Card detail, forms, and
+picker sheets occupy only the board content region, leaving persistent top and
+bottom action rails visible. Multiline description and system-prompt fields
+retain wrapped editing and `$EDITOR` support while using the same focused and
+unfocused value treatment as title/name fields. The old persistent footer hint
+row is gone; only transient toasts use its former space. All original keyboard
+shortcuts are preserved.
+
+Compact adapts to smaller screens and is touch-friendly when the terminal maps
+taps to pointer clicks: navigation, filters, cards, and action chips are all
+tappable/clickable. This is pointer-click support rather than native swipe or
+pinch gestures; keyboard shortcuts remain available too.
+
+<p align="center">
+  <img src="docs/assets/readme/compact-board.png" alt="Compact herdr-board with a three-row header, touch-friendly navigation and filters, boxed cards, and a bottom action rail" width="470">
 </p>
 
 ## Everyday controls

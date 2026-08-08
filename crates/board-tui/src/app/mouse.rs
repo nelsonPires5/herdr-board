@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
-use crate::widgets::Zone;
+use crate::widgets::{UiAction, Zone};
 
 use super::{App, DetailScrollTarget, Effect, Screen, SwitcherLevel};
 
@@ -17,6 +17,22 @@ pub(super) fn on_mouse(app: &mut App, m: MouseEvent) -> Vec<Effect> {
                 return effects;
             }
         }
+    }
+
+    if matches!(app.screen, Screen::CardForm | Screen::ColumnForm) {
+        return match m.kind {
+            MouseEventKind::ScrollDown => super::on_key(app, key(KeyCode::Tab)),
+            MouseEventKind::ScrollUp => super::on_key(app, key(KeyCode::BackTab)),
+            _ => vec![],
+        };
+    }
+
+    if matches!(app.screen, Screen::Help | Screen::CommentHistory) {
+        return match m.kind {
+            MouseEventKind::ScrollDown => super::on_key(app, key(KeyCode::Down)),
+            MouseEventKind::ScrollUp => super::on_key(app, key(KeyCode::Up)),
+            _ => vec![],
+        };
     }
 
     if app.screen == Screen::CardDetail {
@@ -164,6 +180,29 @@ fn scroll_hovered_column(
 /// hit-testing below), `None` to fall through unhandled.
 fn handle_zone(app: &mut App, zone: Zone) -> Option<Vec<Effect>> {
     match zone {
+        Zone::Filter(filter) if app.screen == Screen::Board => {
+            Some(super::board::set_card_filter(app, filter))
+        }
+        // Board card Edit/Delete zones were removed. Keep the legacy variant
+        // as an explicit no-op so stale callers fail closed instead of
+        // falling through to card-body drag/focus handling.
+        Zone::CardAction { .. } if app.screen == Screen::Board => Some(vec![]),
+        Zone::Action(action) => {
+            // Card-level Edit must not inherit Comments focus, where the `e`
+            // reducer intentionally edits the selected comment instead. Route
+            // through that same key branch without changing the focus users
+            // return to after Save/Cancel.
+            let restore_focus = (app.screen == Screen::CardDetail && action == UiAction::EditCard)
+                .then_some(app.detail_scroll_target);
+            if restore_focus.is_some() {
+                app.detail_scroll_target = DetailScrollTarget::Runs;
+            }
+            let effects = action_event(app.screen, action).map(|event| super::on_key(app, event));
+            if let Some(focus) = restore_focus {
+                app.detail_scroll_target = focus;
+            }
+            effects
+        }
         Zone::HeaderPrev if app.screen == Screen::Board => {
             app.move_col(-1);
             Some(vec![])
@@ -208,6 +247,81 @@ fn handle_zone(app: &mut App, zone: Zone) -> Option<Vec<Effect>> {
             }
             Some(super::on_key(app, key(KeyCode::Enter)))
         }
+        Zone::FormField(idx) if matches!(app.screen, Screen::CardForm | Screen::ColumnForm) => {
+            let valid = app
+                .form
+                .as_ref()
+                .is_some_and(|form| idx < form.fields.len() && form.field_visible(idx));
+            if valid {
+                app.form.as_mut().expect("validated form").focus = idx;
+            }
+            Some(vec![])
+        }
+        Zone::FormChoicePrev(idx) | Zone::FormChoiceNext(idx)
+            if matches!(app.screen, Screen::CardForm | Screen::ColumnForm) =>
+        {
+            let valid = app
+                .form
+                .as_ref()
+                .is_some_and(|form| idx < form.fields.len() && form.field_visible(idx));
+            if !valid {
+                return Some(vec![]);
+            }
+            app.form.as_mut().expect("validated form").focus = idx;
+            let code = if matches!(zone, Zone::FormChoicePrev(_)) {
+                KeyCode::Left
+            } else {
+                KeyCode::Right
+            };
+            Some(super::on_key(app, key(code)))
+        }
+        Zone::FormEditor(idx) if matches!(app.screen, Screen::CardForm | Screen::ColumnForm) => {
+            let valid = app
+                .form
+                .as_ref()
+                .is_some_and(|form| idx < form.fields.len() && form.field_visible(idx));
+            if !valid {
+                return Some(vec![]);
+            }
+            app.form.as_mut().expect("validated form").focus = idx;
+            if app
+                .form
+                .as_ref()
+                .is_some_and(|form| form.focused_is_multiline())
+            {
+                Some(super::on_key(
+                    app,
+                    KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL),
+                ))
+            } else {
+                Some(vec![])
+            }
+        }
+        Zone::PickerRow(idx) if app.screen == Screen::Picker => {
+            let valid = app
+                .picker
+                .as_ref()
+                .is_some_and(|picker| idx < picker.options.len());
+            if valid {
+                app.picker.as_mut().expect("validated picker").sel = idx;
+                Some(super::on_key(app, key(KeyCode::Enter)))
+            } else {
+                Some(vec![])
+            }
+        }
+        Zone::HelpScrollUp if app.screen == Screen::Help => {
+            Some(super::on_key(app, key(KeyCode::Up)))
+        }
+        Zone::HelpScrollDown if app.screen == Screen::Help => {
+            Some(super::on_key(app, key(KeyCode::Down)))
+        }
+        Zone::HistoryScrollUp if app.screen == Screen::CommentHistory => {
+            Some(super::on_key(app, key(KeyCode::Up)))
+        }
+        Zone::HistoryScrollDown if app.screen == Screen::CommentHistory => {
+            Some(super::on_key(app, key(KeyCode::Down)))
+        }
+        Zone::Shield => Some(vec![]),
         Zone::BarSave if matches!(app.screen, Screen::CardForm | Screen::ColumnForm) => {
             Some(super::on_key(app, key(KeyCode::Enter)))
         }
@@ -221,6 +335,12 @@ fn handle_zone(app: &mut App, zone: Zone) -> Option<Vec<Effect>> {
             app.follow_comment_focus();
             Some(vec![])
         }
+        Zone::RunRow(idx) if app.screen == Screen::CardDetail => {
+            app.detail_scroll_target = DetailScrollTarget::Runs;
+            app.detail_run_sel = idx;
+            app.follow_run_focus();
+            Some(vec![])
+        }
         Zone::CommentEdit if app.screen == Screen::CardDetail => {
             Some(super::on_key(app, key(KeyCode::Char('e'))))
         }
@@ -232,6 +352,77 @@ fn handle_zone(app: &mut App, zone: Zone) -> Option<Vec<Effect>> {
         }
         _ => None,
     }
+}
+
+fn action_event(screen: Screen, action: UiAction) -> Option<KeyEvent> {
+    use UiAction as A;
+    let (code, modifiers) = match (screen, action) {
+        (Screen::Board, A::Help) => (KeyCode::Char('?'), KeyModifiers::NONE),
+        (Screen::Board, A::Quit) => (KeyCode::Char('q'), KeyModifiers::NONE),
+        (Screen::Board, A::SwitchBoard) => (KeyCode::Char('b'), KeyModifiers::NONE),
+        (Screen::Board, A::NewCard) => (KeyCode::Char('n'), KeyModifiers::NONE),
+        (Screen::Board, A::NewColumn) => (KeyCode::Char('N'), KeyModifiers::SHIFT),
+        (Screen::Board, A::EditCard) => (KeyCode::Char('e'), KeyModifiers::NONE),
+        (Screen::Board, A::EditColumn) => (KeyCode::Char('E'), KeyModifiers::SHIFT),
+        (Screen::Board, A::ArchiveCard) => (KeyCode::Char('a'), KeyModifiers::NONE),
+        (Screen::Board, A::CycleFilter) => (KeyCode::Char('v'), KeyModifiers::NONE),
+        (Screen::Board, A::DeleteCard) => (KeyCode::Char('d'), KeyModifiers::NONE),
+        (Screen::Board, A::DeleteColumn) => (KeyCode::Char('D'), KeyModifiers::SHIFT),
+        (Screen::Board, A::MoveCard) => (KeyCode::Char('m'), KeyModifiers::NONE),
+        (Screen::Board, A::MoveColumn) => (KeyCode::Char('M'), KeyModifiers::SHIFT),
+        (Screen::Board, A::ShoveCardLeft) => (KeyCode::Char('H'), KeyModifiers::SHIFT),
+        (Screen::Board, A::ShoveCardRight) => (KeyCode::Char('L'), KeyModifiers::SHIFT),
+        (Screen::Board, A::OpenCard) => (KeyCode::Enter, KeyModifiers::NONE),
+        (Screen::Board, A::ApplyTemplate) => (KeyCode::Char('T'), KeyModifiers::SHIFT),
+        (Screen::Board, A::Refresh) => (KeyCode::Char('r'), KeyModifiers::NONE),
+
+        (Screen::CardDetail, A::Help) => (KeyCode::Char('?'), KeyModifiers::NONE),
+        (
+            Screen::Picker
+            | Screen::MoveColumn
+            | Screen::Confirm
+            | Screen::Switcher
+            | Screen::CommentHistory,
+            A::Help,
+        ) => (KeyCode::Char('?'), KeyModifiers::NONE),
+        (Screen::CardDetail, A::ConfirmAwaiting) => (KeyCode::Enter, KeyModifiers::NONE),
+        (Screen::CardDetail, A::EditCard) => (KeyCode::Char('e'), KeyModifiers::NONE),
+        (Screen::CardDetail, A::ArchiveCard) => (KeyCode::Char('a'), KeyModifiers::NONE),
+        (Screen::CardDetail, A::AddComment) => (KeyCode::Char('c'), KeyModifiers::NONE),
+        (Screen::CardDetail, A::DeleteComment) => (KeyCode::Char('d'), KeyModifiers::NONE),
+        (Screen::CardDetail, A::CommentHistory) => (KeyCode::Char('h'), KeyModifiers::NONE),
+        (Screen::CardDetail, A::ToggleDetail) => (KeyCode::Char('f'), KeyModifiers::NONE),
+        (Screen::CardDetail, A::FocusRunPane) => (KeyCode::Char('o'), KeyModifiers::NONE),
+        (Screen::CardDetail, A::CancelRun) => (KeyCode::Char('x'), KeyModifiers::NONE),
+        (Screen::CardDetail, A::RetryRun) => (KeyCode::Char('r'), KeyModifiers::NONE),
+        (Screen::CardDetail, A::CloseDetail) => (KeyCode::Esc, KeyModifiers::NONE),
+
+        (Screen::CardForm | Screen::ColumnForm, A::SubmitForm) => {
+            (KeyCode::Enter, KeyModifiers::NONE)
+        }
+        (Screen::CardForm | Screen::ColumnForm, A::CancelForm) => {
+            (KeyCode::Esc, KeyModifiers::NONE)
+        }
+        (Screen::CardForm | Screen::ColumnForm, A::EditInExternalEditor) => {
+            (KeyCode::Char('e'), KeyModifiers::CONTROL)
+        }
+
+        (Screen::Picker, A::ChoosePickerRow) => (KeyCode::Enter, KeyModifiers::NONE),
+        (Screen::Picker, A::PickerOtherBoard) => (KeyCode::Char('b'), KeyModifiers::NONE),
+        (Screen::Picker, A::CancelPicker) => (KeyCode::Esc, KeyModifiers::NONE),
+        (Screen::Confirm, A::ConfirmYes) => (KeyCode::Char('y'), KeyModifiers::NONE),
+        (Screen::Confirm, A::ConfirmNo) => (KeyCode::Char('n'), KeyModifiers::NONE),
+        (Screen::MoveColumn, A::StageColumnLeft) => (KeyCode::Left, KeyModifiers::NONE),
+        (Screen::MoveColumn, A::StageColumnRight) => (KeyCode::Right, KeyModifiers::NONE),
+        (Screen::MoveColumn, A::CommitColumnMove) => (KeyCode::Enter, KeyModifiers::NONE),
+        (Screen::MoveColumn, A::CancelColumnMove) => (KeyCode::Esc, KeyModifiers::NONE),
+        (Screen::Switcher, A::ChooseSwitcherRow) => (KeyCode::Enter, KeyModifiers::NONE),
+        (Screen::Switcher, A::CloseSwitcher) => (KeyCode::Esc, KeyModifiers::NONE),
+        (Screen::CommentHistory, A::CloseCommentHistory) => (KeyCode::Esc, KeyModifiers::NONE),
+        (Screen::Help, A::CloseHelp) => (KeyCode::Esc, KeyModifiers::NONE),
+        _ => return None,
+    };
+    Some(KeyEvent::new(code, modifiers))
 }
 
 fn key(code: KeyCode) -> KeyEvent {

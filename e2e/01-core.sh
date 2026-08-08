@@ -81,8 +81,12 @@ printf '%s\n' "$screen" | grep -q "E2E TUI Card" \
   || fail "new card 'E2E TUI Card' not visible in the TUI pane"
 ok "card created through the TUI is visible on the board"
 
-# Confirm it also exists via the CLI (belt and suspenders).
-"$BOARD_BIN" card list --json | grep -q "E2E TUI Card" \
+# Confirm it also exists via the CLI (belt and suspenders). Capture first,
+# then grep: `grep -q` closing the pipe early makes the CLI report EPIPE as a
+# fatal error (code 64), which `set -o pipefail` turns into a false failure
+# even when the card is listed.
+cards="$("$BOARD_BIN" card list --json)"
+grep -q "E2E TUI Card" <<<"$cards" \
   || fail "TUI-created card not found via CLI card list"
 
 step "01-core: ALL CHECKS PASSED"

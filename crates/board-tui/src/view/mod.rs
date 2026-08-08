@@ -11,15 +11,67 @@ use ratatui::Frame;
 use crate::app::{App, CardFilter, Screen};
 
 const MIN_COL_W: u16 = 26;
-const CARD_H: u16 = 3;
-const COMPACT_CARD_H: u16 = 4;
+const CARD_H: u16 = 5;
+const COMPACT_CARD_H: u16 = 6;
+const BOARD_ACTION_COUNT: u16 = 9;
+
+fn board_action_columns(width: u16) -> u16 {
+    match width {
+        0..=59 => 3,
+        60..=119 => 5,
+        _ => BOARD_ACTION_COUNT,
+    }
+}
+
+fn board_action_rows(width: u16) -> u16 {
+    BOARD_ACTION_COUNT.div_ceil(board_action_columns(width))
+}
+
+/// Filter labels stay explicit when the one-line rail has room. At the
+/// narrowest supported widths the unambiguous prefixes keep all three filters
+/// visible without wrapping the Compact header into extra rows.
+pub(super) fn compact_filter_options(width: u16) -> [(&'static str, CardFilter); 3] {
+    if width >= 48 {
+        [
+            ("Active", CardFilter::Active),
+            ("All", CardFilter::All),
+            ("Archived", CardFilter::Archived),
+        ]
+    } else if width >= 23 {
+        [
+            ("Act", CardFilter::Active),
+            ("All", CardFilter::All),
+            ("Arc", CardFilter::Archived),
+        ]
+    } else if width >= 19 {
+        [
+            ("A", CardFilter::Active),
+            ("All", CardFilter::All),
+            ("R", CardFilter::Archived),
+        ]
+    } else {
+        [
+            ("A", CardFilter::Active),
+            ("L", CardFilter::All),
+            ("R", CardFilter::Archived),
+        ]
+    }
+}
+
+/// Compact has exactly three content rows — identity, board/visibility
+/// controls, and the column navigator — followed by its divider. Regular and
+/// Wide put all header controls on one content row and use the second row only
+/// for the divider.
+pub fn board_header_height(width: u16) -> u16 {
+    if width < 60 {
+        4
+    } else {
+        2
+    }
+}
 const MAX_SCOPE_LABEL: usize = 32;
 const NARROW_DETAIL_WIDTH: u16 = 100;
 const HELP_GUTTER_WIDTH: u16 = 2;
-const HELP_KEY_WIDTH: u16 = 13;
-/// Characters a help key label may occupy. `HELP_KEY_WIDTH` minus the two-space
-/// indent every key row carries, so key text and description never collide.
-const HELP_KEY_TEXT: usize = HELP_KEY_WIDTH as usize - 2;
 
 /// Responsive breakpoint, derived from terminal width only. Compact drives a
 /// single-column mobile-first board + fullscreen sheets; Regular/Wide keep the
@@ -78,9 +130,47 @@ fn sanitize(value: &str) -> String {
         .collect()
 }
 
-/// Region above the 1-row footer.
-fn main_area(area: Rect) -> Rect {
-    Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1))
+/// Board content between persistent header/action chrome. The footer hint
+/// row is gone: an idle board has no permanently reserved blank row. A
+/// transient toast may reserve one row immediately above the action rail.
+pub(crate) fn board_content_area_for(app: &App, area: Rect) -> Rect {
+    board_content_area_with_toast(area, app.toast.is_some())
+}
+
+fn board_content_area_with_toast(area: Rect, toast: bool) -> Rect {
+    let action_h = board_action_rows(area.width).min(area.height);
+    let header_h = board_header_height(area.width).min(area.height.saturating_sub(action_h));
+    let toast_h = u16::from(toast && area.height > header_h.saturating_add(action_h));
+    let reserved = header_h.saturating_add(toast_h).saturating_add(action_h);
+    Rect::new(
+        area.x,
+        area.y.saturating_add(header_h),
+        area.width,
+        area.height.saturating_sub(reserved),
+    )
+}
+
+/// Board-only top chrome, above the card viewport.
+fn board_header_area(area: Rect) -> Rect {
+    let action_h = board_action_rows(area.width).min(area.height);
+    let height = board_header_height(area.width).min(area.height.saturating_sub(action_h));
+    Rect::new(area.x, area.y, area.width, height)
+}
+
+/// Card viewport between the board header and action rail.
+pub(crate) fn board_body_area_for(app: &App, area: Rect) -> Rect {
+    board_content_area_for(app, area)
+}
+
+/// Board-only click-first action row at the bottom of the frame.
+fn board_action_area(area: Rect) -> Rect {
+    let height = board_action_rows(area.width).min(area.height);
+    Rect::new(
+        area.x,
+        area.bottom().saturating_sub(height),
+        area.width,
+        height,
+    )
 }
 
 mod board;
@@ -135,6 +225,9 @@ pub const HELP_KEYS: &[(Screen, &str, &str)] = &[
     (Screen::CardForm, "Shift+Tab", "previous field"),
     (Screen::CardForm, "←/→ Space", "cycle a picker field"),
     (Screen::CardForm, "Ctrl+E", "edit textarea in $EDITOR"),
+    (Screen::CardForm, "Shift+Enter", "newline in textarea"),
+    (Screen::CardForm, "Ctrl+J", "newline in textarea"),
+    (Screen::CardForm, "f", "toggle popup / fullscreen"),
     (Screen::CardForm, "Enter", "submit"),
     (Screen::CardForm, "Esc", "cancel"),
     (Screen::Picker, "--", "-- picker / confirm --"),
@@ -166,7 +259,7 @@ mod overlays;
 
 pub use detail::{
     comment_row_spans, comment_wrapped_rows, comments_action_bar_shown, comments_viewport,
-    detail_layout, detail_toggle_rect, DetailLayout,
+    detail_layout, detail_toggle_rect, runs_viewport_height, DetailLayout,
 };
 pub use layout::{board_layout, BoardLayout, ColLayout, CompactHeader, ScrollInfo};
 pub use overlays::{
@@ -255,15 +348,33 @@ fn centered_rect_abs(w: u16, h: u16, area: Rect) -> Rect {
     Rect::new(x, y, w, h)
 }
 
-/// Sheet placement: Compact overlays go fullscreen (over `main_area`, i.e.
-/// above the footer row); Regular/Wide keep today's centered floating box.
+/// Sheet placement: Compact overlays fill the board content region;
+/// Regular/Wide keep a centered floating box inside that same region.
 ///
-/// Both branches derive from `main_area(area)` (not the raw frame `area`), so
-/// the footer row is subtracted exactly once regardless of mode — passing the
-/// full frame `area` in here is always correct; do not pre-subtract the
-/// footer before calling this.
+/// The persistent top and bottom board chrome is deliberately outside the
+/// returned rectangle. Passing the full frame `area` is always correct.
 pub fn sheet_area(mode: LayoutMode, pref_w: u16, pref_h: u16, area: Rect) -> Rect {
-    let base = main_area(area);
+    sheet_area_with_toast(mode, pref_w, pref_h, area, false)
+}
+
+pub(crate) fn sheet_area_for_app(
+    app: &App,
+    mode: LayoutMode,
+    pref_w: u16,
+    pref_h: u16,
+    area: Rect,
+) -> Rect {
+    sheet_area_with_toast(mode, pref_w, pref_h, area, app.toast.is_some())
+}
+
+fn sheet_area_with_toast(
+    mode: LayoutMode,
+    pref_w: u16,
+    pref_h: u16,
+    area: Rect,
+    toast: bool,
+) -> Rect {
+    let base = board_content_area_with_toast(area, toast);
     match mode {
         LayoutMode::Compact => base,
         LayoutMode::Regular | LayoutMode::Wide => centered_rect_abs(pref_w, pref_h, base),

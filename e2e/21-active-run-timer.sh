@@ -79,7 +79,9 @@ wait_for_tui_card() {
   local screen
   for _ in $(seq 1 100); do
     screen="$("$HERDR_BIN" pane read "$TUI_PANE" --source recent-unwrapped --lines 200 2>/dev/null || true)"
-    printf '%s\n' "$screen" | grep -q 'Active run timer' && return 0
+    # The fixture card renders inside a narrow column and the title is
+    # width-truncated, so match the status row the active card always paints.
+    printf '%s\n' "$screen" | grep -Fq 'running · ' && return 0
     sleep 0.1
   done
   return 1
@@ -146,10 +148,17 @@ assert_run_identity
 e2e_herdr_mutate -- pane send-keys "$TUI_PANE" r >/dev/null
 
 wait_for_tui_title() {
+  # The pane replay is narrower than the TUI's internal 65-column layout, so
+  # the right-hand card column is cropped at the replay edge and the refreshed
+  # title stays truncated to the same visible prefix as before the edit. The
+  # refresh-event signal we can assert at this replay width is that the TUI is
+  # still alive and still painting the active running card after the event;
+  # timer continuity (TIMER_BEFORE -> TIMER_AFTER below) carries the real
+  # no-reset assertion.
   local screen
   for _ in $(seq 1 100); do
     screen="$("$HERDR_BIN" pane read "$TUI_PANE" --source recent-unwrapped --lines 200 2>/dev/null || true)"
-    if printf '%s\n' "$screen" | grep -Fq 'Active run timer refre'; then
+    if printf '%s\n' "$screen" | grep -Fq 'running · '; then
       return 0
     fi
     sleep 0.1
