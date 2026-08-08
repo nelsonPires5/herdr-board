@@ -27,17 +27,92 @@ fn board_action_rows(width: u16) -> u16 {
     BOARD_ACTION_COUNT.div_ceil(board_action_columns(width))
 }
 
-fn board_header_height(_width: u16) -> u16 {
-    // identity/navigation + direct visibility controls + bottom divider
-    3
+/// Number of rows needed by the Compact visibility rail. Full filter names
+/// remain the default; below the one-row width they wrap into additional rows
+/// (or use distinct, unambiguous prefixes at widths where a full chip cannot
+/// fit). The same calculation drives both drawing and the board content
+/// geometry, so Archived can never disappear merely because it is last.
+pub(super) fn compact_filter_rows(width: u16) -> u16 {
+    let options = compact_filter_options(width);
+    let label_width = compact_filter_label(width).chars().count() as u16;
+    let mut used = label_width.saturating_add(1).min(width);
+    let mut rows = 1;
+    let mut needs_gap = false;
+
+    for (label, _) in options {
+        let chip_width = crate::widgets::button_text(label).chars().count() as u16;
+        let gap = u16::from(needs_gap && used > 0);
+        if used.saturating_add(gap).saturating_add(chip_width) <= width {
+            used = used.saturating_add(gap).saturating_add(chip_width);
+            needs_gap = true;
+        } else {
+            rows += 1;
+            used = chip_width.min(width);
+            needs_gap = true;
+        }
+    }
+    rows
+}
+
+pub(super) fn compact_filter_options(width: u16) -> [(&'static str, CardFilter); 3] {
+    if width >= 11 {
+        [
+            ("Active", CardFilter::Active),
+            ("All", CardFilter::All),
+            ("Archived", CardFilter::Archived),
+        ]
+    } else if width >= 8 {
+        // Each prefix is distinct within the rail: Active / All / Archived.
+        [
+            ("Act", CardFilter::Active),
+            ("All", CardFilter::All),
+            ("Arch", CardFilter::Archived),
+        ]
+    } else if width >= 7 {
+        [
+            ("Act", CardFilter::Active),
+            ("All", CardFilter::All),
+            ("Arc", CardFilter::Archived),
+        ]
+    } else if width >= 6 {
+        [
+            ("Ac", CardFilter::Active),
+            ("Al", CardFilter::All),
+            ("Ar", CardFilter::Archived),
+        ]
+    } else {
+        // Widths below the normal mobile target are only a last-resort
+        // rendering mode. These labels are still distinct and all three
+        // click zones remain present, one per wrapped row.
+        [
+            ("A", CardFilter::Active),
+            ("L", CardFilter::All),
+            ("R", CardFilter::Archived),
+        ]
+    }
+}
+
+pub(super) fn compact_filter_label(width: u16) -> &'static str {
+    if width >= 11 {
+        "Visible:"
+    } else {
+        "V:"
+    }
+}
+
+/// Board header height includes identity, the responsive filter rows, the
+/// Compact column navigator, and the bottom divider. Regular/Wide retain the
+/// existing three-row header.
+pub fn board_header_height(width: u16) -> u16 {
+    if width < 60 {
+        3 + compact_filter_rows(width)
+    } else {
+        3
+    }
 }
 const MAX_SCOPE_LABEL: usize = 32;
 const NARROW_DETAIL_WIDTH: u16 = 100;
 const HELP_GUTTER_WIDTH: u16 = 2;
-const HELP_KEY_WIDTH: u16 = 13;
-/// Characters a help key label may occupy. `HELP_KEY_WIDTH` minus the two-space
-/// indent every key row carries, so key text and description never collide.
-const HELP_KEY_TEXT: usize = HELP_KEY_WIDTH as usize - 2;
 
 /// Responsive breakpoint, derived from terminal width only. Compact drives a
 /// single-column mobile-first board + fullscreen sheets; Regular/Wide keep the
@@ -96,9 +171,20 @@ fn sanitize(value: &str) -> String {
         .collect()
 }
 
-/// Region above the 1-row footer.
-fn main_area(area: Rect) -> Rect {
-    Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1))
+/// Board content between persistent header/action chrome and the footer.
+/// Every overlay and fullscreen sheet is constrained to this region; the
+/// product identity, board selector, visibility filters, and board actions
+/// remain visible and available around it.
+pub(crate) fn board_content_area(area: Rect) -> Rect {
+    let header_h = board_header_height(area.width).min(area.height.saturating_sub(1));
+    let action_h = board_action_rows(area.width);
+    let reserved = header_h.saturating_add(action_h).saturating_add(1);
+    Rect::new(
+        area.x,
+        area.y.saturating_add(header_h),
+        area.width,
+        area.height.saturating_sub(reserved),
+    )
 }
 
 /// Board-only top chrome, above the card viewport.
@@ -113,17 +199,7 @@ fn board_header_area(area: Rect) -> Rect {
 
 /// Card viewport between the board header, action row, and global toast/footer.
 fn board_body_area(area: Rect) -> Rect {
-    let footer_h = 1;
-    let header_h = board_header_height(area.width);
-    let reserved = header_h
-        .saturating_add(board_action_rows(area.width))
-        .saturating_add(footer_h);
-    Rect::new(
-        area.x,
-        area.y.saturating_add(header_h.min(area.height)),
-        area.width,
-        area.height.saturating_sub(reserved),
-    )
+    board_content_area(area)
 }
 
 /// Board-only click-first action row, immediately above the global footer.
@@ -189,7 +265,7 @@ pub const HELP_KEYS: &[(Screen, &str, &str)] = &[
     (Screen::CardForm, "Shift+Tab", "previous field"),
     (Screen::CardForm, "←/→ Space", "cycle a picker field"),
     (Screen::CardForm, "Ctrl+E", "edit textarea in $EDITOR"),
-    (Screen::CardForm, "S+Enter", "newline in textarea"),
+    (Screen::CardForm, "Shift+Enter", "newline in textarea"),
     (Screen::CardForm, "Ctrl+J", "newline in textarea"),
     (Screen::CardForm, "f", "toggle popup / fullscreen"),
     (Screen::CardForm, "Enter", "submit"),
@@ -312,15 +388,13 @@ fn centered_rect_abs(w: u16, h: u16, area: Rect) -> Rect {
     Rect::new(x, y, w, h)
 }
 
-/// Sheet placement: Compact overlays go fullscreen (over `main_area`, i.e.
-/// above the footer row); Regular/Wide keep today's centered floating box.
+/// Sheet placement: Compact overlays fill the board content region;
+/// Regular/Wide keep a centered floating box inside that same region.
 ///
-/// Both branches derive from `main_area(area)` (not the raw frame `area`), so
-/// the footer row is subtracted exactly once regardless of mode — passing the
-/// full frame `area` in here is always correct; do not pre-subtract the
-/// footer before calling this.
+/// The persistent top and bottom board chrome is deliberately outside the
+/// returned rectangle. Passing the full frame `area` is always correct.
 pub fn sheet_area(mode: LayoutMode, pref_w: u16, pref_h: u16, area: Rect) -> Rect {
-    let base = main_area(area);
+    let base = board_content_area(area);
     match mode {
         LayoutMode::Compact => base,
         LayoutMode::Regular | LayoutMode::Wide => centered_rect_abs(pref_w, pref_h, base),

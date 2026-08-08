@@ -10,8 +10,8 @@ use board_core::protocol::{CardCreateParams, CardStatus, RunOutcome};
 use board_tui::app::{update, App, DetailScrollTarget, Screen};
 use board_tui::testkit::key;
 use board_tui::view::{
-    board_layout, comment_row_spans, comment_wrapped_rows, comments_action_bar_shown,
-    detail_layout, sheet_area, LayoutMode,
+    board_header_height, board_layout, comment_row_spans, comment_wrapped_rows,
+    comments_action_bar_shown, detail_layout, sheet_area, LayoutMode,
 };
 use crossterm::event::KeyCode;
 use ratatui::layout::Rect;
@@ -97,6 +97,39 @@ fn regular_and_wide_expose_no_compact_header() {
         assert!(
             layout.compact_header.is_none(),
             "w={w} must not draw the Compact header"
+        );
+    }
+}
+
+#[test]
+fn board_layout_keeps_persistent_chrome_clear_while_an_overlay_is_open() {
+    for (w, h) in [(40_u16, 20_u16), (80, 24), (120, 35)] {
+        let mut app = app_with_cards(3);
+        app.screen = Screen::Picker;
+        let area = Rect::new(0, 0, w, h);
+        let layout = board_layout(&app, area);
+        let header_rows = board_header_height(w);
+        let action_rows = if w < 60 {
+            3
+        } else if w < 120 {
+            2
+        } else {
+            1
+        };
+        let content_top = area.y + header_rows;
+        let content_bottom = area.y + h.saturating_sub(1 + action_rows);
+
+        assert!(
+            layout.cols.iter().all(|col| {
+                col.rect.y >= content_top && col.rect.y + col.rect.height <= content_bottom
+            }),
+            "overlay board columns must stay in the content region at {w}x{h}: {:?}",
+            layout.cols.iter().map(|col| col.rect).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            layout.compact_header.is_some(),
+            w < 60,
+            "only Compact retains its column header while an overlay is open"
         );
     }
 }
@@ -212,7 +245,7 @@ fn zero_visible_slots_yields_no_card_rects_and_correct_scroll_state() {
 // -- sheet_area / footer invariant ---------------------------------------------
 
 #[test]
-fn sheet_area_never_overlaps_the_footer_row_in_any_mode() {
+fn sheet_area_stays_inside_the_board_content_region_in_any_mode() {
     let widths = [10u16, 39, 40, 59, 60, 80, 119, 120, 200];
     let heights = [3u16, 5, 10, 24, 35, 60];
     let prefs = [(10u16, 3u16), (58, 3), (96, 20), (200, 200)];
@@ -224,13 +257,25 @@ fn sheet_area_never_overlaps_the_footer_row_in_any_mode() {
                 for &(pw, ph) in &prefs {
                     let area = Rect::new(0, 0, w, h);
                     let rect = sheet_area(mode, pw, ph, area);
-                    // `main_area` (private) is exactly `area` minus the 1-row
-                    // footer; the invariant restated without calling it.
-                    let footer_top = area.y + area.height.saturating_sub(1);
+                    let header_rows = board_header_height(w);
+                    let action_rows = if w < 60 {
+                        3
+                    } else if w < 120 {
+                        2
+                    } else {
+                        1
+                    };
+                    let content_top = area.y + header_rows.min(area.height);
+                    let content_bottom = area.y + h.saturating_sub(1 + action_rows);
                     assert!(
-                        rect.y + rect.height <= footer_top,
+                        rect.y >= content_top || rect.height == 0,
                         "mode={mode:?} w={w} h={h} pref=({pw},{ph}) rect={rect:?} \
-                         footer_top={footer_top}"
+                         content_top={content_top}"
+                    );
+                    assert!(
+                        rect.y + rect.height <= content_bottom.max(content_top),
+                        "mode={mode:?} w={w} h={h} pref=({pw},{ph}) rect={rect:?} \
+                         content_bottom={content_bottom}"
                     );
                 }
             }
@@ -239,6 +284,95 @@ fn sheet_area_never_overlaps_the_footer_row_in_any_mode() {
 }
 
 // -- scrollbar presence ---------------------------------------------------------
+
+#[test]
+fn compact_detail_40x20_never_exposes_a_partial_section() {
+    let mut app = app_with_detail_comments(3);
+    app.last_area = Rect::new(0, 0, 40, 20);
+    for fullscreen in [false, true] {
+        app.detail_fullscreen = fullscreen;
+        let layout = detail_layout(&app, app.last_area);
+        let sections = [
+            ("status", layout.status),
+            ("configuration", layout.configuration),
+            ("session", layout.session),
+            ("description", layout.description),
+            ("comments", layout.comments),
+            ("runs", layout.runs),
+        ];
+        for (name, rect) in sections {
+            assert!(
+                rect.height == 0 || rect.height >= 3,
+                "{name} must be hidden or fully closed at 40x20 (fullscreen={fullscreen}): {rect:?}"
+            );
+        }
+        assert!(
+            layout.card_actions.height >= 1,
+            "the detail action rail must remain reachable: {:?}",
+            layout.card_actions
+        );
+        assert!(
+            layout.card_actions.y + layout.card_actions.height <= layout.panel.bottom(),
+            "the detail action rail must stay inside the closed panel: {:?} panel={:?}",
+            layout.card_actions,
+            layout.panel
+        );
+    }
+}
+
+#[test]
+fn runs_viewport_reserves_action_row_before_every_run_body_row() {
+    let mut app = app_with_detail_runs(2);
+    for (w, h) in [(40_u16, 20_u16), (52, 24), (60, 24), (80, 24), (120, 35)] {
+        app.last_area = Rect::new(0, 0, w, h);
+        let layout = detail_layout(&app, app.last_area);
+        if layout.runs.height == 0 {
+            assert_eq!(board_tui::view::runs_viewport_height(&layout), 0);
+            continue;
+        }
+        let visible = board_tui::view::runs_viewport_height(&layout);
+        let body_bottom = layout.runs.y + 1 + visible as u16;
+        assert!(
+            body_bottom <= layout.run_actions.y,
+            "run body must end before action row at {w}x{h}: runs={:?} actions={:?}",
+            layout.runs,
+            layout.run_actions,
+        );
+        assert!(
+            layout.run_actions.y + layout.run_actions.height <= layout.runs.bottom(),
+            "run action row must stay inside the Runs frame at {w}x{h}: {:?} runs={:?}",
+            layout.run_actions,
+            layout.runs
+        );
+    }
+}
+
+#[test]
+fn zero_height_runs_body_keeps_a_bounded_logical_anchor() {
+    let mut app = app_with_detail_runs(2);
+    app.last_area = Rect::new(0, 0, 60, 24);
+    let layout = detail_layout(&app, app.last_area);
+    if board_tui::view::runs_viewport_height(&layout) == 0 {
+        app.detail_runs_scroll = 99;
+        app.scroll_detail_to_latest();
+        assert_eq!(app.detail_runs_scroll, 1);
+        app.detail_scroll_target = DetailScrollTarget::Runs;
+        update(&mut app, key(KeyCode::Down));
+        assert_eq!(app.detail_runs_scroll, 1);
+    }
+}
+
+#[test]
+fn detail_popup_and_fullscreen_stay_inside_the_content_region() {
+    for fullscreen in [false, true] {
+        let mut app = app_with_detail_comments(2);
+        app.last_area = Rect::new(0, 0, 120, 35);
+        app.detail_fullscreen = fullscreen;
+        let layout = detail_layout(&app, app.last_area);
+        assert_eq!(layout.panel.y, 3);
+        assert_eq!(layout.panel.y + layout.panel.height, 33);
+    }
+}
 
 #[test]
 fn scrollbar_rect_present_iff_column_overflows() {
@@ -378,8 +512,25 @@ fn runs_selection_stays_inside_the_rendered_runs_viewport() {
         let len = app.detail.as_ref().unwrap().runs.len();
         let visible = {
             let layout = detail_layout(&app, app.last_area);
-            board_tui::view::runs_viewport_height(&layout).max(1)
+            board_tui::view::runs_viewport_height(&layout)
         };
+        if visible == 0 {
+            // A three-row frame has room for its title, action row, and
+            // bottom border only. There is no rendered run row to paint, so
+            // only the logical offset is exercised and it must stay bounded.
+            assert_eq!(
+                app.detail_runs_scroll, 0,
+                "{w}x{h}: initial zero-row offset"
+            );
+            for _ in 0..len + 5 {
+                update(&mut app, key(KeyCode::Down));
+                assert!(
+                    app.detail_runs_scroll < len,
+                    "{w}x{h}: zero-row body offset escaped the run list"
+                );
+            }
+            continue;
+        }
         assert!(
             len > visible,
             "{w}x{h}: fixture must overflow the runs viewport ({len} runs, {visible} rows)"

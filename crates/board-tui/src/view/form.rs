@@ -1,4 +1,4 @@
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
@@ -6,9 +6,9 @@ use ratatui::Frame;
 
 use crate::app::App;
 use crate::forms::Form;
-use crate::widgets::{render_sheet_frame, windowed_rows, Zone};
+use crate::widgets::{button_text, render_button_chip_at, render_sheet_frame, windowed_rows, Zone};
 
-use super::{main_area, sheet_area, truncate, LayoutMode};
+use super::{board_body_area, sheet_area, truncate, LayoutMode};
 
 // -- form --------------------------------------------------------------------
 
@@ -20,9 +20,9 @@ use super::{main_area, sheet_area, truncate, LayoutMode};
 const MULTILINE_ROWS: u16 = 5;
 
 /// Height (in rows, including its label row) a field occupies.
-fn field_height(field: &crate::forms::Field) -> u16 {
+fn field_height(field: &crate::forms::Field, wrapped_editor: bool) -> u16 {
     if field.multiline {
-        MULTILINE_ROWS
+        MULTILINE_ROWS.saturating_add(u16::from(wrapped_editor))
     } else {
         2
     }
@@ -61,7 +61,9 @@ pub(super) fn draw_form(app: &App, form: &Form, f: &mut Frame, area: Rect) {
     );
 
     // Build sections over *visible* field indices, preserving field order.
-    // Each section contributes a 1-row section-header card plus its fields.
+    // Each section is one complete bordered card: the border owns its title,
+    // sides, and bottom edge, so no one-row header can float disconnected
+    // above the fields it names.
     let mut sections: Vec<(&'static str, Vec<usize>)> = Vec::new();
     for &fi in &visible {
         let sec = if is_comment {
@@ -74,31 +76,29 @@ pub(super) fn draw_form(app: &App, form: &Form, f: &mut Frame, area: Rect) {
             _ => sections.push((sec, vec![fi])),
         }
     }
-
-    // Combined layout: for each section, [header(1)] + field heights + 1 gap.
-    let mut heights: Vec<u16> = Vec::new();
-    // (section header: name+index | field index), parallel to `heights`
-    type RowMeta = (Option<(&'static str, usize)>, Option<usize>);
-    let mut row_meta: Vec<RowMeta> = Vec::new();
-    // row_meta entries: (some((section_title, section_index)) header,
-    //                    some(field_index) field)
-    for (si, (sec, idxs)) in sections.iter().enumerate() {
-        heights.push(1); // section header card
-        row_meta.push((Some((*sec, si)), None));
-        for &fi in idxs {
-            heights.push(field_height(&form.fields[fi]));
-            row_meta.push((None, Some(fi)));
-        }
-        // Section cards' own borders provide the visual separation; no extra
-        // gap row, so grouped forms keep fitting the same sizes as flat forms.
-        let _ = si;
-    }
-    let content_h = heights.iter().copied().sum::<u16>().saturating_add(4); // + button bar + margins
+    // A section card is its fields plus top/bottom border rows. These section
+    // rows are the scroll units, keeping a card's geometry intact whenever it
+    // fits in the viewport instead of slicing a border through a field.
+    // Compact terminals below 55 columns wrap the editor affordance to its
+    // own label row so the actual field label never ellipsizes.
+    let wrapped_editor = mode == LayoutMode::Compact && area.width < 55;
+    let heights: Vec<u16> = sections
+        .iter()
+        .map(|(_, idxs)| {
+            idxs.iter()
+                .map(|&fi| field_height(&form.fields[fi], wrapped_editor))
+                .sum::<u16>()
+                .saturating_add(2)
+        })
+        .collect();
+    // Add the one-row action rail and the form frame's two border rows to the
+    // preferred height; otherwise a fully fitting set of section cards would
+    // still acquire a needless scrollbar one row short.
+    let content_h = heights.iter().copied().sum::<u16>().saturating_add(3);
 
     // -- sheet placement ---------------------------------------------------------
     let box_area = if app.form_fullscreen {
-        let base = main_area(area);
-        Rect::new(base.x, base.y, base.width, base.height)
+        board_body_area(area)
     } else {
         sheet_area(mode, 96, content_h, area)
     };
@@ -140,17 +140,10 @@ pub(super) fn draw_form(app: &App, form: &Form, f: &mut Frame, area: Rect) {
     );
     render_form_actions(f, bar_area, &mut hit_map);
 
-    // -- windowing over the combined (section-header + field) layout ------------
-    let focus_row = visible
+    // -- windowing over complete section cards -------------------------------
+    let focus_row = sections
         .iter()
-        .position(|&i| i == form.focus)
-        .map(|_| {
-            // map the focused field to its combined row index
-            row_meta
-                .iter()
-                .position(|(_, fld)| *fld == Some(form.focus))
-                .unwrap_or(0)
-        })
+        .position(|(_, fields)| fields.contains(&form.focus))
         .unwrap_or(0);
     let (win_start, win_end) = windowed_rows(&heights, focus_row, fields_area.height);
     let overflowing = win_end - win_start < heights.len();
@@ -186,50 +179,50 @@ pub(super) fn draw_form(app: &App, form: &Form, f: &mut Frame, area: Rect) {
         .iter()
         .map(|h| Constraint::Length(*h))
         .collect();
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(win_constraints)
-        .split(fields_area);
+    let rows = Layout::vertical(win_constraints).split(fields_area);
 
-    // -- draw rows ---------------------------------------------------------------
-    // We track the current section's combined bounds so each section can be
-    // rendered as one bordered card afterwards.
-
+    // -- draw complete section cards ------------------------------------------
     for (row_idx, row) in rows.iter().copied().enumerate() {
         let abs_row = win_start + row_idx;
-        match row_meta.get(abs_row) {
-            Some((Some((title, si)), _)) => {
-                // Section header: a thin clickable card with the section title.
-                let block = Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::DarkGray))
-                    .style(Style::default().bg(Color::Rgb(10, 20, 30)));
-                let inner_h = block.inner(row);
-                f.render_widget(block, row);
-                f.render_widget(
-                    Paragraph::new(Span::styled(
-                        format!("  {title} "),
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    )),
-                    inner_h,
-                );
-                app.hit_map.borrow_mut().push(row, Zone::Shield);
-                let _ = si;
-            }
-            Some((None, Some(fi))) => {
-                draw_form_field(app, form, *fi, row, f);
-            }
-            _ => {}
+        let Some((title, fields)) = sections.get(abs_row) else {
+            continue;
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .style(Style::default().bg(Color::Rgb(10, 20, 30)))
+            .title(Span::styled(
+                format!(" {title} "),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        let content = block.inner(row);
+        f.render_widget(block, row);
+        let field_constraints = fields
+            .iter()
+            .map(|&fi| Constraint::Length(field_height(&form.fields[fi], wrapped_editor)))
+            .collect::<Vec<_>>();
+        let field_rows = Layout::vertical(field_constraints).split(content);
+        for (&fi, field_row) in fields.iter().zip(field_rows.iter().copied()) {
+            draw_form_field(app, form, fi, field_row, f);
         }
     }
+}
+
+fn marker_width_for_label(label: &str) -> u16 {
+    // `▌ ` (or two spaces) + the label + one separator before the editor chip.
+    2u16.saturating_add(label.chars().count() as u16)
+        .saturating_add(1)
 }
 
 /// Render one form field (label row + value row) inside `area`.
 fn draw_form_field(app: &App, form: &Form, fi: usize, row_area: Rect, f: &mut Frame) {
     let field = &form.fields[fi];
     let is_focus = fi == form.focus;
+    let wrap_editor = field.multiline
+        && row_area.width
+            < marker_width_for_label(field.label) + button_text("$EDITOR").chars().count() as u16;
     let label_style = if is_focus {
         Style::default()
             .fg(Color::Cyan)
@@ -239,7 +232,7 @@ fn draw_form_field(app: &App, form: &Form, fi: usize, row_area: Rect, f: &mut Fr
     };
     app.hit_map.borrow_mut().push(row_area, Zone::FormField(fi));
     let marker = if is_focus { "▌ " } else { "  " };
-    let editor = field.multiline.then_some("[$EDITOR]");
+    let editor = (!wrap_editor && field.multiline).then_some("[ $EDITOR ]");
     let label_line = form_label_line(
         marker,
         field.label,
@@ -253,20 +246,29 @@ fn draw_form_field(app: &App, form: &Form, fi: usize, row_area: Rect, f: &mut Fr
     );
     if field.multiline {
         let marker_w = marker.chars().count() as u16;
-        let trailing_w = "[$EDITOR]".chars().count() as u16;
-        let label_w = row_area.width.saturating_sub(marker_w + trailing_w + 1);
-        let shown_label_w = truncate(field.label, label_w as usize).chars().count() as u16;
-        let editor_x = row_area.x + marker_w + shown_label_w + 1;
-        app.hit_map.borrow_mut().push(
-            Rect::new(editor_x, row_area.y, trailing_w, 1),
+        let trailing_w = button_text("$EDITOR").chars().count() as u16;
+        let editor_x = if wrap_editor {
+            row_area.right().saturating_sub(trailing_w)
+        } else {
+            let label_w = row_area.width.saturating_sub(marker_w + trailing_w + 1);
+            let shown_label_w = truncate(field.label, label_w as usize).chars().count() as u16;
+            row_area.x + marker_w + shown_label_w + 1
+        };
+        let editor_y = row_area.y + u16::from(wrap_editor);
+        render_button_chip_at(
+            f,
+            Rect::new(editor_x, editor_y, trailing_w, 1),
+            "$EDITOR",
+            &mut app.hit_map.borrow_mut(),
             Zone::FormEditor(fi),
         );
     }
+    let value_start = row_area.y + 1 + u16::from(wrap_editor);
     let value_area = Rect::new(
         row_area.x,
-        row_area.y + 1,
+        value_start,
         row_area.width,
-        row_area.height.saturating_sub(1),
+        row_area.height.saturating_sub(1 + u16::from(wrap_editor)),
     );
 
     match &field.kind {
@@ -284,14 +286,21 @@ fn draw_form_field(app: &App, form: &Form, fi: usize, row_area: Rect, f: &mut Fr
                 Paragraph::new(Span::styled(text, val_style)),
                 Rect::new(value_area.x, value_area.y, value_area.width, 1),
             );
+            let arrow_w = button_text("‹").chars().count() as u16;
             let mut hm = app.hit_map.borrow_mut();
-            hm.push(
-                Rect::new(value_area.x, value_area.y, 3.min(value_area.width), 1),
+            render_button_chip_at(
+                f,
+                Rect::new(value_area.x, value_area.y, arrow_w.min(value_area.width), 1),
+                "‹",
+                &mut hm,
                 Zone::FormChoicePrev(fi),
             );
-            if shown_w >= 3 && shown_w <= value_area.width {
-                hm.push(
-                    Rect::new(value_area.x + shown_w - 3, value_area.y, 3, 1),
+            if shown_w >= arrow_w && shown_w <= value_area.width {
+                render_button_chip_at(
+                    f,
+                    Rect::new(value_area.x + shown_w - arrow_w, value_area.y, arrow_w, 1),
+                    "›",
+                    &mut hm,
                     Zone::FormChoiceNext(fi),
                 );
             }
@@ -379,20 +388,21 @@ fn form_label_line<'a>(
 }
 
 /// Render both choice controls before allocating the remaining cells to data.
-/// Thus `[‹]` and `[›]` never disappear even when the selected value is hostile.
+/// Thus `[ ‹ ]` and `[ › ]` never disappear even when the selected value is hostile.
 fn choice_control(value: &str, width: usize) -> String {
-    const OVERHEAD: usize = 10; // "[‹]  " + "  [›]"
+    const OVERHEAD: usize = 14; // "[ ‹ ]  " + "  [ › ]"
     if width < OVERHEAD {
         // Real form inners are wider than this, but keep tiny test terminals
         // bounded rather than allowing the paragraph to spill.
-        return truncate("[‹]  [›]", width);
+        return truncate("[ ‹ ]  [ › ]", width);
     }
     let value = truncate(value, width - OVERHEAD);
-    format!("[‹]  {value}  [›]")
+    format!("[ ‹ ]  {value}  [ › ]")
 }
 
 /// Equal-width action rail. The existing semantic zones remain unchanged, so
 /// keyboard and pointer submission still share the established reducer paths.
+/// Only the exact `[ Save ]` / `[ Cancel ]` cells are painted as chips.
 fn render_form_actions(f: &mut Frame, area: Rect, hit_map: &mut crate::widgets::HitMap) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -400,30 +410,8 @@ fn render_form_actions(f: &mut Frame, area: Rect, hit_map: &mut crate::widgets::
     let save_w = area.width / 2;
     let save = Rect::new(area.x, area.y, save_w, 1);
     let cancel = Rect::new(area.x + save_w, area.y, area.width - save_w, 1);
-
-    f.render_widget(
-        Paragraph::new("[ Save ]")
-            .alignment(ratatui::layout::Alignment::Center)
-            .style(
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD | Modifier::REVERSED),
-            ),
-        save,
-    );
-    hit_map.push(save, Zone::BarSave);
-
-    f.render_widget(
-        Paragraph::new("[ Cancel ]")
-            .alignment(ratatui::layout::Alignment::Center)
-            .style(
-                Style::default()
-                    .fg(Color::Red)
-                    .add_modifier(Modifier::BOLD | Modifier::REVERSED),
-            ),
-        cancel,
-    );
-    hit_map.push(cancel, Zone::BarCancel);
+    render_button_chip_at(f, save, "Save", hit_map, Zone::BarSave);
+    render_button_chip_at(f, cancel, "Cancel", hit_map, Zone::BarCancel);
 }
 
 #[cfg(test)]
@@ -432,11 +420,11 @@ mod tests {
 
     #[test]
     fn choice_controls_survive_compact_width_and_only_data_ellipsizes() {
-        assert_eq!(choice_control("manual", 38), "[‹]  manual  [›]");
-        let hostile = choice_control(&"x".repeat(80), 12);
-        assert_eq!(hostile, "[‹]  x…  [›]");
-        assert!(hostile.contains("[‹]"));
-        assert!(hostile.contains("[›]"));
+        assert_eq!(choice_control("manual", 38), "[ ‹ ]  manual  [ › ]");
+        let hostile = choice_control(&"x".repeat(80), 16);
+        assert_eq!(hostile, "[ ‹ ]  x…  [ › ]");
+        assert!(hostile.contains("[ ‹ ]"));
+        assert!(hostile.contains("[ › ]"));
     }
 
     #[test]
@@ -473,8 +461,8 @@ mod tests {
         let line = form_label_line(
             "▌ ",
             "description (base prompt)",
-            Some("[$EDITOR]"),
-            38,
+            Some("[ $EDITOR ]"),
+            39,
             Style::default(),
         );
         let rendered = line
@@ -482,7 +470,7 @@ mod tests {
             .iter()
             .map(|s| s.content.as_ref())
             .collect::<String>();
-        assert_eq!(rendered, "▌ description (base prompt) [$EDITOR]");
+        assert_eq!(rendered, "▌ description (base prompt) [ $EDITOR ]");
         assert!(!rendered.contains('…'));
     }
 }

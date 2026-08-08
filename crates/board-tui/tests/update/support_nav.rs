@@ -183,6 +183,55 @@ fn help_and_quit() {
     assert!(matches!(effects.as_slice(), [Effect::Quit]));
 }
 
+// -- Esc/Alt chord guard (bug: a fast `Esc` then `M` reads as `Alt+M` and
+// matched the bare `M` arm, opening "move column" unprompted) --------------
+
+#[test]
+fn alt_or_ctrl_chorded_letters_do_not_trigger_board_bindings() {
+    use crossterm::event::{KeyEvent, KeyModifiers};
+
+    // `Alt+M`/`Ctrl+M` must not open move-column mode: terminals deliver
+    // `Esc` followed quickly by another key as a single Alt+<key> sequence,
+    // which is how a stray Esc looked like "move column" to the user.
+    for modifiers in [KeyModifiers::ALT, KeyModifiers::CONTROL] {
+        let mut app = demo_app();
+        update(
+            &mut app,
+            Msg::Key(KeyEvent::new(KeyCode::Char('M'), modifiers)),
+        );
+        assert_eq!(app.screen, Screen::Board, "{modifiers:?}+M must be inert");
+        assert!(
+            app.move_column.is_none(),
+            "{modifiers:?}+M opened move column"
+        );
+    }
+
+    // The same guard covers the other uppercase board bindings.
+    let mut app = demo_app();
+    update(
+        &mut app,
+        Msg::Key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::ALT)),
+    );
+    assert_eq!(app.screen, Screen::Board, "Alt+N must not open a form");
+    assert!(app.form.is_none(), "Alt+N opened a form");
+
+    // Bare `M` (and the SHIFT-tagged synthetic click key) still work.
+    let mut app = demo_app();
+    update(&mut app, key(KeyCode::Char('M')));
+    assert_eq!(app.screen, Screen::MoveColumn);
+    let mut app = demo_app();
+    update(
+        &mut app,
+        Msg::Key(KeyEvent::new(KeyCode::Char('M'), KeyModifiers::SHIFT)),
+    );
+    assert_eq!(app.screen, Screen::MoveColumn);
+
+    // Esc itself (bare) still quits from the board.
+    let mut app = demo_app();
+    let effects = update(&mut app, key(KeyCode::Esc));
+    assert!(matches!(effects.as_slice(), [Effect::Quit]));
+}
+
 // -- Feature 2: `r` refresh --------------------------------------------------
 
 #[test]

@@ -6,10 +6,13 @@
 use board_core::client::{BoardClient, FakeBoardClient};
 use board_core::db::{EnqueueRun, FinalizeRun};
 use board_core::protocol::parse_timestamp;
-use board_core::protocol::{AwaitingReason, CardCreateParams, CardStatus, RunOutcome};
-use board_tui::app::{App, Msg, Screen, SwitcherLevel, SwitcherState};
+use board_core::protocol::{
+    AwaitingReason, CardCreateParams, CardStatus, Effort, RunOutcome, SpaceKind,
+};
+use board_tui::app::{App, CardFilter, Msg, Screen, SwitcherLevel, SwitcherState};
 use board_tui::forms::{FieldId, FieldKind};
 use board_tui::testkit::{demo_client, driver_with_origin, hostile_origin, DemoClient};
+use board_tui::widgets::Zone;
 use board_tui::Driver;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
@@ -74,6 +77,41 @@ fn empty_board() {
 }
 
 #[test]
+fn empty_board_copy_matches_the_active_filter() {
+    let expected = [
+        (
+            CardFilter::Active,
+            "No active cards.",
+            "v: show all / archived",
+        ),
+        (CardFilter::All, "No cards.", "v: show active / archived"),
+        (
+            CardFilter::Archived,
+            "No archived cards.",
+            "v: show active / all",
+        ),
+    ];
+    for (filter, message, hint) in expected {
+        let mut d = driver(demo_client().unwrap());
+        d.app.card_filter = filter;
+        // Review has no archived card in the default fixture; Archived is the
+        // regression case, while All also proves its empty copy is distinct.
+        d.app.sel_col = 3;
+        d.app.board.cards.clear();
+        let output = render_sized(&mut d, 40, 20);
+        assert!(
+            output.contains(message),
+            "{filter:?} copy missing:\n{output}"
+        );
+        assert!(output.contains(hint), "{filter:?} hint missing:\n{output}");
+        assert!(
+            !(filter == CardFilter::Archived && output.contains("No active cards.")),
+            "Archived must not use active-card copy:\n{output}"
+        );
+    }
+}
+
+#[test]
 fn set_origin_socket_updates_context_used_by_later_new_card_form() {
     let mut d = driver(FakeBoardClient::new().unwrap());
     d.set_origin_socket(Some("/tmp/herdr/sessions/feature/herdr.sock".to_string()));
@@ -106,10 +144,126 @@ fn seeded_board_glyphs_80x24() {
     insta::assert_snapshot!("seeded_board_80x24", render(&mut d, 80, 24));
 }
 
+/// The visibility filter row keeps its `Visible:` label in every layout, and
+/// the board footer never falls back to the legacy `? help` affordance (the
+/// action row carries the `? Help` button). Pins the e2e 10-archive-filter
+/// contract; the label used to be skipped for Regular/Wide.
+#[test]
+fn visible_label_and_minimal_footer_in_every_layout() {
+    for (w, h) in [(40u16, 20u16), (65, 24), (120, 35)] {
+        let mut d = driver(demo_client().unwrap());
+        let out = render(&mut d, w, h);
+        let header: Vec<&str> = out.lines().take(2).collect();
+        assert!(
+            header.iter().any(|line| line.contains("Visible:")),
+            "{w}x{h}: `Visible:` label missing from the header: {header:?}"
+        );
+        assert!(
+            !header.iter().any(|line| line.contains("? help")),
+            "{w}x{h}: legacy `? help` footer label still visible: {header:?}"
+        );
+        assert!(
+            out.lines().all(|line| !line.contains("? help")),
+            "{w}x{h}: legacy `? help` footer label visible in the board view"
+        );
+    }
+}
+
 #[test]
 fn seeded_board_glyphs_120x35() {
     let mut d = driver(demo_client().unwrap());
     insta::assert_snapshot!("seeded_board_120x35", render(&mut d, 120, 35));
+}
+
+#[test]
+fn compact_visibility_filters_wrap_without_dropping_archived() {
+    let mut d = driver(demo_client().unwrap());
+    let output = render_sized(&mut d, 37, 24);
+    for label in ["[ Active ]", "[ All ]", "[ Archived ]"] {
+        assert!(
+            output.contains(label),
+            "Compact filter {label:?} must remain discoverable at 37 columns:\n{output}"
+        );
+    }
+
+    let (row, line) = output
+        .lines()
+        .enumerate()
+        .find(|(_, line)| line.contains("[ Archived ]"))
+        .expect("Archived chip row");
+    let column = line.find("[ Archived ]").expect("Archived chip column") as u16;
+    assert_eq!(
+        d.app.hit_map.borrow().hit(column, row as u16),
+        Some(Zone::Filter(CardFilter::Archived)),
+        "the wrapped Archived chip must retain its click zone"
+    );
+}
+
+#[test]
+fn board_card_status_glyph_is_once_on_the_next_line_at_each_breakpoint() {
+    let fixtures = [
+        (40_u16, 20_u16, vec![("#1 Update docs", "idle", '·')]),
+        (
+            60,
+            24,
+            vec![
+                ("#1 Update docs", "idle", '·'),
+                ("#2 Add retry", "running", '▶'),
+            ],
+        ),
+        (
+            120,
+            35,
+            vec![
+                ("#1 Update docs", "idle", '·'),
+                ("#2 Add retry", "running", '▶'),
+                ("#3 Fix flaky test", "queued", '⧗'),
+                ("#4 Investigate crash", "blocked", '⏸'),
+                ("#5 Refactor auth module", "failed", '✗'),
+                ("#6 Tune retry backoff", "awaiting", '?'),
+            ],
+        ),
+    ];
+
+    for (width, height, cards) in fixtures {
+        let mut d = driver(demo_client().unwrap());
+        let output = render_sized(&mut d, width, height);
+        let lines: Vec<&str> = output.lines().collect();
+        for (title, status, glyph) in cards {
+            let title_row = lines
+                .iter()
+                .position(|line| line.contains(title))
+                .unwrap_or_else(|| panic!("{title:?} missing at {width}x{height}:\n{output}"));
+            let title_byte = lines[title_row]
+                .find(title)
+                .expect("title position must match the title row");
+            let title_col = lines[title_row][..title_byte].chars().count();
+            let title_chars: Vec<char> = lines[title_row].chars().collect();
+            let card_right = title_chars[title_col..]
+                .iter()
+                .position(|&ch| ch == '│')
+                .map(|offset| title_col + offset)
+                .unwrap_or(title_chars.len());
+            let title_cell: String = title_chars[title_col..card_right].iter().collect();
+            let status_row = title_row + 1;
+            let status_chars: Vec<char> = lines[status_row].chars().collect();
+            let status_cell: String = status_chars[title_col..card_right].iter().collect();
+            assert!(
+                !title_cell.contains(glyph),
+                "{title:?} has status glyph on title row at {width}x{height}:\n{output}"
+            );
+            assert!(
+                status_cell.contains(status),
+                "{title:?} status is not on the next row at {width}x{height} (title_col={title_col}, card_right={card_right}, status_cell={status_cell:?}):\n{output}"
+            );
+            let glyph_count =
+                title_cell.matches(glyph).count() + status_cell.matches(glyph).count();
+            assert!(
+                glyph_count == 1,
+                "{title:?} must have exactly one status glyph at {width}x{height} (count={glyph_count}, title={title_cell:?}, status={status_cell:?}):\n{output}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -322,6 +476,67 @@ fn card_detail_wraps_long_description_and_comment_popup_and_fullscreen() {
 }
 
 #[test]
+fn card_detail_metadata_wraps_wide_and_ellipsizes_when_compact() {
+    let mut client = demo_client().unwrap();
+    let board = client.board_get().unwrap();
+    let todo = board
+        .columns
+        .iter()
+        .find(|column| column.name == "Todo")
+        .unwrap()
+        .id;
+    client
+        .card_create(&CardCreateParams {
+            title: "Long metadata values".into(),
+            column_id: Some(todo),
+            harness: Some("pi".into()),
+            model: Some("model-with-a-very-long-name".into()),
+            effort: Some(Effort::Max),
+            permission_mode: Some("permission-mode-with-a-very-long-name".into()),
+            session: Some("session-with-a-very-long-name".into()),
+            space_kind: Some(SpaceKind::Workspace),
+            space_ref: Some("workspace-with-a-very-long-reference".into()),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let mut d = driver(client);
+    key(&mut d, KeyCode::Down);
+    key(&mut d, KeyCode::Enter);
+
+    let wide = render_sized(&mut d, 120, 35);
+    for prefix in ["Harness · Model:", "Herdr session:"] {
+        let line = wide
+            .lines()
+            .find(|line| line.contains(prefix))
+            .unwrap_or_else(|| panic!("{prefix:?} missing from wide detail:\n{wide}"));
+        assert!(
+            !line.contains('…'),
+            "wide metadata should wrap before it ellipsizes:\n{wide}"
+        );
+    }
+    assert!(wide.contains("permission-mode-with-a-very-long-name"));
+    assert!(
+        wide.contains("eference"),
+        "the wrapped session value is incomplete:\n{wide}"
+    );
+    insta::assert_snapshot!("card_detail_metadata_wrap_120x35", wide);
+
+    let compact = render_sized(&mut d, 40, 20);
+    for prefix in ["Harness · Model:", "Herdr session:"] {
+        let line = compact
+            .lines()
+            .find(|line| line.contains(prefix))
+            .unwrap_or_else(|| panic!("{prefix:?} missing from compact detail:\n{compact}"));
+        assert!(
+            line.contains('…'),
+            "compact metadata must use an explicit ellipsis when it cannot wrap:\n{compact}"
+        );
+    }
+    insta::assert_snapshot!("card_detail_metadata_ellipsis_40x20", compact);
+}
+
+#[test]
 fn card_detail_with_comments_and_runs() {
     let mut d = driver(demo_client().unwrap());
     // Navigate to the failed card in Review (column index 3).
@@ -330,6 +545,124 @@ fn card_detail_with_comments_and_runs() {
     key(&mut d, KeyCode::Right);
     key(&mut d, KeyCode::Enter);
     insta::assert_snapshot!("card_detail", render(&mut d, 80, 24));
+}
+
+#[test]
+fn compact_detail_actions_keep_complete_named_chips() {
+    let mut d = driver(demo_client().unwrap());
+    key(&mut d, KeyCode::Enter); // Todo's idle card has no run history.
+    let output = render_sized(&mut d, 40, 20);
+    for label in [
+        "[ Edit ]",
+        "[ Archive ]",
+        "[ Add ]",
+        "[ Open ]",
+        "[ Retry ]",
+        "[ Cancel ]",
+    ] {
+        assert!(
+            output.contains(label),
+            "compact detail action {label:?} is not discoverable:\n{output}"
+        );
+    }
+    assert!(
+        !output.contains("[ E… ]")
+            && !output.contains("[ A… ]")
+            && !output.contains("[ O… ]")
+            && !output.contains("[ R… ]")
+            && !output.contains("[ C… ]"),
+        "compact detail actions must never ellipsize:\n{output}"
+    );
+
+    // Awaiting adds one card action but must still keep every action named.
+    d.app.detail.as_mut().unwrap().card.status = CardStatus::Awaiting;
+    let awaiting = render_sized(&mut d, 40, 20);
+    assert!(
+        awaiting.contains("[ Confirm ]"),
+        "awaiting action missing:\n{awaiting}"
+    );
+    for label in [
+        "[ Edit ]",
+        "[ Archive ]",
+        "[ Add ]",
+        "[ Open ]",
+        "[ Retry ]",
+        "[ Cancel ]",
+    ] {
+        assert!(
+            awaiting.contains(label),
+            "awaiting detail action {label:?} is not discoverable:\n{awaiting}"
+        );
+    }
+}
+
+#[test]
+fn empty_runs_body_never_shares_a_row_with_run_actions() {
+    let sizes = [(40_u16, 20_u16), (52, 24), (60, 24), (80, 24), (120, 35)];
+    for (w, h) in sizes {
+        let mut d = driver(demo_client().unwrap());
+        key(&mut d, KeyCode::Enter); // Todo's idle card has no runs.
+        let output = render_sized(&mut d, w, h);
+        assert!(
+            !output
+                .lines()
+                .any(|line| line.contains("(no run[") || line.contains("(no[")),
+            "empty Runs content overlaps its action row at {w}x{h}:\n{output}"
+        );
+    }
+}
+
+#[test]
+fn detail_action_label_snapshots_cover_mobile_regular_and_wide_sizes() {
+    for (w, h) in [(40_u16, 20_u16), (52, 24), (60, 24), (80, 24), (120, 35)] {
+        let mut d = driver(demo_client().unwrap());
+        key(&mut d, KeyCode::Enter);
+        insta::assert_snapshot!(
+            format!("detail_actions_{w}x{h}"),
+            render_sized(&mut d, w, h)
+        );
+    }
+}
+
+#[test]
+fn overlays_preserve_board_chrome_and_use_icon_run_controls() {
+    let mut d = driver(demo_client().unwrap());
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Right);
+    key(&mut d, KeyCode::Enter);
+    let output = render(&mut d, 120, 35);
+    let top: Vec<&str> = output.lines().take(3).collect();
+    assert!(
+        top.iter().any(|line| line.contains("herdr-board")),
+        "{output}"
+    );
+    assert!(top.iter().any(|line| line.contains("Board:")), "{output}");
+    assert!(top.iter().any(|line| line.contains("Visible:")), "{output}");
+    assert!(
+        output.contains("[ X ]"),
+        "detail close icon missing:\n{output}"
+    );
+    assert!(
+        output.contains("[ □ ]"),
+        "detail toggle icon missing:\n{output}"
+    );
+    assert!(
+        output.contains("[ Open ]"),
+        "run open label missing:\n{output}"
+    );
+    assert!(
+        output.contains("[ Retry ]"),
+        "run retry label missing:\n{output}"
+    );
+    assert!(
+        output.contains("[ Cancel ]"),
+        "run cancel label missing:\n{output}"
+    );
+    assert!(
+        output.contains("[ + Card ]"),
+        "board action chrome missing:\n{output}"
+    );
 }
 
 #[test]
@@ -939,12 +1272,13 @@ form_size_matrix_test!(size_matrix_edit_form_long_multiline_description, |w, h| 
 
     let output = render_sized(&mut d, w, h);
     // Essential form chrome remains complete at every responsive width;
-    // only hostile dynamic values may ellipsize.
+    // only hostile dynamic values may ellipsize. Choice fields may be in a
+    // different complete section-card window at short heights, so assert
+    // their chip shape whenever a choice is visible rather than requiring a
+    // hidden section to be rendered.
     for label in [
         "description (base prompt)",
-        "[$EDITOR]",
-        "[‹]",
-        "[›]",
+        "[ $EDITOR ]",
         "[ Save ]",
         "[ Cancel ]",
     ] {
@@ -957,6 +1291,16 @@ form_size_matrix_test!(size_matrix_edit_form_long_multiline_description, |w, h| 
         !output.contains("Ctrl+E:"),
         "the clipping-prone inline editor hint must be replaced at {w}x{h}:\n{output}"
     );
+    if output.contains('‹') || output.contains('›') {
+        assert!(
+            output.contains("[ ‹ ]"),
+            "left choice chip is malformed at {w}x{h}:\n{output}"
+        );
+        assert!(
+            output.contains("[ › ]"),
+            "right choice chip is malformed at {w}x{h}:\n{output}"
+        );
+    }
     assert!(
         !output
             .lines()

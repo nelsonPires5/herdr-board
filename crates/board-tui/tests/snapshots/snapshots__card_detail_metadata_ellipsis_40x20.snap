@@ -1,18 +1,18 @@
 ---
 source: crates/board-tui/tests/snapshots.rs
-expression: "render_sized(&mut d, w, h)"
+expression: compact
 ---
 " ◈ herdr-board    [ Board: Global ▾ ]   "
 "Visible: [ Active ] [ All ] [ Archived ]"
-"[ ‹ ][ Review · 4/6 · 2 cards · … ][ › ]"
+"[ ‹ ][ Todo · 1/6 · 2 cards · ▶1 ] [ › ]"
 "────────────────────────────────────────"
-"┌ Card #5: Refactor auth m… [ X ] [ □ ]┐"
+"┌ Card #9: Long metadata v… [ X ] [ □ ]┐"
 "│┌Status──────────────────────────────┐│"
-"││✗ failed                            ││"
+"││· idle                              ││"
 "│└────────────────────────────────────┘│"
 "│┌Task Configuration──────────────────┐│"
-"││Harness · Model: claude · opus · ef…││"
-"││Herdr session: default · Space: wor…││"
+"││Harness · Model: pi · model-with-a-…││"
+"││Herdr session: session-with-a-very-…││"
 "│└────────────────────────────────────┘│"
 "│  [ Edit ]    [ Archive ]    [ Add ]  │"
 "│ [ Open ]    [ Retry ]    [ Cancel ]  │"

@@ -9,12 +9,14 @@ use ratatui::Frame;
 
 use crate::app::{App, CardFilter, Screen, SwitcherLevel};
 use crate::widgets::{
-    render_sheet_frame, windowed_rows, ActionButton, ActionStrip, ActionTone, UiAction, Zone,
+    button_text, render_button_chip_at, render_button_chip_at_with_modifier, render_sheet_frame,
+    windowed_rows, ActionButton, ActionStrip, ActionTone, UiAction, Zone,
 };
 
 use super::{
     board_action_area, board_action_columns, board_body_area, board_header_area, board_layout,
-    centered_rect_abs, main_area, sheet_area, status_glyph, truncate, CompactHeader, LayoutMode,
+    centered_rect_abs, compact_filter_label, compact_filter_options, compact_filter_rows,
+    sheet_area, status_glyph, truncate, CompactHeader, LayoutMode,
 };
 
 // -- board -------------------------------------------------------------------
@@ -24,14 +26,11 @@ pub(super) fn draw_board(app: &App, f: &mut Frame, area: Rect) {
     let focused = app.screen == Screen::Board;
     let compact = app.layout_mode() == LayoutMode::Compact;
 
-    // The board title/running/scope chrome stays visible behind every overlay:
-    // sheets draw over `main_area` (below the header), so drawing the header
-    // unconditionally keeps the header pinned at the top even while a picker,
-    // detail, form, or help sheet is open.
+    // The board title/running/scope chrome and bottom action row stay visible
+    // behind every overlay. Sheets are restricted to the content region, so
+    // both rails can be drawn unconditionally here.
     draw_board_header(app, f, area, layout.compact_header.as_ref());
-    if focused {
-        draw_board_actions(app, f, area);
-    }
+    draw_board_actions(app, f, area);
 
     for col in &layout.cols {
         let Some(column) = app.display_column(col.idx) else {
@@ -74,7 +73,7 @@ pub(super) fn draw_board(app: &App, f: &mut Frame, area: Rect) {
         for (ci, r) in &col.cards {
             let card = app.cards_of(column.id)[*ci];
             let selected = is_sel_col && *ci == app.sel_card && focused;
-            draw_card(app, f, card, *r, selected, compact, (col.idx, *ci));
+            draw_card(app, f, card, *r, selected, compact);
         }
 
         if let Some(sb_rect) = col.scrollbar_rect {
@@ -95,15 +94,15 @@ pub(super) fn draw_board(app: &App, f: &mut Frame, area: Rect) {
         .map(|column| app.cards_of(column.id).len())
         .sum::<usize>();
     if app.is_empty_board() || visible_cards == 0 {
-        let m = if focused {
-            board_body_area(area)
-        } else {
-            main_area(area)
-        };
-        let (message, actions) = if app.is_empty_board() {
+        let m = board_body_area(area);
+        let (message, actions) = if app.is_empty_board() && app.card_filter == CardFilter::Active {
             ("Board is empty.", "N: new column  ·  T: apply template")
         } else {
-            ("No active cards.", "v: show all / archived")
+            match app.card_filter {
+                CardFilter::Active => ("No active cards.", "v: show all / archived"),
+                CardFilter::All => ("No cards.", "v: show active / archived"),
+                CardFilter::Archived => ("No archived cards.", "v: show active / all"),
+            }
         };
         let hint = Paragraph::new(vec![
             Line::from(""),
@@ -141,15 +140,20 @@ fn draw_board_header(app: &App, f: &mut Frame, area: Rect, compact_header: Optio
     );
 
     let identity = Rect::new(header_area.x, header_area.y, header_area.width, 1);
-    let controls = Rect::new(
-        header_area.x,
-        header_area.y.saturating_add(1),
-        header_area.width,
-        1.min(header_area.height.saturating_sub(1)),
-    );
-    if let Some(header) = compact_header {
-        draw_compact_header(app, f, header);
-        draw_scope_and_filter(app, f, controls);
+    if compact_header.is_some() {
+        // Compact keeps the product identity and board selector on the first
+        // row, filters on the second, and the column navigator on the third.
+        draw_compact_identity(app, f, identity);
+        let filters = Rect::new(
+            header_area.x,
+            header_area.y.saturating_add(1),
+            header_area.width,
+            compact_filter_rows(header_area.width).min(header_area.height.saturating_sub(1)),
+        );
+        draw_visibility_filters(app, f, filters);
+        if let Some(header) = compact_header {
+            draw_compact_header(app, f, header);
+        }
         return;
     }
 
@@ -187,104 +191,172 @@ fn draw_board_header(app: &App, f: &mut Frame, area: Rect, compact_header: Optio
             ),
         );
     }
+    let controls = Rect::new(
+        header_area.x,
+        header_area.y.saturating_add(1),
+        header_area.width,
+        1.min(header_area.height.saturating_sub(1)),
+    );
     draw_scope_and_filter(app, f, controls);
+}
+
+fn draw_compact_identity(app: &App, f: &mut Frame, area: Rect) {
+    if area.is_empty() {
+        return;
+    }
+    let brand = " ◈ herdr-board";
+    let brand_w = (brand.chars().count() as u16).min(area.width.saturating_sub(1));
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            truncate(brand, brand_w as usize),
+            Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Rect::new(area.x, area.y, brand_w, 1),
+    );
+    let selector_area = Rect::new(
+        area.x.saturating_add(brand_w).saturating_add(1),
+        area.y,
+        area.width.saturating_sub(brand_w).saturating_sub(1),
+        1,
+    );
+    let label = format!("Board: {} ▾", app.board.board.name);
+    render_button_chip_at(
+        f,
+        selector_area,
+        &label,
+        &mut app.hit_map.borrow_mut(),
+        Zone::Action(UiAction::SwitchBoard),
+    );
 }
 
 fn draw_scope_and_filter(app: &App, f: &mut Frame, area: Rect) {
     if area.is_empty() {
         return;
     }
-    let compact = app.layout_mode() == LayoutMode::Compact;
+    let filter_w = visibility_filter_width();
+    let scope_w = area.width.saturating_sub(filter_w.saturating_add(1));
+    if scope_w > 0 {
+        let scope_area = Rect::new(area.x, area.y, scope_w, 1);
+        let label = format!("Board: {} ▾", app.board.board.name);
+        render_button_chip_at(
+            f,
+            scope_area,
+            &label,
+            &mut app.hit_map.borrow_mut(),
+            Zone::Action(UiAction::SwitchBoard),
+        );
+    }
+    draw_visibility_filters(app, f, area);
+}
 
-    // Left: the board selector dropdown showing the FULL board name (wider than
-    // before so it is not truncated).
-    if !compact {
-        let scope_w = if area.width < 78 {
-            (area.width / 2).min(60)
-        } else {
-            (area.width / 2).min(72)
-        };
-        let scope = format!(
-            "[ Board: {} ▾ ]",
-            truncate(&app.board.board.name, scope_w.saturating_sub(13) as usize)
-        );
-        let scope_rect = Rect::new(area.x, area.y, scope_w, 1);
-        f.render_widget(
-            Paragraph::new(scope)
-                .style(Style::default().fg(Color::White).bg(Color::Rgb(7, 22, 34))),
-            scope_rect,
-        );
-        app.hit_map
-            .borrow_mut()
-            .push(scope_rect, Zone::Action(UiAction::SwitchBoard));
+fn visibility_filter_width() -> u16 {
+    let chips = ["Active", "All", "Archived"];
+    let chips_width: usize = chips.iter().map(|label| button_text(label).len()).sum();
+    ("Visible:".len() + 1 + chips_width + chips.len().saturating_sub(1)) as u16
+}
+
+fn draw_visibility_filters(app: &App, f: &mut Frame, area: Rect) {
+    if area.is_empty() {
+        return;
     }
 
-    // Right: the Visible: filter buttons. Unselected = white text; selected =
-    // black-on-white (per the request: no weird grey, buttons white/black).
-    let active = app.card_filter == CardFilter::Active;
-    let all = app.card_filter == CardFilter::All;
-    let archived = app.card_filter == CardFilter::Archived;
-    let selected_style = || {
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::White)
-            .add_modifier(Modifier::BOLD)
-    };
-    let unselected_style = || Style::default().fg(Color::White);
-
-    let chips: [(String, bool); 3] = [
-        ("Active".to_string(), active),
-        ("All".to_string(), all),
-        ("Archived".to_string(), archived),
-    ];
-    let total_w: usize = chips
-        .iter()
-        .map(|(c, _)| c.chars().count() + 2)
-        .sum::<usize>()
-        + chips.len().saturating_sub(1) * 2
-        + "Visible:".chars().count()
-        + 1;
-
-    let mut x = area.right().saturating_sub(total_w as u16).max(area.x);
-    let label_rect = Rect::new(x, area.y, "Visible:".chars().count() as u16, 1);
-    if compact {
+    // Preserve the established right-aligned one-row rail for all normal
+    // widths. Compact only enters the wrapping path when its full set cannot
+    // fit on one row.
+    if area.height == 1 {
+        let chips = [
+            ("Active", CardFilter::Active),
+            ("All", CardFilter::All),
+            ("Archived", CardFilter::Archived),
+        ];
+        let total_w = visibility_filter_width();
+        let mut x = area.right().saturating_sub(total_w).max(area.x);
+        let label_w = "Visible:".chars().count() as u16;
         f.render_widget(
             Paragraph::new(Span::styled("Visible:", Style::default().fg(Color::Gray))),
-            label_rect,
+            Rect::new(x, area.y, label_w.min(area.width), 1),
         );
-        x = x.saturating_add(label_rect.width).saturating_add(1);
-    } else {
-        // non-compact: skip "Visible:" label, just the three tappable buttons
-        x = area
-            .right()
-            .saturating_sub(
-                chips
-                    .iter()
-                    .map(|(c, _)| c.chars().count() + 2 + 2)
-                    .sum::<usize>() as u16,
-            )
-            .max(area.x);
-    }
-    for (label, is_sel) in &chips {
-        let shown = format!("[{label}]");
-        let width = shown.chars().count() as u16;
-        if x.saturating_add(width) > area.right() {
-            break;
+        x = x.saturating_add(label_w).saturating_add(1);
+        for (label, filter) in chips {
+            let width = button_text(label).chars().count() as u16;
+            let modifier = if filter == app.card_filter {
+                Modifier::UNDERLINED
+            } else {
+                Modifier::empty()
+            };
+            render_button_chip_at_with_modifier(
+                f,
+                Rect::new(x, area.y, width, 1),
+                label,
+                &mut app.hit_map.borrow_mut(),
+                Zone::Filter(filter),
+                modifier,
+            );
+            x = x.saturating_add(width).saturating_add(1);
         }
-        let rect = Rect::new(x, area.y, width, 1);
-        let style = if *is_sel {
-            selected_style()
+        return;
+    }
+
+    // Compact keeps the transparent `[ NAME ]` chips but wraps the rail as a
+    // unit when one row cannot contain every filter. The row count is shared
+    // with `board_header_height`, so the final Archived chip is never silently
+    // clipped out of the header.
+    let chips = if area.width < 60 {
+        compact_filter_options(area.width)
+    } else {
+        [
+            ("Active", CardFilter::Active),
+            ("All", CardFilter::All),
+            ("Archived", CardFilter::Archived),
+        ]
+    };
+    let label = if area.width < 60 {
+        compact_filter_label(area.width)
+    } else {
+        "Visible:"
+    };
+    let label_w = label.chars().count() as u16;
+    f.render_widget(
+        Paragraph::new(Span::styled(label, Style::default().fg(Color::Gray))),
+        Rect::new(area.x, area.y, label_w.min(area.width), 1),
+    );
+
+    let mut row = 0u16;
+    let mut used = label_w.saturating_add(1).min(area.width);
+    let mut needs_gap = false;
+    for (label, filter) in chips {
+        let width = button_text(label).chars().count() as u16;
+        let gap = u16::from(needs_gap && used > 0);
+        if used.saturating_add(gap).saturating_add(width) > area.width {
+            row = row.saturating_add(1);
+            if row >= area.height {
+                // This is only reachable when the frame itself is too short
+                // to support its responsive header; normal supported mobile
+                // sizes allocate exactly `compact_filter_rows` rows.
+                continue;
+            }
+            used = 0;
+            needs_gap = false;
+        }
+        let gap = u16::from(needs_gap && used > 0);
+        let x = area.x.saturating_add(used).saturating_add(gap);
+        let modifier = if filter == app.card_filter {
+            Modifier::UNDERLINED
         } else {
-            unselected_style()
+            Modifier::empty()
         };
-        f.render_widget(Paragraph::new(Span::styled(shown, style)), rect);
-        let filter = match label.as_str() {
-            "Active" => CardFilter::Active,
-            "All" => CardFilter::All,
-            _ => CardFilter::Archived,
-        };
-        app.hit_map.borrow_mut().push(rect, Zone::Filter(filter));
-        x = x.saturating_add(width).saturating_add(1);
+        render_button_chip_at_with_modifier(
+            f,
+            Rect::new(x, area.y.saturating_add(row), width, 1),
+            label,
+            &mut app.hit_map.borrow_mut(),
+            Zone::Filter(filter),
+            modifier,
+        );
+        used = used.saturating_add(gap).saturating_add(width);
+        needs_gap = true;
     }
 }
 
@@ -394,71 +466,30 @@ fn draw_board_actions(app: &App, f: &mut Frame, area: Rect) {
     }
 }
 
-/// Compact column navigation: `‹  Name · n/n · cards  ›`.
+/// Compact column navigation: `[ ‹ ]  [ column · n/n · cards  ▶n ]  [ › ]`.
 fn draw_compact_header(app: &App, f: &mut Frame, header: &CompactHeader) {
     let mut hit_map = app.hit_map.borrow_mut();
-
-    f.render_widget(
-        Paragraph::new(Span::styled(
-            "‹",
-            Style::default()
-                .fg(Color::LightCyan)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .alignment(Alignment::Center),
-        header.prev,
-    );
-    hit_map.push(header.prev, Zone::HeaderPrev);
+    render_button_chip_at(f, header.prev, "‹", &mut hit_map, Zone::HeaderPrev);
 
     let n = app.board.columns.len();
     let running = running_card_count(app);
     let column = app.display_column(app.sel_col);
     let label = match column {
         Some(c) => format!(
-            "[{} · {}/{} · {} cards · ▶{}]",
+            "{} · {}/{} · {} cards · ▶{}",
             c.name,
             app.sel_col + 1,
             n.max(1),
             app.cards_of(c.id).len(),
             running,
         ),
-        None => format!("[no columns · ▶{running}]"),
+        None => format!("no columns · ▶{running}"),
     };
-    f.render_widget(
-        Paragraph::new(Span::styled(
-            truncate(&label, header.switch.width as usize),
-            Style::default()
-                .fg(Color::LightCyan)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .alignment(Alignment::Center),
-        header.switch,
-    );
-    hit_map.push(header.switch, Zone::HeaderSwitch);
-
-    f.render_widget(
-        Paragraph::new(Span::styled(
-            "›",
-            Style::default()
-                .fg(Color::LightCyan)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .alignment(Alignment::Center),
-        header.next,
-    );
-    hit_map.push(header.next, Zone::HeaderNext);
+    render_button_chip_at(f, header.switch, &label, &mut hit_map, Zone::HeaderSwitch);
+    render_button_chip_at(f, header.next, "›", &mut hit_map, Zone::HeaderNext);
 }
 
-fn draw_card(
-    app: &App,
-    f: &mut Frame,
-    card: &Card,
-    r: Rect,
-    selected: bool,
-    compact: bool,
-    at: (usize, usize),
-) {
-    let (col_idx, card_idx) = at;
+fn draw_card(app: &App, f: &mut Frame, card: &Card, r: Rect, selected: bool, compact: bool) {
     let archived = card.archived_at.is_some();
     let (glyph, color) = if archived {
         ('▣', Color::DarkGray)
@@ -501,33 +532,41 @@ fn draw_card(
         .effort
         .map(|e| e.as_str().to_string())
         .unwrap_or_else(|| "default".to_string());
+    let mut status = format!("{glyph} {status_text}");
+    if !archived && card.status == CardStatus::Running {
+        let started = app
+            .active_run_for_card(card.id)
+            .and_then(|run| parse_timestamp(&run.started_at))
+            .or_else(|| parse_timestamp(&card.updated_at));
+        let elapsed = run_elapsed(started, None, app.now).unwrap_or(0);
+        status.push_str(&format!(" · {}", format_duration(Some(elapsed))));
+    }
 
     let bg = background;
     if compact {
-        // Compact box: one status marker (in the title row) only, plus three
-        // left/right data rows:  title|status,  harness|permission,
-        // model|effort, and the [Edit] [Delete] controls at the bottom row.
-        let row_count = inner.height.saturating_sub(1).max(1); // leave one action row
-        let title_rows = row_count.saturating_sub(3).max(1); // rows for title (may wrap)
-        let title_prefix = format!("{glyph} #{} ", card.id);
+        // Compact cards keep the title/id on its own row(s), followed by one
+        // status row and the two left/right metadata rows. Board-card
+        // Edit/Delete controls intentionally do not appear; keyboard `e`/`d`
+        // remains available.
+        let title_rows = inner.height.saturating_sub(3).max(1); // leave status + two metadata rows
+        let title_prefix = format!("#{} ", card.id);
 
         let title_area = Rect::new(inner.x, inner.y, inner.width, title_rows);
-        let title_style = Style::default()
-            .fg(if archived {
-                Color::DarkGray
-            } else {
-                Color::White
-            })
-            .add_modifier(if selected {
-                Modifier::BOLD
-            } else {
-                Modifier::empty()
-            });
+        // The first row is deliberately neutral. Semantic status color is
+        // reserved for the status row (and the existing card border); it must
+        // never leak into the card id or title.
+        let title_style = Style::default().fg(Color::White).add_modifier(if selected {
+            Modifier::BOLD
+        } else {
+            Modifier::empty()
+        });
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(
                     title_prefix,
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(card.title.clone(), title_style),
             ]))
@@ -535,16 +574,12 @@ fn draw_card(
             .style(Style::default().bg(background)),
             title_area,
         );
-        // status on the same (last title) line, right-aligned
-        let status_rect = Rect::new(
-            inner.x + 2,
-            inner.y + title_rows.saturating_sub(1),
-            inner.width.saturating_sub(2),
-            1,
-        );
+        // Status owns the semantic glyph on the row immediately after the
+        // title, keeping the title/id presentation free of status markers.
+        let status_rect = Rect::new(inner.x, inner.y + title_rows, inner.width, 1);
         f.render_widget(
             Paragraph::new(Span::styled(
-                format!("{glyph} {status_text}"),
+                status,
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ))
             .alignment(Alignment::Right)
@@ -552,7 +587,7 @@ fn draw_card(
             status_rect,
         );
 
-        let mut y = inner.y + title_rows;
+        let mut y = inner.y + title_rows + 1;
         draw_card_pair_row(
             f,
             Rect::new(inner.x + 1, y, inner.width.saturating_sub(2), 1),
@@ -568,57 +603,34 @@ fn draw_card(
             &format!("effort: {effort}"),
             bg,
         );
-
-        // [Edit] [Delete] actions on the last row, right-aligned
-        let actions_row = inner.bottom().saturating_sub(1);
-        let edit_w = "[Edit]".chars().count() as u16;
-        let delete_w = "[Delete]".chars().count() as u16;
-        let total_w = edit_w.saturating_add(delete_w).saturating_add(1);
-        if total_w <= inner.width {
-            let x0 = inner.right().saturating_sub(total_w);
-            let edit_rect = Rect::new(x0, actions_row, edit_w, 1);
-            let delete_rect = Rect::new(x0 + edit_w + 1, actions_row, delete_w, 1);
-            draw_card_controls(app, f, edit_rect, delete_rect, col_idx, card_idx, bg);
-        }
         return;
     }
 
     // --- non-compact (desktop box) ---
-    let title_prefix = format!("{glyph} #{} ", card.id);
+    let title_prefix = format!("#{} ", card.id);
     let prefix_w = title_prefix.chars().count() as u16;
     let title = Line::from(vec![
+        // Keep the desktop title/id row neutral for the same reason as the
+        // Compact branch: only the following status row carries semantics.
         Span::styled(
             title_prefix,
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             truncate(&card.title, inner.width.saturating_sub(prefix_w) as usize),
-            Style::default()
-                .fg(if archived {
-                    Color::DarkGray
-                } else {
-                    Color::White
-                })
-                .add_modifier(if selected {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                }),
+            Style::default().fg(Color::White).add_modifier(if selected {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            }),
         ),
     ]);
     f.render_widget(
         Paragraph::new(title).style(Style::default().bg(background)),
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
-    let mut status = format!("{glyph} {status_text}");
-    if !archived && card.status == CardStatus::Running {
-        let started = app
-            .active_run_for_card(card.id)
-            .and_then(|run| parse_timestamp(&run.started_at))
-            .or_else(|| parse_timestamp(&card.updated_at));
-        let elapsed = run_elapsed(started, None, app.now).unwrap_or(0);
-        status.push_str(&format!(" · {}", format_duration(Some(elapsed))));
-    }
     if inner.height >= 2 {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -629,87 +641,18 @@ fn draw_card(
             Rect::new(inner.x, inner.y + 1, inner.width, 1),
         );
     }
-    let actions_row = inner.bottom().saturating_sub(1);
-    let edit_w = "[Edit]".chars().count() as u16;
-    let delete_w = "[Delete]".chars().count() as u16;
-    let total_w = edit_w.saturating_add(delete_w).saturating_add(1);
+    let metadata_row = inner.bottom().saturating_sub(1);
     let meta = match (&card.model, card.effort) {
         (Some(_model), Some(eff)) => format!("{} · eff: {}", card.harness, eff.as_str()),
         _ => card.harness.clone(),
     };
-    let meta_w = inner.width.saturating_sub(total_w.saturating_add(1));
-    if meta_w >= 2 && total_w <= inner.width {
-        f.render_widget(
-            Paragraph::new(Span::styled(
-                truncate(&meta, meta_w as usize),
-                Style::default().fg(Color::Gray),
-            ))
-            .style(Style::default().bg(background)),
-            Rect::new(inner.x, actions_row, meta_w, 1),
-        );
-    }
-    if total_w <= inner.width {
-        let x0 = inner.right().saturating_sub(total_w);
-        draw_card_controls(
-            app,
-            f,
-            Rect::new(x0, actions_row, edit_w, 1),
-            Rect::new(x0 + edit_w + 1, actions_row, delete_w, 1),
-            col_idx,
-            card_idx,
-            bg,
-        );
-    }
-}
-
-/// Render the [Edit] [Delete] controls inside a board card and register their
-/// hit zones pointing at that exact card. Kept as a free function so it is not
-/// a closure borrowing the frame.
-fn draw_card_controls(
-    app: &App,
-    f: &mut Frame,
-    edit_rect: Rect,
-    delete_rect: Rect,
-    col_idx: usize,
-    card_idx: usize,
-    background: Color,
-) {
     f.render_widget(
         Paragraph::new(Span::styled(
-            "[Edit]",
-            Style::default()
-                .fg(Color::LightCyan)
-                .add_modifier(Modifier::BOLD),
+            truncate(&meta, inner.width as usize),
+            Style::default().fg(Color::Gray),
         ))
         .style(Style::default().bg(background)),
-        edit_rect,
-    );
-    f.render_widget(
-        Paragraph::new(Span::styled(
-            "[Delete]",
-            Style::default()
-                .fg(Color::LightRed)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .style(Style::default().bg(background)),
-        delete_rect,
-    );
-    let mut hit_map = app.hit_map.borrow_mut();
-    hit_map.push(
-        edit_rect,
-        Zone::CardAction {
-            col_idx,
-            card_idx,
-            action: UiAction::EditCard,
-        },
-    );
-    hit_map.push(
-        delete_rect,
-        Zone::CardAction {
-            col_idx,
-            card_idx,
-            action: UiAction::DeleteCard,
-        },
+        Rect::new(inner.x, metadata_row, inner.width, 1),
     );
 }
 
@@ -763,14 +706,13 @@ pub(super) fn draw_switcher(app: &App, f: &mut Frame, area: Rect) {
     );
     if mode != LayoutMode::Compact {
         let close_label = if state.level == SwitcherLevel::Boards && !state.entered_at_boards {
-            "[Back]"
+            "Back"
         } else {
-            "[Close]"
+            "Close"
         };
-        let width = close_label.chars().count() as u16;
+        let width = button_text(close_label).chars().count() as u16;
         let rect = Rect::new(sheet.right().saturating_sub(width + 2), sheet.y, width, 1);
-        f.render_widget(Paragraph::new(close_label), rect);
-        hit_map.push(rect, Zone::SheetClose);
+        render_button_chip_at(f, rect, close_label, &mut hit_map, Zone::SheetClose);
     }
     let items: Vec<ListItem> = match state.level {
         SwitcherLevel::Columns => {
@@ -782,18 +724,22 @@ pub(super) fn draw_switcher(app: &App, f: &mut Frame, area: Rect) {
                 .map(|(i, c)| {
                     let count = app.cards_of(c.id).len();
                     let style = if i == state.sel {
-                        Style::default().add_modifier(Modifier::REVERSED)
-                    } else {
                         Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                    } else {
+                        Style::default().fg(Color::White)
                     };
                     ListItem::new(Span::styled(format!(" {}  {} ", c.name, count), style))
                 })
                 .collect();
             let trailing_idx = app.board.columns.len();
             let trailing_style = if state.sel == trailing_idx {
-                Style::default().add_modifier(Modifier::REVERSED)
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
             } else {
-                Style::default().fg(Color::Cyan)
+                Style::default().fg(Color::White)
             };
             rows.push(ListItem::new(Span::styled(
                 " ⇄  Switch board  → ",
@@ -802,9 +748,11 @@ pub(super) fn draw_switcher(app: &App, f: &mut Frame, area: Rect) {
             let template_idx = trailing_idx + 1;
             let template_enabled = app.is_empty_board();
             let template_style = if state.sel == template_idx {
-                Style::default().add_modifier(Modifier::REVERSED)
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
             } else if template_enabled {
-                Style::default().fg(Color::Cyan)
+                Style::default().fg(Color::White)
             } else {
                 Style::default().fg(Color::DarkGray)
             };
@@ -820,9 +768,11 @@ pub(super) fn draw_switcher(app: &App, f: &mut Frame, area: Rect) {
             .enumerate()
             .map(|(i, (label, _))| {
                 let style = if i == state.sel {
-                    Style::default().add_modifier(Modifier::REVERSED)
-                } else {
                     Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                } else {
+                    Style::default().fg(Color::White)
                 };
                 ListItem::new(Span::styled(format!(" {} ", label), style))
             })

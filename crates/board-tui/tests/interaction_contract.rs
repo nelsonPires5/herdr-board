@@ -53,7 +53,7 @@ const EXPECTED: &[(Screen, &str, &str)] = &[
     (Screen::CardForm, "Shift+Tab", "previous field"),
     (Screen::CardForm, "←/→ Space", "cycle a picker field"),
     (Screen::CardForm, "Ctrl+E", "edit textarea in $EDITOR"),
-    (Screen::CardForm, "S+Enter", "newline in textarea"),
+    (Screen::CardForm, "Shift+Enter", "newline in textarea"),
     (Screen::CardForm, "Ctrl+J", "newline in textarea"),
     (Screen::CardForm, "f", "toggle popup / fullscreen"),
     (Screen::CardForm, "Enter", "submit"),

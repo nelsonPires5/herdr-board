@@ -607,8 +607,8 @@ fn card_detail_comment_zones_row_edit_delete_history() {
     }
 }
 
-/// System comments are immutable (`docs/protocol.md`): tapping `[Edit]`/
-/// `[Del]` while a `[system]` comment is focused must toast rather than open
+/// System comments are immutable (`docs/protocol.md`): tapping `[ Edit ]`/
+/// `[ Delete ]` while a `[system]` comment is focused must toast rather than open
 /// the form/confirm — the zone stays tappable (not a dead zone), it just
 /// routes to the same toast the `e`/`d` keys produce.
 #[test]
@@ -1103,7 +1103,7 @@ fn card_detail_exposes_card_comment_and_run_action_zones_at_all_breakpoints() {
         UiAction::CloseDetail,
         UiAction::ToggleDetail,
     ];
-    for (w, h) in [(40, 20), (80, 24), (120, 35)] {
+    for (w, h) in [(40, 20), (52, 24), (60, 24), (80, 24), (120, 35)] {
         let mut d = setup_card_detail_non_system_focus();
         render_at(&mut d, w, h);
         let zones = hit_zones(&d, w, h);
@@ -1113,11 +1113,16 @@ fn card_detail_exposes_card_comment_and_run_action_zones_at_all_breakpoints() {
                 "{w}x{h} missing {action:?}"
             );
         }
-        assert!(zones.iter().any(|(_, z)| matches!(z, Zone::RunRow(_))));
+        // The persistent chrome leaves no run-row viewport at 40x20 or
+        // 80x24; the run actions remain in the card rail/section action row.
+        // The wide three-pane detail keeps a rendered clickable run row.
+        if w >= 120 {
+            assert!(zones.iter().any(|(_, z)| matches!(z, Zone::RunRow(_))));
+        }
         // At 40x20 the comments card collapses to a hint without the in-card
         // action bar, so the Edit/Delete/History bar is only guaranteed where
         // the section has room for it.
-        if (w, h) != (40, 20) {
+        if w >= 80 {
             assert!(
                 zones.iter().any(|(_, z)| matches!(z, Zone::CommentEdit)),
                 "{w}x{h} missing CommentEdit"
@@ -1128,30 +1133,32 @@ fn card_detail_exposes_card_comment_and_run_action_zones_at_all_breakpoints() {
 
 #[test]
 fn card_detail_awaiting_confirm_zone_is_conditional_and_uses_run_done_path() {
-    let mut d = setup_card_detail();
-    assert!(!hit_zones_after_render(&mut d, 80, 24)
-        .iter()
-        .any(|(_, z)| *z == Zone::Action(UiAction::ConfirmAwaiting)));
-    d.app.detail.as_mut().unwrap().card.status = board_core::protocol::CardStatus::Awaiting;
-    let zones = hit_zones_after_render(&mut d, 80, 24);
-    let point = zones
-        .into_iter()
-        .find_map(|(p, z)| (z == Zone::Action(UiAction::ConfirmAwaiting)).then_some(p))
-        .expect("awaiting confirm");
-    let card_id = d.app.detail.as_ref().unwrap().card.id;
-    // HitMap routing itself is covered by title/actions above; use the same
-    // reducer event here so the exact completion effect stays observable.
-    let effects = update(
-        &mut d.app,
-        Msg::Key(crossterm::event::KeyEvent::new(
-            KeyCode::Enter,
-            crossterm::event::KeyModifiers::NONE,
-        )),
-    );
-    assert!(
-        matches!(effects.as_slice(), [Effect::RunDone(id, board_core::protocol::RunOutcome::Ok)] if *id == card_id)
-    );
-    assert!(point.0 < 80);
+    for (w, h) in [(40, 20), (80, 24)] {
+        let mut d = setup_card_detail();
+        assert!(!hit_zones_after_render(&mut d, w, h)
+            .iter()
+            .any(|(_, z)| *z == Zone::Action(UiAction::ConfirmAwaiting)));
+        d.app.detail.as_mut().unwrap().card.status = board_core::protocol::CardStatus::Awaiting;
+        let zones = hit_zones_after_render(&mut d, w, h);
+        let point = zones
+            .into_iter()
+            .find_map(|(p, z)| (z == Zone::Action(UiAction::ConfirmAwaiting)).then_some(p))
+            .expect("awaiting confirm");
+        let card_id = d.app.detail.as_ref().unwrap().card.id;
+        // HitMap routing itself is covered by title/actions above; use the same
+        // reducer event here so the exact completion effect stays observable.
+        let effects = update(
+            &mut d.app,
+            Msg::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            )),
+        );
+        assert!(
+            matches!(effects.as_slice(), [Effect::RunDone(id, board_core::protocol::RunOutcome::Ok)] if *id == card_id)
+        );
+        assert!(point.0 < w);
+    }
 }
 
 fn hit_zones_after_render(d: &mut Driver, w: u16, h: u16) -> Vec<((u16, u16), Zone)> {
@@ -1314,38 +1321,41 @@ fn board_visible_filters_are_independent_click_targets() {
 }
 
 #[test]
-fn card_edit_and_delete_controls_select_the_owning_card_before_reusing_reducers() {
-    let target = Zone::CardAction {
-        col_idx: 3,
-        card_idx: 1,
-        action: UiAction::EditCard,
-    };
+fn board_cards_have_no_edit_delete_controls_or_mouse_hit_zones() {
+    for (w, h) in [(40, 20), (80, 24), (120, 35)] {
+        let mut d = setup_board();
+        let output = render_at(&mut d, w, h);
+        assert!(
+            !output.contains("[ Edit ]"),
+            "Board cards must not render an Edit chip at {w}x{h}:\n{output}"
+        );
+        assert!(
+            !output.contains("[ Delete ]"),
+            "Board cards must not render a Delete chip at {w}x{h}:\n{output}"
+        );
+        assert!(
+            hit_zones(&d, w, h).iter().all(|(_, zone)| {
+                !matches!(zone, Zone::CardAction { .. })
+                    && !matches!(
+                        zone,
+                        Zone::Action(UiAction::EditCard | UiAction::DeleteCard)
+                    )
+            }),
+            "Board cards must not expose Edit/Delete mouse zones at {w}x{h}"
+        );
+    }
+
+    // Removing the visual controls must not remove the established keyboard
+    // paths: e opens the card form and d opens the confirmation.
     let mut edit = setup_board();
-    render_at(&mut edit, 120, 35);
-    let (x, y) = hit_zones(&edit, 120, 35)
-        .into_iter()
-        .find_map(|(point, zone)| (zone == target).then_some(point))
-        .expect("second card edit control");
-    edit.handle(left_down(x, y));
-    assert_eq!((edit.app.sel_col, edit.app.sel_card), (3, 1));
+    edit.handle(key_msg(KeyCode::Char('e')));
     assert!(matches!(
         edit.app.form.as_ref().map(|form| form.kind),
         Some(board_tui::forms::FormKind::CardEdit { .. })
     ));
 
-    let target = Zone::CardAction {
-        col_idx: 3,
-        card_idx: 1,
-        action: UiAction::DeleteCard,
-    };
     let mut delete = setup_board();
-    render_at(&mut delete, 120, 35);
-    let (x, y) = hit_zones(&delete, 120, 35)
-        .into_iter()
-        .find_map(|(point, zone)| (zone == target).then_some(point))
-        .expect("second card delete control");
-    delete.handle(left_down(x, y));
-    assert_eq!((delete.app.sel_col, delete.app.sel_card), (3, 1));
+    delete.handle(key_msg(KeyCode::Char('d')));
     assert_eq!(delete.app.screen, Screen::Confirm);
 }
 

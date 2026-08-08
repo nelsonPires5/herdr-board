@@ -84,9 +84,10 @@ fn sections_for(file: &str) -> Option<Vec<&'static str>> {
             "MoveColumn",
             "CommentHistory",
         ],
-        // `mouse.rs` *synthesizes* key events to reuse a screen's handler (a
-        // click on `[Edit]` replays `e`); it binds nothing of its own, so its
-        // literals are documented wherever the real handler lives.
+        // `mouse.rs` *synthesizes* key events to reuse a screen's handler (for
+        // example, the Card Detail comment `[ Edit ]` action replays `e`); it
+        // binds nothing of its own, so its literals are documented wherever the
+        // real handler lives.
         "mouse.rs" => return None,
         // Pure state, effect, and drag-lifecycle modules: no key handling at
         // all, so there is nothing here to document.

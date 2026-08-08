@@ -183,22 +183,10 @@ fn handle_zone(app: &mut App, zone: Zone) -> Option<Vec<Effect>> {
         Zone::Filter(filter) if app.screen == Screen::Board => {
             Some(super::board::set_card_filter(app, filter))
         }
-        Zone::CardAction {
-            col_idx,
-            card_idx,
-            action,
-        } if app.screen == Screen::Board => {
-            let valid = app
-                .display_column(col_idx)
-                .is_some_and(|column| card_idx < app.cards_of(column.id).len());
-            if !valid {
-                return Some(vec![]);
-            }
-            app.sel_col = col_idx;
-            app.sel_card = card_idx;
-            let effects = action_event(app.screen, action).map(|event| super::on_key(app, event));
-            Some(effects.unwrap_or_default())
-        }
+        // Board card Edit/Delete zones were removed. Keep the legacy variant
+        // as an explicit no-op so stale callers fail closed instead of
+        // falling through to card-body drag/focus handling.
+        Zone::CardAction { .. } if app.screen == Screen::Board => Some(vec![]),
         Zone::Action(action) => {
             // Card-level Edit must not inherit Comments focus, where the `e`
             // reducer intentionally edits the selected comment instead. Route

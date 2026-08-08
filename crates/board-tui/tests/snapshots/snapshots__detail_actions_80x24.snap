@@ -1,13 +1,13 @@
 ---
 source: crates/board-tui/tests/snapshots.rs
-expression: output
+expression: "render_sized(&mut d, w, h)"
 ---
 " ◈ herdr-board                                                      ● 1 running "
 "          [ Board: Global ▾ ]           Visible: [ Active ] [ All ] [ Archived ]"
 "────────────────────────────────────────────────────────────────────────────────"
-"┌ Card #6: Tune retry backoff                                       [ X ] [ □ ]┐"
+"┌ Card #1: Update docs                                              [ X ] [ □ ]┐"
 "│┌Status──────────────────────────────────────────────────────────────────────┐│"
-"││? awaiting (agent reported done)                                            ││"
+"││· idle                                                                      ││"
 "│└────────────────────────────────────────────────────────────────────────────┘│"
 "│┌Task Configuration──────────────────────────────────────────────────────────┐│"
 "││Harness · Model: claude · default · effort default · perm default           ││"
@@ -15,7 +15,7 @@ expression: output
 "│┌Session─────────────────────────────────────────────────────────────────────┐│"
 "││Herdr session: default · Space: workspace:-                                 ││"
 "│└────────────────────────────────────────────────────────────────────────────┘│"
-"│      [ Edit card ]            [ Archive card ]          [ Confirm done ]     │"
+"│             [ Edit card ]                        [ Archive card ]            │"
 "│┌Comments────────────────────────────────────────────────────────────────────┐│"
 "││                              [ Add comment ]                               ││"
 "│└────────────────────────────────────────────────────────────────────────────┘│"

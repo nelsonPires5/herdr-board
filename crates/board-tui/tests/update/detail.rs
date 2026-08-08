@@ -972,11 +972,11 @@ fn opening_detail_starts_comments_and_runs_at_latest() {
     let (_, comments_visible) = board_tui::view::comments_viewport(&driver.app, &layout);
     let runs_visible = board_tui::view::runs_viewport_height(&layout);
     assert_eq!(
-        driver.app.detail_comments_scroll + comments_visible,
+        driver.app.detail_comments_scroll + comments_visible.max(1),
         detail.comments.len()
     );
     assert_eq!(
-        driver.app.detail_runs_scroll + runs_visible,
+        driver.app.detail_runs_scroll + runs_visible.max(1),
         detail.runs.len()
     );
     assert_eq!(
@@ -1046,9 +1046,13 @@ fn shrinking_detail_to_popup_reanchors_history_to_latest() {
     let layout = board_tui::view::detail_layout(&app, app.last_area);
     let (_, comments_visible) = board_tui::view::comments_viewport(&app, &layout);
     let runs_visible = board_tui::view::runs_viewport_height(&layout);
+    // Comments word-wrap, so the re-anchor is row-based (see
+    // `App::scroll_detail_to_latest`): the wrapped total at the popup's
+    // column width, not the comment count, is what must fit the viewport.
+    let comments_total = board_tui::view::comment_wrapped_rows(detail, layout.comments.width);
     assert_eq!(
         app.detail_comments_scroll,
-        detail.comments.len().saturating_sub(comments_visible),
+        comments_total.saturating_sub(comments_visible.max(1)),
         "comments re-anchor to the latest visible row"
     );
     assert_eq!(

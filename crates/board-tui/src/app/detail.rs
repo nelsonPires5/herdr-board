@@ -46,6 +46,10 @@ impl App {
         let runs_total = detail.runs.len();
         let (_, comments_visible) = crate::view::comments_viewport(self, &layout);
         let runs_visible = crate::view::runs_viewport_height(&layout);
+        // Keep one logical row as the latest anchor even when the frame has
+        // only title/action/bottom rows. The renderer paints no body at a
+        // zero-row viewport, and the anchor becomes useful immediately after
+        // a resize reveals rows.
         self.detail_comments_scroll = comments_total.saturating_sub(comments_visible.max(1));
         self.detail_runs_scroll = runs_total.saturating_sub(runs_visible.max(1));
     }
@@ -78,7 +82,7 @@ impl App {
     /// Whether the focused comment can be edited/deleted: system comments are
     /// immutable (`Db::update_comment`/`soft_delete_comment` reject
     /// `author == "system"`; see `docs/protocol.md`), so `e`/`d` and the
-    /// action bar's `[Edit]`/`[Del]` labels must treat it as read-only.
+    /// action bar's `[ Edit ]`/`[ Delete ]` labels must treat it as read-only.
     /// `comment.history` is unaffected — history stays available regardless.
     pub fn focused_comment_is_system(&self) -> bool {
         self.focused_comment().is_some_and(Comment::is_system)
@@ -111,6 +115,13 @@ impl App {
         let spans =
             crate::view::comment_row_spans(self.detail.as_ref().unwrap(), layout.comments.width);
         let (_, visible) = crate::view::comments_viewport(self, &layout);
+        // A compact content region can retain the title/action/bottom rows
+        // while leaving zero history rows. Do not move the scroll anchor to a
+        // hidden comment in that case; the action rail remains usable and the
+        // next resize can reveal the same latest anchor.
+        if visible == 0 {
+            return;
+        }
         let Some(&(start, span_len)) = spans.get(self.detail_comment_sel) else {
             return;
         };
@@ -184,6 +195,9 @@ impl App {
                 // span must intersect — not a comment index range.
                 let spans = crate::view::comment_row_spans(detail, layout.comments.width);
                 let (_, visible) = crate::view::comments_viewport(self, &layout);
+                if visible == 0 {
+                    return;
+                }
                 let lo = self.detail_comments_scroll;
                 let hi = lo + visible.max(1);
                 let visible_idx: Vec<usize> = spans

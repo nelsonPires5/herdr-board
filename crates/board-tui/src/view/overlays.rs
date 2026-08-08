@@ -2,18 +2,17 @@ use board_core::model::CommentHistory;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::{App, PickerPurpose, Screen};
 use crate::widgets::{
-    render_sheet_frame, windowed_rows, ActionButton, ActionStrip, ActionTone, HitMap, UiAction,
-    Zone,
+    button_text, render_button_chip_at, render_sheet_frame, windowed_rows, ActionButton,
+    ActionStrip, ActionTone, HitMap, UiAction, Zone,
 };
 
 use super::{
     detail::wrapped_row_count, sheet_area, truncate, LayoutMode, HELP_GUTTER_WIDTH, HELP_KEYS,
-    HELP_KEY_TEXT, HELP_KEY_WIDTH,
 };
 
 // -- shared sheet chrome -----------------------------------------------------
@@ -36,7 +35,7 @@ fn render_overlay_frame(
     } else {
         // Keep dynamic titles from painting through the trailing close control.
         // Fixed action labels win; only hostile/dynamic title data ellipsizes.
-        let close_width = close_label.chars().count().saturating_add(2);
+        let close_width = button_text(close_label).chars().count();
         let max_title = box_area
             .width
             .saturating_sub(2) // corners
@@ -55,25 +54,15 @@ fn render_overlay_frame(
         border_style,
         hit_map,
     );
-    if !compact && box_area.width > close_label.chars().count() as u16 + 4 {
-        let text = format!("[{close_label}]");
-        let width = text.chars().count() as u16;
+    if !compact && box_area.width > button_text(close_label).chars().count() as u16 + 4 {
+        let width = button_text(close_label).chars().count() as u16;
         let rect = Rect::new(
             box_area.right().saturating_sub(width + 2),
             box_area.y,
             width,
             1,
         );
-        f.render_widget(
-            Paragraph::new(Span::styled(
-                text,
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            rect,
-        );
-        hit_map.push(rect, Zone::SheetClose);
+        render_button_chip_at(f, rect, close_label, hit_map, Zone::SheetClose);
     }
     inner
 }
@@ -94,7 +83,8 @@ pub(super) fn draw_picker(app: &App, f: &mut Frame, area: Rect) {
         .saturating_add(4)
         .clamp(30, 100) as u16;
     // A wrapped option may need more than one row.  Let centered sheets grow
-    // to their content preference; `sheet_area` still clamps to main_area.
+    // to their content preference; `sheet_area` still clamps to the board
+    // content region.
     let desired_rows: usize = picker
         .options
         .iter()
@@ -138,7 +128,7 @@ pub(super) fn draw_picker(app: &App, f: &mut Frame, area: Rect) {
     if other_board && inner.height > 0 {
         let action_area = Rect::new(inner.x, inner.bottom() - 1, inner.width, 1);
         let buttons = [ActionButton {
-            label: "[Other board]",
+            label: "Other board",
             compact_label: "Other board",
             action: UiAction::PickerOtherBoard,
             tone: ActionTone::Normal,
@@ -205,11 +195,10 @@ pub(super) fn draw_picker(app: &App, f: &mut Frame, area: Rect) {
                 name.as_str(),
                 if selected {
                     Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD)
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
                 } else {
-                    Style::default()
+                    Style::default().fg(Color::White)
                 },
             ),
         ]);
@@ -261,14 +250,17 @@ pub(super) fn draw_move_column(app: &App, f: &mut Frame, area: Rect) {
     );
     let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
     let move_controls = Layout::horizontal([
-        Constraint::Length(9.min(chunks[0].width / 3)),
+        Constraint::Length(10.min(chunks[0].width / 3)),
         Constraint::Min(1),
         Constraint::Length(10.min(chunks[0].width / 3)),
     ])
     .split(chunks[0]);
-    f.render_widget(
-        Paragraph::new("[← Left]").alignment(Alignment::Center),
+    render_button_chip_at(
+        f,
         move_controls[0],
+        "← Left",
+        &mut hit_map,
+        Zone::Action(UiAction::StageColumnLeft),
     );
     f.render_widget(
         Paragraph::new(format!("reorder {name}"))
@@ -276,21 +268,22 @@ pub(super) fn draw_move_column(app: &App, f: &mut Frame, area: Rect) {
             .wrap(Wrap { trim: false }),
         move_controls[1],
     );
-    f.render_widget(
-        Paragraph::new("[Right →]").alignment(Alignment::Center),
+    render_button_chip_at(
+        f,
         move_controls[2],
+        "Right →",
+        &mut hit_map,
+        Zone::Action(UiAction::StageColumnRight),
     );
-    hit_map.push(move_controls[0], Zone::Action(UiAction::StageColumnLeft));
-    hit_map.push(move_controls[2], Zone::Action(UiAction::StageColumnRight));
     let buttons = [
         ActionButton {
-            label: "[Confirm]",
+            label: "Confirm",
             compact_label: "Confirm",
             action: UiAction::CommitColumnMove,
             tone: ActionTone::Primary,
         },
         ActionButton {
-            label: "[Cancel]",
+            label: "Cancel",
             compact_label: "Cancel",
             action: UiAction::CancelColumnMove,
             tone: ActionTone::Normal,
@@ -336,13 +329,13 @@ pub(super) fn draw_confirm(app: &App, f: &mut Frame, area: Rect) {
     );
     let buttons = [
         ActionButton {
-            label: "[Yes]",
+            label: "Yes",
             compact_label: "Yes",
             action: UiAction::ConfirmYes,
             tone: ActionTone::Primary,
         },
         ActionButton {
-            label: "[No]",
+            label: "No",
             compact_label: "No",
             action: UiAction::ConfirmNo,
             tone: ActionTone::Normal,
@@ -351,7 +344,7 @@ pub(super) fn draw_confirm(app: &App, f: &mut Frame, area: Rect) {
     ActionStrip { buttons: &buttons }.render(f, chunks[1], &mut hit_map);
 }
 
-/// Inner content rect of the help sheet's wrapped single-column list, minus
+/// Inner content rect of the help sheet's stacked section-card list, minus
 /// the trailing hint row. Regular widths deliberately use this same geometry.
 pub fn help_list_rect(app: &App, area: Rect) -> Rect {
     let content_h = HELP_KEYS.len().div_ceil(2) as u16 + 2;
@@ -374,17 +367,99 @@ pub fn help_content_width(list_rect: Rect) -> u16 {
     list_rect.width.saturating_sub(1).max(1)
 }
 
-pub fn help_wrapped_rows(width: u16) -> usize {
-    HELP_KEYS
-        .iter()
-        .map(|(_, k, d)| {
-            if *k == "--" {
-                1
-            } else {
-                wrapped_row_count(&format!("{:<11} {}", k, d), width)
+/// One help section: its card title plus the key rows it documents.
+pub type HelpSection<'a> = (String, &'a [(Screen, &'a str, &'a str)]);
+
+/// Split `HELP_KEYS` at its `"--"` separators into titled sections. The
+/// first section (the board) has no leading separator; every separator
+/// introduces the section that follows it. Titles are capitalized for use as
+/// card titles.
+pub fn help_sections() -> Vec<HelpSection<'static>> {
+    fn capitalize(s: &str) -> String {
+        let mut chars = s.chars();
+        match chars.next() {
+            Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+            None => String::new(),
+        }
+    }
+    let mut out: Vec<HelpSection<'static>> = Vec::new();
+    let mut title = "Board".to_string();
+    let mut start = 0usize;
+    for (i, (_, k, d)) in HELP_KEYS.iter().enumerate() {
+        if *k == "--" {
+            if i > start {
+                out.push((title.clone(), &HELP_KEYS[start..i]));
             }
-        })
+            title = capitalize(d.trim_matches(|c| c == '-' || c == ' '));
+            start = i + 1;
+        }
+    }
+    if start < HELP_KEYS.len() {
+        out.push((title, &HELP_KEYS[start..]));
+    }
+    out
+}
+
+/// Wrapped rows a section's key rows occupy at `width` (the text width
+/// inside the card borders), measured exactly as the renderer draws them: a
+/// padded key column plus the description, greedy-wrapped at the card's
+/// content width.
+fn section_key_rows(section: &HelpSection, width: u16) -> usize {
+    section
+        .1
+        .iter()
+        .map(|(_, k, d)| wrapped_row_count(&format!("{:<11} {}", k, d), width))
         .sum()
+}
+
+/// Full height of one section card: top + bottom border plus the wrapped key
+/// rows (a section with no rows still renders its title card). `text_w` is
+/// the width of the text area inside the card borders.
+fn section_card_height(section: &HelpSection, text_w: u16) -> usize {
+    section_key_rows(section, text_w).max(1).saturating_add(2)
+}
+
+/// Stacked rows of a list of section cards, with a 1-row gap between cards.
+/// The single source the renderer and the scroll clamps both use, so
+/// `help_scroll` can never exceed what is actually drawn.
+fn help_column_rows(sections: &[HelpSection], text_w: u16) -> usize {
+    let cards: usize = sections
+        .iter()
+        .map(|section| section_card_height(section, text_w))
+        .sum();
+    cards.saturating_add(sections.len().saturating_sub(1))
+}
+
+/// Total rows of the single-column (Compact/Regular) help sheet: every
+/// section card plus the inter-card gaps. `width` is the card width
+/// including its side borders, matching what the renderer draws. The Compact
+/// scroll clamp.
+pub fn help_wrapped_rows(width: u16) -> usize {
+    help_column_rows(&help_sections(), width.saturating_sub(2).max(1))
+}
+
+/// Wide-mode two-column split of the help sections: sections keep their
+/// reading order, and the cut lands as close to half the stacked rows as
+/// possible so both columns need roughly the same amount of scrolling.
+fn help_wide_columns(inner: Rect) -> (Vec<HelpSection<'static>>, Vec<HelpSection<'static>>) {
+    let gutter = HELP_GUTTER_WIDTH.min(inner.width.saturating_sub(2));
+    let columns_width = inner.width.saturating_sub(gutter);
+    let left_w = columns_width / 2;
+    let sections = help_sections();
+    let total = help_column_rows(&sections, left_w.saturating_sub(2).max(1));
+    let half = total / 2;
+    let mut cut = 0usize;
+    let mut acc = 0usize;
+    while cut < sections.len() {
+        let next =
+            section_card_height(&sections[cut], left_w.saturating_sub(2).max(1)).saturating_add(1); // + gap
+        if acc.saturating_add(next) > half && cut > 0 {
+            break;
+        }
+        acc = acc.saturating_add(next);
+        cut += 1;
+    }
+    (sections[..cut].to_vec(), sections[cut..].to_vec())
 }
 
 pub fn help_regular_max_scroll(app: &App, area: Rect) -> usize {
@@ -395,8 +470,114 @@ pub fn help_regular_max_scroll(app: &App, area: Rect) -> usize {
     }
     let content_h = HELP_KEYS.len().div_ceil(2) as u16 + 2;
     let box_area = sheet_area(app.layout_mode(), 110, content_h, area);
-    let visible = box_area.height.saturating_sub(2) as usize;
-    HELP_KEYS.len().div_ceil(2).saturating_sub(visible)
+    let inner = Rect::new(
+        box_area.x + 1,
+        box_area.y + 1,
+        box_area.width.saturating_sub(2),
+        box_area.height.saturating_sub(2),
+    );
+    let visible = inner.height as usize;
+    let (left, right) = help_wide_columns(inner);
+    let text_w = inner.width.saturating_sub(HELP_GUTTER_WIDTH) / 2;
+    let text_w = text_w.saturating_sub(2).max(1);
+    help_column_rows(&left, text_w)
+        .max(help_column_rows(&right, text_w))
+        .saturating_sub(visible)
+}
+
+/// Render stacked section cards into `area`, clipping each card to the
+/// `[scroll, scroll + area.height)` window. Border rows are drawn as separate
+/// top (title) / bottom strips and the key rows as a side-bordered block, so
+/// a card cut off by the window edge keeps its borders on the correct rows
+/// instead of ratatui reflowing them into the content area.
+fn draw_help_section_cards(
+    f: &mut Frame,
+    area: Rect,
+    sections: &[HelpSection],
+    scroll: usize,
+    card_w: u16,
+) {
+    let window_lo = scroll;
+    let window_hi = scroll.saturating_add(area.height as usize);
+    let text_w = card_w.saturating_sub(2).max(1);
+    let border_style = Style::default().fg(Color::DarkGray);
+    let mut top = 0usize;
+    for section in sections {
+        let card_h = section_card_height(section, text_w);
+        let bottom = top.saturating_add(card_h);
+        // Top border strip (carries the section title). `Borders::TOP` alone
+        // draws no corner glyphs, so the `┌┐` cells are stamped afterwards.
+        if top >= window_lo && top < window_hi {
+            let strip = Rect::new(area.x, area.y + (top - window_lo) as u16, card_w, 1);
+            let title = format!(" {} ", section.0);
+            let title = crate::view::truncate(&title, card_w.saturating_sub(3) as usize);
+            f.render_widget(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .border_style(border_style)
+                    .title(title),
+                strip,
+            );
+            let buf = f.buffer_mut();
+            buf[(strip.x, strip.y)]
+                .set_symbol("┌")
+                .set_style(border_style);
+            buf[(strip.right() - 1, strip.y)]
+                .set_symbol("┐")
+                .set_style(border_style);
+        }
+        // Key rows `[top+1, bottom-1)` with their left/right borders.
+        let c_lo = (top + 1).max(window_lo);
+        let c_hi = (bottom.saturating_sub(1)).min(window_hi);
+        if c_lo < c_hi {
+            let block = Block::default()
+                .borders(Borders::LEFT | Borders::RIGHT)
+                .border_style(border_style);
+            let outer = Rect::new(
+                area.x,
+                area.y + (c_lo - window_lo) as u16,
+                card_w,
+                (c_hi - c_lo) as u16,
+            );
+            let inner = block.inner(outer);
+            let lines: Vec<Line> = section
+                .1
+                .iter()
+                .map(|(_, k, d)| {
+                    Line::from(vec![
+                        Span::styled(format!("{:<11} ", k), Style::default().fg(Color::Yellow)),
+                        Span::raw(*d),
+                    ])
+                })
+                .collect();
+            f.render_widget(block, outer);
+            f.render_widget(
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .scroll(((c_lo - (top + 1)) as u16, 0)),
+                inner,
+            );
+        }
+        // Bottom border strip, corners stamped like the top one.
+        let bottom_row = bottom.saturating_sub(1);
+        if bottom_row >= window_lo && bottom_row < window_hi {
+            let strip = Rect::new(area.x, area.y + (bottom_row - window_lo) as u16, card_w, 1);
+            f.render_widget(
+                Block::default()
+                    .borders(Borders::BOTTOM)
+                    .border_style(border_style),
+                strip,
+            );
+            let buf = f.buffer_mut();
+            buf[(strip.x, strip.y)]
+                .set_symbol("└")
+                .set_style(border_style);
+            buf[(strip.right() - 1, strip.y)]
+                .set_symbol("┘")
+                .set_style(border_style);
+        }
+        top = bottom.saturating_add(1); // + inter-card gap
+    }
 }
 
 pub(super) fn draw_help(app: &App, f: &mut Frame, area: Rect) {
@@ -417,20 +598,26 @@ pub(super) fn draw_help(app: &App, f: &mut Frame, area: Rect) {
         "Close",
         &mut hit_map,
     );
-    let scroll = app.help_scroll.min(help_regular_max_scroll(app, area)) as u16;
-    let mid = HELP_KEYS.len().div_ceil(2);
+    let scroll = app.help_scroll.min(help_regular_max_scroll(app, area));
+    let (left, right) = help_wide_columns(inner);
     let gutter = HELP_GUTTER_WIDTH.min(inner.width.saturating_sub(2));
     let columns_width = inner.width.saturating_sub(gutter);
-    let left_width = columns_width / 2;
-    let left = Rect::new(inner.x, inner.y, left_width, inner.height);
-    let right = Rect::new(
-        inner.x + left_width + gutter,
-        inner.y,
-        columns_width - left_width,
-        inner.height,
+    let left_w = columns_width / 2;
+    draw_help_section_cards(
+        f,
+        Rect::new(inner.x, inner.y, left_w, inner.height),
+        &left,
+        scroll,
+        left_w,
     );
-    render_help_column(f, left, &HELP_KEYS[..mid], scroll);
-    render_help_column(f, right, &HELP_KEYS[mid..], scroll);
+    let right_w = columns_width - left_w;
+    draw_help_section_cards(
+        f,
+        Rect::new(inner.x + left_w + gutter, inner.y, right_w, inner.height),
+        &right,
+        scroll,
+        right_w,
+    );
 }
 
 fn draw_help_wrapped(app: &App, f: &mut Frame, area: Rect) {
@@ -460,33 +647,17 @@ fn draw_help_wrapped(app: &App, f: &mut Frame, area: Rect) {
         1,
     );
     let content_w = help_content_width(list_rect);
-    let lines: Vec<Line> = HELP_KEYS
-        .iter()
-        .map(|(_, k, d)| {
-            if *k == "--" {
-                Line::from(Span::styled(
-                    format!(" {} ", d.trim_matches(|c| c == '-' || c == ' ')),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ))
-            } else {
-                Line::from(vec![
-                    Span::styled(format!("{:<11} ", k), Style::default().fg(Color::Yellow)),
-                    Span::raw(*d),
-                ])
-            }
-        })
-        .collect();
     let total_rows = help_wrapped_rows(content_w);
     let visible_rows = list_rect.height.max(1) as usize;
     let max_scroll = total_rows.saturating_sub(visible_rows);
     let scroll = app.help_scroll.min(max_scroll);
-    f.render_widget(
-        Paragraph::new(Text::from(lines))
-            .wrap(Wrap { trim: false })
-            .scroll((scroll as u16, 0)),
+    let sections = help_sections();
+    draw_help_section_cards(
+        f,
         Rect::new(list_rect.x, list_rect.y, content_w, list_rect.height),
+        &sections,
+        scroll,
+        content_w,
     );
     if total_rows > visible_rows {
         let sb = Rect::new(
@@ -514,36 +685,6 @@ fn draw_help_wrapped(app: &App, f: &mut Frame, area: Rect) {
         )),
         hint_row,
     );
-}
-
-fn render_help_column(f: &mut Frame, area: Rect, keys: &[(Screen, &str, &str)], scroll: u16) {
-    debug_assert_eq!(HELP_KEY_WIDTH as usize, HELP_KEY_TEXT + 2);
-    let lines: Vec<Line> = keys
-        .iter()
-        .map(|(_, k, d)| {
-            if *k == "--" {
-                Line::from(Span::styled(
-                    format!(" {} ", d.trim_matches(|c| c == '-' || c == ' ')),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ))
-            } else {
-                Line::from(vec![
-                    Span::styled(
-                        format!(
-                            "  {:<width$}",
-                            truncate(k, HELP_KEY_TEXT),
-                            width = HELP_KEY_TEXT
-                        ),
-                        Style::default().fg(Color::Yellow),
-                    ),
-                    Span::raw(*d),
-                ])
-            }
-        })
-        .collect();
-    f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), area);
 }
 
 // -- comment history sheet ---------------------------------------------------
@@ -679,8 +820,8 @@ pub(super) fn draw_footer(app: &App, f: &mut Frame, area: Rect) {
         Screen::CardForm | Screen::ColumnForm => ("Tab fields · Enter save · Esc cancel", false),
         Screen::Help => ("j/k scroll · Esc close", false),
         Screen::Board => ("drag card to move · double-click to open", false),
-        Screen::CardDetail
-        | Screen::Picker
+        Screen::CardDetail => ("q/Esc close · f popup/fullscreen · ? help", true),
+        Screen::Picker
         | Screen::MoveColumn
         | Screen::Confirm
         | Screen::Switcher

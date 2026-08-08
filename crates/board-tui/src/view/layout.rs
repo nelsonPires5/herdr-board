@@ -3,7 +3,8 @@ use ratatui::layout::Rect;
 use crate::app::App;
 
 use super::{
-    board_body_area, board_header_area, main_area, LayoutMode, CARD_H, COMPACT_CARD_H, MIN_COL_W,
+    board_body_area, board_header_area, compact_filter_rows, LayoutMode, CARD_H, COMPACT_CARD_H,
+    MIN_COL_W,
 };
 
 // -- layout / hit-testing ----------------------------------------------------
@@ -82,11 +83,10 @@ pub fn board_layout(app: &App, area: Rect) -> BoardLayout {
     if mode == LayoutMode::Compact {
         return board_layout_compact(app, area);
     }
-    let main = if app.screen == crate::app::Screen::Board {
-        board_body_area(area)
-    } else {
-        main_area(area)
-    };
+    // Keep the board viewport below the persistent top chrome and above the
+    // persistent action/footer chrome even while a sheet or detail view is
+    // open. Overlays are drawn later into this same content region.
+    let main = board_body_area(area);
     let n = app.board.columns.len();
     let mut cols = Vec::new();
     if n == 0 || main.width == 0 {
@@ -121,14 +121,10 @@ pub fn board_layout(app: &App, area: Rect) -> BoardLayout {
     }
 }
 
-/// Compact: exactly one column at full main width, with a 2-row header that
-/// carries prev/switch/next hit zones instead of the plain bordered title.
+/// Compact: exactly one column at full content width, with a three-control
+/// navigator below the persistent identity/filter rows.
 fn board_layout_compact(app: &App, area: Rect) -> BoardLayout {
-    let main = if app.screen == crate::app::Screen::Board {
-        board_body_area(area)
-    } else {
-        main_area(area)
-    };
+    let main = board_body_area(area);
     let n = app.board.columns.len();
     if main.width == 0 {
         return BoardLayout {
@@ -137,25 +133,26 @@ fn board_layout_compact(app: &App, area: Rect) -> BoardLayout {
         };
     }
     let rect = Rect::new(main.x, main.y, main.width, main.height);
-    let header_area = if app.screen == crate::app::Screen::Board {
-        board_header_area(area)
-    } else {
-        main
-    };
+    let header_area = board_header_area(area);
+    // Compact's column navigator sits below the brand/board/filter rows.
+    let nav_y = header_area
+        .y
+        .saturating_add(1)
+        .saturating_add(compact_filter_rows(header_area.width));
+    let prev_w = 5.min(header_area.width);
+    let next_w = 5.min(header_area.width.saturating_sub(prev_w));
     let header = CompactHeader {
-        prev: Rect::new(header_area.x, header_area.y, 4.min(header_area.width), 1),
+        prev: Rect::new(header_area.x, nav_y, prev_w, 1),
         switch: Rect::new(
-            header_area.x + 4.min(header_area.width),
-            header_area.y,
-            header_area.width.saturating_sub(8),
+            header_area.x + prev_w,
+            nav_y,
+            header_area
+                .width
+                .saturating_sub(prev_w)
+                .saturating_sub(next_w),
             1,
         ),
-        next: Rect::new(
-            header_area.x + header_area.width.saturating_sub(4),
-            header_area.y,
-            4.min(header_area.width),
-            1,
-        ),
+        next: Rect::new(header_area.right().saturating_sub(next_w), nav_y, next_w, 1),
     };
     if n == 0 {
         return BoardLayout {
@@ -176,15 +173,16 @@ fn col_layout(app: &App, idx: usize, rect: Rect, card_h: u16) -> ColLayout {
     col_layout_with_header(app, idx, rect, card_h, 1, 1, false)
 }
 
-/// Rows a Compact card needs: 5 when its title fits on one line, 6 when the
-/// title wraps to two (borders + 1/2 title rows + status + metadata, matching
-/// how `board::draw_card` splits the rect). `content_w` is the card's content
-/// width (after the "▌ " glyph prefix it's actually rendered at).
-fn compact_card_height(title: &str, content_w: u16) -> u16 {
+/// Rows a Compact card needs: 6 when its title/id fits on one line, 7 when
+/// the title wraps to two (borders + title rows + status + two metadata rows,
+/// matching how `board::draw_card` splits the rect). Board cards deliberately
+/// have no Edit/Delete action row; keyboard `e`/`d` remains the compact route.
+fn compact_card_height(id: i64, title: &str, content_w: u16) -> u16 {
     let usable = content_w.saturating_sub(2).max(1);
-    let lines = super::detail::wrapped_row_count(title, usable).clamp(1, 2) as u16;
-    // 4 content rows (title/status, harness/permission, model/effort, actions)
-    // + 2 borders; a wrapped title adds one more row.
+    let title = format!("#{id} {title}");
+    let lines = super::detail::wrapped_row_count(&title, usable).clamp(1, 2) as u16;
+    // Title rows + status + harness/permission and model/effort, with two
+    // borders.
     lines + 5
 }
 
@@ -192,8 +190,8 @@ fn compact_card_height(title: &str, content_w: u16) -> u16 {
 /// top of `rect` are consumed by a title/header (1 for the bordered box, 2 for
 /// the Compact header); `reserve_bottom` is extra rows reserved below the card
 /// list (1 for the bordered box's bottom border, 0 for the borderless Compact
-/// column which already sits inside `main_area`). `compact` selects the
-/// variable 3/4-row Compact card sizing over the fixed `card_h`.
+/// column which already sits inside the board content region). `compact` selects the
+/// variable 6/7-row Compact card sizing over the fixed `card_h`.
 fn col_layout_with_header(
     app: &App,
     idx: usize,
@@ -233,7 +231,7 @@ fn col_layout_with_header(
         0
     };
 
-    // Compact cards have real variable heights (5/6 rows). Derive overflow,
+    // Compact cards have real variable heights (6/7 rows). Derive overflow,
     // offsets, visible count and rendered rects from the same height vector so
     // the scrollbar and wheel logic can never disagree with the frame.
     let base_content_w = rect.width.saturating_sub(2);
@@ -242,7 +240,7 @@ fn col_layout_with_header(
             .iter()
             .map(|card| {
                 if compact {
-                    compact_card_height(&card.title, width)
+                    compact_card_height(card.id, &card.title, width)
                 } else {
                     card_h
                 }
