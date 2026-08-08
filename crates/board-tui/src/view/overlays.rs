@@ -253,7 +253,7 @@ pub(super) fn draw_move_column(app: &App, f: &mut Frame, area: Rect) {
     let move_controls = Layout::horizontal([
         Constraint::Length(10.min(chunks[0].width / 3)),
         Constraint::Min(1),
-        Constraint::Length(10.min(chunks[0].width / 3)),
+        Constraint::Length(11.min(chunks[0].width / 3)),
     ])
     .split(chunks[0]);
     render_button_chip_at(
