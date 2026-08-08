@@ -1,20 +1,21 @@
 ---
 source: crates/board-tui/tests/snapshots.rs
-expression: "render_sized(&mut d, w, h)"
+assertion_line: 853
+expression: output
 ---
 " ◈ herdr-board ● 1 running              "
 "  [ Global ▾ ]   [ Act ] [ All ] [ Arc ]"
 "[ ‹ ] [ Todo (M) · 1/6 · 1 cards ] [ › ]"
 "────────────────────────────────────────"
-"┌ Columns ───────────────────────[ X ]─┐"
-"│ Todo  1                              │"
-"│ Plan  1                              │"
-"│ Execute  2                           │"
-"│ Review  2                            │"
-"│ Human Review  0                      │"
-"│ Done  2                              │"
-"│ ⇄  Switch board  →                   │"
-"│ ⊞  Apply template                    │"
+"┌ Boards ────────────────────────[ X ]─┐"
+"│ Global                               │"
+"│ project — /Volumes/archive/project   │"
+"│ scope — /private/tmp/hb-visual.HWoE… │"
+"│ project — /work/alpha/project        │"
+"│                                      │"
+"│                                      │"
+"│                                      │"
+"│                                      │"
 "│                                      │"
 "│                                      │"
 "│                                      │"

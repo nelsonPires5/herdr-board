@@ -1,6 +1,6 @@
 //! Pure layout behavior for the mobile-responsive board: `LayoutMode`
 //! breakpoints, the Compact single-column layout (card height, header zones,
-//! vertical scroll clamping), and the `sheet_area` footer-overlap invariant.
+//! vertical scroll clamping), and the `sheet_area` action-rail-overlap invariant.
 //! No snapshots, no rendering — everything here calls `board_layout` /
 //! `sheet_area` directly against a pure `App`.
 
@@ -48,6 +48,27 @@ fn from_width_compact_below_60() {
 fn from_width_regular_60_to_119() {
     for w in [60, 80, 119] {
         assert_eq!(LayoutMode::from_width(w), LayoutMode::Regular, "w={w}");
+    }
+}
+
+#[test]
+fn header_geometry_matches_the_three_row_compact_and_one_line_desktop_contract() {
+    assert_eq!(
+        board_header_height(40),
+        4,
+        "three Compact rows plus divider"
+    );
+    assert_eq!(
+        board_header_height(52),
+        4,
+        "three Compact rows plus divider"
+    );
+    for width in [60, 80, 120] {
+        assert_eq!(
+            board_header_height(width),
+            2,
+            "one desktop row plus divider at {width}"
+        );
     }
 }
 
@@ -117,7 +138,7 @@ fn board_layout_keeps_persistent_chrome_clear_while_an_overlay_is_open() {
             1
         };
         let content_top = area.y + header_rows;
-        let content_bottom = area.y + h.saturating_sub(1 + action_rows);
+        let content_bottom = area.y + h.saturating_sub(action_rows);
 
         assert!(
             layout.cols.iter().all(|col| {
@@ -266,7 +287,7 @@ fn sheet_area_stays_inside_the_board_content_region_in_any_mode() {
                         1
                     };
                     let content_top = area.y + header_rows.min(area.height);
-                    let content_bottom = area.y + h.saturating_sub(1 + action_rows);
+                    let content_bottom = area.y + h.saturating_sub(action_rows);
                     assert!(
                         rect.y >= content_top || rect.height == 0,
                         "mode={mode:?} w={w} h={h} pref=({pw},{ph}) rect={rect:?} \
@@ -332,6 +353,16 @@ fn runs_viewport_reserves_action_row_before_every_run_body_row() {
         }
         let visible = board_tui::view::runs_viewport_height(&layout);
         let body_bottom = layout.runs.y + 1 + visible as u16;
+        if layout.run_actions.is_empty() {
+            // Compact puts run actions in the shared card rail rather than
+            // reserving a second in-section row.
+            assert!(
+                body_bottom <= layout.runs.bottom(),
+                "compact run body must stay inside the Runs frame at {w}x{h}: runs={:?}",
+                layout.runs,
+            );
+            continue;
+        }
         assert!(
             body_bottom <= layout.run_actions.y,
             "run body must end before action row at {w}x{h}: runs={:?} actions={:?}",
@@ -369,8 +400,13 @@ fn detail_popup_and_fullscreen_stay_inside_the_content_region() {
         app.last_area = Rect::new(0, 0, 120, 35);
         app.detail_fullscreen = fullscreen;
         let layout = detail_layout(&app, app.last_area);
-        assert_eq!(layout.panel.y, 3);
-        assert_eq!(layout.panel.y + layout.panel.height, 33);
+        if fullscreen {
+            assert_eq!(layout.panel.y, 2);
+            assert_eq!(layout.panel.y + layout.panel.height, 34);
+        } else {
+            assert_eq!(layout.panel.y, 3);
+            assert_eq!(layout.panel.y + layout.panel.height, 33);
+        }
     }
 }
 
@@ -414,7 +450,7 @@ fn app_with_detail_comments(n: usize) -> App {
 }
 
 #[test]
-fn action_bar_row_sits_inside_comments_and_never_overlaps_runs_or_footer() {
+fn action_bar_row_sits_inside_comments_and_never_overlaps_runs_or_action_rail() {
     let app = app_with_detail_comments(3);
     let area = Rect::new(0, 0, 80, 24);
     let layout = detail_layout(&app, area);
@@ -428,9 +464,16 @@ fn action_bar_row_sits_inside_comments_and_never_overlaps_runs_or_footer() {
     assert!(bar_y >= layout.comments.y && bar_y < layout.comments.y + layout.comments.height);
     // Never overlaps `layout.runs` (which starts strictly after it).
     assert!(bar_y < layout.runs.y, "bar row must not overlap runs");
-    // Never overlaps the global footer row.
-    let footer_y = area.y + area.height - 1;
-    assert!(bar_y < footer_y, "bar row must not overlap the footer");
+    // Never overlaps the persistent board action rail.
+    let action_rows = if area.width < 60 {
+        3
+    } else if area.width < 120 {
+        2
+    } else {
+        1
+    };
+    let action_y = area.bottom().saturating_sub(action_rows);
+    assert!(bar_y < action_y, "bar row must not overlap the action rail");
 }
 
 #[test]

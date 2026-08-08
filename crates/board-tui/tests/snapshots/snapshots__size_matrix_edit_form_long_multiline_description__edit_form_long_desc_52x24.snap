@@ -2,9 +2,9 @@
 source: crates/board-tui/tests/snapshots.rs
 expression: output
 ---
-" ◈ herdr-board          [ Board: Global ▾ ]         "
-"            Visible: [ Active ] [ All ] [ Archived ]"
-"[ ‹ ]      [ Todo · 1/6 · 2 cards · ▶1 ]       [ › ]"
+" ◈ herdr-board ● 1 running                          "
+"    [ Global ▾ ]     [ Active ] [ All ] [ Archived ]"
+"[ ‹ ]       [ Todo (M) · 1/6 · 2 cards ]       [ › ]"
 "────────────────────────────────────────────────────"
 "┌ Edit card ─────────────────────────────────[ X ]─┐"
 "│┌ Task ─────────────────────────────────────────┐▲│"
@@ -19,10 +19,10 @@ expression: output
 "│└───────────────────────────────────────────────┘││"
 "│                                                 ││"
 "│                                                 ││"
+"│                                                 ││"
 "│                                                 ▼│"
 "│        [ Save ]                [ Cancel ]        │"
 "└──────────────────────────────────────────────────┘"
 " [ + New card ]    [ Open card ]   [ Archive card ] "
 "[ + New column ]  [ Edit column ]  [ Delete column ]"
 " [ Move column ]    [ Template ]      [ ? Help ]    "
-"Tab fields · Enter save · Esc cancel                "

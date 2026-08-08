@@ -8,7 +8,7 @@ use crate::app::App;
 use crate::forms::Form;
 use crate::widgets::{button_text, render_button_chip_at, render_sheet_frame, windowed_rows, Zone};
 
-use super::{board_body_area, sheet_area, truncate, LayoutMode};
+use super::{board_body_area_for, sheet_area_for_app, truncate, LayoutMode};
 
 // -- form --------------------------------------------------------------------
 
@@ -98,9 +98,9 @@ pub(super) fn draw_form(app: &App, form: &Form, f: &mut Frame, area: Rect) {
 
     // -- sheet placement ---------------------------------------------------------
     let box_area = if app.form_fullscreen {
-        board_body_area(area)
+        board_body_area_for(app, area)
     } else {
-        sheet_area(mode, 96, content_h, area)
+        sheet_area_for_app(app, mode, 96, content_h, area)
     };
     f.render_widget(Clear, box_area);
 
@@ -216,6 +216,28 @@ fn marker_width_for_label(label: &str) -> u16 {
         .saturating_add(1)
 }
 
+/// Text fields share one value treatment regardless of whether their buffer is
+/// one line or a wrapped textarea. In particular, a focused multiline editor
+/// gets the same unmistakable reverse selection as the title/name fields, and
+/// an unfocused buffer stays white/readable instead of falling back to the
+/// section's dim gray.
+fn text_field_value_style(is_focus: bool) -> Style {
+    if is_focus {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default().fg(Color::White)
+    }
+}
+
+fn insert_cursor_marker(value: &mut String, char_col: usize) {
+    let byte = value
+        .char_indices()
+        .nth(char_col.min(value.chars().count()))
+        .map(|(byte, _)| byte)
+        .unwrap_or(value.len());
+    value.insert(byte, '▏');
+}
+
 /// Render one form field (label row + value row) inside `area`.
 fn draw_form_field(app: &App, form: &Form, fi: usize, row_area: Rect, f: &mut Frame) {
     let field = &form.fields[fi];
@@ -308,11 +330,7 @@ fn draw_form_field(app: &App, form: &Form, fi: usize, row_area: Rect, f: &mut Fr
         crate::forms::FieldKind::Text(ta) if field.multiline => {
             // Keeps the cursor line visible and draws a live cursor marker at
             // the real cursor column so edits move visibly with the cursor.
-            let val_style = if is_focus {
-                Style::default().fg(Color::White)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
+            let val_style = text_field_value_style(is_focus);
             let cursor_row = ta.cursor().0.min(ta.lines().len().saturating_sub(1));
             let total_lines = ta.lines().len().max(1);
             let visible_rows = value_area.height.max(1) as usize;
@@ -328,8 +346,7 @@ fn draw_form_field(app: &App, form: &Form, fi: usize, row_area: Rect, f: &mut Fr
             for (li, line) in ta.lines().iter().enumerate() {
                 let mut s = line.clone();
                 if is_focus && li == cursor_row {
-                    let col = cursor_col.min(s.chars().count() + 1);
-                    s.insert(col.min(s.len()), '▏');
+                    insert_cursor_marker(&mut s, cursor_col);
                 }
                 rendered.push(Line::from(s));
             }
@@ -341,21 +358,17 @@ fn draw_form_field(app: &App, form: &Form, fi: usize, row_area: Rect, f: &mut Fr
         }
         crate::forms::FieldKind::Text(ta) => {
             // Single-line field: show the live cursor bar at the cursor column.
-            let val_style = if is_focus {
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default().fg(Color::White)
-            };
+            let val_style = text_field_value_style(is_focus);
             let mut t = ta.lines().join("  ⏎  ");
             if is_focus {
-                let col = ta.cursor().1.min(t.chars().count() + 1);
-                t.insert(col, '▏');
+                insert_cursor_marker(&mut t, ta.cursor().1);
             }
             f.render_widget(
                 Paragraph::new(Span::styled(
                     truncate(&t, value_area.width as usize),
                     val_style,
-                )),
+                ))
+                .style(val_style),
                 Rect::new(value_area.x, value_area.y, value_area.width, 1),
             );
         }
@@ -417,6 +430,151 @@ fn render_form_actions(f: &mut Frame, area: Rect, hit_map: &mut crate::widgets::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multiline_value_uses_title_value_treatment_when_focused_or_not() {
+        use board_core::model::Board;
+        use board_core::protocol::BoardSnapshot;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        fn value_cell(
+            field: crate::forms::FieldId,
+            focus: crate::forms::FieldId,
+        ) -> ratatui::buffer::Cell {
+            let mut form = crate::forms::Form::card_create(1);
+            let field_idx = form.fields.iter().position(|f| f.id == field).unwrap();
+            form.focus = form.fields.iter().position(|f| f.id == focus).unwrap();
+            let app = crate::app::App::new(BoardSnapshot {
+                board: Board {
+                    id: 1,
+                    name: "Global".into(),
+                    scope_path: None,
+                },
+                columns: Vec::new(),
+                cards: Vec::new(),
+                active_runs: Vec::new(),
+            });
+            let mut terminal = Terminal::new(TestBackend::new(50, 6)).unwrap();
+            terminal
+                .draw(|f| draw_form_field(&app, &form, field_idx, f.area(), f))
+                .unwrap();
+            terminal.backend().buffer()[(0, 1)].clone()
+        }
+
+        for focused in [true, false] {
+            let title_focus = if focused {
+                crate::forms::FieldId::Title
+            } else {
+                crate::forms::FieldId::Description
+            };
+            let description_focus = if focused {
+                crate::forms::FieldId::Description
+            } else {
+                crate::forms::FieldId::Title
+            };
+            let title = value_cell(crate::forms::FieldId::Title, title_focus);
+            let description = value_cell(crate::forms::FieldId::Description, description_focus);
+            assert_eq!(
+                title.modifier, description.modifier,
+                "title and description focus modifiers must match when focused={focused}"
+            );
+            assert_eq!(title.fg, description.fg);
+            assert_eq!(title.bg, description.bg);
+        }
+        assert!(
+            value_cell(
+                crate::forms::FieldId::Description,
+                crate::forms::FieldId::Description
+            )
+            .modifier
+            .contains(Modifier::REVERSED),
+            "focused multiline values must retain the title/name reverse treatment"
+        );
+        assert_eq!(
+            value_cell(
+                crate::forms::FieldId::Description,
+                crate::forms::FieldId::Title
+            )
+            .fg,
+            Color::White,
+            "unfocused multiline values must remain readable"
+        );
+    }
+
+    #[test]
+    fn column_system_prompt_matches_name_value_treatment_when_focused_or_not() {
+        use board_core::model::Board;
+        use board_core::protocol::BoardSnapshot;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        fn value_cell(
+            field_id: crate::forms::FieldId,
+            focus: crate::forms::FieldId,
+        ) -> ratatui::buffer::Cell {
+            let mut form = crate::forms::Form::column_create(&[]);
+            let field = form
+                .fields
+                .iter()
+                .position(|field| field.id == field_id)
+                .unwrap();
+            form.focus = form
+                .fields
+                .iter()
+                .position(|field| field.id == focus)
+                .unwrap();
+            let app = crate::app::App::new(BoardSnapshot {
+                board: Board {
+                    id: 1,
+                    name: "Global".into(),
+                    scope_path: None,
+                },
+                columns: Vec::new(),
+                cards: Vec::new(),
+                active_runs: Vec::new(),
+            });
+            let mut terminal = Terminal::new(TestBackend::new(50, 6)).unwrap();
+            terminal
+                .draw(|f| draw_form_field(&app, &form, field, f.area(), f))
+                .unwrap();
+            terminal.backend().buffer()[(0, 1)].clone()
+        }
+
+        for focused in [true, false] {
+            let name_focus = if focused {
+                crate::forms::FieldId::Name
+            } else {
+                crate::forms::FieldId::SystemPrompt
+            };
+            let prompt_focus = if focused {
+                crate::forms::FieldId::SystemPrompt
+            } else {
+                crate::forms::FieldId::Name
+            };
+            let name = value_cell(crate::forms::FieldId::Name, name_focus);
+            let prompt = value_cell(crate::forms::FieldId::SystemPrompt, prompt_focus);
+            assert_eq!(name.modifier, prompt.modifier);
+            assert_eq!(name.fg, prompt.fg);
+            assert_eq!(name.bg, prompt.bg);
+        }
+        assert!(
+            value_cell(
+                crate::forms::FieldId::SystemPrompt,
+                crate::forms::FieldId::SystemPrompt
+            )
+            .modifier
+            .contains(Modifier::REVERSED),
+            "focused column system-prompt values must retain the name treatment"
+        );
+    }
+
+    #[test]
+    fn cursor_marker_uses_character_columns_for_multibyte_text() {
+        let mut value = "Olá mundo".to_string();
+        insert_cursor_marker(&mut value, 3);
+        assert_eq!(value, "Olá▏ mundo");
+    }
 
     #[test]
     fn choice_controls_survive_compact_width_and_only_data_ellipsizes() {

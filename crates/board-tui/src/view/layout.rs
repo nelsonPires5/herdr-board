@@ -3,8 +3,7 @@ use ratatui::layout::Rect;
 use crate::app::App;
 
 use super::{
-    board_body_area, board_header_area, compact_filter_rows, LayoutMode, CARD_H, COMPACT_CARD_H,
-    MIN_COL_W,
+    board_body_area_for, board_header_area, LayoutMode, CARD_H, COMPACT_CARD_H, MIN_COL_W,
 };
 
 // -- layout / hit-testing ----------------------------------------------------
@@ -84,9 +83,10 @@ pub fn board_layout(app: &App, area: Rect) -> BoardLayout {
         return board_layout_compact(app, area);
     }
     // Keep the board viewport below the persistent top chrome and above the
-    // persistent action/footer chrome even while a sheet or detail view is
-    // open. Overlays are drawn later into this same content region.
-    let main = board_body_area(area);
+    // bottom action rail (and a transient toast row, when present) even while
+    // a sheet or detail view is open. Overlays are drawn later into this same
+    // content region.
+    let main = board_body_area_for(app, area);
     let n = app.board.columns.len();
     let mut cols = Vec::new();
     if n == 0 || main.width == 0 {
@@ -124,7 +124,7 @@ pub fn board_layout(app: &App, area: Rect) -> BoardLayout {
 /// Compact: exactly one column at full content width, with a three-control
 /// navigator below the persistent identity/filter rows.
 fn board_layout_compact(app: &App, area: Rect) -> BoardLayout {
-    let main = board_body_area(area);
+    let main = board_body_area_for(app, area);
     let n = app.board.columns.len();
     if main.width == 0 {
         return BoardLayout {
@@ -134,25 +134,27 @@ fn board_layout_compact(app: &App, area: Rect) -> BoardLayout {
     }
     let rect = Rect::new(main.x, main.y, main.width, main.height);
     let header_area = board_header_area(area);
-    // Compact's column navigator sits below the brand/board/filter rows.
-    let nav_y = header_area
-        .y
-        .saturating_add(1)
-        .saturating_add(compact_filter_rows(header_area.width));
+    // Compact's column navigator is the third content row, below the
+    // identity row and the board/visibility controls row.
     let prev_w = 5.min(header_area.width);
     let next_w = 5.min(header_area.width.saturating_sub(prev_w));
     let header = CompactHeader {
-        prev: Rect::new(header_area.x, nav_y, prev_w, 1),
+        prev: Rect::new(header_area.x, header_area.y + 2, prev_w, 1),
         switch: Rect::new(
             header_area.x + prev_w,
-            nav_y,
+            header_area.y + 2,
             header_area
                 .width
                 .saturating_sub(prev_w)
                 .saturating_sub(next_w),
             1,
         ),
-        next: Rect::new(header_area.right().saturating_sub(next_w), nav_y, next_w, 1),
+        next: Rect::new(
+            header_area.right().saturating_sub(next_w),
+            header_area.y + 2,
+            next_w,
+            1,
+        ),
     };
     if n == 0 {
         return BoardLayout {

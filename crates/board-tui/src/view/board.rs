@@ -14,9 +14,8 @@ use crate::widgets::{
 };
 
 use super::{
-    board_action_area, board_action_columns, board_body_area, board_header_area, board_layout,
-    centered_rect_abs, compact_filter_label, compact_filter_options, compact_filter_rows,
-    sheet_area, status_glyph, truncate, CompactHeader, LayoutMode,
+    board_action_area, board_action_columns, board_body_area_for, board_header_area, board_layout,
+    centered_rect_abs, compact_filter_options, status_glyph, truncate, CompactHeader, LayoutMode,
 };
 
 // -- board -------------------------------------------------------------------
@@ -94,7 +93,7 @@ pub(super) fn draw_board(app: &App, f: &mut Frame, area: Rect) {
         .map(|column| app.cards_of(column.id).len())
         .sum::<usize>();
     if app.is_empty_board() || visible_cards == 0 {
-        let m = board_body_area(area);
+        let m = board_body_area_for(app, area);
         let (message, actions) = if app.is_empty_board() && app.card_filter == CardFilter::Active {
             ("Board is empty.", "N: new column  ·  T: apply template")
         } else {
@@ -141,63 +140,31 @@ fn draw_board_header(app: &App, f: &mut Frame, area: Rect, compact_header: Optio
 
     let identity = Rect::new(header_area.x, header_area.y, header_area.width, 1);
     if compact_header.is_some() {
-        // Compact keeps the product identity and board selector on the first
-        // row, filters on the second, and the column navigator on the third.
+        // Compact is deliberately three rows: brand/count, board + filters,
+        // then the column navigator. The divider is the fourth header row.
         draw_compact_identity(app, f, identity);
-        let filters = Rect::new(
+        let controls = Rect::new(
             header_area.x,
             header_area.y.saturating_add(1),
             header_area.width,
-            compact_filter_rows(header_area.width).min(header_area.height.saturating_sub(1)),
+            1.min(header_area.height.saturating_sub(1)),
         );
-        draw_visibility_filters(app, f, filters);
+        draw_compact_controls(app, f, controls);
         if let Some(header) = compact_header {
             draw_compact_header(app, f, header);
         }
         return;
     }
 
-    // Brand identity (only the product name; the actual board name lives in
-    // the dropdown row below), with the live running count on the right.
-    let running = format!("● {} running", running_card_count(app));
-    let running_w = running.chars().count() as u16;
-    f.render_widget(
-        Paragraph::new(Span::styled(
-            " ◈ herdr-board",
-            Style::default()
-                .fg(Color::LightCyan)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Rect::new(
-            identity.x,
-            identity.y,
-            identity.width.saturating_sub(running_w.saturating_add(2)),
-            1,
-        ),
-    );
-    if running_w <= identity.width {
-        f.render_widget(
-            Paragraph::new(Span::styled(
-                running,
-                Style::default()
-                    .fg(Color::LightGreen)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Rect::new(
-                identity.right().saturating_sub(running_w + 1),
-                identity.y,
-                running_w,
-                1,
-            ),
-        );
-    }
-    let controls = Rect::new(
-        header_area.x,
-        header_area.y.saturating_add(1),
-        header_area.width,
-        1.min(header_area.height.saturating_sub(1)),
-    );
-    draw_scope_and_filter(app, f, controls);
+    // Regular/Wide keep every header control on one balanced line. The left
+    // group owns the product identity and the *global* running count; the
+    // centered board chip and right-aligned filters each receive a disjoint
+    // hit area, so long board names can only ellipsize inside their own slot.
+    draw_desktop_header(app, f, identity);
+}
+
+fn running_label(app: &App) -> String {
+    format!("● {} running", running_card_count(app))
 }
 
 fn draw_compact_identity(app: &App, f: &mut Frame, area: Rect) {
@@ -205,7 +172,7 @@ fn draw_compact_identity(app: &App, f: &mut Frame, area: Rect) {
         return;
     }
     let brand = " ◈ herdr-board";
-    let brand_w = (brand.chars().count() as u16).min(area.width.saturating_sub(1));
+    let brand_w = (brand.chars().count() as u16).min(area.width);
     f.render_widget(
         Paragraph::new(Span::styled(
             truncate(brand, brand_w as usize),
@@ -215,148 +182,171 @@ fn draw_compact_identity(app: &App, f: &mut Frame, area: Rect) {
         )),
         Rect::new(area.x, area.y, brand_w, 1),
     );
-    let selector_area = Rect::new(
-        area.x.saturating_add(brand_w).saturating_add(1),
-        area.y,
-        area.width.saturating_sub(brand_w).saturating_sub(1),
-        1,
-    );
-    let label = format!("Board: {} ▾", app.board.board.name);
-    render_button_chip_at(
-        f,
-        selector_area,
-        &label,
-        &mut app.hit_map.borrow_mut(),
-        Zone::Action(UiAction::SwitchBoard),
-    );
-}
-
-fn draw_scope_and_filter(app: &App, f: &mut Frame, area: Rect) {
-    if area.is_empty() {
-        return;
-    }
-    let filter_w = visibility_filter_width();
-    let scope_w = area.width.saturating_sub(filter_w.saturating_add(1));
-    if scope_w > 0 {
-        let scope_area = Rect::new(area.x, area.y, scope_w, 1);
-        let label = format!("Board: {} ▾", app.board.board.name);
-        render_button_chip_at(
-            f,
-            scope_area,
-            &label,
-            &mut app.hit_map.borrow_mut(),
-            Zone::Action(UiAction::SwitchBoard),
-        );
-    }
-    draw_visibility_filters(app, f, area);
-}
-
-fn visibility_filter_width() -> u16 {
-    let chips = ["Active", "All", "Archived"];
-    let chips_width: usize = chips.iter().map(|label| button_text(label).len()).sum();
-    ("Visible:".len() + 1 + chips_width + chips.len().saturating_sub(1)) as u16
-}
-
-fn draw_visibility_filters(app: &App, f: &mut Frame, area: Rect) {
-    if area.is_empty() {
-        return;
-    }
-
-    // Preserve the established right-aligned one-row rail for all normal
-    // widths. Compact only enters the wrapping path when its full set cannot
-    // fit on one row.
-    if area.height == 1 {
-        let chips = [
-            ("Active", CardFilter::Active),
-            ("All", CardFilter::All),
-            ("Archived", CardFilter::Archived),
-        ];
-        let total_w = visibility_filter_width();
-        let mut x = area.right().saturating_sub(total_w).max(area.x);
-        let label_w = "Visible:".chars().count() as u16;
+    let running = running_label(app);
+    let running_x = area.x.saturating_add(brand_w).saturating_add(1);
+    if running_x < area.right() {
         f.render_widget(
-            Paragraph::new(Span::styled("Visible:", Style::default().fg(Color::Gray))),
-            Rect::new(x, area.y, label_w.min(area.width), 1),
+            Paragraph::new(Span::styled(
+                truncate(&running, area.right().saturating_sub(running_x) as usize),
+                Style::default()
+                    .fg(Color::LightGreen)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Rect::new(running_x, area.y, area.right().saturating_sub(running_x), 1),
         );
-        x = x.saturating_add(label_w).saturating_add(1);
-        for (label, filter) in chips {
-            let width = button_text(label).chars().count() as u16;
-            let modifier = if filter == app.card_filter {
-                Modifier::UNDERLINED
-            } else {
-                Modifier::empty()
-            };
-            render_button_chip_at_with_modifier(
-                f,
-                Rect::new(x, area.y, width, 1),
-                label,
-                &mut app.hit_map.borrow_mut(),
-                Zone::Filter(filter),
-                modifier,
-            );
-            x = x.saturating_add(width).saturating_add(1);
-        }
-        return;
     }
+}
 
-    // Compact keeps the transparent `[ NAME ]` chips but wraps the rail as a
-    // unit when one row cannot contain every filter. The row count is shared
-    // with `board_header_height`, so the final Archived chip is never silently
-    // clipped out of the header.
-    let chips = if area.width < 60 {
-        compact_filter_options(area.width)
-    } else {
+fn desktop_filter_options(width: u16) -> [(&'static str, CardFilter); 3] {
+    if width >= 72 {
         [
             ("Active", CardFilter::Active),
             ("All", CardFilter::All),
             ("Archived", CardFilter::Archived),
         ]
-    };
-    let label = if area.width < 60 {
-        compact_filter_label(area.width)
     } else {
-        "Visible:"
-    };
-    let label_w = label.chars().count() as u16;
-    f.render_widget(
-        Paragraph::new(Span::styled(label, Style::default().fg(Color::Gray))),
-        Rect::new(area.x, area.y, label_w.min(area.width), 1),
-    );
+        // At the narrow Regular breakpoint, removing the redundant words is
+        // what leaves room for a readable centered board dropdown.
+        [
+            ("A", CardFilter::Active),
+            ("All", CardFilter::All),
+            ("R", CardFilter::Archived),
+        ]
+    }
+}
 
-    let mut row = 0u16;
-    let mut used = label_w.saturating_add(1).min(area.width);
-    let mut needs_gap = false;
+fn filter_chips_width(chips: &[(&str, CardFilter)]) -> u16 {
+    chips
+        .iter()
+        .map(|(label, _)| button_text(label).chars().count() as u16)
+        .sum::<u16>()
+        .saturating_add(chips.len().saturating_sub(1) as u16)
+}
+
+/// Fit a board dropdown label without sacrificing its affordance. The shared
+/// chip fitter truncates an arbitrary label from the end, which would turn a
+/// long `name ▾` into `name…` and hide the fact that the control opens a menu.
+fn board_dropdown_label(name: &str, max_width: u16) -> String {
+    let label_width = max_width.saturating_sub(4) as usize; // `[ ` + ` ]`
+    if label_width == 0 {
+        return String::new();
+    }
+
+    const CHEVRON: &str = " ▾";
+    let full = format!("{name}{CHEVRON}");
+    if full.chars().count() <= label_width {
+        return full;
+    }
+    if label_width == 1 {
+        return "▾".into();
+    }
+
+    let name_width = label_width.saturating_sub(CHEVRON.chars().count());
+    format!("{}{}", truncate(name, name_width), CHEVRON)
+}
+
+fn draw_desktop_header(app: &App, f: &mut Frame, area: Rect) {
+    if area.is_empty() {
+        return;
+    }
+    let chips = desktop_filter_options(area.width);
+    let filters_w = filter_chips_width(&chips).min(area.width);
+    let filters_x = area.right().saturating_sub(filters_w);
+    let brand = " ◈ herdr-board";
+    let brand_w = brand.chars().count() as u16;
+    let running = running_label(app);
+    let running_w = running.chars().count() as u16;
+    let left_w = brand_w
+        .saturating_add(1)
+        .saturating_add(running_w)
+        .min(filters_x.saturating_sub(area.x));
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            truncate(brand, brand_w.min(left_w) as usize),
+            Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Rect::new(area.x, area.y, brand_w.min(left_w), 1),
+    );
+    let running_x = area.x.saturating_add(brand_w).saturating_add(1);
+    if running_x < area.x.saturating_add(left_w) {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                truncate(
+                    &running,
+                    area.x.saturating_add(left_w).saturating_sub(running_x) as usize,
+                ),
+                Style::default()
+                    .fg(Color::LightGreen)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Rect::new(
+                running_x,
+                area.y,
+                area.x.saturating_add(left_w).saturating_sub(running_x),
+                1,
+            ),
+        );
+    }
+
+    let center_x = area.x.saturating_add(left_w).saturating_add(1);
+    let center_right = filters_x.saturating_sub(1).max(center_x);
+    let center = Rect::new(center_x, area.y, center_right.saturating_sub(center_x), 1);
+    let board_label = board_dropdown_label(&app.board.board.name, center.width);
+    render_button_chip_at(
+        f,
+        center,
+        &board_label,
+        &mut app.hit_map.borrow_mut(),
+        Zone::Action(UiAction::SwitchBoard),
+    );
+    draw_filter_chips(app, f, Rect::new(filters_x, area.y, filters_w, 1), &chips);
+}
+
+fn draw_compact_controls(app: &App, f: &mut Frame, area: Rect) {
+    if area.is_empty() {
+        return;
+    }
+    let chips = compact_filter_options(area.width);
+    let filters_w = filter_chips_width(&chips).min(area.width);
+    let filters_x = area.right().saturating_sub(filters_w);
+    let board_w = filters_x.saturating_sub(area.x).saturating_sub(1);
+    if board_w > 0 {
+        let label = board_dropdown_label(&app.board.board.name, board_w);
+        render_button_chip_at(
+            f,
+            Rect::new(area.x, area.y, board_w, 1),
+            &label,
+            &mut app.hit_map.borrow_mut(),
+            Zone::Action(UiAction::SwitchBoard),
+        );
+    }
+    draw_filter_chips(app, f, Rect::new(filters_x, area.y, filters_w, 1), &chips);
+}
+
+fn draw_filter_chips(app: &App, f: &mut Frame, area: Rect, chips: &[(&str, CardFilter)]) {
+    if area.is_empty() {
+        return;
+    }
+    let mut x = area.x;
     for (label, filter) in chips {
         let width = button_text(label).chars().count() as u16;
-        let gap = u16::from(needs_gap && used > 0);
-        if used.saturating_add(gap).saturating_add(width) > area.width {
-            row = row.saturating_add(1);
-            if row >= area.height {
-                // This is only reachable when the frame itself is too short
-                // to support its responsive header; normal supported mobile
-                // sizes allocate exactly `compact_filter_rows` rows.
-                continue;
-            }
-            used = 0;
-            needs_gap = false;
-        }
-        let gap = u16::from(needs_gap && used > 0);
-        let x = area.x.saturating_add(used).saturating_add(gap);
-        let modifier = if filter == app.card_filter {
+        let modifier = if *filter == app.card_filter {
             Modifier::UNDERLINED
         } else {
             Modifier::empty()
         };
         render_button_chip_at_with_modifier(
             f,
-            Rect::new(x, area.y.saturating_add(row), width, 1),
+            Rect::new(x, area.y, width.min(area.right().saturating_sub(x)), 1),
             label,
             &mut app.hit_map.borrow_mut(),
-            Zone::Filter(filter),
+            Zone::Filter(*filter),
             modifier,
         );
-        used = used.saturating_add(gap).saturating_add(width);
-        needs_gap = true;
+        x = x.saturating_add(width).saturating_add(1);
     }
 }
 
@@ -466,24 +456,33 @@ fn draw_board_actions(app: &App, f: &mut Frame, area: Rect) {
     }
 }
 
-/// Compact column navigation: `[ ‹ ]  [ column · n/n · cards  ▶n ]  [ › ]`.
+/// Compact column navigation: `[ ‹ ]  [ column (M/A) · n/n · cards ]  [ › ]`.
+/// The global running count belongs to row one; it is intentionally absent
+/// from this per-column navigator.
 fn draw_compact_header(app: &App, f: &mut Frame, header: &CompactHeader) {
     let mut hit_map = app.hit_map.borrow_mut();
     render_button_chip_at(f, header.prev, "‹", &mut hit_map, Zone::HeaderPrev);
 
     let n = app.board.columns.len();
-    let running = running_card_count(app);
     let column = app.display_column(app.sel_col);
     let label = match column {
-        Some(c) => format!(
-            "{} · {}/{} · {} cards · ▶{}",
-            c.name,
-            app.sel_col + 1,
-            n.max(1),
-            app.cards_of(c.id).len(),
-            running,
-        ),
-        None => format!("no columns · ▶{running}"),
+        Some(c) => {
+            let trigger = c
+                .trigger
+                .as_str()
+                .chars()
+                .next()
+                .unwrap_or('M')
+                .to_ascii_uppercase();
+            format!(
+                "{} ({trigger}) · {}/{} · {} cards",
+                c.name,
+                app.sel_col + 1,
+                n.max(1),
+                app.cards_of(c.id).len(),
+            )
+        }
+        None => "no columns".to_string(),
     };
     render_button_chip_at(f, header.switch, &label, &mut hit_map, Zone::HeaderSwitch);
     render_button_chip_at(f, header.next, "›", &mut hit_map, Zone::HeaderNext);
@@ -680,10 +679,26 @@ fn draw_card_pair_row(f: &mut Frame, area: Rect, left: &str, right: &str, bg: Co
 
 // -- Compact-only two-level switcher sheet ------------------------------------
 
+/// Keep a switcher row's leading/trailing marker cells while fitting its
+/// dynamic label to the list viewport. In particular, the trailing space is
+/// retained so an ellipsis is visibly separated from the sheet border.
+fn truncate_switcher_row(row: &str, max_width: u16) -> String {
+    let max_width = max_width as usize;
+    let chars: Vec<char> = row.chars().collect();
+    if chars.len() <= max_width {
+        return row.to_string();
+    }
+    if max_width >= 3 && chars.first() == Some(&' ') && chars.last() == Some(&' ') {
+        let content: String = chars[1..chars.len() - 1].iter().collect();
+        return format!(" {} ", truncate(&content, max_width - 2));
+    }
+    truncate(row, max_width)
+}
+
 pub(super) fn draw_switcher(app: &App, f: &mut Frame, area: Rect) {
     let Some(state) = &app.switcher else { return };
     let mode = app.layout_mode();
-    let sheet = sheet_area(mode, 44, 14, area);
+    let sheet = super::sheet_area_for_app(app, mode, 44, 14, area);
     f.render_widget(Clear, sheet);
 
     let (full_title, compact_title) = match state.level {
@@ -708,15 +723,15 @@ pub(super) fn draw_switcher(app: &App, f: &mut Frame, area: Rect) {
         let close_label = if state.level == SwitcherLevel::Boards && !state.entered_at_boards {
             "Back"
         } else {
-            "Close"
+            "X"
         };
         let width = button_text(close_label).chars().count() as u16;
         let rect = Rect::new(sheet.right().saturating_sub(width + 2), sheet.y, width, 1);
         render_button_chip_at(f, rect, close_label, &mut hit_map, Zone::SheetClose);
     }
-    let items: Vec<ListItem> = match state.level {
+    let rows: Vec<(String, Style)> = match state.level {
         SwitcherLevel::Columns => {
-            let mut rows: Vec<ListItem> = app
+            let mut rows: Vec<(String, Style)> = app
                 .board
                 .columns
                 .iter()
@@ -730,7 +745,7 @@ pub(super) fn draw_switcher(app: &App, f: &mut Frame, area: Rect) {
                     } else {
                         Style::default().fg(Color::White)
                     };
-                    ListItem::new(Span::styled(format!(" {}  {} ", c.name, count), style))
+                    (format!(" {}  {} ", c.name, count), style)
                 })
                 .collect();
             let trailing_idx = app.board.columns.len();
@@ -741,10 +756,7 @@ pub(super) fn draw_switcher(app: &App, f: &mut Frame, area: Rect) {
             } else {
                 Style::default().fg(Color::White)
             };
-            rows.push(ListItem::new(Span::styled(
-                " ⇄  Switch board  → ",
-                trailing_style,
-            )));
+            rows.push((" ⇄  Switch board  → ".into(), trailing_style));
             let template_idx = trailing_idx + 1;
             let template_enabled = app.is_empty_board();
             let template_style = if state.sel == template_idx {
@@ -756,10 +768,7 @@ pub(super) fn draw_switcher(app: &App, f: &mut Frame, area: Rect) {
             } else {
                 Style::default().fg(Color::DarkGray)
             };
-            rows.push(ListItem::new(Span::styled(
-                " ⊞  Apply template  ",
-                template_style,
-            )));
+            rows.push((" ⊞  Apply template  ".into(), template_style));
             rows
         }
         SwitcherLevel::Boards => state
@@ -774,11 +783,11 @@ pub(super) fn draw_switcher(app: &App, f: &mut Frame, area: Rect) {
                 } else {
                     Style::default().fg(Color::White)
                 };
-                ListItem::new(Span::styled(format!(" {} ", label), style))
+                (format!(" {} ", label), style)
             })
             .collect(),
     };
-    let total = items.len();
+    let total = rows.len();
     let heights = vec![1u16; total];
     let selected = state.sel.min(total.saturating_sub(1));
     let (start, end) = windowed_rows(&heights, selected, inner.height);
@@ -789,16 +798,18 @@ pub(super) fn draw_switcher(app: &App, f: &mut Frame, area: Rect) {
         inner.width.saturating_sub(u16::from(overflowing)),
         inner.height,
     );
-    f.render_widget(
-        List::new(
-            items
-                .into_iter()
-                .skip(start)
-                .take(end - start)
-                .collect::<Vec<_>>(),
-        ),
-        rows_area,
-    );
+    let items = rows
+        .into_iter()
+        .map(|(row, style)| {
+            ListItem::new(Span::styled(
+                truncate_switcher_row(&row, rows_area.width),
+                style,
+            ))
+        })
+        .skip(start)
+        .take(end - start)
+        .collect::<Vec<_>>();
+    f.render_widget(List::new(items), rows_area);
 
     // Zones carry absolute model indices even after the selection-follow window moves.
     for (visible_row, absolute) in (start..end).enumerate() {

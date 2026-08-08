@@ -854,10 +854,18 @@ fn wheel_over_a_column_with_zero_visible_slots_does_not_panic() {
 #[test]
 fn idle_board_footer_is_inert_and_help_stays_in_the_header_and_action_row() {
     let mut blank = driver();
-    render_at(&mut blank, 80, 24);
+    let output = render_at(&mut blank, 80, 24);
     let before_col = blank.app.sel_col;
     let before_card = blank.app.sel_card;
-    blank.handle(left_down(20, 23));
+    assert!(
+        output
+            .lines()
+            .all(|line| { !line.contains("drag card to move") && !line.contains("? help") }),
+        "no persistent footer hint may be rendered:\n{output}"
+    );
+    // The old footer row is now reclaimed. A blank cell immediately above the
+    // action rail remains inert, while the rail itself stays clickable.
+    blank.handle(left_down(20, 21));
     assert_eq!(blank.app.screen, Screen::Board);
     assert_eq!(blank.app.sel_col, before_col);
     assert_eq!(blank.app.sel_card, before_card);
@@ -977,7 +985,26 @@ fn mandatory_board_breakpoints_keep_filter_labels_complete_and_action_zone_tight
     for (w, h) in [(40, 20), (52, 24), (60, 24), (80, 24), (120, 35)] {
         let mut d = setup_board();
         let output = render_at(&mut d, w, h);
-        assert!(output.contains("Archived"), "Archived clipped at {w}x{h}");
+        let expected_filters = match w {
+            0..=47 => ["[ Act ]", "[ All ]", "[ Arc ]"],
+            48..=59 => ["[ Active ]", "[ All ]", "[ Archived ]"],
+            60..=71 => ["[ A ]", "[ All ]", "[ R ]"],
+            _ => ["[ Active ]", "[ All ]", "[ Archived ]"],
+        };
+        for filter in expected_filters {
+            assert!(
+                output.contains(filter),
+                "filter {filter:?} clipped at {w}x{h}"
+            );
+        }
+        assert!(
+            !output.contains("Board:"),
+            "redundant Board label at {w}x{h}"
+        );
+        assert!(
+            !output.contains("Visible:"),
+            "redundant Visible label at {w}x{h}"
+        );
         for label in ["Edit col", "Del col", "Move col", "Template", "? Help"] {
             let label = if label == "Del col" && output.contains("Delete column") {
                 "Delete column"

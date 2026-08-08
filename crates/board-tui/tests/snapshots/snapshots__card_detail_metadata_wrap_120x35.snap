@@ -2,9 +2,9 @@
 source: crates/board-tui/tests/snapshots.rs
 expression: wide
 ---
-" ◈ herdr-board                                                                                              ● 1 running "
-"                              [ Board: Global ▾ ]                               Visible: [ Active ] [ All ] [ Archived ]"
+" ◈ herdr-board ● 1 running                         [ Global ▾ ]                          [ Active ] [ All ] [ Archived ]"
 "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────"
+"┌ TODO · MANUAL · 2 ─────────┐┌ PLAN · AUTO · 1 ───────────┐┌ EXECUTE · AUTO · 2 ────────┐┌ REVIEW · AUTO · 2 ─────────┐"
 "┌ Card #9: Long metadata values                                                                             [ X ] [ □ ]┐"
 "│┌Status────────────────────────────────┐ ┌Runs────────────────────────────────────────┐ ┌Comments────────────────────┐│"
 "││· idle                                │ │(no runs)                                   │ │(no comments)               ││"
@@ -35,5 +35,5 @@ expression: wide
 "│└──────────────────────────────────────┘ │  [ Open ]       [ Retry ]      [ Cancel ]  │ │      [ Add comment ]       ││"
 "│   [ Edit card ]      [ Archive card ]   └────────────────────────────────────────────┘ └────────────────────────────┘│"
 "└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘"
+"└────────────────────────────┘└────────────────────────────┘└────────────────────────────┘└────────────────────────────┘"
 " [ + Card ]  [ Open card ]  [ Archive ] [ + Column ]  [ Edit col ]  [ Del col ] [ Move col ]  [ Template ]  [ ? Help ]  "
-"q/Esc close · f popup/fullscreen · ? help                                                                               "

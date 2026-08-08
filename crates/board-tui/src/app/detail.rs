@@ -132,10 +132,14 @@ impl App {
         if start + span_len > scroll + visible {
             scroll = (start + span_len).saturating_sub(visible);
         }
-        if scroll > start {
-            scroll = start;
-        }
-        self.detail_comments_scroll = scroll;
+        // Do not pull a valid bottom anchor back toward the comment's start:
+        // the final comment may itself span more than one viewport row, and
+        // the latest position is the only one that keeps its tail visible.
+        let total = crate::view::comment_wrapped_rows(
+            self.detail.as_ref().expect("detail exists"),
+            layout.comments.width,
+        );
+        self.detail_comments_scroll = scroll.min(total.saturating_sub(visible));
     }
 
     /// The selected run — what `o` jumps to. `Some` whenever a detail with at

@@ -9,7 +9,7 @@ use board_core::protocol::parse_timestamp;
 use board_core::protocol::{
     AwaitingReason, CardCreateParams, CardStatus, Effort, RunOutcome, SpaceKind,
 };
-use board_tui::app::{App, CardFilter, Msg, Screen, SwitcherLevel, SwitcherState};
+use board_tui::app::{App, CardFilter, Msg, Screen, SwitcherLevel, SwitcherState, Toast};
 use board_tui::forms::{FieldId, FieldKind};
 use board_tui::testkit::{demo_client, driver_with_origin, hostile_origin, DemoClient};
 use board_tui::widgets::Zone;
@@ -144,27 +144,31 @@ fn seeded_board_glyphs_80x24() {
     insta::assert_snapshot!("seeded_board_80x24", render(&mut d, 80, 24));
 }
 
-/// The visibility filter row keeps its `Visible:` label in every layout, and
-/// the board footer never falls back to the legacy `? help` affordance (the
-/// action row carries the `? Help` button). Pins the e2e 10-archive-filter
-/// contract; the label used to be skipped for Regular/Wide.
+/// Header controls stay on the documented rows without redundant Board/Visible
+/// prose, and the old persistent footer hint is gone. Narrow rails use
+/// unambiguous filter prefixes while retaining all three hit zones.
 #[test]
-fn visible_label_and_minimal_footer_in_every_layout() {
+fn responsive_header_and_minimal_footer_in_every_layout() {
     for (w, h) in [(40u16, 20u16), (65, 24), (120, 35)] {
         let mut d = driver(demo_client().unwrap());
         let out = render(&mut d, w, h);
-        let header: Vec<&str> = out.lines().take(2).collect();
+        let header: Vec<&str> = out.lines().take(if w < 60 { 3 } else { 1 }).collect();
         assert!(
-            header.iter().any(|line| line.contains("Visible:")),
-            "{w}x{h}: `Visible:` label missing from the header: {header:?}"
+            header.iter().any(|line| line.contains("herdr-board")),
+            "{w}x{h}: product identity missing from header: {header:?}"
         );
         assert!(
-            !header.iter().any(|line| line.contains("? help")),
-            "{w}x{h}: legacy `? help` footer label still visible: {header:?}"
+            !header.iter().any(|line| line.contains("Board:")),
+            "{w}x{h}: redundant Board label remains: {header:?}"
         );
         assert!(
-            out.lines().all(|line| !line.contains("? help")),
-            "{w}x{h}: legacy `? help` footer label visible in the board view"
+            !header.iter().any(|line| line.contains("Visible:")),
+            "{w}x{h}: redundant Visible label remains: {header:?}"
+        );
+        assert!(
+            out.lines()
+                .all(|line| { !line.contains("? help") && !line.contains("drag card to move") }),
+            "{w}x{h}: persistent footer hint still visible: {out}"
         );
     }
 }
@@ -176,10 +180,10 @@ fn seeded_board_glyphs_120x35() {
 }
 
 #[test]
-fn compact_visibility_filters_wrap_without_dropping_archived() {
+fn compact_visibility_filters_fit_without_dropping_archived() {
     let mut d = driver(demo_client().unwrap());
     let output = render_sized(&mut d, 37, 24);
-    for label in ["[ Active ]", "[ All ]", "[ Archived ]"] {
+    for label in ["[ Act ]", "[ All ]", "[ Arc ]"] {
         assert!(
             output.contains(label),
             "Compact filter {label:?} must remain discoverable at 37 columns:\n{output}"
@@ -189,9 +193,9 @@ fn compact_visibility_filters_wrap_without_dropping_archived() {
     let (row, line) = output
         .lines()
         .enumerate()
-        .find(|(_, line)| line.contains("[ Archived ]"))
+        .find(|(_, line)| line.contains("[ Arc ]"))
         .expect("Archived chip row");
-    let column = line.find("[ Archived ]").expect("Archived chip column") as u16;
+    let column = line.find("[ Arc ]").expect("Archived chip column") as u16;
     assert_eq!(
         d.app.hit_map.borrow().hit(column, row as u16),
         Some(Zone::Filter(CardFilter::Archived)),
@@ -637,8 +641,20 @@ fn overlays_preserve_board_chrome_and_use_icon_run_controls() {
         top.iter().any(|line| line.contains("herdr-board")),
         "{output}"
     );
-    assert!(top.iter().any(|line| line.contains("Board:")), "{output}");
-    assert!(top.iter().any(|line| line.contains("Visible:")), "{output}");
+    assert!(
+        top.iter().any(|line| line.contains("[ Global ▾ ]")),
+        "{output}"
+    );
+    assert!(!top.iter().any(|line| line.contains("Board:")), "{output}");
+    assert!(
+        !top.iter().any(|line| line.contains("Visible:")),
+        "{output}"
+    );
+    let legacy_close = format!("[ {} ]", "Close");
+    assert!(
+        !output.contains(&legacy_close),
+        "legacy close label remains:\n{output}"
+    );
     assert!(
         output.contains("[ X ]"),
         "detail close icon missing:\n{output}"
@@ -801,6 +817,52 @@ fn board_picker_wide_and_narrow() {
 }
 
 #[test]
+fn compact_switcher_long_scoped_row_ellipsizes_before_border_and_desktop_chevron_survives() {
+    let long_scope = "/private/tmp/hb-visual.HWoEPU/scope";
+    let mut client = demo_client().unwrap();
+    client.board_open(long_scope).unwrap();
+
+    let mut compact = driver(client);
+    compact.app.last_area = Rect::new(0, 0, 40, 20);
+    key(&mut compact, KeyCode::Char('b'));
+    let selected = compact
+        .app
+        .switcher
+        .as_ref()
+        .and_then(|state| {
+            state
+                .boards
+                .iter()
+                .position(|(label, _)| label.contains(long_scope))
+        })
+        .expect("long scoped board in compact switcher");
+    compact.app.switcher.as_mut().unwrap().sel = selected;
+    let output = render_sized(&mut compact, 40, 20);
+    let row = output
+        .lines()
+        .find(|line| line.contains("scope —"))
+        .expect("long scoped board row");
+    assert!(
+        row.contains('…'),
+        "long scoped board row must visibly ellipsize before the border:\n{output}"
+    );
+    assert!(
+        row.contains("… │"),
+        "long scoped board row must place its ellipsis before the sheet border:\n{output}"
+    );
+    insta::assert_snapshot!("compact_switcher_long_scoped_row", output);
+
+    let mut desktop = driver(demo_client().unwrap());
+    desktop.app.board.board.name = long_scope.into();
+    let desktop_output = render_sized(&mut desktop, 60, 24);
+    let header = desktop_output.lines().next().expect("desktop header");
+    assert!(
+        header.contains("… ▾"),
+        "truncated desktop board chip must retain its dropdown chevron: {header:?}"
+    );
+}
+
+#[test]
 fn help_overlay() {
     let mut d = driver(demo_client().unwrap());
     key(&mut d, KeyCode::Char('?'));
@@ -811,8 +873,7 @@ fn help_overlay() {
     assert!(!output.contains("column│"));
     assert!(output
         .lines()
-        .last()
-        .is_some_and(|line| line.contains("j/k scroll · Esc close")));
+        .all(|line| !line.contains("j/k scroll · Esc close")));
     insta::assert_snapshot!("help_overlay", output);
 }
 
@@ -935,6 +996,26 @@ fn move_column_mini_mode_esc_cancels() {
     assert_eq!(
         after, original,
         "Esc must restore the original column order"
+    );
+}
+
+#[test]
+fn toast_does_not_overwrite_chrome_when_no_toast_row_fits() {
+    let mut d = driver(demo_client().unwrap());
+    d.app.toast = Some(Toast {
+        text: "must stay hidden".into(),
+        is_error: true,
+        at: now(),
+    });
+
+    let output = render(&mut d, 40, 5);
+    assert!(
+        output.contains("herdr-board"),
+        "header was overwritten:\n{output}"
+    );
+    assert!(
+        !output.contains("must stay hidden"),
+        "toast must not overwrite header/action chrome:\n{output}"
     );
 }
 

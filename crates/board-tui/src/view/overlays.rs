@@ -12,7 +12,8 @@ use crate::widgets::{
 };
 
 use super::{
-    detail::wrapped_row_count, sheet_area, truncate, LayoutMode, HELP_GUTTER_WIDTH, HELP_KEYS,
+    detail::wrapped_row_count, sheet_area_for_app, truncate, LayoutMode, HELP_GUTTER_WIDTH,
+    HELP_KEYS,
 };
 
 // -- shared sheet chrome -----------------------------------------------------
@@ -67,7 +68,7 @@ fn render_overlay_frame(
     inner
 }
 
-// -- picker / confirm / help / footer ---------------------------------------
+// -- picker / confirm / help / transient toast -----------------------------
 
 pub(super) fn draw_picker(app: &App, f: &mut Frame, area: Rect) {
     let Some(picker) = &app.picker else { return };
@@ -91,7 +92,7 @@ pub(super) fn draw_picker(app: &App, f: &mut Frame, area: Rect) {
         .map(|(name, _)| wrapped_row_count(name, content_w.saturating_sub(3).max(1)))
         .sum();
     let content_h = (desired_rows as u16).saturating_add(2).max(5);
-    let box_area = sheet_area(mode, content_w, content_h, area);
+    let box_area = sheet_area_for_app(app, mode, content_w, content_h, area);
     f.render_widget(Clear, box_area);
 
     let visual_title = picker
@@ -115,7 +116,7 @@ pub(super) fn draw_picker(app: &App, f: &mut Frame, area: Rect) {
         compact,
         (&visual_title, compact_title),
         Style::default().fg(Color::LightBlue),
-        "Close",
+        "X",
         &mut hit_map,
     );
     let other_board = matches!(picker.purpose, PickerPurpose::MoveCardPickColumn { .. });
@@ -236,7 +237,7 @@ pub(super) fn draw_move_column(app: &App, f: &mut Frame, area: Rect) {
         .map(|c| c.name.as_str())
         .unwrap_or("column");
     let mode = app.layout_mode();
-    let box_area = sheet_area(mode, 58, 5, area);
+    let box_area = sheet_area_for_app(app, mode, 58, 5, area);
     f.render_widget(Clear, box_area);
     let mut hit_map = app.hit_map.borrow_mut();
     let inner = render_overlay_frame(
@@ -245,7 +246,7 @@ pub(super) fn draw_move_column(app: &App, f: &mut Frame, area: Rect) {
         mode == LayoutMode::Compact,
         ("Move column", "Move column"),
         Style::default().fg(Color::Magenta),
-        "Close",
+        "X",
         &mut hit_map,
     );
     let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
@@ -302,7 +303,7 @@ pub(super) fn draw_confirm(app: &App, f: &mut Frame, area: Rect) {
     };
     let message_w = target_w.saturating_sub(4).max(1);
     let message_rows = wrapped_row_count(&confirm.message, message_w).max(1) as u16;
-    let box_area = sheet_area(mode, 50, message_rows.saturating_add(4).max(5), area);
+    let box_area = sheet_area_for_app(app, mode, 50, message_rows.saturating_add(4).max(5), area);
     f.render_widget(Clear, box_area);
     let mut hit_map = app.hit_map.borrow_mut();
     let inner = render_overlay_frame(
@@ -311,7 +312,7 @@ pub(super) fn draw_confirm(app: &App, f: &mut Frame, area: Rect) {
         mode == LayoutMode::Compact,
         ("Confirm", "Confirm"),
         Style::default().fg(Color::Red),
-        "Close",
+        "X",
         &mut hit_map,
     );
     let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
@@ -344,22 +345,16 @@ pub(super) fn draw_confirm(app: &App, f: &mut Frame, area: Rect) {
     ActionStrip { buttons: &buttons }.render(f, chunks[1], &mut hit_map);
 }
 
-/// Inner content rect of the help sheet's stacked section-card list, minus
-/// the trailing hint row. Regular widths deliberately use this same geometry.
+/// Inner content rect of the help sheet's stacked section-card list. The
+/// content fills the sheet; no persistent hint row is reserved.
 pub fn help_list_rect(app: &App, area: Rect) -> Rect {
     let content_h = HELP_KEYS.len().div_ceil(2) as u16 + 2;
-    let box_area = sheet_area(app.layout_mode(), 110, content_h, area);
-    let inner = Rect::new(
+    let box_area = sheet_area_for_app(app, app.layout_mode(), 110, content_h, area);
+    Rect::new(
         box_area.x + 1,
         box_area.y + 1,
         box_area.width.saturating_sub(2),
         box_area.height.saturating_sub(2),
-    );
-    Rect::new(
-        inner.x,
-        inner.y,
-        inner.width,
-        inner.height.saturating_sub(1),
     )
 }
 
@@ -469,7 +464,7 @@ pub fn help_regular_max_scroll(app: &App, area: Rect) -> usize {
             .saturating_sub(rect.height.max(1) as usize);
     }
     let content_h = HELP_KEYS.len().div_ceil(2) as u16 + 2;
-    let box_area = sheet_area(app.layout_mode(), 110, content_h, area);
+    let box_area = sheet_area_for_app(app, app.layout_mode(), 110, content_h, area);
     let inner = Rect::new(
         box_area.x + 1,
         box_area.y + 1,
@@ -586,16 +581,16 @@ pub(super) fn draw_help(app: &App, f: &mut Frame, area: Rect) {
         return;
     }
     let content_h = HELP_KEYS.len().div_ceil(2) as u16 + 2;
-    let box_area = sheet_area(app.layout_mode(), 110, content_h, area);
+    let box_area = sheet_area_for_app(app, app.layout_mode(), 110, content_h, area);
     f.render_widget(Clear, box_area);
     let mut hit_map = app.hit_map.borrow_mut();
     let inner = render_overlay_frame(
         f,
         box_area,
         false,
-        ("Help — all keybindings (j/k scroll)", "Help"),
+        ("Help — all keybindings", "Help"),
         Style::default().fg(Color::LightBlue),
-        "Close",
+        "X",
         &mut hit_map,
     );
     let scroll = app.help_scroll.min(help_regular_max_scroll(app, area));
@@ -622,30 +617,19 @@ pub(super) fn draw_help(app: &App, f: &mut Frame, area: Rect) {
 
 fn draw_help_wrapped(app: &App, f: &mut Frame, area: Rect) {
     let content_h = HELP_KEYS.len().div_ceil(2) as u16 + 2;
-    let box_area = sheet_area(app.layout_mode(), 110, content_h, area);
+    let box_area = sheet_area_for_app(app, app.layout_mode(), 110, content_h, area);
     f.render_widget(Clear, box_area);
     let mut hit_map = app.hit_map.borrow_mut();
     let block_inner = render_overlay_frame(
         f,
         box_area,
         app.layout_mode() == LayoutMode::Compact,
-        ("Help — all keybindings (j/k scroll)", "Help"),
+        ("Help — all keybindings", "Help"),
         Style::default().fg(Color::LightBlue),
-        "Close",
+        "X",
         &mut hit_map,
     );
-    let list_rect = Rect::new(
-        block_inner.x,
-        block_inner.y,
-        block_inner.width,
-        block_inner.height.saturating_sub(1),
-    );
-    let hint_row = Rect::new(
-        block_inner.x,
-        block_inner.bottom().saturating_sub(1),
-        block_inner.width,
-        1,
-    );
+    let list_rect = block_inner;
     let content_w = help_content_width(list_rect);
     let total_rows = help_wrapped_rows(content_w);
     let visible_rows = list_rect.height.max(1) as usize;
@@ -678,13 +662,6 @@ fn draw_help_wrapped(app: &App, f: &mut Frame, area: Rect) {
             hit_map.push(down, Zone::HelpScrollDown);
         }
     }
-    f.render_widget(
-        Paragraph::new(Span::styled(
-            "j/k scroll · Esc close",
-            Style::default().fg(Color::DarkGray),
-        )),
-        hint_row,
-    );
 }
 
 // -- comment history sheet ---------------------------------------------------
@@ -693,7 +670,8 @@ const COMMENT_HISTORY_W: u16 = 90;
 const COMMENT_HISTORY_H: u16 = 24;
 
 pub fn comment_history_rect(app: &App, area: Rect) -> Rect {
-    let box_area = sheet_area(
+    let box_area = sheet_area_for_app(
+        app,
         app.layout_mode(),
         COMMENT_HISTORY_W,
         COMMENT_HISTORY_H,
@@ -735,7 +713,7 @@ pub(super) fn draw_comment_history(app: &App, f: &mut Frame, area: Rect) {
         return;
     };
     let mode = app.layout_mode();
-    let box_area = sheet_area(mode, COMMENT_HISTORY_W, COMMENT_HISTORY_H, area);
+    let box_area = sheet_area_for_app(app, mode, COMMENT_HISTORY_W, COMMENT_HISTORY_H, area);
     f.render_widget(Clear, box_area);
     let mut hit_map = app.hit_map.borrow_mut();
     let inner = render_overlay_frame(
@@ -744,7 +722,7 @@ pub(super) fn draw_comment_history(app: &App, f: &mut Frame, area: Rect) {
         mode == LayoutMode::Compact,
         ("Comment history (j/k scroll)", "History"),
         Style::default().fg(Color::LightBlue),
-        "Close",
+        "X",
         &mut hit_map,
     );
     let content = Rect::new(
@@ -798,45 +776,30 @@ pub(super) fn draw_comment_history(app: &App, f: &mut Frame, area: Rect) {
     }
 }
 
+/// Paint only a transient toast. The old contextual hint/footer row is
+/// intentionally gone; board actions remain the persistent bottom rail and an
+/// idle frame reserves no extra blank row for help text.
 pub(super) fn draw_footer(app: &App, f: &mut Frame, area: Rect) {
-    let y = area.y + area.height.saturating_sub(1);
-    let rect = Rect::new(area.x, y, area.width, 1);
-    if let Some(toast) = &app.toast {
-        let style = if toast.is_error {
-            Style::default().fg(Color::White).bg(Color::Red)
-        } else {
-            Style::default().fg(Color::Black).bg(Color::Yellow)
-        };
-        f.render_widget(
-            Paragraph::new(Span::styled(
-                truncate(&format!(" {} ", toast.text), area.width as usize),
-                style,
-            )),
-            rect,
-        );
+    let Some(toast) = &app.toast else {
+        return;
+    };
+    let action_h = super::board_action_rows(area.width).min(area.height);
+    let header_h = super::board_header_height(area.width).min(area.height.saturating_sub(action_h));
+    if area.height <= header_h.saturating_add(action_h) {
         return;
     }
-    let (hint, help_clickable) = match app.screen {
-        Screen::CardForm | Screen::ColumnForm => ("Tab fields · Enter save · Esc cancel", false),
-        Screen::Help => ("j/k scroll · Esc close", false),
-        Screen::Board => ("drag card to move · double-click to open", false),
-        Screen::CardDetail => ("q/Esc close · f popup/fullscreen · ? help", true),
-        Screen::Picker
-        | Screen::MoveColumn
-        | Screen::Confirm
-        | Screen::Switcher
-        | Screen::CommentHistory => ("? help", true),
+    let y = area.bottom().saturating_sub(action_h + 1);
+    let rect = Rect::new(area.x, y, area.width, 1);
+    let style = if toast.is_error {
+        Style::default().fg(Color::White).bg(Color::Red)
+    } else {
+        Style::default().fg(Color::Black).bg(Color::Yellow)
     };
-    let shown = truncate(hint, area.width as usize);
-    let width = shown.chars().count() as u16;
     f.render_widget(
-        Paragraph::new(Span::styled(shown, Style::default().fg(Color::DarkGray))),
+        Paragraph::new(Span::styled(
+            truncate(&format!(" {} ", toast.text), area.width as usize),
+            style,
+        )),
         rect,
     );
-    if help_clickable && width > 0 {
-        app.hit_map.borrow_mut().push(
-            Rect::new(rect.x, rect.y, width, 1),
-            Zone::Action(UiAction::Help),
-        );
-    }
 }

@@ -2,9 +2,9 @@
 source: crates/board-tui/tests/snapshots.rs
 expression: "render(&mut d, 120, 35)"
 ---
-" ◈ herdr-board                                                                                              ● 1 running "
-"                              [ Board: Global ▾ ]                               Visible: [ Active ] [ All ] [ Archived ]"
+" ◈ herdr-board ● 1 running                         [ Global ▾ ]                          [ Active ] [ All ] [ Archived ]"
 "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────"
+"┌ TODO · MANUAL · 1 ─────────┐┌ PLAN · AUTO · 1 ───────────┐┌ EXECUTE · AUTO · 2 ────────┐┌ REVIEW · AUTO · 2 ─────────┐"
 "┌ Card #5: Refactor auth module                                                                             [ X ] [ □ ]┐"
 "│┌Status────────────────────────────────┐ ┌Runs────────────────────────────────────────┐ ┌Comments────────────────────┐│"
 "││✗ failed                              │ │ #2 claude · ok · 0s                        │ │ [agent:1] Plan ready at    ││"
@@ -35,5 +35,5 @@ expression: "render(&mut d, 120, 35)"
 "│└──────────────────────────────────────┘ │  [ Open ]       [ Retry ]      [ Cancel ]  │ [ Add ] [ Ed… ][ Del… ][ Hi… ]│"
 "│   [ Edit card ]      [ Archive card ]   └────────────────────────────────────────────┘ └────────────────────────────┘│"
 "└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘"
+"└────────────────────────────┘└────────────────────────────┘└────────────────────────────┘└────────────────────────────┘"
 " [ + Card ]  [ Open card ]  [ Archive ] [ + Column ]  [ Edit col ]  [ Del col ] [ Move col ]  [ Template ]  [ ? Help ]  "
-"q/Esc close · f popup/fullscreen · ? help                                                                               "

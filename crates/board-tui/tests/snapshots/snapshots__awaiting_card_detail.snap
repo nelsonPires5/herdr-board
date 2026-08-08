@@ -2,8 +2,7 @@
 source: crates/board-tui/tests/snapshots.rs
 expression: output
 ---
-" ◈ herdr-board                                                      ● 1 running "
-"          [ Board: Global ▾ ]           Visible: [ Active ] [ All ] [ Archived ]"
+" ◈ herdr-board ● 1 running     [ Global ▾ ]      [ Active ] [ All ] [ Archived ]"
 "────────────────────────────────────────────────────────────────────────────────"
 "┌ Card #6: Tune retry backoff                                       [ X ] [ □ ]┐"
 "│┌Status──────────────────────────────────────────────────────────────────────┐│"
@@ -22,7 +21,8 @@ expression: output
 "│┌Runs────────────────────────────────────────────────────────────────────────┐│"
 "││        [ Open ]                 [ Retry ]                 [ Cancel ]       ││"
 "│└────────────────────────────────────────────────────────────────────────────┘│"
+"│                                                                              │"
+"│                                                                              │"
 "└──────────────────────────────────────────────────────────────────────────────┘"
 " [ + New card ]  [ Open card ]  [ Archive card ][ + New column ][ Edit column ] "
 " [ Delete column ]    [ Move column ]       [ Template ]         [ ? Help ]     "
-"q/Esc close · f popup/fullscreen · ? help                                       "

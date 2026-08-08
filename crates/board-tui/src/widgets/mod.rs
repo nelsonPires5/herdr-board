@@ -483,8 +483,8 @@ const CLOSE_GAP: u16 = 1; // blank column between the close button and the corne
 /// erasing it. Here Compact gets its own short, hint-free `compact_title`,
 /// truncated to leave room for the corner + a gap + the close button; the
 /// close button is placed one gap column inside the corner so it never
-/// overwrites it. Regular/Wide keep the existing full title and no close
-/// button (the hint text already spells out `Esc`).
+/// overwrites it. Regular/Wide keep the existing full title; their overlay
+/// callers place the same exact `[ X ]` chip in the title row.
 ///
 /// Returns `block.inner(box_area)`.
 pub fn render_sheet_frame(
@@ -518,7 +518,7 @@ pub fn render_sheet_frame(
         let x = box_area.x + box_area.width - 1 - CLOSE_GAP - CLOSE_W;
         let rect = Rect::new(x, box_area.y, CLOSE_W, 1);
         // Compact sheets use the same exact chip as every other button. The
-        // The old compact close glyph had no interior spacing and was easy to confuse
+        // old compact close glyph had no interior spacing and was easy to confuse
         // with a border corner at narrow widths.
         render_button_chip_at(f, rect, "X", hit_map, Zone::SheetClose);
     }

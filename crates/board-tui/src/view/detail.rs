@@ -12,16 +12,17 @@ use crate::widgets::{
 };
 
 use super::{
-    board_body_area, sheet_area, status_glyph, status_label, truncate, NARROW_DETAIL_WIDTH,
+    board_body_area_for, sheet_area_for_app, status_glyph, status_label, truncate,
+    NARROW_DETAIL_WIDTH,
 };
 
 // -- detail ------------------------------------------------------------------
 
 fn detail_panel_area(app: &App, area: Rect) -> Rect {
     if app.detail_fullscreen {
-        board_body_area(area)
+        board_body_area_for(app, area)
     } else {
-        sheet_area(app.layout_mode(), 120, 30, area)
+        sheet_area_for_app(app, app.layout_mode(), 120, 30, area)
     }
 }
 
@@ -988,12 +989,22 @@ fn draw_comments(app: &App, f: &mut Frame, detail: &CardDetail, layout: &DetailL
             ])
         })
         .collect::<Vec<_>>();
+    // Paint the frame separately from the history body. The contextual
+    // action row occupies the last inner row; rendering a Paragraph across
+    // the whole section would let wrapped comment text paint underneath the
+    // `[ Add ]`/`[ Edit ]`/`[ Delete ]`/`[ History ]` rail on short layouts.
+    f.render_widget(section_block(&title, active), layout.comments);
+    let body = Rect::new(
+        layout.comments.x.saturating_add(1),
+        layout.comments.y.saturating_add(1),
+        layout.comments.width.saturating_sub(2),
+        visible as u16,
+    );
     f.render_widget(
         Paragraph::new(Text::from(lines))
             .wrap(Wrap { trim: false })
-            .scroll((app.detail_comments_scroll as u16, 0))
-            .block(section_block(&title, active)),
-        layout.comments,
+            .scroll((app.detail_comments_scroll as u16, 0)),
+        body,
     );
     let spans = comment_row_spans(detail, layout.comments.width);
     let mut hit_map = app.hit_map.borrow_mut();

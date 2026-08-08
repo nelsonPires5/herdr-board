@@ -27,63 +27,29 @@ fn board_action_rows(width: u16) -> u16 {
     BOARD_ACTION_COUNT.div_ceil(board_action_columns(width))
 }
 
-/// Number of rows needed by the Compact visibility rail. Full filter names
-/// remain the default; below the one-row width they wrap into additional rows
-/// (or use distinct, unambiguous prefixes at widths where a full chip cannot
-/// fit). The same calculation drives both drawing and the board content
-/// geometry, so Archived can never disappear merely because it is last.
-pub(super) fn compact_filter_rows(width: u16) -> u16 {
-    let options = compact_filter_options(width);
-    let label_width = compact_filter_label(width).chars().count() as u16;
-    let mut used = label_width.saturating_add(1).min(width);
-    let mut rows = 1;
-    let mut needs_gap = false;
-
-    for (label, _) in options {
-        let chip_width = crate::widgets::button_text(label).chars().count() as u16;
-        let gap = u16::from(needs_gap && used > 0);
-        if used.saturating_add(gap).saturating_add(chip_width) <= width {
-            used = used.saturating_add(gap).saturating_add(chip_width);
-            needs_gap = true;
-        } else {
-            rows += 1;
-            used = chip_width.min(width);
-            needs_gap = true;
-        }
-    }
-    rows
-}
-
+/// Filter labels stay explicit when the one-line rail has room. At the
+/// narrowest supported widths the unambiguous prefixes keep all three filters
+/// visible without wrapping the Compact header into extra rows.
 pub(super) fn compact_filter_options(width: u16) -> [(&'static str, CardFilter); 3] {
-    if width >= 11 {
+    if width >= 48 {
         [
             ("Active", CardFilter::Active),
             ("All", CardFilter::All),
             ("Archived", CardFilter::Archived),
         ]
-    } else if width >= 8 {
-        // Each prefix is distinct within the rail: Active / All / Archived.
-        [
-            ("Act", CardFilter::Active),
-            ("All", CardFilter::All),
-            ("Arch", CardFilter::Archived),
-        ]
-    } else if width >= 7 {
+    } else if width >= 23 {
         [
             ("Act", CardFilter::Active),
             ("All", CardFilter::All),
             ("Arc", CardFilter::Archived),
         ]
-    } else if width >= 6 {
+    } else if width >= 19 {
         [
-            ("Ac", CardFilter::Active),
-            ("Al", CardFilter::All),
-            ("Ar", CardFilter::Archived),
+            ("A", CardFilter::Active),
+            ("All", CardFilter::All),
+            ("R", CardFilter::Archived),
         ]
     } else {
-        // Widths below the normal mobile target are only a last-resort
-        // rendering mode. These labels are still distinct and all three
-        // click zones remain present, one per wrapped row.
         [
             ("A", CardFilter::Active),
             ("L", CardFilter::All),
@@ -92,22 +58,15 @@ pub(super) fn compact_filter_options(width: u16) -> [(&'static str, CardFilter);
     }
 }
 
-pub(super) fn compact_filter_label(width: u16) -> &'static str {
-    if width >= 11 {
-        "Visible:"
-    } else {
-        "V:"
-    }
-}
-
-/// Board header height includes identity, the responsive filter rows, the
-/// Compact column navigator, and the bottom divider. Regular/Wide retain the
-/// existing three-row header.
+/// Compact has exactly three content rows — identity, board/visibility
+/// controls, and the column navigator — followed by its divider. Regular and
+/// Wide put all header controls on one content row and use the second row only
+/// for the divider.
 pub fn board_header_height(width: u16) -> u16 {
     if width < 60 {
-        3 + compact_filter_rows(width)
+        4
     } else {
-        3
+        2
     }
 }
 const MAX_SCOPE_LABEL: usize = 32;
@@ -171,14 +130,18 @@ fn sanitize(value: &str) -> String {
         .collect()
 }
 
-/// Board content between persistent header/action chrome and the footer.
-/// Every overlay and fullscreen sheet is constrained to this region; the
-/// product identity, board selector, visibility filters, and board actions
-/// remain visible and available around it.
-pub(crate) fn board_content_area(area: Rect) -> Rect {
-    let header_h = board_header_height(area.width).min(area.height.saturating_sub(1));
-    let action_h = board_action_rows(area.width);
-    let reserved = header_h.saturating_add(action_h).saturating_add(1);
+/// Board content between persistent header/action chrome. The footer hint
+/// row is gone: an idle board has no permanently reserved blank row. A
+/// transient toast may reserve one row immediately above the action rail.
+pub(crate) fn board_content_area_for(app: &App, area: Rect) -> Rect {
+    board_content_area_with_toast(area, app.toast.is_some())
+}
+
+fn board_content_area_with_toast(area: Rect, toast: bool) -> Rect {
+    let action_h = board_action_rows(area.width).min(area.height);
+    let header_h = board_header_height(area.width).min(area.height.saturating_sub(action_h));
+    let toast_h = u16::from(toast && area.height > header_h.saturating_add(action_h));
+    let reserved = header_h.saturating_add(toast_h).saturating_add(action_h);
     Rect::new(
         area.x,
         area.y.saturating_add(header_h),
@@ -189,25 +152,22 @@ pub(crate) fn board_content_area(area: Rect) -> Rect {
 
 /// Board-only top chrome, above the card viewport.
 fn board_header_area(area: Rect) -> Rect {
-    Rect::new(
-        area.x,
-        area.y,
-        area.width,
-        board_header_height(area.width).min(area.height.saturating_sub(1)),
-    )
+    let action_h = board_action_rows(area.width).min(area.height);
+    let height = board_header_height(area.width).min(area.height.saturating_sub(action_h));
+    Rect::new(area.x, area.y, area.width, height)
 }
 
-/// Card viewport between the board header, action row, and global toast/footer.
-fn board_body_area(area: Rect) -> Rect {
-    board_content_area(area)
+/// Card viewport between the board header and action rail.
+pub(crate) fn board_body_area_for(app: &App, area: Rect) -> Rect {
+    board_content_area_for(app, area)
 }
 
-/// Board-only click-first action row, immediately above the global footer.
+/// Board-only click-first action row at the bottom of the frame.
 fn board_action_area(area: Rect) -> Rect {
-    let height = board_action_rows(area.width).min(area.height.saturating_sub(1));
+    let height = board_action_rows(area.width).min(area.height);
     Rect::new(
         area.x,
-        area.bottom().saturating_sub(1 + height),
+        area.bottom().saturating_sub(height),
         area.width,
         height,
     )
@@ -394,7 +354,27 @@ fn centered_rect_abs(w: u16, h: u16, area: Rect) -> Rect {
 /// The persistent top and bottom board chrome is deliberately outside the
 /// returned rectangle. Passing the full frame `area` is always correct.
 pub fn sheet_area(mode: LayoutMode, pref_w: u16, pref_h: u16, area: Rect) -> Rect {
-    let base = board_content_area(area);
+    sheet_area_with_toast(mode, pref_w, pref_h, area, false)
+}
+
+pub(crate) fn sheet_area_for_app(
+    app: &App,
+    mode: LayoutMode,
+    pref_w: u16,
+    pref_h: u16,
+    area: Rect,
+) -> Rect {
+    sheet_area_with_toast(mode, pref_w, pref_h, area, app.toast.is_some())
+}
+
+fn sheet_area_with_toast(
+    mode: LayoutMode,
+    pref_w: u16,
+    pref_h: u16,
+    area: Rect,
+    toast: bool,
+) -> Rect {
+    let base = board_content_area_with_toast(area, toast);
     match mode {
         LayoutMode::Compact => base,
         LayoutMode::Regular | LayoutMode::Wide => centered_rect_abs(pref_w, pref_h, base),
