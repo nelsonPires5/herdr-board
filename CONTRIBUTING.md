@@ -60,7 +60,8 @@ Harnesses are pluggable behind a `HarnessAdapter`. To add one:
 - One focused change per PR. Update the docs and `CHANGELOG.md` (`[Unreleased]`) in the same PR as a
   user-facing change — a change isn't done until the docs match it.
 - Branch targeting: feature PRs open against **`dev`** (the long-lived integration branch); only
-  hotfixes and the `dev -> main` promotion open against **`main`** (production).
+  hotfixes open against **`main`** (production) — the `dev -> main` promotion is opened and merged
+  by the Promote workflow.
 - Release policy: [`docs/releasing.md`](docs/releasing.md) for the Prepare Release → promote → CI-green
   tag flow.
 - The gates above pass. Reference the design in `docs/design.md` / the contract in `docs/protocol.md`

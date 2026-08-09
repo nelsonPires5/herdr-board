@@ -402,6 +402,33 @@ class DocumentationContractTests(unittest.TestCase):
             "the PR base must never be hardcoded to main",
         )
 
+    def test_promote_workflow_merges_dev_but_never_tags(self) -> None:
+        """The action-owned promotion: green dev CI with a pending bump opens
+        and merges `dev -> main`; tagging stays exclusively in Release.
+
+        The promote workflow must be bound to `dev` CI completions, merge
+        through a PR (so the merge commit is GitHub-verified and satisfies the
+        main ruleset), and contain no tag- or release-creation step.
+        """
+        workflow = (ROOT / ".github/workflows/promote.yml").read_text(encoding="utf-8")
+        self.assertIn(
+            "branches:\n      - dev",
+            workflow,
+            "promote trigger must be dev-only",
+        )
+        self.assertIn(
+            "github.event.workflow_run.head_branch == 'dev'",
+            workflow,
+            "promote job must stay gated to dev CI runs",
+        )
+        self.assertIn(
+            "gh pr merge",
+            workflow,
+            "promotion must land via a merged PR",
+        )
+        self.assertNotIn("git tag", workflow, "promote must never create tags")
+        self.assertNotIn("gh release", workflow, "promote must never publish")
+
     def test_maintained_markdown_links_resolve(self) -> None:
         for document in maintained_markdown():
             for link in re.findall(r"\[[^]]+\]\(([^)]+)\)", document.read_text()):

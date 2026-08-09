@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
-- [#62](https://github.com/nelsonPires5/herdr-board/pull/62) chore(ci): adopt `dev` as the long-lived integration branch — feature/release PRs target `dev`, Prepare Release defaults to `base=dev` (`main` only for hotfixes), and each release promotes `dev -> main` so the Release workflow tags the exact green promotion commit; `main` stays production/default and `v*` tags remain Release-owned only.
+- [#62](https://github.com/nelsonPires5/herdr-board/pull/62) chore(ci): adopt `dev` as the long-lived integration branch — feature/release PRs target `dev`, Prepare Release defaults to `base=dev` (`main` only for hotfixes), the Promote workflow automatically merges `dev -> main` after green dev CI, and the Release workflow tags the exact green promotion commit; `main` stays production/default with PR-only, merge-commit and signed-commit protection, and `v*` tags remain Release-owned only.
 
 ## [0.12.0] - 2026-08-08
 
