@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # main is production; dev is the long-lived integration branch. The Release
+    # workflow stays bound to main, so a dev push runs CI but never publishes.
+    branches: [main, dev]
   pull_request:
   workflow_dispatch:
 

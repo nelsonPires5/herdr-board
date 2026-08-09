@@ -14,6 +14,7 @@ The reference detail behind the [root README](../README.md). Start here to find 
 | Runtime launch | daemon-owned `Spawner`, placement, process/pane handles | [implementation.md](implementation.md) |
 | Config | typed `RootConfig`, one parse, environment overrides after parse | [configuration.md](configuration.md), [design.md](design.md) |
 | Live catalog | scenarios 01–30; provider-free fake/safe harness boundary | [e2e/README.md](../e2e/README.md) |
+| Branches | `dev` integration; `main` production (PR-only, merge-commit, signed); action-owned promotion; tags only from green `main` | [releasing.md](releasing.md) |
 
 Keep these links as navigation, not duplicate wire definitions: serde types and migrations are the
 source of truth. The old worktree API is intentionally absent from `board-herdr`; repository
@@ -28,7 +29,7 @@ isolation is an agent prompt concern, not a board space primitive.
 | [protocol.md](protocol.md) | The boardd unix-socket protocol (v1) — transport (NDJSON), auto-start, every method and event, error codes. **The single source of truth** for the daemon⇄client contract; serde types live in `board-core::protocol`. | are writing a client, adding a method, or debugging the wire. |
 | [implementation.md](implementation.md) | The cargo workspace crate layout, crate ownership, shared dependencies, key traits (`BoardClient`, `Spawner`), and the build phases with their tests. | are navigating the codebase or picking up a build task. |
 | [research.md](research.md) | The verified herdr capability map (commands/events/IDs), prior-art survey of agent-kanban tools, and verified harness invocation flags (Pi/Claude/codex/gemini/opencode). | are scoping a feature that touches herdr or a new harness, and want the background that grounded the design. |
-| [releasing.md](releasing.md) | The release contract: Prepare Release, version bumps, CI-gated tagging/publishing, artifacts, reruns, and tag policy. | are cutting a release or need the repo's release policy. |
+| [releasing.md](releasing.md) | The release contract: the `dev`/`main` branch model (feature → dev, action-owned promotion to main, hotfix, back-merge), Prepare Release, version bumps, CI-gated tagging/publishing, artifacts, reruns, and tag policy. | are cutting a release or need the repo's release policy. |
 | [herdr.md](herdr.md) | How to learn and verify **Herdr** facts (there is no man page): the live sources of truth (`herdr api schema --json`, `herdr <cmd> --help`, `herdr api snapshot`), the Herdr 0.8.0/protocol-19 delta, per-harness integrations, and the exact compatibility gate. | hit a Herdr command/shape that misbehaves, or need to confirm what the installed Herdr actually does. |
 | [testing.md](testing.md) | The testing pyramid in this repo (unit/pure → daemon+CLI integration → TUI snapshots → live E2E), how the provider-free fake Pi/Claude suite works (including the current pane-first scenarios 16/17, whose filenames are historical), and how to write a scenario. The use case ↔ scenario catalog lives in [`../e2e/README.md`](../e2e/README.md). | are adding a feature and need to test it, or are writing/running the live E2E suite. |
 

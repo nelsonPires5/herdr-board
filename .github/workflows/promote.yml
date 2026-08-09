@@ -1,0 +1,139 @@
+name: Promote
+
+# The action-owned half of a normal release: when CI completes green on a push
+# to `dev` whose workspace version is ahead of `main`, this workflow opens (or
+# updates) the `dev -> main` promotion PR, waits for its required checks, and
+# merges it with a merge commit. The resulting `main` push runs CI again, and
+# the Release workflow — still bound to green pushes on `main` — creates the
+# tag at that exact merge SHA. This workflow never creates or moves tags.
+on:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+    branches:
+      - dev
+
+# Serialize promotions for the same dev SHA without dropping a pending one
+# when later dev commits complete CI. Different dev SHAs may promote in
+# parallel only if the decide step finds the older one already on main.
+concurrency:
+  group: promote-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  promote:
+    name: promote dev to main
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'dev'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Decide promotion
+        id: decide
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+
+          remote_url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch "$remote_url" main
+          main_sha="$(git rev-parse FETCH_HEAD)"
+          if git merge-base --is-ancestor "$HEAD_SHA" "$main_sha"; then
+            echo "dev tip is already on main; promotion is a no-op."
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          workspace_version() {
+            git show "$1" | python3 -c 'import sys,tomllib; print(tomllib.loads(sys.stdin.read())["workspace"]["package"]["version"])'
+          }
+          dev_version="$(workspace_version "$HEAD_SHA:Cargo.toml")"
+          main_version="$(workspace_version "$main_sha:Cargo.toml")"
+          echo "Cargo.toml version: main=$main_version dev=$dev_version"
+          if [ "$dev_version" = "$main_version" ]; then
+            echo "dev carries no pending bump over main; promotion is a no-op."
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "needed=true" >> "$GITHUB_OUTPUT"
+          echo "version=$dev_version" >> "$GITHUB_OUTPUT"
+          echo "main_sha=$main_sha" >> "$GITHUB_OUTPUT"
+          echo "Promoting v$dev_version from dev to main."
+
+      - name: Create or update promotion PR
+        if: steps.decide.outputs.needed == 'true'
+        id: pr
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.decide.outputs.version }}
+        run: |
+          set -euo pipefail
+          title="chore(release): promote v$VERSION to main"
+          body="$(printf '%s\n' \
+            "Automatic promotion from \`dev\` after green \`dev\` CI (version v$VERSION)." \
+            "" \
+            "- opened and merged by the Promote workflow" \
+            "- the Release workflow tags this merge commit once \`main\` CI is green")"
+
+          pr_json="$(gh pr list --head dev --base main --state open --json number,url)"
+          if [ "$(printf '%s' "$pr_json" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')" -gt 0 ]; then
+            pr_number="$(printf '%s' "$pr_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["number"])')"
+            pr_url="$(printf '%s' "$pr_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["url"])')"
+            gh pr edit "$pr_number" --title "$title" --body "$body"
+          else
+            pr_url="$(gh pr create --head dev --base main --title "$title" --body "$body")"
+            pr_number="$(printf '%s' "$pr_url" | python3 -c 'import sys; print(sys.argv[1].rstrip("/").split("/")[-1])')"
+          fi
+          echo "pr_url=$pr_url" >> "$GITHUB_OUTPUT"
+          echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
+          echo "PR: $pr_url"
+
+      - name: Wait for required checks on the promotion PR
+        if: steps.decide.outputs.needed == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          # gh pr checks --watch exits 0 immediately when no check has been
+          # reported yet, so first wait until the PR's checks actually exist.
+          for _ in $(seq 1 80); do
+            n="$(gh pr view "$PR_NUMBER" --json statusCheckRollup -q '.statusCheckRollup | length')"
+            [ "${n:-0}" -gt 0 ] && break
+            sleep 15
+          done
+          gh pr checks "$PR_NUMBER" --watch --interval 30
+
+      - name: Merge promotion PR (merge commit)
+        if: steps.decide.outputs.needed == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          gh pr merge "$PR_NUMBER" --merge --delete-branch=false
+          merged_sha="$(gh pr view "$PR_NUMBER" --json mergeCommit -q '.mergeCommit.oid')"
+          echo "Promoted dev to main at $merged_sha; Release will tag it after main CI is green."

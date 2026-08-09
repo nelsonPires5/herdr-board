@@ -11,6 +11,14 @@ on:
           - patch
           - minor
           - major
+      base:
+        description: Branch to branch from and target — dev for normal releases, main for hotfixes.
+        required: false
+        type: choice
+        default: dev
+        options:
+          - dev
+          - main
 
 concurrency:
   group: prepare-release
@@ -34,7 +42,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main
+          # The release branch is cut from the selected base: dev for normal
+          # releases, main only for hotfixes. The branch stays serialized by the
+          # concurrency group above regardless of base.
+          ref: ${{ inputs.base }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -139,19 +150,21 @@ jobs:
           set -euo pipefail
           title="chore(release): v$TARGET"
           body="$(printf '%s\n' \
-            "Prepare release branch for v$TARGET." \
+            "Prepare release branch for v$TARGET (base \`${{ inputs.base }}\`)." \
             "" \
             "- release files synced by scripts/prepare-release.py" \
             "- CI is dispatched explicitly from this workflow" \
-            "- release workflow waits for CI green on main")"
+            "- base dev: the Promote workflow merges dev -> main, then Release tags the green commit" \
+            "- base main (hotfix): Release tags the green main commit directly")""
 
           pr_json="$(gh pr list --head "$BRANCH" --state open --json number,url)"
           if [ "$(printf '%s' "$pr_json" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')" -gt 0 ]; then
             pr_number="$(printf '%s' "$pr_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["number"])')"
             pr_url="$(printf '%s' "$pr_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["url"])')"
-            gh pr edit "$pr_number" --title "$title" --body "$body"
+            # Retarget on reruns: an earlier run may have used another base.
+            gh pr edit "$pr_number" --title "$title" --body "$body" --base "${{ inputs.base }}"
           else
-            pr_url="$(gh pr create --head "$BRANCH" --base main --title "$title" --body "$body")"
+            pr_url="$(gh pr create --head "$BRANCH" --base "${{ inputs.base }}" --title "$title" --body "$body")"
           fi
           echo "pr_url=$pr_url" >> "$GITHUB_OUTPUT"
           echo "PR: $pr_url"

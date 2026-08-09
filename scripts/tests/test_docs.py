@@ -345,6 +345,90 @@ class DocumentationContractTests(unittest.TestCase):
             "re-run the documentation contracts against the bumped tree",
         )
 
+    def test_ci_runs_on_main_and_dev_pushes(self) -> None:
+        """Both long-lived branches run the full CI; dev is integration, main production.
+
+        Feature/release PRs merge into `dev`, so the push gate must cover it —
+        otherwise a broken integration branch ships silently until promotion.
+        """
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertIn("branches: [main, dev]", workflow)
+
+    def test_release_workflow_never_publishes_from_dev(self) -> None:
+        """A dev push runs CI but must never publish: Release stays bound to main.
+
+        Both the `workflow_run` branch filter and the job's head_branch guard
+        must keep naming `main`, or a dev CI completion would become a release
+        path. This is the gate D4 of the dev-branch rollout exists to protect.
+        """
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        self.assertIn(
+            "branches:\n      - main",
+            workflow,
+            "workflow_run trigger must stay filtered to main",
+        )
+        self.assertIn(
+            "github.event.workflow_run.head_branch == 'main'",
+            workflow,
+            "release job must stay gated to green CI runs on main",
+        )
+
+    def test_prepare_release_targets_an_input_base(self) -> None:
+        """Prepare Release defaults to `dev` and supports `main` for hotfixes.
+
+        The checkout and the created/reused PR must both follow the input;
+        a rerun must retarget an existing PR whose base changed.
+        """
+        workflow = (ROOT / ".github/workflows/prepare-release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("base:", workflow, "base input is missing")
+        self.assertIn("default: dev", workflow, "dev must be the default base")
+        self.assertIn("- dev", workflow)
+        self.assertIn("- main", workflow)
+        self.assertIn(
+            "ref: ${{ inputs.base }}",
+            workflow,
+            "release branch must be cut from the selected base",
+        )
+        self.assertIn(
+            '--base "${{ inputs.base }}"',
+            workflow,
+            "created/reused PR must target the selected base",
+        )
+        self.assertNotIn(
+            "--base main",
+            workflow,
+            "the PR base must never be hardcoded to main",
+        )
+
+    def test_promote_workflow_merges_dev_but_never_tags(self) -> None:
+        """The action-owned promotion: green dev CI with a pending bump opens
+        and merges `dev -> main`; tagging stays exclusively in Release.
+
+        The promote workflow must be bound to `dev` CI completions, merge
+        through a PR (so the merge commit is GitHub-verified and satisfies the
+        main ruleset), and contain no tag- or release-creation step.
+        """
+        workflow = (ROOT / ".github/workflows/promote.yml").read_text(encoding="utf-8")
+        self.assertIn(
+            "branches:\n      - dev",
+            workflow,
+            "promote trigger must be dev-only",
+        )
+        self.assertIn(
+            "github.event.workflow_run.head_branch == 'dev'",
+            workflow,
+            "promote job must stay gated to dev CI runs",
+        )
+        self.assertIn(
+            "gh pr merge",
+            workflow,
+            "promotion must land via a merged PR",
+        )
+        self.assertNotIn("git tag", workflow, "promote must never create tags")
+        self.assertNotIn("gh release", workflow, "promote must never publish")
+
     def test_maintained_markdown_links_resolve(self) -> None:
         for document in maintained_markdown():
             for link in re.findall(r"\[[^]]+\]\(([^)]+)\)", document.read_text()):
