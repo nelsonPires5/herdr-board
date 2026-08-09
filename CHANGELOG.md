@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+- [#62](https://github.com/nelsonPires5/herdr-board/pull/62) chore(ci): adopt `dev` as the long-lived integration branch — feature/release PRs target `dev`, Prepare Release defaults to `base=dev` (`main` only for hotfixes), and each release promotes `dev -> main` so the Release workflow tags the exact green promotion commit; `main` stays production/default and `v*` tags remain Release-owned only.
+
 ## [0.12.0] - 2026-08-08
 
 - [#59](https://github.com/nelsonPires5/herdr-board/pull/59) Redesign the board TUI mobile-first: boxed cards with one semantic glyph on each dedicated status row, direct visibility filters, persistent chrome around content overlays, transparent white `[ NAME ]` controls, icon detail toggles, no Board-card Edit/Delete controls (keyboard `e`/`d` preserved), drag-only card movement, and a reduced bottom action row.

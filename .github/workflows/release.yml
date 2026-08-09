@@ -6,6 +6,9 @@ on:
       - CI
     types:
       - completed
+    # dev pushes run the same CI, but only a green push to main may publish:
+    # the tag is created at the promotion commit merged into main. Never widen
+    # this filter to dev — a dev CI completion must not become a release path.
     branches:
       - main
 

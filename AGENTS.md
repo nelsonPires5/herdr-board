@@ -3,6 +3,8 @@
 Cross-agent contributor guide for herdr-board. Read this before touching the repo. herdr-board is a
 kanban board that dispatches AI coding agents into visible herdr panes; the single `board` binary is
 TUI + daemon + CLI. Rust, cargo workspace, edition 2021, all crates share the workspace version.
+Feature PRs target the long-lived `dev` branch; `main` is production (branch model:
+[`docs/releasing.md`](docs/releasing.md)).
 
 ## Workspace layout & crate ownership
 
@@ -109,9 +111,14 @@ Full layering, test placement, harness details, and how to add tests live in
   per-session supervisor reconnects and reconciles conservatively.
 - Definition of done for a user-facing change: update the docs and `CHANGELOG.md` in the same change. Keep each `CHANGELOG.md` entry to one line prefixed by a clickable link to its PR, e.g. `- [#31](https://github.com/nelsonPires5/herdr-board/pull/31) Pin Herdr plugin installs to a released tag.` (GitHub does not auto-link bare `#NN` inside rendered markdown files, so use the full link) so the changelog links the PR rather than reproducing it — long rationale lives in the PR body. Write the one-line description first, then fill in the PR link once the PR is open.
 - Release/version changes follow [`docs/releasing.md`](docs/releasing.md). Agents must never create,
-  push, move, or delete release tags manually: a maintainer starts **Prepare Release**, merges its PR,
-  and the **Release** workflow creates the tag only after `main` CI is green. No tag ruleset currently
-  enforces this; it is repository policy.
+  push, move, or delete release tags manually: a maintainer starts **Prepare Release**, merges its
+  PR into `dev`, promotes `dev -> main`, and the **Release** workflow creates the tag only after
+  `main` CI is green at that promotion SHA. A repository tag ruleset protects `v*`; this is policy
+  and workflow validation together.
+- Branching: `dev` is the long-lived integration branch and the default target for feature PRs;
+  `main` is production (default branch, Release's only publish path). Hotfixes and the `dev -> main`
+  promotion are the only PRs that target `main`. After every promotion or hotfix, back-merge
+  `main -> dev` before the next normal release.
 
 ## herdr gotchas (field-tested)
 
