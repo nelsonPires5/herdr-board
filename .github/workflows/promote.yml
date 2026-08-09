@@ -115,7 +115,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
-        run: gh pr checks "$PR_NUMBER" --watch --interval 30
+        run: |
+          set -euo pipefail
+          # gh pr checks --watch exits 0 immediately when no check has been
+          # reported yet, so first wait until the PR's checks actually exist.
+          for _ in $(seq 1 80); do
+            n="$(gh pr view "$PR_NUMBER" --json statusCheckRollup -q '.statusCheckRollup | length')"
+            [ "${n:-0}" -gt 0 ] && break
+            sleep 15
+          done
+          gh pr checks "$PR_NUMBER" --watch --interval 30
 
       - name: Merge promotion PR (merge commit)
         if: steps.decide.outputs.needed == 'true'
