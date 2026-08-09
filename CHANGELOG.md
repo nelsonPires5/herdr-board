@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+- Retry `agent.start` on a fresh owned pane five times with doubling backoff (100→1600ms, ≈3.1s window) so slow login shells (~0.5s zsh+oh-my-zsh+nvm boot) stop failing managed runs with `agent_pane_busy`. (PR link to be filled in when the PR is opened)
+
 - [#63](https://github.com/nelsonPires5/herdr-board/pull/63) Add the managed Codex harness with live cached model/effort discovery, native access presets, self-minted thread capture, resume/fork/reuse/rescue, and provider-free E2E coverage.
 
 - [#62](https://github.com/nelsonPires5/herdr-board/pull/62) chore(ci): adopt `dev` as the long-lived integration branch — feature/release PRs target `dev`, Prepare Release defaults to `base=dev` (`main` only for hotfixes), the Promote workflow automatically merges `dev -> main` after green dev CI, and the Release workflow tags the exact green promotion commit; `main` stays production/default with PR-only, merge-commit and signed-commit protection, and `v*` tags remain Release-owned only.

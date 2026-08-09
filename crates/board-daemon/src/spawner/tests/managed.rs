@@ -539,12 +539,114 @@ fn managed_busy_retry_preserves_exact_start_on_one_new_split_pane() {
 }
 
 #[test]
+fn managed_slow_shell_boot_retries_until_pane_is_available() {
+    // A freshly split pane whose login shell (zsh + oh-my-zsh + nvm) has not
+    // reached the interactive prompt yet answers agent_pane_busy for several
+    // hundred milliseconds (measured ~515ms on this machine's default herdr
+    // session). The busy retry budget must outlast a slow shell boot, not just
+    // the brief residual-agent-state window of the original design.
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let starts = Arc::new(AtomicUsize::new(0));
+    let starts2 = Arc::clone(&starts);
+    let prompt_paths = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
+    let prompt_paths2 = Arc::clone(&prompt_paths);
+    let fake = serve_recording_herdr(move |req, _| match req["method"].as_str().unwrap() {
+        "tab.list" => existing_tab_list(req),
+        "pane.list" => reply(
+            req,
+            serde_json::json!({"type": "pane_list", "panes": [pane_info("w1:p1")]}),
+        ),
+        "pane.layout" => reply(
+            req,
+            serde_json::json!({"type": "pane_layout", "layout": {
+                "workspace_id": "w1", "tab_id": "w1:t1", "zoomed": false,
+                "area": {"x": 0, "y": 0, "width": 200, "height": 40},
+                "focused_pane_id": "w1:p1",
+                "panes": [{"pane_id": "w1:p1", "focused": true,
+                    "rect": {"x": 0, "y": 0, "width": 200, "height": 40}}],
+                "splits": []
+            }}),
+        ),
+        "pane.split" => {
+            assert_eq!(req["params"]["target_pane_id"], "w1:p1");
+            pane_result(req, "w1:p3")
+        }
+        "agent.start" => {
+            let path = assert_startup_prompt_file(
+                req,
+                &[
+                    "--model",
+                    "provider/model with space",
+                    "--session-id",
+                    "session-42",
+                ],
+                "--append-system-prompt",
+                "system instructions\nwith an exact second line",
+            );
+            prompt_paths2.lock().unwrap().push(path);
+            if starts2.fetch_add(1, Ordering::SeqCst) < 4 {
+                error(req, "agent_pane_busy", "pane is still busy")
+            } else {
+                agent_started(req, "w1:p3", false, true)
+            }
+        }
+        "pane.close" => pane_result(req, "w1:p3"),
+        method => panic!("unexpected slow-boot method {method}"),
+    });
+    let delays = Arc::new(Mutex::new(Vec::new()));
+    let delays2 = Arc::clone(&delays);
+    let spawner = HerdrSpawner::with_pane_runner_and_delay(
+        fake.socket.clone(),
+        Arc::new(RecordingPaneRunner {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            behavior: Box::new(|_, _| unreachable!("managed launch must not use pane runner")),
+        }),
+        Arc::new(move |delay| delays2.lock().unwrap().push(delay)),
+    );
+
+    let handle = spawner.spawn(&pi_req(None)).unwrap();
+    assert_eq!(handle.pane_id.as_deref(), Some("w1:p3"));
+    assert_eq!(starts.load(Ordering::SeqCst), 5);
+    assert_eq!(
+        delays.lock().unwrap().as_slice(),
+        &[
+            super::super::AGENT_START_BUSY_BACKOFF,
+            super::super::AGENT_START_BUSY_BACKOFF.saturating_mul(2),
+            super::super::AGENT_START_BUSY_BACKOFF.saturating_mul(4),
+            super::super::AGENT_START_BUSY_BACKOFF.saturating_mul(8),
+        ]
+    );
+
+    let requests = fake.requests.lock().unwrap();
+    let starts: Vec<_> = requests
+        .iter()
+        .filter(|request| request["method"] == "agent.start")
+        .collect();
+    assert_eq!(starts.len(), 5);
+    assert!(starts
+        .iter()
+        .all(|request| request["params"]["pane_id"] == "w1:p3"));
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request["method"] == "pane.split")
+            .count(),
+        1,
+        "slow shell boot must retry on the owned pane instead of splitting again",
+    );
+}
+
+#[test]
 fn managed_composed_busy_then_name_taken_has_one_global_busy_budget() {
     assert_composed_busy_name_sequence(
-        &["busy", "name_taken", "busy", "busy"],
+        &["busy", "name_taken", "busy", "busy", "busy", "busy", "busy"],
         &[
             "card-42-execute",
             "card-42-execute",
+            "card-42-execute-r7",
+            "card-42-execute-r7",
+            "card-42-execute-r7",
             "card-42-execute-r7",
             "card-42-execute-r7",
         ],
@@ -554,9 +656,12 @@ fn managed_composed_busy_then_name_taken_has_one_global_busy_budget() {
 #[test]
 fn managed_composed_name_taken_then_busy_has_one_global_busy_budget() {
     assert_composed_busy_name_sequence(
-        &["name_taken", "busy", "busy", "busy"],
+        &["name_taken", "busy", "busy", "busy", "busy", "busy", "busy"],
         &[
             "card-42-execute",
+            "card-42-execute-r7",
+            "card-42-execute-r7",
+            "card-42-execute-r7",
             "card-42-execute-r7",
             "card-42-execute-r7",
             "card-42-execute-r7",

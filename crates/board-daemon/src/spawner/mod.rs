@@ -126,7 +126,13 @@ pub trait Spawner: Send + Sync {
 }
 
 pub(crate) const AGENT_START_TIMEOUT_MS: u64 = 30_000;
-pub(crate) const AGENT_START_BUSY_RETRIES: usize = 2;
+/// How many delayed retries `agent.start` may take on a freshly split owned
+/// pane before the run fails. Herdr answers `agent_pane_busy` until the pane's
+/// login shell reaches an interactive prompt; a slow shell (zsh + oh-my-zsh +
+/// nvm) can need ~0.5s while the residual-agent-state window is only a few
+/// hundred ms. The backoff doubles per retry (100/200/400/800/1600ms), so five
+/// retries extend the window to roughly 3.1s after the initial attempt.
+pub(crate) const AGENT_START_BUSY_RETRIES: usize = 5;
 pub(crate) const AGENT_START_BUSY_BACKOFF: Duration = Duration::from_millis(100);
 pub(crate) const READINESS_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const READINESS_BACKOFF: Duration = Duration::from_millis(100);

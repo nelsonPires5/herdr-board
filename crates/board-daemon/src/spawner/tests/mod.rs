@@ -423,12 +423,15 @@ fn assert_composed_busy_name_sequence(sequence: &[&str], expected_names: &[&str]
     assert!(err.to_string().contains("pane is still busy"));
     assert_eq!(starts.load(Ordering::SeqCst), sequence.len());
     assert_eq!(expected_names.len(), sequence.len());
+    let mut expected_delays = Vec::new();
+    let mut delay = super::AGENT_START_BUSY_BACKOFF;
+    for _ in 0..super::AGENT_START_BUSY_RETRIES {
+        expected_delays.push(delay);
+        delay = delay.saturating_mul(2);
+    }
     assert_eq!(
         delays.lock().unwrap().as_slice(),
-        &[
-            super::AGENT_START_BUSY_BACKOFF,
-            super::AGENT_START_BUSY_BACKOFF.saturating_mul(2),
-        ],
+        expected_delays.as_slice(),
         "busy delays must be globally bounded across the name fallback",
     );
 
