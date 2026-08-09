@@ -37,10 +37,17 @@ p = Path(sys.argv[1])
 p.write_text("idle_grace_seconds = 10\n" + p.read_text(encoding="utf-8"), encoding="utf-8")
 PY
 
+# Route the daemon's event subscription through the proxy so the scenario can
+# prove the live stream is established BEFORE reporting integration signals
+# (the same gate the 19/20 scenarios use); the pane and CLI reports keep
+# talking to the real session socket.
+REAL_HERDR_SOCKET="$E2E_SESSION_SOCKET"
+e2e_proxy_start "$E2E_TMP/herdr-proxy.sock" "$E2E_TMP/proxy-control.sock" "$REAL_HERDR_SOCKET"
+export HERDR_SOCKET_PATH="$E2E_PROXY_SOCKET"
 e2e_daemon_start
 
 step "HERDR MUTATION: create disposable workspace"
-e2e_ws_create board-awaiting-e2e; WS_ID="$E2E_WS"
+e2e_ws_create board-awaiting-e2e "$REAL_HERDR_SOCKET" "$E2E_SESSION_PID" "$E2E_SESSION_IDENTITY"; WS_ID="$E2E_WS"
 echo "  workspace: $WS_ID"
 
 step "Create an auto column with no on_success and a four-second test timeout"
@@ -83,6 +90,18 @@ clock_ms() { python3 -c 'import time; print(time.time_ns() // 1_000_000)'; }
 RUN_STARTED_OBSERVED_MS="$(clock_ms)"
 ok "run started in live pane $PANE_ID"
 
+# Recording the pane and starting the event subscription are separate daemon
+# steps. Require the live stream before reporting so integration signals
+# cannot race watcher subscription setup (the same gate the 19/20 scenarios
+# use; the proxy counts subscriptions without altering the event flow).
+for _ in $(seq 1 50); do
+  PROXY_STATUS="$(e2e_proxy_command status)"
+  SUBSCRIPTIONS="$(printf '%s' "$PROXY_STATUS" | jget subscriptions)"
+  [ "${SUBSCRIPTIONS:-0}" -gt 0 ] && break
+  sleep 0.1
+done
+[ "${SUBSCRIPTIONS:-0}" -gt 0 ] || fail "watcher never subscribed through proxy"
+
 status_of() { card_field "$CARD_ID" card.status 2>/dev/null || true; }
 wait_status() {
   local expected="$1" tries="${2:-60}" actual="" i
@@ -91,6 +110,7 @@ wait_status() {
     [ "$actual" = "$expected" ] && return 0
     sleep .1
   done
+  e2e_card_failure_diag "$CARD_ID"
   fail "card status '$actual' (expected '$expected')"
 }
 
@@ -101,7 +121,7 @@ SEQ="$(python3 -c 'import time; print(time.time_ns())')"
 report_agent() {
   local state="$1"
   SEQ=$((SEQ + 1))
-  e2e_herdr_mutate -- pane report-agent "$PANE_ID" \
+  e2e_herdr_mutate "$E2E_SESSION_PID" "$E2E_SESSION_IDENTITY" "$REAL_HERDR_SOCKET" -- pane report-agent "$PANE_ID" \
     --source herdr:pi --agent pi --agent-session-path "$AGENT_SESSION_PATH" \
     --state "$state" --seq "$SEQ" >/dev/null
 }
