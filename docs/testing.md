@@ -127,10 +127,12 @@ The current parity/schema-v13 change is specified test-first:
   CRUD/audit semantics stay in hermetic core/daemon/CLI tests; the live suite does not duplicate
   every management RPC.
 
-The authoritative [`e2e/README.md`](../e2e/README.md) catalog currently covers scenarios 01–30,
-and `e2e/run-all.sh` includes every numbered script. Scenarios 18–29 extend the live coverage with
+The authoritative [`e2e/README.md`](../e2e/README.md) catalog currently covers scenarios 01–31,
+and `e2e/run-all.sh` includes every numbered script. Scenarios 18–31 extend the live coverage with
 nullable/validation, late-start and recovery, active-run timing, TUI layout and board transfers,
-pane rescue, Pi catalog behavior, and diagnostics. This document describes the intended coverage
+pane rescue, Pi catalog behavior, diagnostics, pane reuse, and the managed Codex launch contract
+(self-minted thread capture, delimited mint prompt, fork/reuse/rescue, fail-closed missing-report
+rescue). This document describes the intended coverage
 and gate configuration; it does **not** claim that the full live E2E suite has passed.
 
 Nullable update coverage in `board-core` is table-driven across every column/card nullable:
@@ -314,7 +316,8 @@ state is copied. Its intended contract is one authorized Haiku/low attempt with 
   script. The standard suite creates a mode-`0700` managed root with controlled `HOME`, `ZDOTDIR`,
   rc files, `PATH`, and exported fake-provider functions; it never sources user rc files. It
   resolves the Herdr executable to an absolute path before narrowing the managed pane `PATH`.
-  Built-in managed agents see checked-in `e2e/fake-bin/pi` and `e2e/fake-bin/claude` only inside
+  Built-in managed agents see checked-in `e2e/fake-bin/pi`, `e2e/fake-bin/claude`, and
+  `e2e/fake-bin/codex` only inside
   the disposable Herdr server/workspaces. The fixtures record argv/readiness/prompt evidence
   under the scenario temp dir and call only the isolated `board comment`/`board done`; they never
   replace user installations or make model calls.
@@ -432,9 +435,10 @@ E2E_REAL_PI=1 e2e/real-pi-smoke.sh  # explicit real-provider opt-in; may incur c
 E2E_REAL_PI=1 E2E_REAL_PI_MODEL=openai-codex/gpt-5.3 E2E_REAL_PI_EFFORT=high e2e/real-pi-smoke.sh  # model/effort overrides; model must exist in `pi --list-models`
 E2E_REAL_PI=1 E2E_REAL_PI_NEW_WORKSPACE=1 e2e/real-pi-smoke.sh  # daemon-created new_workspace space; asserts one card tab + one Pi pane, no anchor
 E2E_REAL_CLAUDE_HAIKU=1 e2e/real-claude-haiku-smoke.sh  # one authorized Haiku/low attempt; may incur cost
+E2E_REAL_CODEX=1 e2e/real-codex-smoke.sh  # one authorized Codex/low attempt; may incur cost
 ```
 
-- Standard suite requires **exactly Herdr 0.8.0 / socket protocol 19**, `python3`, Bash ≥4, and `cargo`. It supports Linux and macOS; `run-all.sh` resolves Herdr and Bash absolutely before narrowing `PATH`. Every scenario preflights both `herdr --version` and a socket `ping`; older and unknown/future protocols fail before dispatch. The forced-build standard suite is configured to exercise scenarios 01–30 without provider calls; this is coverage guidance, not a claim that a full live run has passed. The real-Pi smoke additionally verifies Pi's runtime default model, current Herdr integration, and WezTerm. The real-Claude smoke is an intended-contract validation only: it requires a logged-in real Claude CLI plus current Herdr Claude integration v7, stages minimal completed onboarding/theme, exact workspace trust, the current Claude integration hook, credentials, and approved `remote-settings.json` under `/tmp` so startup dialogs cannot consume `agent.prompt`; no broad personal Claude state is copied, and it has no retry or fallback. Its independent identity implementation remains Linux-only and is outside the portable provider-free gate. Both opt-ins compare user/repository state and clean exact resources. `run-all.sh` builds
+- Standard suite requires **exactly Herdr 0.8.0 / socket protocol 19**, `python3`, Bash ≥4, and `cargo`. It supports Linux and macOS; `run-all.sh` resolves Herdr and Bash absolutely before narrowing `PATH`. Every scenario preflights both `herdr --version` and a socket `ping`; older and unknown/future protocols fail before dispatch. The forced-build standard suite is configured to exercise scenarios 01–31 without provider calls; this is coverage guidance, not a claim that a full live run has passed. The real-Pi smoke additionally verifies Pi's runtime default model, current Herdr integration, and WezTerm. The real-Claude smoke is an intended-contract validation only: it requires a logged-in real Claude CLI plus current Herdr Claude integration v7, stages minimal completed onboarding/theme, exact workspace trust, the current Claude integration hook, credentials, and approved `remote-settings.json` under `/tmp` so startup dialogs cannot consume `agent.prompt`; no broad personal Claude state is copied, and it has no retry or fallback. The real-Codex smoke is the same intended-contract shape for the Codex built-in: it requires the current Herdr Codex integration and hook, stages only codex auth/config/hook under a disposable `CODEX_HOME`, and authorizes one low-effort attempt with no retry or fallback. Their independent identity implementations remain Linux-only and are outside the portable provider-free gate. All three opt-ins compare user/repository state and clean exact resources. `run-all.sh` builds
   the release binary once; scenarios reuse it. Every scenario boots and cleans its own ephemeral
   session; scenario 03 additionally owns an independently tokened secondary session.
 - Exit codes: scenario `0` = PASS, `3` = SKIP, other = FAIL; `run-all.sh` exits

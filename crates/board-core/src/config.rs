@@ -81,6 +81,12 @@ pub struct Config {
     /// daemon fills this in at startup; tests leave it `None` to stay hermetic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pi_agent_dir: Option<PathBuf>,
+    /// Codex home to read the live model catalog from (`models_cache.json`).
+    /// `None` disables live codex model discovery → the `codex` harness
+    /// reports the static free-form catalog (`models: []`). The daemon fills
+    /// this in at startup; tests leave it `None` to stay hermetic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_home: Option<PathBuf>,
 }
 
 /// A config-defined harness: an argv template plus an optional capability
@@ -121,6 +127,7 @@ impl Default for Config {
             idle_grace_seconds: default_idle_grace_seconds(),
             harness: HashMap::new(),
             pi_agent_dir: None,
+            codex_home: None,
         }
     }
 }

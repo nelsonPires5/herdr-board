@@ -1,5 +1,5 @@
 use board_core::capability::{
-    claude_capabilities, pi_capabilities, HarnessCapabilities, ModelInfo,
+    claude_capabilities, codex_capabilities, pi_capabilities, HarnessCapabilities, ModelInfo,
 };
 use board_core::engine::{validate_card_space, validate_column_permission_override};
 use board_core::protocol::{Effort, SpaceKind};
@@ -67,7 +67,11 @@ fn card_harness_select_consumes_harness_list() {
     // (the card default).
     let mut form = Form::card_create(1);
     let before = choice_labels(&form, FieldId::Harness);
-    assert_eq!(before, vec!["pi".to_string(), "claude".to_string()]);
+    assert_eq!(
+        before,
+        vec!["pi".to_string(), "claude".to_string(), "codex".to_string()],
+        "the built-in catalog includes codex after claude"
+    );
     form.apply_options(
         None,
         Some(vec!["pi".into(), "claude".into(), "fake".into()]),
@@ -249,6 +253,148 @@ fn card_selectors_fall_back_to_default_capabilities_per_harness() {
         choice_labels(&unknown, FieldId::Permission),
         vec!["(default)", "ask"]
     );
+}
+
+#[test]
+fn card_codex_selectors_show_full_ladder_and_approval_modes() {
+    // The codex catalog drives the guided selectors: the full effort ladder
+    // with `off` first (mapped to codex `none` only at argv time), and the
+    // three user-facing approval presets. Sandbox is not a permission mode.
+    let mut form = Form::card_create(1);
+    set_choice(&mut form, FieldId::Harness, "codex");
+    form.apply_options(Some(codex_capabilities()), None, None, None);
+    assert_eq!(form.current_harness(), "codex");
+    assert_eq!(
+        choice_labels(&form, FieldId::Effort),
+        vec![
+            "(default)".to_string(),
+            "off".to_string(),
+            "minimal".to_string(),
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+            "xhigh".to_string(),
+            "max".to_string(),
+        ],
+        "the full ladder, off first"
+    );
+    assert!(
+        form.field_visible(idx_of(&form, FieldId::Permission)),
+        "codex has approval modes, so the permission field is visible"
+    );
+    assert_eq!(
+        choice_labels(&form, FieldId::Permission),
+        vec![
+            "(default)".to_string(),
+            "Ask for approval".to_string(),
+            "Approve for me".to_string(),
+            "Full access".to_string(),
+        ]
+    );
+
+    // Submit carries the exact card overrides.
+    form.fields
+        .iter_mut()
+        .find(|f| f.id == FieldId::Title)
+        .unwrap()
+        .set_text("codex task");
+    set_choice(&mut form, FieldId::Effort, "off");
+    set_choice(&mut form, FieldId::Permission, "Full access");
+    match form.submit().unwrap() {
+        Submit::CardCreate(p) => {
+            assert_eq!(p.harness.as_deref(), Some("codex"));
+            assert_eq!(p.effort, Some(Effort::Off));
+            assert_eq!(p.permission_mode.as_deref(), Some("full-access"));
+        }
+        _ => panic!("expected CardCreate"),
+    }
+}
+
+#[test]
+fn card_codex_default_capabilities_before_fetch() {
+    // Before any catalog fetch, selecting codex answers from board-core's
+    // built-in snapshot (`default_capabilities`), not a hardcoded harness
+    // comparison — same ladder and approval enum the daemon will confirm.
+    let mut form = Form::card_create(1);
+    set_choice(&mut form, FieldId::Harness, "codex");
+    form.apply_options(None, None, None, None);
+    assert_eq!(form.current_harness(), "codex");
+    assert_eq!(
+        choice_labels(&form, FieldId::Effort),
+        vec![
+            "(default)".to_string(),
+            "off".to_string(),
+            "minimal".to_string(),
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+            "xhigh".to_string(),
+            "max".to_string(),
+        ]
+    );
+    assert!(form.field_visible(idx_of(&form, FieldId::Permission)));
+    assert_eq!(
+        choice_labels(&form, FieldId::Permission),
+        vec![
+            "(default)".to_string(),
+            "Ask for approval".to_string(),
+            "Approve for me".to_string(),
+            "Full access".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn column_codex_override_selectors_show_ladder_and_approval() {
+    // Column override selectors share the card form's builders, so selecting
+    // codex offers the same full ladder and approval enum as the card form.
+    let mut form = Form::column_create(&[]);
+    set_choice(&mut form, FieldId::HarnessOverride, "codex");
+    form.apply_options(Some(codex_capabilities()), None, None, None);
+    assert_eq!(form.current_harness(), "codex");
+    assert_eq!(
+        choice_labels(&form, FieldId::EffortOverride),
+        vec![
+            "(default)".to_string(),
+            "off".to_string(),
+            "minimal".to_string(),
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+            "xhigh".to_string(),
+            "max".to_string(),
+        ]
+    );
+    assert!(
+        form.field_visible(idx_of(&form, FieldId::PermissionOverride)),
+        "a codex override harness shows its approval selector"
+    );
+    assert_eq!(
+        choice_labels(&form, FieldId::PermissionOverride),
+        vec![
+            "(default)".to_string(),
+            "Ask for approval".to_string(),
+            "Approve for me".to_string(),
+            "Full access".to_string(),
+        ]
+    );
+
+    // Submit carries the exact column overrides.
+    form.fields
+        .iter_mut()
+        .find(|f| f.id == FieldId::Name)
+        .unwrap()
+        .set_text("Codex stage");
+    set_choice(&mut form, FieldId::EffortOverride, "minimal");
+    set_choice(&mut form, FieldId::PermissionOverride, "Ask for approval");
+    match form.submit().unwrap() {
+        Submit::ColumnCreate(p) => {
+            assert_eq!(p.harness_override.as_deref(), Some("codex"));
+            assert_eq!(p.effort_override.as_deref(), Some("minimal"));
+            assert_eq!(p.permission_override.as_deref(), Some("ask-for-approval"));
+        }
+        _ => panic!("expected ColumnCreate"),
+    }
 }
 
 /// A9: submit runs the core validators as a pre-flight, so the

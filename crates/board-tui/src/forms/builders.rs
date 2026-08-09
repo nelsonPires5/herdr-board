@@ -219,13 +219,27 @@ fn effort_choice_opts(efforts: &[Effort], current: Option<&str>) -> (Vec<ChoiceO
 
 /// Shared permission selector: `(default)` (wire `None`) + each mode. Used by
 /// both the card `Permission` field and the column `PermissionOverride` field.
+/// Codex's stable wire ids get the same human labels as its `/permissions`
+/// picker; config-defined modes remain verbatim.
 fn permission_choice_opts(modes: &[String], current: Option<&str>) -> (Vec<ChoiceOpt>, usize) {
     let mut opts = vec![ChoiceOpt::default_opt()];
-    for m in modes {
-        opts.push(ChoiceOpt::str(m));
+    for mode in modes {
+        let label = match mode.as_str() {
+            "ask-for-approval" => "Ask for approval",
+            "approve-for-me" => "Approve for me",
+            "full-access" => "Full access",
+            other => other,
+        };
+        opts.push(ChoiceOpt {
+            label: label.to_string(),
+            val: ChoiceVal::Str(mode.clone()),
+        });
     }
     let idx = current
-        .and_then(|c| opts.iter().position(|o| o.label == c))
+        .and_then(|current| {
+            opts.iter()
+                .position(|option| matches!(&option.val, ChoiceVal::Str(value) if value == current))
+        })
         .unwrap_or(0);
     (opts, idx)
 }

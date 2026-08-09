@@ -1,7 +1,7 @@
 //! Form tests: field cycling, capabilities, model/effort/harness/space selectors.
 
 use super::helpers::{
-    demo_client, driver_of, is_choice, key, opt_labels, set_choice, split_effort_caps,
+    demo_client, driver_of, is_choice, key, opt_labels, set_choice, split_effort_caps, CodexClient,
     RecordingClient,
 };
 use board_core::capability::{
@@ -201,7 +201,11 @@ fn new_card_defaults_to_pi_and_lists_both_builtins() {
     d.handle(key(KeyCode::Char('n')));
     let form = d.app.form.as_ref().unwrap();
     assert_eq!(form.current_harness(), "pi");
-    assert_eq!(opt_labels(form, FieldId::Harness), vec!["pi", "claude"]);
+    assert_eq!(
+        opt_labels(form, FieldId::Harness),
+        vec!["pi", "claude", "codex"],
+        "the built-in catalog includes codex after claude"
+    );
     assert_eq!(form.caps.as_ref().unwrap().harness, "pi");
 }
 
@@ -220,7 +224,7 @@ fn opening_column_form_loads_only_column_metadata() {
     assert_eq!(form.caps.as_ref().unwrap().harness, "pi");
     assert_eq!(
         opt_labels(form, FieldId::HarnessOverride),
-        vec!["none", "pi", "claude"]
+        vec!["none", "pi", "claude", "codex"]
     );
     assert!(form.spaces.is_empty(), "column forms do not load spaces");
     assert!(
@@ -325,6 +329,179 @@ fn switching_harness_reloads_capabilities() {
         .position(|field| field.id == FieldId::Permission)
         .unwrap();
     assert!(form.field_visible(permission_idx));
+}
+
+#[test]
+fn selecting_codex_in_card_form_shows_exact_efforts_and_approval_and_submits() {
+    // The live-catalog path: the client answers harness.capabilities for
+    // codex, and the guided selectors show the full effort ladder plus the
+    // three user-facing approval presets.
+    let client = CodexClient::new(demo_client().unwrap());
+    let created_cards = std::sync::Arc::clone(&client.created_cards);
+    let mut d = driver_of(client);
+    d.handle(key(KeyCode::Char('n')));
+    let form = d.app.form.as_mut().unwrap();
+    form.focus = form
+        .fields
+        .iter()
+        .position(|field| field.id == FieldId::Harness)
+        .unwrap();
+    d.handle(key(KeyCode::Right)); // pi -> claude
+    d.handle(key(KeyCode::Right)); // claude -> codex
+    let form = d.app.form.as_ref().unwrap();
+    assert_eq!(form.current_harness(), "codex");
+    assert_eq!(form.caps.as_ref().unwrap().harness, "codex");
+    assert_eq!(
+        opt_labels(form, FieldId::Effort),
+        vec![
+            "(default)",
+            "off",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+        ]
+    );
+    let permission_idx = form
+        .fields
+        .iter()
+        .position(|field| field.id == FieldId::Permission)
+        .unwrap();
+    assert!(form.field_visible(permission_idx));
+    assert_eq!(
+        opt_labels(form, FieldId::Permission),
+        vec![
+            "(default)",
+            "Ask for approval",
+            "Approve for me",
+            "Full access"
+        ]
+    );
+
+    // Submit: the exact codex overrides reach card.create.
+    let form = d.app.form.as_mut().unwrap();
+    form.fields[0].set_text("codex task");
+    set_choice(form, FieldId::Effort, "off");
+    set_choice(form, FieldId::Permission, "Full access");
+    d.handle(key(KeyCode::Enter));
+    let cards = created_cards.lock().unwrap();
+    assert_eq!(cards.len(), 1, "one card.create dispatched");
+    assert_eq!(cards[0]["harness"], "codex");
+    assert_eq!(cards[0]["effort"], "off");
+    assert_eq!(cards[0]["permission_mode"], "full-access");
+    assert_eq!(cards[0]["title"], "codex task");
+}
+
+#[test]
+fn selecting_codex_in_column_form_shows_exact_efforts_and_approval_and_submits() {
+    let client = CodexClient::new(demo_client().unwrap());
+    let created_columns = std::sync::Arc::clone(&client.created_columns);
+    let mut d = driver_of(client);
+    d.handle(key(KeyCode::Char('N')));
+    let form = d.app.form.as_mut().unwrap();
+    form.focus = form
+        .fields
+        .iter()
+        .position(|field| field.id == FieldId::HarnessOverride)
+        .unwrap();
+    d.handle(key(KeyCode::Right)); // (none) -> pi
+    d.handle(key(KeyCode::Right)); // pi -> claude
+    d.handle(key(KeyCode::Right)); // claude -> codex
+    let form = d.app.form.as_ref().unwrap();
+    assert_eq!(form.current_harness(), "codex");
+    assert_eq!(form.caps.as_ref().unwrap().harness, "codex");
+    assert_eq!(
+        opt_labels(form, FieldId::EffortOverride),
+        vec![
+            "(default)",
+            "off",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+        ]
+    );
+    let permission_idx = form
+        .fields
+        .iter()
+        .position(|field| field.id == FieldId::PermissionOverride)
+        .unwrap();
+    assert!(form.field_visible(permission_idx));
+    assert_eq!(
+        opt_labels(form, FieldId::PermissionOverride),
+        vec![
+            "(default)",
+            "Ask for approval",
+            "Approve for me",
+            "Full access"
+        ]
+    );
+
+    // Submit: the exact codex column overrides reach column.create.
+    let form = d.app.form.as_mut().unwrap();
+    form.fields[0].set_text("Codex stage");
+    set_choice(form, FieldId::EffortOverride, "minimal");
+    set_choice(form, FieldId::PermissionOverride, "Ask for approval");
+    d.handle(key(KeyCode::Enter));
+    let columns = created_columns.lock().unwrap();
+    assert_eq!(columns.len(), 1, "one column.create dispatched");
+    assert_eq!(columns[0]["harness_override"], "codex");
+    assert_eq!(columns[0]["effort_override"], "minimal");
+    assert_eq!(columns[0]["permission_override"], "ask-for-approval");
+    assert_eq!(columns[0]["name"], "Codex stage");
+}
+
+#[test]
+fn codex_selectors_survive_capabilities_fetch_failure() {
+    // The seeded demo client cannot answer harness.capabilities for codex, so
+    // the fetch fails and the form falls back to board-core's built-in
+    // snapshot — the effort ladder and approval enum still appear, from the
+    // catalog rather than a harness-name comparison.
+    let mut d = driver_of(demo_client().unwrap());
+    d.handle(key(KeyCode::Char('n')));
+    let form = d.app.form.as_mut().unwrap();
+    form.focus = form
+        .fields
+        .iter()
+        .position(|field| field.id == FieldId::Harness)
+        .unwrap();
+    d.handle(key(KeyCode::Right)); // pi -> claude
+    d.handle(key(KeyCode::Right)); // claude -> codex (caps fetch fails)
+    let form = d.app.form.as_ref().unwrap();
+    assert_eq!(form.current_harness(), "codex");
+    assert!(form.caps.is_none(), "the demo client has no codex catalog");
+    assert_eq!(
+        opt_labels(form, FieldId::Effort),
+        vec![
+            "(default)",
+            "off",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+        ]
+    );
+    let permission_idx = form
+        .fields
+        .iter()
+        .position(|field| field.id == FieldId::Permission)
+        .unwrap();
+    assert!(form.field_visible(permission_idx));
+    assert_eq!(
+        opt_labels(form, FieldId::Permission),
+        vec![
+            "(default)",
+            "Ask for approval",
+            "Approve for me",
+            "Full access"
+        ]
+    );
 }
 
 #[test]

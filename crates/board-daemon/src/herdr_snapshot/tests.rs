@@ -69,6 +69,7 @@ fn agent_status_overrides_pane_fallback() {
         revision: 1,
         interactive_ready: true,
         launch_pending: false,
+        agent_session: None,
     }];
     let mut snap = empty_snapshot();
     snap.panes = panes;
@@ -97,6 +98,7 @@ fn agent_on_nonexistent_pane_is_ignored() {
         revision: 1,
         interactive_ready: true,
         launch_pending: false,
+        agent_session: None,
     }];
     let mut snap = empty_snapshot();
     snap.panes = panes;

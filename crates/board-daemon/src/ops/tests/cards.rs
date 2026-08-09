@@ -300,20 +300,16 @@ fn card_move_blocked_by_incompatible_target_harness() {
 
 #[test]
 fn card_move_blocked_when_session_cannot_resolve() {
-    // A fake `herdr` that reports no sessions. A card pinned to a named session
-    // ("ghost") then cannot resolve, so the blocking pre-check rejects the
-    // move; the default-session card (session: null) is still allowed.
-    let dir = tempfile::tempdir().unwrap();
-    let script = dir.path().join("herdr");
-    std::fs::write(&script, "#!/bin/sh\necho '{\"sessions\":[]}'\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
-    }
-    std::env::set_var("HERDR_BIN_PATH", &script);
-
-    let registry = Some(SessionRegistry::new(PathBuf::from("/tmp/board-test.sock")));
+    // A registry that knows NO sessions (seeded, so no `herdr` binary is ever
+    // invoked — deliberately NOT a global `HERDR_BIN_PATH` env mutation, which
+    // would race every parallel test that shells out to the configured-harness
+    // runner). A card pinned to a named session ("ghost") then cannot resolve,
+    // so the blocking pre-check rejects the move; the default-session card
+    // (session: null) is still allowed.
+    let registry = Some(SessionRegistry::with_entries(
+        PathBuf::from("/tmp/board-test.sock"),
+        Vec::new(),
+    ));
     let d = test_daemon_with_registry(Config::default(), registry);
     let alpha = scoped_board(&d, "/alpha");
     let beta = scoped_board(&d, "/beta");
@@ -353,8 +349,6 @@ fn card_move_blocked_when_session_cannot_resolve() {
         Some(alpha),
         "blocked move must not move the card"
     );
-
-    std::env::remove_var("HERDR_BIN_PATH");
 }
 
 #[test]

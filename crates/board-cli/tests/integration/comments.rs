@@ -129,6 +129,19 @@ fn comment_mutations_enforce_agent_run_ownership_and_reject_system_comments() {
     let td = TestDaemon::start(&[]);
     let card_id = old_card(&td, "comment authorization");
 
+    let human = json_output(&td.board_with_env(
+        &[
+            "card",
+            "comment",
+            "add",
+            &card_id.to_string(),
+            "rescued human comment",
+            "--json",
+        ],
+        &[("BOARD_RUN_ID", "")],
+    ));
+    assert_eq!(human["author"], "user");
+
     let own = json_output(&td.board_with_env(
         &[
             "card",

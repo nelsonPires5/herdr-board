@@ -9,9 +9,9 @@ exercises the herdr wire integration end to end.
 For the layers below this one (unit, daemon+CLI integration, TUI snapshots), the
 isolation/safety design, and the **how-to-write-a-scenario** guide, see
 [`../docs/testing.md`](../docs/testing.md). This file is the authoritative use-case catalog for board protocol v1 / SQLite schema v13:
-every numbered scenario from **01 through 30** must appear here and in `run-all.sh`. The provider-free
+every numbered scenario from **01 through 31** must appear here and in `run-all.sh`. The provider-free
 safe boundary is `fake-agent.sh`,
-`fake-bin/{pi,claude}`, and `test-harness.sh`; prompt/system-prompt contents are never logged.
+`fake-bin/{pi,claude,codex}`, and `test-harness.sh`; prompt/system-prompt contents are never logged.
 Scenario 21 is the active-run timer/event-refresh characterization. The CI live gate is configured to
 exercise the complete catalog after the cheaper static checks succeed.
 
@@ -49,6 +49,7 @@ exercise the complete catalog after the cheaper static checks succeed.
 | Pi's authenticated file catalog applies sparse/null `thinkingLevelMap` semantics in `harness.capabilities`, and the real TUI cycles the exact corrected effort order without submitting a card or launching Pi | `28-pi-effort-catalog.sh` | live, provider-free; no model invocation |
 | Private daily NDJSON diagnostics prune only exact owned files beyond 30 days and record redacted board/Herdr success, error, and subscription metadata | `29-diagnostic-logs.sh` | live, provider-free; no payloads or model invocation |
 | A non-fresh auto chain reuses ONE managed agent pane (and one conversation) across stages via `agent.prompt` (no new `pane.split`/`agent.start`); the managed tab stays anchorless with exactly one harness pane; a fresh column still mints a new pane, and a manual landing keeps the pane open | `30-pane-reuse.sh` | live, checked-in fake `pi`, zero provider cost |
+| Managed Codex mint captures its self-minted thread id from `agent.get.agent_session` (mint persists NULL at enqueue, the captured id atomically at promotion) and receives ONE delimited system+task `agent.prompt` block; retry runs `codex fork <id>` and captures the NEW thread; a non-fresh hop reuses the same pane with the task alone; a rescue reopens the dead pane with `codex resume <id>` without re-sending the task; a missing session report degrades the capture (mint completes NULL) and rescue fails closed with an actionable refusal; every managed tab converges anchorless to exactly one Codex pane | `31-managed-codex.sh` | live, checked-in fake `codex`, zero provider cost |
 
 ### How the live scenario produces Herdr `done`
 
@@ -121,7 +122,7 @@ unmarked, or out-of-root paths. Named-session sockets must be at most 92 bytes, 
 short `/tmp/hb-e2e.XXXXXX` isolated root. `TMPDIR` is pinned to that exact marker-owned root, so
 generated configured-harness scripts remain contained even if asynchronous `pane run` never opens
 their normal self-removing script. The forced-build standard suite is configured and required to exercise
-scenarios 01–30 without provider calls; this is a coverage requirement, not a claim that a live run
+scenarios 01–31 without provider calls; this is a coverage requirement, not a claim that a live run
 has completed. Scenarios 18–29 use only the configured or managed
 fake harnesses and never record prompt or system-prompt bodies.
 
@@ -139,6 +140,7 @@ E2E_REAL_PI=1 e2e/real-pi-smoke.sh  # REAL provider, explicit opt-in, may incur 
 E2E_REAL_PI=1 E2E_REAL_PI_MODEL=openai-codex/gpt-5.3 E2E_REAL_PI_EFFORT=high e2e/real-pi-smoke.sh  # explicit model/effort overrides (validated in `pi --list-models`)
 E2E_REAL_PI=1 E2E_REAL_PI_NEW_WORKSPACE=1 e2e/real-pi-smoke.sh  # card creates its workspace via new_workspace; asserts one card tab + one Pi pane
 E2E_REAL_CLAUDE_HAIKU=1 e2e/real-claude-haiku-smoke.sh  # one authorized REAL Haiku/low attempt
+E2E_REAL_CODEX=1 e2e/real-codex-smoke.sh  # one authorized REAL Codex attempt (low effort); may incur cost
 ```
 
 **Keep mode** (`--keep`, or `E2E_KEEP=1`): skips session stop/delete **and** workspace close,
@@ -167,7 +169,7 @@ personal Claude state. Its intended contract is one authorized attempt with no r
 | `test-harness.sh` | Deterministic Linux/macOS shell safety checks for signed ownership tokens, key scrubbing, every exact-resource ledger kind, replacement, malformed record, and standalone parity; starts no Herdr resources. |
 | `process_identity.py` | Standard-library platform backend: Linux `/proc`; Darwin `libproc`/`KERN_PROCARGS2`; exact argv/start/executable capture and HMAC verification. |
 | `fake-agent.sh` | Config-defined/shared fake harness used by provider-free configured-harness scenarios. |
-| `fake-bin/pi` / `fake-bin/claude` | Executables exposed only inside disposable standard-E2E Herdr servers/workspaces. They emulate interactive readiness/session reports, require the exact `agent.prompt` bytes before completion, record evidence under isolated temp, and never modify installed tools or call a provider. |
+| `fake-bin/pi` / `fake-bin/claude` / `fake-bin/codex` | Executables exposed only inside disposable standard-E2E Herdr servers/workspaces. They emulate interactive readiness/session reports, require the exact `agent.prompt` bytes before completion, record evidence under isolated temp, and never modify installed tools or call a provider. The codex fixture additionally emulates the self-minted thread id (`AgentInfo.agent_session`) that the real Codex integration reports, plus an opt-in degraded mode (a `--model no-session` sentinel card, or `FAKE_CODEX_NO_SESSION=1` where the env can reach the pane) that reports no session identity. |
 | `16-managed-p17.sh` | Managed pane-first Pi/Claude protocol-19/current launch, no-provider boundary, and anchorless managed tabs that converge to exactly one harness pane (historical filename). |
 | `17-configured-p17-runner.sh` | Unmanaged protocol-19/current configured-command `pane run` bridge and exact argv/env evidence (historical filename). |
 | `18-nullable-clear.sh` | Nullable clearing, merged validation, atomic rejection, and post-clear configured dispatch; no prompt-body logging. |
@@ -183,13 +185,15 @@ personal Claude state. Its intended contract is one authorized attempt with no r
 | `28-pi-effort-catalog.sh` | Auth-scoped Pi file discovery plus exact board-RPC and real-TUI proof of sparse/null thinking-level semantics; never starts Pi or submits a card. |
 | `29-diagnostic-logs.sh` | Daily NDJSON validity, private modes, exact 30-day retention boundary, board/Herdr completion metadata, sentinel absence, and exact cleanup. |
 | `30-pane-reuse.sh` | Non-fresh auto-chain pane reuse: one managed agent pane + one conversation across resume hops (no second `pane.split`/`agent.start`), anchorless managed tab with exactly one harness pane, fresh column still mints, manual landing keeps the pane open; checked-in fake `pi`. |
+| `31-managed-codex.sh` | Managed Codex protocol-19/current launch: self-minted thread capture from `agent.get.agent_session` (mint persists NULL at enqueue and the captured id atomically at promotion), ONE delimited system+task `agent.prompt` block on mint, `codex fork <id>` on retry with the new thread replacing the source id, same-pane/task-only reuse across a non-fresh hop, `codex resume <id>` rescue without re-sending the task (runs row byte-for-byte unchanged), fail-closed missing-report rescue (no session report → mint completes NULL, rescue refused with an actionable diagnostic), and anchorless managed tabs that converge to exactly one Codex pane; checked-in fake `codex`, zero provider cost. |
 | `real-pi-smoke.sh` | Fail-closed real-provider poem smoke. Detects Pi's runtime default model (`E2E_REAL_PI_MODEL` overrides it, validated in `pi --list-models`), passes `E2E_REAL_PI_EFFORT` (default `low`) as the thinking level consistently in card create + evidence, and `E2E_REAL_PI_NEW_WORKSPACE=1` switches to a daemon-created `new_workspace` space (discovered for cleanup; final structure is exactly one `card-<id>` tab with one Pi harness pane and no anchor/unused tab). Isolates board/Pi session output under `/tmp`, verifies the current Pi integration v8/WezTerm, poem/comments/argv/git/settings, and supports keep mode for visual audit. Not in `run-all.sh`. |
 | `real-claude-haiku-smoke.sh` | Fail-closed intended-contract smoke. Requires exact opt-in, authorizes one Claude Haiku/low attempt with no retry/fallback, stages only completed onboarding/theme, exact workspace trust, the installed current Claude integration v7 hook, credentials, and approved remote-settings bytes under `/tmp` so startup dialogs cannot consume `agent.prompt`; no broad personal Claude state is copied. Independently identity-gates the daemon and Herdr server and cleans exact resources. Not in `run-all.sh`. |
+| `real-codex-smoke.sh` | Fail-closed real-provider smoke. Requires exact opt-in (`E2E_REAL_CODEX=1`), authorizes one low-effort Codex attempt with no retry/fallback, stages only codex auth, config, and the installed current Herdr agent-state hook under a disposable `CODEX_HOME` so startup dialogs cannot consume `agent.prompt`; no broad personal Codex state is copied. Preflights the current Codex Herdr integration and staged login status, asserts the captured thread id (`agent_session` kind `id`), exact startup argv (no prompt text, `model_reasoning_effort=low`), the marker file bytes, the agent comment, and exactly one run; independently identity-gates the daemon and Herdr server and cleans exact resources. Linux-only `/proc` identity, outside the portable provider-free gate. Not in `run-all.sh`. |
 | `hrpc.py` | One-shot raw **herdr** socket RPC (honours `HERDR_SOCKET_PATH`) for structural asserts (`tab.list`/`pane.list`/`pane.layout`). |
 | `12-cwd-boards.sh` | Scoped board identity/isolation plus real TUI title/picker. |
 | `13-jump-to-pane.sh` | Canonical CLI and same-session TUI focus of a deliberately selected run through a real plugin overlay. |
 | `NN-*.sh` | The scenarios above. |
-| `run-all.sh` | Builds once, runs scenarios 01–30 as environment-scrubbed children with their own sessions, captures artifacts, and prints the summary (`--require-all` forbids skips). |
+| `run-all.sh` | Builds once, runs scenarios 01–31 as environment-scrubbed children with their own sessions, captures artifacts, and prints the summary (`--require-all` forbids skips). |
 | `ci.sh` | Pins, caches, and verifies Herdr for Linux x86_64; runs the complete suite with `--require-all`; exports only its exact private artifact root to `e2e-artifacts/`. |
 
 Columns have no `board` CLI verb, so scenarios configure them over the boardd

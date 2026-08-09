@@ -485,3 +485,278 @@ fn run_for_card_requires_the_exact_owning_card() {
     let unknown = db.run_for_card(4242, first.id).unwrap_err();
     assert_eq!(unknown.to_string(), "not found: card 4242");
 }
+
+// ---------------------------------------------------------------------------
+// Captured-session promotion (C4 core): a self-minting harness like codex
+// reports its thread/conversation id only after launch, so the daemon persists
+// it atomically on BOTH the run and the card — never half-promoted.
+// ---------------------------------------------------------------------------
+
+/// Enqueue a codex-shaped run: Mint persists `session_id: NULL` (the board
+/// never invents a uuid for codex; the captured thread id replaces it).
+fn enqueue_codex<'a>(card_id: i64, column_id: i64, session_id: Option<&'a str>) -> EnqueueRun<'a> {
+    EnqueueRun {
+        card_id,
+        column_id,
+        harness: "codex",
+        argv_json: r#"["codex","--model","m"]"#,
+        prompt_snapshot: "Card task:\nwork",
+        system_prompt_snapshot: Some("s"),
+        launch_spec_json: None,
+        session_id,
+        session: None,
+    }
+}
+
+#[test]
+fn captured_session_promotion_writes_run_and_card_in_one_transaction() {
+    let db = mem();
+    let card = db
+        .create_card(&CardCreateParams {
+            title: "codex mint".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let run = db
+        .enqueue_run_uow(&enqueue_codex(card.id, card.column_id, None))
+        .unwrap();
+    // Mint persisted NULL — never a board-invented uuid.
+    assert_eq!(run.session_id, None);
+    assert_eq!(db.get_card(card.id).unwrap().unwrap().session_id, None);
+
+    // Capture while still queued (post-launch capture can race promotion).
+    let promoted = db
+        .promote_captured_session_uow(run.id, "thread-abc")
+        .unwrap();
+    assert_eq!(promoted.session_id.as_deref(), Some("thread-abc"));
+    assert_eq!(
+        db.get_card(card.id).unwrap().unwrap().session_id.as_deref(),
+        Some("thread-abc")
+    );
+
+    // A later capture on the same open run replaces the id (fork: the NEW
+    // thread id supersedes the source id recorded at enqueue).
+    let replaced = db
+        .promote_captured_session_uow(run.id, "thread-forked")
+        .unwrap();
+    assert_eq!(replaced.session_id.as_deref(), Some("thread-forked"));
+    assert_eq!(
+        db.get_card(card.id).unwrap().unwrap().session_id.as_deref(),
+        Some("thread-forked")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Integrated promotion (C4 daemon path): the captured id is persisted in the
+// SAME transaction as the run promotion + card running/session update.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn promotion_with_captured_session_commits_run_card_and_identity_together() {
+    let db = mem();
+    let card = db
+        .create_card(&CardCreateParams {
+            title: "codex capture promote".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let run = db
+        .enqueue_run_uow(&enqueue_codex(card.id, card.column_id, None))
+        .unwrap();
+    assert_eq!(run.session_id, None);
+
+    // One UOW: run started + workspace/pane + session id on the run AND the
+    // card's running state + session id — no intermediate state is visible.
+    let promoted = db
+        .promote_run_with_anchor_uow(
+            run.id,
+            Some("workspace"),
+            Some("pane"),
+            Some("anchor"),
+            Some(1_000),
+            Some("thread-captured"),
+        )
+        .unwrap();
+    assert!(promoted.started_at.is_some());
+    assert_eq!(promoted.herdr_workspace_id.as_deref(), Some("workspace"));
+    assert_eq!(promoted.herdr_pane_id.as_deref(), Some("pane"));
+    assert_eq!(promoted.herdr_anchor_pane_id.as_deref(), Some("anchor"));
+    assert_eq!(
+        promoted.session_id.as_deref(),
+        Some("thread-captured"),
+        "the captured id replaces the mint NULL on the run"
+    );
+    let card = db.get_card(card.id).unwrap().unwrap();
+    assert_eq!(card.status, CardStatus::Running);
+    assert_eq!(
+        card.session_id.as_deref(),
+        Some("thread-captured"),
+        "run and card must never disagree about the conversation id"
+    );
+}
+
+#[test]
+fn promotion_without_capture_keeps_the_enqueue_time_session_id() {
+    // A fork whose NEW thread id was never captured degrades to the recorded
+    // source id: COALESCE keeps it instead of wiping identity.
+    let db = mem();
+    let card = db
+        .create_card(&CardCreateParams {
+            title: "codex fork no capture".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let run = db
+        .enqueue_run_uow(&enqueue_codex(card.id, card.column_id, Some("thread-1")))
+        .unwrap();
+    let promoted = db
+        .promote_run_with_anchor_uow(run.id, None, None, None, None, None)
+        .unwrap();
+    assert_eq!(promoted.session_id.as_deref(), Some("thread-1"));
+    assert_eq!(
+        db.get_card(card.id).unwrap().unwrap().session_id.as_deref(),
+        Some("thread-1")
+    );
+}
+
+#[test]
+fn promotion_with_captured_session_replaces_a_prior_enqueue_id_on_both_rows() {
+    // Fork with a captured NEW thread id: the source id must survive nowhere.
+    let db = mem();
+    let card = db
+        .create_card(&CardCreateParams {
+            title: "codex fork captured".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let run = db
+        .enqueue_run_uow(&enqueue_codex(card.id, card.column_id, Some("thread-1")))
+        .unwrap();
+    let promoted = db
+        .promote_run_with_anchor_uow(run.id, None, None, None, None, Some("thread-new"))
+        .unwrap();
+    assert_eq!(promoted.session_id.as_deref(), Some("thread-new"));
+    assert_eq!(
+        db.get_card(card.id).unwrap().unwrap().session_id.as_deref(),
+        Some("thread-new")
+    );
+    assert!(!db
+        .get_run(run.id)
+        .unwrap()
+        .session_id
+        .as_deref()
+        .is_some_and(|id| id == "thread-1"));
+}
+
+#[test]
+fn captured_session_promotion_works_after_run_started() {
+    let db = mem();
+    let card = db
+        .create_card(&CardCreateParams {
+            title: "codex started".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let run = db
+        .enqueue_run_uow(&enqueue_codex(card.id, card.column_id, None))
+        .unwrap();
+    db.promote_run_uow(run.id, Some("workspace"), Some("pane"), None)
+        .unwrap();
+    let promoted = db
+        .promote_captured_session_uow(run.id, "thread-late")
+        .unwrap();
+    assert_eq!(promoted.session_id.as_deref(), Some("thread-late"));
+    assert_eq!(promoted.herdr_pane_id.as_deref(), Some("pane"));
+    assert_eq!(
+        db.get_card(card.id).unwrap().unwrap().session_id.as_deref(),
+        Some("thread-late")
+    );
+}
+
+#[test]
+fn captured_session_promotion_rejects_ended_run_without_touching_identity() {
+    // The cancel-during-spawn race: the run ended while the capture was in
+    // flight, so persisting the captured id on a dead run must fail closed and
+    // leave both rows untouched.
+    let db = mem();
+    let card = db
+        .create_card(&CardCreateParams {
+            title: "codex cancelled".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let run = db
+        .enqueue_run_uow(&enqueue_codex(card.id, card.column_id, None))
+        .unwrap();
+    db.finalize_run_uow(&FinalizeRun {
+        run_id: run.id,
+        outcome: RunOutcome::Cancelled,
+        summary: None,
+        comments: &[],
+        target_column_id: None,
+        final_status: CardStatus::Idle,
+        final_awaiting_reason: None,
+        next: None,
+    })
+    .unwrap();
+
+    let err = db
+        .promote_captured_session_uow(run.id, "thread-late")
+        .unwrap_err();
+    assert!(err.to_string().contains("not open"), "message: {err}");
+    assert_eq!(db.get_run(run.id).unwrap().session_id, None);
+    assert_eq!(db.get_card(card.id).unwrap().unwrap().session_id, None);
+    assert!(db.get_run(run.id).unwrap().ended_at.is_some());
+}
+
+#[test]
+fn captured_session_promotion_rejects_blank_session_id() {
+    let db = mem();
+    let card = db
+        .create_card(&CardCreateParams {
+            title: "codex blank".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let run = db
+        .enqueue_run_uow(&enqueue_codex(card.id, card.column_id, None))
+        .unwrap();
+    for blank in ["", "   "] {
+        assert!(db.promote_captured_session_uow(run.id, blank).is_err());
+    }
+    assert_eq!(db.get_run(run.id).unwrap().session_id, None);
+    assert_eq!(db.get_card(card.id).unwrap().unwrap().session_id, None);
+}
+
+#[test]
+fn captured_session_promotion_replaces_a_prior_resume_id_on_both_rows() {
+    // Fork enqueues the source id; the fork's NEW thread id replaces it on
+    // run and card atomically once the integration reports it.
+    let db = mem();
+    let card = db
+        .create_card(&CardCreateParams {
+            title: "codex fork".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let run = db
+        .enqueue_run_uow(&enqueue_codex(card.id, card.column_id, Some("thread-1")))
+        .unwrap();
+    assert_eq!(run.session_id.as_deref(), Some("thread-1"));
+
+    let promoted = db
+        .promote_captured_session_uow(run.id, "thread-new")
+        .unwrap();
+    assert_eq!(promoted.session_id.as_deref(), Some("thread-new"));
+    assert_eq!(
+        db.get_card(card.id).unwrap().unwrap().session_id.as_deref(),
+        Some("thread-new")
+    );
+    // The prior id survives nowhere.
+    assert!(!db
+        .get_run(run.id)
+        .unwrap()
+        .session_id
+        .as_deref()
+        .is_some_and(|id| id == "thread-1"));
+}

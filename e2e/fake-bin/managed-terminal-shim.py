@@ -107,7 +107,11 @@ def main() -> int:
     # not treat the marker itself as proof: it requires bytes delivered here.
     print("HERDR_FAKE_MANAGED_INTERACTIVE_READY", flush=True)
     try:
-        tty.setraw(fd)
+        # TCSADRAIN (not the tty.setraw default TCSAFLUSH): a second prompt can
+        # arrive while this shim is still starting (the daemon's reuse hop races
+        # the loop's next shim), and TCSAFLUSH would DISCARD those pending bytes
+        # before select ever sees them. Draining output only keeps the queue.
+        tty.setraw(fd, when=termios.TCSADRAIN)
         if multi_turn:
             try:
                 # A real managed client is only idle once its input loop is
@@ -136,10 +140,11 @@ def main() -> int:
             if not data:
                 break
             saw_transport_bytes = True
+            prompt_raw = bytes(data)
             try:
-                candidate = normalize_terminal_prompt(bytes(data))
+                candidate = normalize_terminal_prompt(prompt_raw)
             except UnicodeDecodeError as error:
-                update(record_path, prompt_raw_hex=bytes(data).hex(), prompt_error=str(error))
+                update(record_path, prompt_raw_hex=prompt_raw.hex(), prompt_error=str(error))
                 print(f"managed terminal shim: prompt was not UTF-8: {error}", file=sys.stderr)
                 return 2
             # A subsequent turn can begin with a residual Enter/framing batch
@@ -147,7 +152,6 @@ def main() -> int:
             # keep waiting for this turn's substantive agent.prompt payload.
             if candidate:
                 prompt = candidate
-                prompt_raw = bytes(data)
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_attributes)
 
@@ -157,7 +161,10 @@ def main() -> int:
             if saw_transport_bytes
             else f"no agent.prompt bytes within {timeout:g}s"
         )
-        update(record_path, prompt_error=reason)
+        fields: dict[str, object] = {"prompt_error": reason}
+        if saw_transport_bytes:
+            fields["prompt_raw_hex"] = prompt_raw.hex()
+        update(record_path, **fields)
         print(f"managed terminal shim: {reason}", file=sys.stderr)
         return 2
 
@@ -215,12 +222,28 @@ def main() -> int:
         update(record_path, prompt_error="run prompt_snapshot was not committed within 10s")
         print("managed terminal shim: authoritative run prompt unavailable", file=sys.stderr)
         return 2
-    if prompt != expected:
-        update(record_path, expected_prompt=expected, prompt_error="agent.prompt did not match run snapshot")
-        print("managed terminal shim: agent.prompt did not match run snapshot", file=sys.stderr)
-        return 2
-    update(record_path, prompt_matches_run_snapshot=True)
-    return 0
+    if prompt == expected:
+        update(record_path, prompt_matches_run_snapshot=True)
+        return 0
+    # A codex Mint receives ONE delimited block: `## herdr-board system
+    # instructions` + non-empty system text + `## herdr-board card task` + the
+    # exact run snapshot. The system half is private DB state (never exposed
+    # by `card show`), so the fixture pins the block structure and the exact
+    # task half here, records the system half verbatim, and the scenario
+    # reconstructs the full block from its own sources. Resume, fork, and
+    # same-pane reuse deliver the task alone and matched above.
+    mint_block = None
+    if os.environ.get("FAKE_MANAGED_KIND", "pi") == "codex":
+        prefix = "## herdr-board system instructions\n"
+        task_delim = "\n\n## herdr-board card task\n"
+        if prompt.startswith(prefix) and task_delim in prompt[len(prefix):]:
+            system_half = prompt[len(prefix):].split(task_delim, 1)[0]
+            if system_half and prompt == prefix + system_half + task_delim + expected:
+                update(record_path, prompt_matches_mint_block=True, mint_system_half=system_half)
+                return 0
+    update(record_path, expected_prompt=expected, prompt_error="agent.prompt did not match run snapshot")
+    print("managed terminal shim: agent.prompt did not match run snapshot", file=sys.stderr)
+    return 2
 
 
 if __name__ == "__main__":

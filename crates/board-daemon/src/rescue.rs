@@ -214,7 +214,7 @@ fn rescue_identity(
 /// the two rescue variables, and any harness that reads the board env — the
 /// checked-in fixtures do, under `set -u` — would exit immediately.
 ///
-/// **`BOARD_RUN_ID` is deliberately absent.** It is not documentation, it is the
+/// **`BOARD_RUN_ID` is deliberately empty.** It is not documentation, it is the
 /// *actor credential*: `board comment` authenticates as `agent:$BOARD_RUN_ID`,
 /// `board done` forwards it as the run to finalize, and the configured-harness
 /// wrapper passes it to `run.pane_exited`. A rescued pane belongs to no run, and
@@ -226,13 +226,14 @@ fn rescue_identity(
 ///   unwatched, unowned pane finalize that run — racing the liveness watcher for
 ///   the right to write the run's outcome.
 ///
-/// Omitting it fails closed instead: `board comment` degrades to an ordinary
-/// human comment on the card (still useful, and the card is the durable place for
-/// a rescued conversation to report), `board done` answers "no active run" or is
-/// rejected on run-id mismatch, and the configured wrapper's `__pane-exited` call
-/// fails argument parsing and is swallowed by its own `|| :`. The run id is still
-/// carried, for humans and fixtures, as `BOARD_RESCUED_RUN_ID` — a plain label
-/// that no board command consumes.
+/// An explicit empty value, rather than omission, also overrides a stale value a
+/// shell pane may inherit; the CLI treats empty as unset. Thus `board comment`
+/// degrades to an ordinary human comment on the card (still useful, and the card
+/// is the durable place for a rescued conversation to report), `board done`
+/// answers "no active run" or is rejected on run-id mismatch, and the configured
+/// wrapper's `__pane-exited` call fails argument parsing and is swallowed by its
+/// own `|| :`. The run id is still carried, for humans and fixtures, as
+/// `BOARD_RESCUED_RUN_ID` — a plain label that no board command consumes.
 fn rescue_board_env(
     d: &Arc<Daemon>,
     run: &Run,
@@ -247,8 +248,12 @@ fn rescue_board_env(
         execution.env.retain(|(existing, _)| existing != &key);
         execution.env.push((key, value));
     }
-    // Belt and braces: the actor credential must not survive from any source.
+    // Belt and braces: explicitly clear an actor credential inherited by a
+    // live shell; omission cannot override an existing pane environment.
     execution.env.retain(|(key, _)| key != "BOARD_RUN_ID");
+    execution
+        .env
+        .push(("BOARD_RUN_ID".to_string(), String::new()));
     Ok(())
 }
 

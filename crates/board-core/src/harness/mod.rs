@@ -1,9 +1,12 @@
 //! Harness adapters: turn resolved settings + a prompt into `(argv, env)`.
 //!
-//! Two kinds:
-//! - built-ins `pi` and `claude` — flags exactly per `docs/protocol.md`;
+//! Three kinds:
+//! - built-ins `pi`, `claude` and `codex` — flags exactly per
+//!   `docs/protocol.md` (the codex adapter lives in [`codex`]);
 //! - config-defined harnesses — an argv template with `{model}`/`{effort}`/
 //!   `{permission_mode}` placeholders; prompt via `BOARD_PROMPT` env.
+
+pub mod codex;
 
 use crate::capability::ResumeSupport;
 use crate::config::Config;
@@ -13,7 +16,7 @@ use crate::prompt::EffectiveSettings;
 /// Harness stored on newly-created cards when the caller omits one.
 pub const DEFAULT_HARNESS: &str = "pi";
 /// Built-ins routed without config-defined argv/env reconstruction.
-pub const BUILTIN_HARNESSES: [&str; 2] = ["pi", "claude"];
+pub const BUILTIN_HARNESSES: [&str; 3] = ["pi", "claude", "codex"];
 
 pub fn is_builtin_harness(name: &str) -> bool {
     BUILTIN_HARNESSES.contains(&name)
@@ -160,6 +163,7 @@ pub fn session_argv(
                 Some(id.clone()),
             )),
         },
+        "codex" => codex::session_argv(session, target_uuid),
         other => Err(HarnessError::UnknownHarness(other.to_string())),
     }
 }
@@ -176,12 +180,24 @@ fn session_flags(harness_name: &str) -> &'static [(&'static str, bool)] {
             ("--resume", true),
             ("--fork-session", false),
         ],
+        "codex" => codex::SESSION_FLAGS,
         _ => &[],
     }
 }
 
 /// Drop every session-carrying flag (and its value) from a persisted argv.
 fn strip_session_flags(harness_name: &str, argv: &[String]) -> Vec<String> {
+    // Codex session syntax is a trailing bare-word subcommand. Its model is
+    // free-form, so `--model resume`/`--model fork` must not be mistaken for
+    // session syntax; only the adapter-owned final pair is removable.
+    if harness_name == "codex" {
+        return if argv.len() >= 2 && matches!(argv[argv.len() - 2].as_str(), "resume" | "fork") {
+            argv[..argv.len() - 2].to_vec()
+        } else {
+            argv.to_vec()
+        };
+    }
+
     let flags = session_flags(harness_name);
     let mut out = Vec::with_capacity(argv.len());
     let mut index = 0;
@@ -409,6 +425,9 @@ pub fn build_invocation(
     }
     if harness_name == "claude" {
         return managed_claude_invocation(settings, session, minted_uuid, prompt);
+    }
+    if harness_name == "codex" {
+        return codex::managed_codex_invocation(settings, session, minted_uuid, prompt);
     }
 
     let def = config

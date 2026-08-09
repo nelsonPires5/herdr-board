@@ -1,5 +1,7 @@
 //! Managed Herdr launch: `agent.start` on a board-owned pane, with the
-//! name/busy retry taxonomy and the wait for the agent to become interactive.
+//! name/busy retry taxonomy, the wait for the agent to become interactive,
+//! and — for self-minting harnesses like codex — the bounded post-launch
+//! capture of the integration-reported conversation/thread id.
 
 use std::fs;
 use std::io::Write;
@@ -16,7 +18,8 @@ use board_herdr::{
 use super::super::placement::{RetryablePlacementRace, ERR_PANE_NOT_FOUND};
 use super::super::{
     HerdrLaunchPlan, AGENT_START_BUSY_BACKOFF, AGENT_START_BUSY_RETRIES, AGENT_START_TIMEOUT_MS,
-    IMMEDIATE_READINESS_PROBES, READINESS_BACKOFF, READINESS_TIMEOUT,
+    IMMEDIATE_READINESS_PROBES, READINESS_BACKOFF, READINESS_TIMEOUT, SESSION_CAPTURE_PROBES,
+    SESSION_CAPTURE_TIMEOUT,
 };
 
 const ERR_AGENT_NAME_TAKEN: &str = "agent_name_taken";
@@ -28,6 +31,15 @@ pub(crate) type DelayFn = dyn Fn(Duration) + Send + Sync;
 /// `HerdrSpawner` (the run-pane rescue) that have no injected clock of their own.
 pub(crate) const DEFAULT_AGENT_START_DELAY: &DelayFn = &(thread::sleep as fn(Duration));
 
+/// Launch one managed agent and return the harness-captured conversation id
+/// (self-minting harnesses like codex), or `None` when no capture applies
+/// (pi/claude, same-pane reuse) or none validated.
+///
+/// The capture travels through the spawn handle so the daemon persists it
+/// atomically with run promotion inside [`crate::dispatch::launch_plan::
+/// register_spawned_run`]'s cancellation critical section — a cancel that
+/// ended the run while the launch was in flight discards the captured id
+/// together with the handle.
 pub(crate) fn launch_managed(
     client: &mut HerdrClient,
     req: &HerdrLaunchPlan,
@@ -35,7 +47,7 @@ pub(crate) fn launch_managed(
     pane_id: &str,
     reuse: bool,
     delay: &DelayFn,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<String>> {
     // A same-conversation resume hop reuses the prior run's agent pane. The
     // conversation + agent are already live there, so there is nothing to
     // `agent.start`: the pane name is exclusive while open (re-starting would
@@ -43,7 +55,9 @@ pub(crate) fn launch_managed(
     // by the original start, and the persisted `--resume`/`--session-id` argv
     // is irrelevant (the conversation is in-process). Just wait for the agent
     // to finish the previous stage's turn (it may still be Working right after
-    // `board done`) and deliver the new stage's prompt.
+    // `board done`) and deliver the new stage's prompt — task only, never a
+    // system block, and nothing to capture (the conversation id is already
+    // persisted on the card).
     if reuse {
         await_reuse_ready(client, pane_id)?;
         if let Some(text) = &req.initial_prompt {
@@ -55,9 +69,172 @@ pub(crate) fn launch_managed(
                 })
                 .with_context(|| format!("herdr agent.prompt (reuse) for {}", req.name))?;
         }
-        return Ok(());
+        return Ok(None);
     }
 
+    match kind {
+        // Codex mints its own thread id and has no system-prompt file: startup
+        // argv carries no prompt text, and the reported id is captured after
+        // readiness through the same gated connection (C5/C7).
+        "codex" => launch_managed_codex(client, req, pane_id, delay),
+        // Pi/Claude keep the authoritative 0600 startup system-prompt file.
+        "pi" | "claude" => {
+            launch_managed_prompt_file(client, req, kind, pane_id, delay)?;
+            Ok(None)
+        }
+        other => bail!("unsupported managed harness kind: {other}"),
+    }
+}
+
+/// A codex launch: `agent.start` with the startup-only argv (no prompt file,
+/// no `--` delimiter), readiness polling, the bounded session capture, and
+/// then the prompt — Mint receives one delimited `system + task` block,
+/// resume/fork receive the task alone, a rescue sends nothing.
+fn launch_managed_codex(
+    client: &mut HerdrClient,
+    req: &HerdrLaunchPlan,
+    pane_id: &str,
+    delay: &DelayFn,
+) -> anyhow::Result<Option<String>> {
+    let (_, startup_tail) = req
+        .argv
+        .split_first()
+        .ok_or_else(|| anyhow!("managed codex invocation has empty startup argv"))?;
+    let params = AgentStartParams {
+        name: req.name.clone(),
+        kind: "codex".to_string(),
+        pane_id: pane_id.to_string(),
+        args: startup_tail.to_vec(),
+        timeout_ms: Some(AGENT_START_TIMEOUT_MS),
+    };
+    let started = agent_start_retry_name(client, &params, req.name_fallback.as_deref(), delay)
+        .map_err(|error| map_start_error(req, error))?;
+    await_interactive_ready(client, &started)?;
+
+    // Post-launch capture: the minted thread id is reported only once the
+    // integration is up. Bounded poll on the SAME gated connection; a
+    // missing/mismatched report degrades to None with a warning and the
+    // launch stays successful (enqueue-time identity is kept as-is).
+    let captured_session_id = capture_codex_session(client, pane_id, delay);
+
+    if let Some(text) = codex_prompt_text(req) {
+        client
+            .agent_prompt(&AgentPromptParams {
+                target: pane_id.to_string(),
+                text,
+                wait: None,
+            })
+            .with_context(|| format!("herdr agent.prompt for {}", req.name))?;
+    }
+    Ok(captured_session_id)
+}
+
+/// The `agent.prompt` text for a codex launch: Mint receives one clearly
+/// delimited block with the system instructions first, then the card task;
+/// resume/fork (fresh pane) receive the task alone; a rescue sends nothing
+/// (`initial_prompt` was cleared by `resume_invocation`). Same-pane reuse is
+/// handled by [`launch_managed`] before this point and delivers the task
+/// alone.
+fn codex_prompt_text(req: &HerdrLaunchPlan) -> Option<String> {
+    let task = req.initial_prompt.as_deref()?;
+    if is_codex_mint(&req.argv) {
+        let system = req.system_prompt.as_deref().unwrap_or_default();
+        Some(board_core::harness::codex::mint_prompt(system, task))
+    } else {
+        Some(task.to_string())
+    }
+}
+
+/// Whether a board-built codex argv is a Mint. The codex session adapter
+/// appends `resume <id>` / `fork <id>` as the LAST two tokens for
+/// resume/fork; a Mint argv carries no session tokens at all. Only the tail
+/// is inspected because the model value after `--model` could itself be
+/// spelled `resume` or `fork`.
+fn is_codex_mint(argv: &[String]) -> bool {
+    !(argv.len() >= 2 && matches!(argv[argv.len() - 2].as_str(), "resume" | "fork"))
+}
+
+/// Bounded post-launch capture of the integration-reported thread id for a
+/// codex pane, over the launch's already-gated connection.
+///
+/// The report rides `AgentInfo.agent_session` (`AgentSessionInfo` in the
+/// protocol-19 schema): `{agent, kind, source, value}`. Only an `id`-kind
+/// reference owned by the codex agent (`agent == "codex"`) with a non-empty
+/// value is a usable conversation id; a wrong agent, a `path` kind or a blank
+/// value means the pane's identity is not board-resumable, so the capture
+/// degrades to `None` with a warning. `source` is deliberately not
+/// constrained — its exact spelling is integration-internal and undocumented,
+/// and the plan's rule is to not overfit it. The poll is bounded by
+/// [`SESSION_CAPTURE_PROBES`] and [`SESSION_CAPTURE_TIMEOUT`]; a session that
+/// never appears degrades the same way and the launch continues.
+fn capture_codex_session(
+    client: &mut HerdrClient,
+    pane_id: &str,
+    delay: &DelayFn,
+) -> Option<String> {
+    let deadline = Instant::now() + SESSION_CAPTURE_TIMEOUT;
+    let mut probes = 0_usize;
+    loop {
+        match client.agent_get(pane_id) {
+            Ok(agent) => {
+                if let Some(session) = agent.agent_session {
+                    let agent_ok = session.agent == "codex";
+                    let kind_ok = session.kind == "id";
+                    let value_ok = !session.value.trim().is_empty();
+                    if agent_ok && kind_ok && value_ok {
+                        tracing::info!(
+                            pane_id,
+                            thread_id = %session.value,
+                            "captured codex thread id"
+                        );
+                        return Some(session.value);
+                    }
+                    tracing::warn!(
+                        pane_id,
+                        agent = %session.agent,
+                        kind = %session.kind,
+                        has_value = value_ok,
+                        error_category = "harness",
+                        "codex reported an unusable agent_session; run continues without a captured thread id"
+                    );
+                    return None;
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    pane_id,
+                    error = %format!("{error:#}"),
+                    error_category = "herdr",
+                    "agent.get failed while capturing the codex thread id; run continues without it"
+                );
+                return None;
+            }
+        }
+        probes += 1;
+        if probes >= SESSION_CAPTURE_PROBES || Instant::now() >= deadline {
+            tracing::warn!(
+                pane_id,
+                probes,
+                error_category = "harness",
+                "codex did not report an agent_session within the capture bound; run continues without a captured thread id"
+            );
+            return None;
+        }
+        if probes > IMMEDIATE_READINESS_PROBES {
+            delay(READINESS_BACKOFF.min(deadline.saturating_duration_since(Instant::now())));
+        }
+    }
+}
+
+/// Pi/Claude fresh launch: startup argv plus the authoritative 0600
+/// system-prompt file, readiness polling, then the card prompt.
+fn launch_managed_prompt_file(
+    client: &mut HerdrClient,
+    req: &HerdrLaunchPlan,
+    kind: &str,
+    pane_id: &str,
+    delay: &DelayFn,
+) -> anyhow::Result<()> {
     let flag = match kind {
         "pi" => "--append-system-prompt",
         "claude" => "--append-system-prompt-file",
@@ -102,18 +279,7 @@ pub(crate) fn launch_managed(
 
     let operation = (|| -> anyhow::Result<()> {
         let started = agent_start_retry_name(client, &params, req.name_fallback.as_deref(), delay)
-            .map_err(|error| {
-                let message = error.to_string();
-                let typed = if matches!(
-                    &error,
-                    HerdrError::Protocol { code, .. } if code == ERR_PANE_NOT_FOUND
-                ) {
-                    anyhow::Error::new(RetryablePlacementRace(error))
-                } else {
-                    anyhow::Error::new(error)
-                };
-                typed.context(format!("herdr agent.start for {}: {message}", req.name))
-            })?;
+            .map_err(|error| map_start_error(req, error))?;
         await_interactive_ready(client, &started)?;
         if let Some(text) = &req.initial_prompt {
             client
@@ -138,6 +304,21 @@ pub(crate) fn launch_managed(
             "additionally failed to remove system-prompt file: {remove_error:#}"
         ))),
     }
+}
+
+/// Wrap an `agent.start` failure, classifying the owned-pane race exactly as
+/// placement does so the caller can retry the whole allocation.
+fn map_start_error(req: &HerdrLaunchPlan, error: HerdrError) -> anyhow::Error {
+    let message = error.to_string();
+    let typed = if matches!(
+        &error,
+        HerdrError::Protocol { code, .. } if code == ERR_PANE_NOT_FOUND
+    ) {
+        anyhow::Error::new(RetryablePlacementRace(error))
+    } else {
+        anyhow::Error::new(error)
+    };
+    typed.context(format!("herdr agent.start for {}: {message}", req.name))
 }
 
 fn agent_start_retry_name(

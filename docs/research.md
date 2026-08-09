@@ -21,6 +21,7 @@ workspaces/tabs/panes/agents, with IDs shaped like `w3`, `w3:t1`, and `w3:p1`.
 | Place a pane first | Use `tab.create` or `pane.split {workspace_id, target_pane_id, cwd, env, direction, ratio, focus}`. Placement, cwd, and environment are established before managed launch. |
 | Start a managed agent | `herdr agent start NAME --kind KIND --pane ID [--timeout MS] -- [AGENT_ARG…]`; the socket `agent.start` request is `{name, kind, pane_id, args, timeout_ms}`. `kind` selects the canonical executable and `args` excludes it. Board-side launch therefore stays pane-first rather than embedding placement in the agent request. |
 | Inspect readiness | `herdr agent get TARGET` / `agent.get {target}` returns `interactive_ready` and `launch_pending`; readiness is `interactive_ready=true && launch_pending=false`. `agent.wait` waits for agent status, not this startup predicate. |
+| Capture a reported session | `agent.get` → `AgentInfo.agent_session` (`AgentSessionInfo | null` in the protocol-19 schema): `{agent, kind, source, value}` with `kind` ∈ {`id`, `path`}; the field is absent when no session was reported. The codex integration reports its self-minted thread id here; board-herdr decodes it and the daemon's bounded post-launch capture accepts only `agent:"codex"` + `kind:"id"` + non-empty `value`, promoting it atomically onto run+card. |
 | Submit a card task | `herdr agent prompt TARGET TEXT`; `agent.prompt {target,text,wait?}` preserves multiline text and optionally waits for status. Herdr handles the short send-text/Enter settling delay; no synthetic keystroke/Enter pair is needed. |
 | Read output | `herdr agent read TARGET --source recent-unwrapped --lines N` / `agent.read` reads terminal screen/scrollback, not a semantic result. Read responses include `truncated`; `true` means older terminal rows were omitted. |
 | Run an unmanaged command | `herdr pane run PANE_ID COMMAND…` remains a CLI-only boundary: the current socket schema has no `pane.run` method. It schedules the command, so herdr-board uses a temporary self-cleaning runner and a board callback for silent child exit. |
@@ -44,6 +45,12 @@ request fields, result envelopes, and event forms. The delta is additive:
 - The integration target vocabulary adds `antigravity_cli` (CLI spelling
   `antigravity-cli`) and `grok`, including their session-reporting/native-restore
   support. They are not board built-in harnesses.
+
+- `AgentInfo.agent_session` is `AgentSessionInfo | null` (`{agent, kind,
+  source, value}`, `kind` ∈ {`id`, `path`}) and absent when a pane reported no
+  session. The board decodes it for the codex built-in: the integration's
+  reported thread id is captured after launch and persisted atomically with the
+  run promotion; a Mint keeps `session_id = NULL` until then.
 
 The board client does not call `workspace.move_block` and does not need to decode
 `workspace.reordered` to run its queue. Unknown additive events remain observable as
@@ -137,7 +144,8 @@ through a temporary `0600` file, waits for `interactive_ready`, and sends the ca
 **Claude Code**: `-p/--print` headless; `--output-format text|json|stream-json` (+`--verbose`); `--system-prompt` / **`--append-system-prompt`** (+ `-file` variants); `--model`; **`--effort low|medium|high|xhigh|max`** (first-class flag); `--permission-mode acceptEdits|auto|bypassPermissions|manual|dontAsk|plan`; `--allowedTools`/`--disallowedTools`; **`--session-id <uuid>`** (pre-assign), `--resume <id>`, `--fork-session` (retry without polluting), `--no-session-persistence`; `--max-budget-usd` (print-only); `--json-schema` (structured final output); `--input-format stream-json` (long-lived multi-prompt process); `--bare`; `--bg`; `-n/--name` (label session). Hooks: Stop/StopFailure, SessionStart/SessionEnd — **Stop not fired on silent tool stop** ([#29881](https://github.com/anthropics/claude-code/issues/29881)), don't rely on it alone.
 
 **Adapter shape for built-in/future harnesses** = (binary, prompt style, model flag, permission flag, resume mechanism, resulting session id):
-- codex: `codex exec "p"` — `-m`, `--sandbox read-only|workspace-write|danger-full-access`, `--json`, `--output-last-message <path>`, resume `codex exec resume <id>`; effort via `-c model_reasoning_effort=…` (unverified key).
+- codex (interactive, the managed built-in): `--model` remains free-form, while the visible model slugs and their per-model efforts are discovered from `$CODEX_HOME/models_cache.json`; effort uses `-c model_reasoning_effort=…` (board `off` maps to `none`, protocol-known levels keep their spelling, cache-only `ultra` is filtered). The Codex permission picker is represented by three presets combining approval and sandbox: `ask-for-approval` → `--sandbox workspace-write --ask-for-approval on-request`; `approve-for-me` → `--approve-for-me` (automatic reviewer, workspace-write); `full-access` → `--dangerously-bypass-approvals-and-sandbox`. There is **no `--session-id` for Mint** — codex mints its own thread uuid, so the board persists `NULL` and captures the id the Herdr integration reports via `agent_session`; resume/fork are **subcommands** `codex resume <id>` / `codex fork <id>`; no system-prompt-file equivalent (prompt travels only through `agent.prompt`).
+- codex headless: `codex exec "p"` — `-m`, `--sandbox …`, `--json`, `--output-last-message <path>`, resume `codex exec resume <id>`. Not a built-in: configure it under another harness name (e.g. `[harness.codex-exec]`) to keep it unmanaged.
 - gemini: `gemini -p "p"` — `-m`, `--approval-mode default|auto_edit|yolo|plan`; `-o json` (unverified spelling).
 - opencode: `opencode run "p"` — `--model provider/model`; `opencode serve` + `--attach` to amortize startup (session flags unverified).
 
