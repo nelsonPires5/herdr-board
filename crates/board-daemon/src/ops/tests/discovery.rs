@@ -288,9 +288,10 @@ fn run_focus_rescue_gives_the_new_pane_the_board_env_but_never_the_run_credentia
     // `board comment`/`done`/`__pane-exited`. A rescued pane belongs to no run
     // and must not be able to write to the immutable historical row, so it is
     // withheld; the id travels as an inert label instead.
-    assert!(
-        !env.contains_key("BOARD_RUN_ID"),
-        "a rescued pane must not receive the run credential: {env:?}"
+    assert_eq!(
+        env.get("BOARD_RUN_ID"),
+        Some(&String::new()),
+        "a rescued pane must explicitly clear an inherited run credential: {env:?}"
     );
     assert_eq!(env.get("BOARD_RESCUED_RUN_ID"), Some(&run_id.to_string()));
 }
@@ -605,7 +606,10 @@ fn harness_list_builtin_only() {
     let d = test_daemon(Config::default());
     let v = handle_request(&d, "harness.list", json!({})).unwrap();
     let names: Vec<String> = serde_json::from_value(v["harnesses"].clone()).unwrap();
-    assert_eq!(names, vec!["pi".to_string(), "claude".to_string()]);
+    assert_eq!(
+        names,
+        vec!["pi".to_string(), "claude".to_string(), "codex".to_string()]
+    );
 }
 
 #[test]
@@ -621,7 +625,7 @@ fn harness_list_includes_config_defined() {
     let d = test_daemon(config);
     let v = handle_request(&d, "harness.list", json!({})).unwrap();
     let names: Vec<String> = serde_json::from_value(v["harnesses"].clone()).unwrap();
-    assert_eq!(names, vec!["pi", "claude", "fake"]);
+    assert_eq!(names, vec!["pi", "claude", "codex", "fake"]);
 }
 
 #[test]
@@ -699,6 +703,99 @@ fn harness_capabilities_pi_falls_back_to_static_without_agent_dir() {
     // No pi_agent_dir (tests) → static free-form catalog (models: []).
     let d = test_daemon(Config::default());
     let v = handle_request(&d, "harness.capabilities", json!({ "harness": "pi" })).unwrap();
+    assert!(v["models"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn harness_capabilities_codex_overlays_live_catalog_from_codex_home() {
+    // A CODEX_HOME with models_cache.json → the daemon overlays the visible
+    // model slugs (per-model supported_reasoning_levels) onto the codex
+    // catalog, exactly like the pi overlay. `hide` models and levels the
+    // board does not know (`ultra`) never reach the wire.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("models_cache.json"),
+        r#"{"models": [
+          {"slug": "gpt-5.6-sol", "visibility": "list",
+           "supported_reasoning_levels": [
+             {"effort": "low"}, {"effort": "medium"}, {"effort": "high"},
+             {"effort": "xhigh"}, {"effort": "max"}, {"effort": "ultra"}]},
+          {"slug": "gpt-5.4", "visibility": "list",
+           "supported_reasoning_levels": [{"effort": "none"}, {"effort": "low"}]},
+          {"slug": "codex-auto-review", "visibility": "hide",
+           "supported_reasoning_levels": [{"effort": "low"}]}
+        ]}"#,
+    )
+    .unwrap();
+    let config = Config {
+        codex_home: Some(dir.path().to_path_buf()),
+        ..Config::default()
+    };
+    let d = test_daemon(config);
+
+    let v = handle_request(&d, "harness.capabilities", json!({ "harness": "codex" })).unwrap();
+    let models = v["models"].as_array().unwrap();
+    let ids: Vec<&str> = models.iter().map(|m| m["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, vec!["gpt-5.4", "gpt-5.6-sol"]);
+    let sol = models.iter().find(|m| m["id"] == "gpt-5.6-sol").unwrap();
+    let efforts: Vec<&str> = sol["efforts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        efforts,
+        vec!["low", "medium", "high", "xhigh", "max"],
+        "ultra is filtered, not added to the protocol"
+    );
+    let gpt54 = models.iter().find(|m| m["id"] == "gpt-5.4").unwrap();
+    let efforts: Vec<&str> = gpt54["efforts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        efforts,
+        vec!["off", "low"],
+        "codex `none` maps to board `off`"
+    );
+    // model_freeform stays true: arbitrary model strings are still accepted.
+    assert_eq!(v["model_freeform"], true);
+    // The preset approval vocabulary is untouched by the overlay.
+    let presets: Vec<&str> = v["permission_modes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        presets,
+        vec!["ask-for-approval", "approve-for-me", "full-access"]
+    );
+}
+
+#[test]
+fn harness_capabilities_codex_falls_back_to_static_without_codex_home() {
+    // No codex_home (tests) → static free-form catalog (models: []).
+    let d = test_daemon(Config::default());
+    let v = handle_request(&d, "harness.capabilities", json!({ "harness": "codex" })).unwrap();
+    assert!(v["models"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn harness_capabilities_codex_falls_back_to_static_on_malformed_cache() {
+    // A malformed models_cache.json must not break codex capabilities: the
+    // daemon keeps the static free-form catalog.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("models_cache.json"), "{not json").unwrap();
+    let config = Config {
+        codex_home: Some(dir.path().to_path_buf()),
+        ..Config::default()
+    };
+    let d = test_daemon(config);
+    let v = handle_request(&d, "harness.capabilities", json!({ "harness": "codex" })).unwrap();
     assert!(v["models"].as_array().unwrap().is_empty());
 }
 

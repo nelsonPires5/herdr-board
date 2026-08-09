@@ -383,7 +383,13 @@ fn launch_rescue(
             pane_id,
             false,
             DEFAULT_AGENT_START_DELAY,
-        ),
+        )
+        .map(|_captured| {
+            // A rescue persists nothing: the captured id (when the resumed
+            // integration reports one) is deliberately dropped here — the
+            // historical run row stays immutable, so there is nowhere to
+            // promote it to.
+        }),
         None => {
             let runner = HerdrCliPaneRunner;
             launch_configured(

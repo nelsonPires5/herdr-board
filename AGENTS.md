@@ -20,7 +20,7 @@ Ownership is strict: edit your crate(s) + append to root `[workspace.dependencie
 source of truth: `docs/protocol.md` + `docs/design.md`. Docs live in `docs/` (index: `docs/README.md`);
 `schema.sql` is the fresh-schema source of truth and `board-core::db` owns upgrades. Final compatibility
 is board protocol v1, SQLite schema v13, and exactly Herdr 0.8.0 / socket protocol 19. The complete
-live catalog is `e2e/README.md` (scenarios 01–30); `e2e/test-harness.sh` is the provider-free static
+live catalog is `e2e/README.md` (scenarios 01–31); `e2e/test-harness.sh` is the provider-free static
 safety gate.
 
 ## Build / test gates (keep green)
@@ -35,7 +35,7 @@ The gate list has one maintained copy: **[`docs/README.md` → Test gates](docs/
 
 - `#[ignore]`'d tests hit a live herdr (run only when `HERDR_SOCK`/`HERDR_SOCKET_PATH` exists).
 - End-to-end: `e2e/run-all.sh` (compat: `scripts/e2e.sh`) drives a REAL Herdr; checked-in fake
-  Pi/Claude executables keep the standard suite (scenarios 01–30) provider-free and zero-cost.
+  Pi/Claude/Codex executables keep the standard suite (scenarios 01–31) provider-free and zero-cost.
   **Hard rules an agent must never violate:** run only against the scenario's own **ephemeral**
   `hb-e2e-<slug>-<pid>-<random64>` session and **disposable** workspaces it created — never a user
   session, workspace, or tab — and prefix every Herdr mutation with `HERDR MUTATION:`.

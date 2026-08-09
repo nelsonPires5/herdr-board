@@ -74,7 +74,10 @@ Installing one **writes into that harness's own config** (`pi` installs
 updates integrations** — running `herdr integration install <harness>` is a **user
 prerequisite** for live lifecycle signals. Check the reported version with
 `herdr integration status`; the board's current support matrix expects Pi v8 and
-Claude v7 when those harnesses are dispatched.
+Claude v7 when those harnesses are dispatched. For codex, the integration is what
+reports `AgentInfo.agent_session` (the thread id the board captures so a minted
+conversation can later be resumed/forked); without it a codex run still executes
+and completes, but its conversation cannot be reopened by id.
 
 ### 0.8.0 lifecycle implications
 
@@ -126,6 +129,16 @@ The delta is additive and outside the board client surface:
 - `antigravity_cli` (CLI spelling `antigravity-cli`) and `grok` are new
   integration targets with session reporting/native restore. They do not add
   board built-in harnesses.
+- `AgentInfo.agent_session` carries an `AgentSessionInfo | null` reference —
+  `{agent, kind, source, value}` with `kind` ∈ {`id`, `path`} — for panes whose
+  integration reported a session. It is absent on panes without one. `board-herdr`
+  decodes it (`AgentInfo.agent_session`) because the codex built-in harness needs
+  the reported thread id: a codex Mint persists `session_id = NULL` at enqueue,
+  and the daemon's bounded post-launch `agent.get` capture accepts only an
+  `id`-kind reference owned by the codex agent with a non-empty value, promoting
+  it atomically onto the run and card. A wrong-agent, `path`-kind, blank, or
+  never-reported session degrades the capture to `None` (run still executes);
+  the pane then keeps no recorded conversation id, so reuse/rescue fail closed.
 
 The client does not call the new workspace method. It preserves unknown additive
 events rather than treating them as a change to the used transport. The current
@@ -180,6 +193,19 @@ both tab and anchor are selected only from scoped durable pane identities.
 Labels are display metadata and never authorize a tab or pane.
 `agent.read` remains a terminal screen/scrollback read, not a semantic result
 channel.
+
+**Codex is a managed kind with no prompt file.** `kind:"codex"` starts the
+interactive Codex CLI with the same pane-first readiness contract, but there is
+no system-prompt-file equivalent: startup argv carries neither system nor task
+text (no `--append-system-prompt*`, no `--` delimiter), and the prompt travels
+exclusively through `agent.prompt` after readiness — a Mint receives one
+delimited block (`## herdr-board system instructions` then
+`## herdr-board card task`), a resume/fork fresh pane the task alone, same-pane
+reuse the task alone, a rescue nothing. Between readiness and the prompt, the
+daemon bounded-polls `agent.get.agent_session` (5 probes / 10s) for the
+integration-reported thread id and persists it atomically with the run
+promotion; a missing or unusable report degrades to `None` (see the protocol-19
+delta above).
 
 The rescue depends on two runtime facts that are not guaranteed by the request
 shapes: a pane label set with `pane.rename` must survive a subsequent

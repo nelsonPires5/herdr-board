@@ -1,11 +1,12 @@
 //! Shared helpers for update integration tests.
 
-use board_core::capability::{HarnessCapabilities, ModelInfo};
+use board_core::capability::{codex_capabilities, HarnessCapabilities, ModelInfo};
 use board_core::client::BoardClient;
 use board_core::protocol::{CardStatus, Effort, Event};
 use board_tui::app::{App, Screen};
 pub use board_tui::testkit::{
     choice_labels as opt_labels, demo_client, is_choice, key, mouse, rendered_rows, set_choice,
+    DemoClient,
 };
 use board_tui::Driver;
 use serde_json::Value;
@@ -32,6 +33,47 @@ pub struct RecordingClient<C> {
 impl<C: BoardClient> BoardClient for RecordingClient<C> {
     fn call(&mut self, method: &str, params: Value) -> anyhow::Result<Value> {
         self.calls.lock().unwrap().push(method.to_string());
+        self.inner.call(method, params)
+    }
+
+    fn subscribe(&mut self) -> anyhow::Result<Box<dyn Iterator<Item = Event> + Send>> {
+        self.inner.subscribe()
+    }
+}
+
+/// A [`DemoClient`] wrapper that also answers `harness.capabilities` for the
+/// codex built-in (the seeded demo client knows pi and claude only) and
+/// records the `card.create` / `column.create` payloads, so driver tests can
+/// exercise the live-catalog path for codex and assert the exact overrides a
+/// codex form submits.
+pub struct CodexClient {
+    inner: DemoClient,
+    pub created_cards: Arc<Mutex<Vec<Value>>>,
+    pub created_columns: Arc<Mutex<Vec<Value>>>,
+}
+
+impl CodexClient {
+    pub fn new(inner: DemoClient) -> CodexClient {
+        CodexClient {
+            inner,
+            created_cards: Arc::new(Mutex::new(Vec::new())),
+            created_columns: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+impl BoardClient for CodexClient {
+    fn call(&mut self, method: &str, params: Value) -> anyhow::Result<Value> {
+        if method == "harness.capabilities"
+            && params.get("harness").and_then(Value::as_str) == Some("codex")
+        {
+            return Ok(serde_json::to_value(codex_capabilities()).unwrap());
+        }
+        match method {
+            "card.create" => self.created_cards.lock().unwrap().push(params.clone()),
+            "column.create" => self.created_columns.lock().unwrap().push(params.clone()),
+            _ => {}
+        }
         self.inner.call(method, params)
     }
 

@@ -25,6 +25,10 @@ pub enum LifecycleFaultPoint {
     EnqueueAfterRunInsert,
     PromoteAfterRunUpdate,
     FinalizeAfterRunUpdate,
+    /// After the run row of a captured-session promotion is written, before
+    /// the card row: the daemon can die between the two, and the unit of work
+    /// must still roll back as one.
+    CaptureAfterRunUpdate,
 }
 
 /// All values needed to insert one queued run. Prompt building and external I/O

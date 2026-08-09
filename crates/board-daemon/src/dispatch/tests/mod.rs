@@ -291,5 +291,6 @@ mod concurrency;
 mod enqueue;
 mod finalize;
 mod ownership;
+mod pane_reuse;
 mod registration;
 mod space;

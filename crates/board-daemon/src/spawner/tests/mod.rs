@@ -218,6 +218,39 @@ fn claude_req() -> HerdrLaunchPlan {
     }
 }
 
+/// A board-built codex launch plan: startup-only argv (Mint) or with the
+/// `resume <id>` / `fork <id>` subcommand pair appended last (the exact shape
+/// `board_core::harness::codex::managed_codex_invocation` persists).
+fn codex_req(session_tail: &[&str], initial_prompt: Option<&str>) -> HerdrLaunchPlan {
+    let mut argv = vec![
+        "codex".into(),
+        "--model".into(),
+        "gpt-5.6".into(),
+        "-c".into(),
+        "model_reasoning_effort=low".into(),
+    ];
+    argv.extend(session_tail.iter().map(|s| s.to_string()));
+    HerdrLaunchPlan {
+        name: "card-42-execute".into(),
+        name_fallback: Some("card-42-execute-r7".into()),
+        agent_kind: Some("codex".into()),
+        initial_prompt: initial_prompt.map(str::to_string),
+        system_prompt: Some("codex system instructions".into()),
+        tab_label: Some("kanban".into()),
+        owned_tab_id: None,
+        durable_pane_ids: Vec::new(),
+        reclaimable_pane_ids: Vec::new(),
+        durable_anchor_pane_ids: Vec::new(),
+        reuse_pane_id: None,
+        cwd: Some(PathBuf::from("/tmp/card cwd")),
+        workspace_ref: Some("w1".into()),
+        herdr_socket: None,
+        bootstrap: None,
+        env: vec![("BOARD_CARD_ID".into(), "42".into())],
+        argv,
+    }
+}
+
 fn assert_startup_prompt_file(
     req: &Value,
     expected_base_args: &[&str],

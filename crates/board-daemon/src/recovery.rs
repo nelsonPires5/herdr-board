@@ -71,6 +71,7 @@ async fn adopt_runs(d: &Arc<Daemon>) {
             anchor_pane_id: run.herdr_anchor_pane_id.clone(),
             pid: None,
             herdr_socket,
+            captured_session_id: run.session_id.clone(),
         };
         let alive = if handle.pane_id.is_some() {
             let spawner = d.spawner.clone();

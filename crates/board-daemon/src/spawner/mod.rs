@@ -98,6 +98,12 @@ pub struct RuntimeHandle {
     /// herdr socket this pane lives on (its session), so kill/liveness target
     /// the right session after a daemon restart. `None` = default socket.
     pub herdr_socket: Option<PathBuf>,
+    /// Harness-reported conversation/thread id captured after launch
+    /// (self-minting integrations like codex report it only once the agent is
+    /// up, via `agent.get.agent_session`). The daemon persists it atomically
+    /// with run promotion + card running/session update; `None` means no
+    /// capture was attempted (pi/claude, reuse) or none validated.
+    pub captured_session_id: Option<String>,
 }
 
 /// Launch, kill, and liveness-check agent processes.
@@ -125,3 +131,10 @@ pub(crate) const AGENT_START_BUSY_BACKOFF: Duration = Duration::from_millis(100)
 pub(crate) const READINESS_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const READINESS_BACKOFF: Duration = Duration::from_millis(100);
 pub(crate) const IMMEDIATE_READINESS_PROBES: usize = 3;
+/// Total `agent.get` probes of the post-launch session capture (self-minting
+/// harnesses like codex). After the immediate probes the capture backs off
+/// with [`READINESS_BACKOFF`], and [`SESSION_CAPTURE_TIMEOUT`] is the hard
+/// wall-clock cap — the capture is bounded and degrades to `None` instead of
+/// polling forever, so a late or missing thread report never stalls launch.
+pub(crate) const SESSION_CAPTURE_PROBES: usize = 5;
+pub(crate) const SESSION_CAPTURE_TIMEOUT: Duration = Duration::from_secs(10);

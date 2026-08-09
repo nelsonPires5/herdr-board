@@ -205,7 +205,7 @@ impl HerdrSpawner {
             // `agent.start` and only re-prompts the live agent.
             let reused = req.reuse_pane_id.as_deref() == Some(owned.pane_id.as_str());
 
-            let launch_result = match req.agent_kind.as_deref() {
+            let launch_result: anyhow::Result<Option<String>> = match req.agent_kind.as_deref() {
                 Some(kind) => launch_managed(
                     &mut client,
                     req,
@@ -220,11 +220,12 @@ impl HerdrSpawner {
                     &selected_socket,
                     req,
                     &owned.pane_id,
-                ),
+                )
+                .map(|()| None),
             };
 
             match launch_result {
-                Ok(()) => {
+                Ok(captured_session_id) => {
                     // Managed card tabs converge to exactly one harness pane:
                     // once the fresh launch (or the reuse re-prompt) succeeded,
                     // close the anchor so no shell strip is left beside the
@@ -260,6 +261,10 @@ impl HerdrSpawner {
                         anchor_pane_id,
                         pid: None,
                         herdr_socket: req.herdr_socket.clone(),
+                        // The launch captured the integration-reported
+                        // conversation id (codex self-mints its thread id);
+                        // dispatch persists it atomically with the promotion.
+                        captured_session_id,
                     });
                 }
                 Err(error) if attempt == 0 && is_retryable_placement_race(&error) => {

@@ -45,6 +45,7 @@ pub(crate) fn env_card_id() -> Result<i64> {
 
 pub(crate) fn actor_run_id() -> Result<Option<i64>> {
     match std::env::var("BOARD_RUN_ID") {
+        Ok(value) if value.is_empty() => Ok(None),
         Ok(value) => Ok(Some(value.parse::<i64>().map_err(|_| {
             anyhow!("invalid $BOARD_RUN_ID '{value}': expected an integer")
         })?)),

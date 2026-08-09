@@ -2,7 +2,8 @@
 //!
 //! Built-in harness catalogs are intentionally small and static. Pi models stay
 //! free-form because they depend on provider/auth/user configuration; Claude's
-//! aliases are field-verified against Claude CLI 2.1.209. Config-defined
+//! aliases are field-verified against Claude CLI 2.1.209; codex is free-form
+//! with the full effort ladder and a fixed approval-mode enum. Config-defined
 //! harnesses declare capabilities in `[harness.NAME]`.
 
 use serde::{Deserialize, Serialize};
@@ -185,7 +186,6 @@ const CLAUDE_PERMISSION_MODES: [&str; 6] = [
 /// and therefore free-form; thinking is valid for omitted and explicit model
 /// ids; Pi has no board-level tool permission mode.
 pub struct Pi;
-
 impl HarnessMeta for Pi {
     fn id(&self) -> &str {
         "pi"
@@ -260,6 +260,55 @@ impl HarnessMeta for Claude {
     }
 }
 
+/// Codex reasoning efforts, ascending — the full board ladder. `off` maps to
+/// codex's `none` only while building argv ([`crate::harness::codex`]).
+const CODEX_EFFORTS: [Effort; 7] = [
+    Effort::Off,
+    Effort::Minimal,
+    Effort::Low,
+    Effort::Medium,
+    Effort::High,
+    Effort::Xhigh,
+    Effort::Max,
+];
+
+/// The codex CLI approval presets (board-facing ids). Each maps to an exact
+/// codex CLI spelling while building argv (see [`crate::harness::codex`]):
+/// `ask-for-approval`, `approve-for-me`, `full-access`. Sandbox stays a
+/// separate dimension and never hides inside this list.
+const CODEX_PERMISSION_MODES: [&str; 3] = ["ask-for-approval", "approve-for-me", "full-access"];
+
+/// Built-in `codex` harness adapter (zero-sized). Models are free-form (no
+/// alias catalog); every effort level is accepted for any model; approval is
+/// the fixed enum above; resume/fork are conversation-id subcommands.
+pub struct Codex;
+
+impl HarnessMeta for Codex {
+    fn id(&self) -> &str {
+        "codex"
+    }
+    fn models(&self) -> Vec<ModelInfo> {
+        Vec::new()
+    }
+    fn efforts(&self, _model: Option<&str>) -> Vec<Effort> {
+        CODEX_EFFORTS.to_vec()
+    }
+    fn permissions(&self) -> Vec<String> {
+        CODEX_PERMISSION_MODES
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+    fn model_freeform(&self) -> bool {
+        true
+    }
+    fn resume(&self) -> ResumeSupport {
+        // `codex resume <id>` re-opens a recorded thread (verified against the
+        // fixture harness in `e2e/fake-bin/codex`).
+        ResumeSupport::ByConversationId
+    }
+}
+
 /// Owning adapter for a config-defined harness (`[harness.NAME]`).
 pub struct ConfigHarness {
     name: String,
@@ -325,6 +374,7 @@ pub fn meta_for(harness: &str, config: &Config) -> Option<Box<dyn HarnessMeta>> 
     match harness {
         "pi" => Some(Box::new(Pi)),
         "claude" => Some(Box::new(Claude)),
+        "codex" => Some(Box::new(Codex)),
         _ => config.harness.get(harness).map(|def| {
             Box::new(ConfigHarness {
                 name: harness.to_string(),
@@ -366,6 +416,11 @@ pub fn pi_capabilities() -> HarnessCapabilities {
     HarnessCapabilities::from_meta(&Pi)
 }
 
+/// Built-in codex capabilities.
+pub fn codex_capabilities() -> HarnessCapabilities {
+    HarnessCapabilities::from_meta(&Codex)
+}
+
 /// Resolve capabilities for a built-in or config-defined harness via its
 /// [`HarnessMeta`] adapter. Unknown harness → `None`.
 pub fn capabilities_for(harness: &str, config: &Config) -> Option<HarnessCapabilities> {
@@ -389,6 +444,7 @@ pub fn default_capabilities(harness: &str) -> HarnessCapabilities {
     match harness {
         "pi" => pi_capabilities(),
         "claude" => claude_capabilities(),
+        "codex" => codex_capabilities(),
         _ => HarnessCapabilities {
             harness: harness.to_string(),
             models: Vec::new(),

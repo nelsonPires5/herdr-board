@@ -1,0 +1,346 @@
+#!/usr/bin/env bash
+# Hermetic, no-provider Codex stand-in for protocol-19 managed launches.
+# Codex mints its own thread/session id, has no system-prompt file, and carries
+# no prompt text in startup argv: the card task (Mint: system_prompt + task
+# block; resume/fork: task only) must arrive through the interactive terminal
+# via Herdr's agent.prompt AFTER the integration reported session identity +
+# idle readiness. This fixture pins that contract (mirror of
+# crates/board-core/tests/harness_codex.rs C3/C6):
+#   Mint   codex [--model M] [-c model_reasoning_effort=E]
+#                [approval preset]                                  (no id!)
+#   Resume codex ... resume <thread-id>       (subcommand, LAST two argv)
+#   Fork   codex ... fork <thread-id>         (subcommand, LAST two argv)
+#   -c model_reasoning_effort: board `off` maps to `none`; the other levels
+#     keep their spelling (minimal|low|medium|high|xhigh|max); `off`/`ultra`
+#     and any other -c key are rejected (the prompt must never ride -c).
+#   Approval presets (board-facing ids, each with an exact CLI spelling):
+#     ask-for-approval -> --sandbox workspace-write --ask-for-approval on-request
+#     approve-for-me   -> --approve-for-me
+#     full-access      -> --dangerously-bypass-approvals-and-sandbox
+#     The old codex-internal ids untrusted/on-request/never are rejected.
+#   --session-id/--resume/--fork flags, --append-system-prompt*, and `--` are
+#     invalid for codex: resume/fork are subcommands, mint has no session flag,
+#     and there is no system-prompt file equivalent.
+# The minted thread id is deterministic and stable so scenario 31 can predict
+# it: "${FAKE_CODEX_THREAD_ID:-codex-thread-$BOARD_CARD_ID}-$RUN_LABEL"
+# (FAKE_CODEX_THREAD_ID is an optional base; fork/mint always append the run
+# label, so two mints never collide). Resume reuses the argv id verbatim.
+# The thread id is reported to Herdr via pane.report_agent_session
+# (--agent-session-id) exactly like the real Codex integration reports
+# AgentInfo.agent_session; the daemon's post-launch agent.get capture (C4/C5)
+# reads it back. `board comment`/`done` run only after the terminal shim
+# verified agent.prompt bytes equal the committed run's prompt_snapshot.
+set -euo pipefail
+
+: "${BOARD_CARD_ID:?BOARD_CARD_ID required}"
+: "${BOARD_SOCKET:?BOARD_SOCKET required}"
+: "${HERDR_SOCKET_PATH:?HERDR_SOCKET_PATH required}"
+
+# A *rescued* pane never receives BOARD_RUN_ID (the actor credential): it may
+# not write to the immutable historical run row. The inert BOARD_RESCUED_RUN_ID
+# label names its artifacts instead, and rescue must re-attach to the recorded
+# thread (`resume <id>`) — minting a new thread on rescue would break the
+# byte-for-byte runs-row guarantee.
+if [ "${BOARD_RESCUE:-0}" = "1" ]; then
+  [ -z "${BOARD_RUN_ID:-}" ] \
+    || { echo 'fake codex: a rescued pane must NOT receive BOARD_RUN_ID' >&2; exit 2; }
+  : "${BOARD_RESCUED_RUN_ID:?BOARD_RESCUED_RUN_ID required on a rescued pane}"
+  RUN_LABEL="$BOARD_RESCUED_RUN_ID"
+else
+  : "${BOARD_RUN_ID:?BOARD_RUN_ID required}"
+  RUN_LABEL="$BOARD_RUN_ID"
+fi
+
+argv=("$@")
+model=""; effort=""; permission=""; sandbox=""
+sub=""; sub_id=""
+while (($#)); do
+  case "$1" in
+    --model|-m)
+      (($# >= 2)) || { echo 'fake codex: --model missing value' >&2; exit 2; }
+      [ -z "$model" ] || { echo 'fake codex: duplicate --model' >&2; exit 2; }
+      model="$2"; shift 2 ;;
+    -c)
+      (($# >= 2)) || { echo 'fake codex: -c missing value' >&2; exit 2; }
+      case "$2" in
+        model_reasoning_effort=none|model_reasoning_effort=minimal|model_reasoning_effort=low|model_reasoning_effort=medium|model_reasoning_effort=high|model_reasoning_effort=xhigh|model_reasoning_effort=max)
+          effort="${2#model_reasoning_effort=}" ;;
+        model_reasoning_effort=*)
+          echo "fake codex: board effort must map off->none (got: $2)" >&2; exit 2 ;;
+        *)
+          echo "fake codex: unexpected -c config; the prompt must never ride -c: $2" >&2; exit 2 ;;
+      esac
+      shift 2 ;;
+    --ask-for-approval|-a)
+      # Only the on-request policy may ride this flag — the board-facing
+      # `ask-for-approval` preset spells it explicitly. The codex-internal
+      # ids `untrusted`/`never` are no longer board vocabulary.
+      (($# >= 2)) || { echo 'fake codex: --ask-for-approval missing value' >&2; exit 2; }
+      [ "$2" = "on-request" ] || {
+        echo "fake codex: --ask-for-approval accepts only on-request (the ask-for-approval preset): $2" >&2; exit 2; }
+      [ -z "$permission" ] || { echo 'fake codex: duplicate approval preset' >&2; exit 2; }
+      permission="ask-for-approval"; shift 2 ;;
+    --approve-for-me)
+      [ -z "$permission" ] || { echo 'fake codex: duplicate approval preset' >&2; exit 2; }
+      permission="approve-for-me"; shift 1 ;;
+    --dangerously-bypass-approvals-and-sandbox)
+      [ -z "$permission" ] || { echo 'fake codex: duplicate approval preset' >&2; exit 2; }
+      permission="full-access"; shift 1 ;;
+    --sandbox)
+      # Sandbox is a separate dimension: the board spells it explicitly ONLY
+      # for the ask-for-approval preset, and only as workspace-write. A
+      # user-config --sandbox on a configured launch is still recorded.
+      (($# >= 2)) || { echo 'fake codex: --sandbox missing value' >&2; exit 2; }
+      [ -z "$sandbox" ] || { echo 'fake codex: duplicate --sandbox' >&2; exit 2; }
+      sandbox="$2"; shift 2 ;;
+    --session-id|--resume|--fork|--append-system-prompt|--append-system-prompt-file|--)
+      echo "fake codex: invalid protocol-19 startup option: $1" >&2; exit 2 ;;
+    resume|fork)
+      # Subcommands are the session flags and MUST close the argv: nothing may
+      # follow the thread id (in particular no task text).
+      (($# == 2)) || { echo "fake codex: '$1 <id>' must be the last two argv entries" >&2; exit 2; }
+      [ -z "$sub" ] || { echo 'fake codex: duplicate subcommand' >&2; exit 2; }
+      [ -n "$2" ] || { echo "fake codex: '$1' needs a non-empty thread id" >&2; exit 2; }
+      case "$2" in
+        *[!A-Za-z0-9._:-]*) echo "fake codex: suspicious '$1' thread id (leaked prompt?): $2" >&2; exit 2 ;;
+      esac
+      sub="$1"; sub_id="$2"; shift 2 ;;
+    -*) echo "fake codex: unexpected startup option: $1" >&2; exit 2 ;;
+    *) echo "fake codex: card prompt leaked into startup argv: $1" >&2; exit 2 ;;
+  esac
+done
+
+# Preset/pair consistency: the ask-for-approval preset REQUIRES the
+# explicit workspace-write sandbox; the other presets never carry --sandbox.
+case "$permission" in
+  ask-for-approval)
+    [ "$sandbox" = "workspace-write" ] \
+      || { echo 'fake codex: ask-for-approval must pair with --sandbox workspace-write' >&2; exit 2; } ;;
+  approve-for-me|full-access)
+    [ -z "$sandbox" ] || { echo "fake codex: $permission never carries --sandbox" >&2; exit 2; } ;;
+esac
+
+mode="mint"; resume_id=""; fork_id=""
+case "$sub" in
+  "")    mode="mint" ;;
+  resume) mode="resume"; resume_id="$sub_id" ;;
+  fork)  mode="fork";  fork_id="$sub_id" ;;
+esac
+
+# A rescued pane must re-attach to the recorded thread, and the daemon's
+# BOARD_RESUME_SESSION_ID must name exactly the id in `resume <id>`.
+if [ "${BOARD_RESCUE:-0}" = "1" ]; then
+  [ "$mode" = "resume" ] \
+    || { echo "fake codex: a rescued pane must resume, not $mode" >&2; exit 2; }
+  : "${BOARD_RESUME_SESSION_ID:?BOARD_RESUME_SESSION_ID required on a rescued pane}"
+  [ "$BOARD_RESUME_SESSION_ID" = "$resume_id" ] \
+    || { echo "fake codex: resume id '$BOARD_RESUME_SESSION_ID' != argv 'resume $resume_id'" >&2; exit 2; }
+fi
+
+# Mint/fork create a NEW thread (codex mints its own id; the board must never
+# invent one). Deterministic + stable: scenario 31 can predict the id from the
+# card and run ids, or pin a base with FAKE_CODEX_THREAD_ID.
+if [ "$mode" = "resume" ]; then
+  thread_id="$resume_id"
+else
+  thread_id="${FAKE_CODEX_THREAD_ID:-codex-thread-$BOARD_CARD_ID}-$RUN_LABEL"
+fi
+
+suffix=""
+if [ "${BOARD_RESCUE:-0}" = "1" ]; then
+  suffix="-rescue"
+fi
+record="$(dirname "$BOARD_SOCKET")/fake-codex-run-$RUN_LABEL$suffix.json"
+python3 - "$record" "$RUN_LABEL" "$PWD" "$BOARD_CARD_ID" "$BOARD_SOCKET" \
+  "$HERDR_SOCKET_PATH" "$mode" "$model" "$effort" "$permission" "$sandbox" \
+  "$thread_id" "$resume_id" "$fork_id" "${BOARD_RESCUE:-0}" "${argv[@]}" <<'PY'
+import json, sys
+(path, run_id, cwd, card_id, board_socket, herdr_socket, mode, model, effort,
+ permission, sandbox, thread_id, resume_id, fork_id, rescue, *argv) = sys.argv[1:]
+with open(path, "w", encoding="utf-8") as target:
+    json.dump({
+        "run_id": int(run_id), "card_id": int(card_id), "cwd": cwd,
+        "board_socket": board_socket, "herdr_socket": herdr_socket,
+        "mode": mode, "model": model or None,
+        "effort": effort or None, "permission_mode": permission or None,
+        "sandbox": sandbox or None,
+        "thread_id": thread_id,
+        "resume_id": resume_id or None, "fork_id": fork_id or None,
+        "argv": argv,
+        "system_prompt_file": None,
+        "startup_argv_has_no_prompt": True,
+        "rescue": rescue == "1",
+    }, target, ensure_ascii=False, indent=2)
+    target.write("\n")
+PY
+
+# Mirror the real Codex integration startup ordering: establish a unique
+# transcript path, emit the terminal identity surface, report the minted
+# thread id (AgentInfo.agent_session) + idle lifecycle, and only then let Herdr
+# deliver agent.prompt. No fixture path calls board done early.
+#
+# Opt-in degraded-integration mode: report ONLY the idle lifecycle, never a
+# session identity, so Herdr's agent.get carries no agent_session and the
+# daemon's bounded capture (C5) degrades — the basic mint still completes,
+# but the run persists NULL and rescue must fail closed. Scenario 31 pins
+# that contract; the record's `reports` proves no session report ran.
+#
+# The managed pane's env is the daemon's launch env (a split pane does not
+# inherit the workspace env), so a scenario-level export cannot reach this
+# process. The fixture therefore also honors the documented per-run sentinel:
+# a --model value of exactly `no-session` (codex models are free-form).
+if [ "${FAKE_CODEX_NO_SESSION:-0}" != "1" ] && [ "$model" != "no-session" ]; then
+  FAKE_CODEX_NO_SESSION=0
+else
+  FAKE_CODEX_NO_SESSION=1
+fi
+# The degraded no-session mode skips the transcript and the identity report
+# entirely: there is no session evidence to hand out.
+session_dir="$(dirname "$BOARD_SOCKET")/fake-codex-sessions"
+mkdir -p "$session_dir"
+# Unique per process: a run can be reopened more than once (each reopen is a
+# fresh launch), and the exclusive-create below must keep catching a genuine
+# double-launch of the SAME process rather than failing a legitimate retry.
+session_path="$session_dir/${thread_id}-${RUN_LABEL}${suffix}-$$.jsonl"
+if [ "${FAKE_CODEX_NO_SESSION:-0}" != "1" ]; then
+python3 - "$session_path" "$thread_id" "$RUN_LABEL" <<'PY'
+import json, os, sys
+path, thread_id, run_id = sys.argv[1:]
+with open(path, "x", encoding="utf-8") as target:
+    json.dump({"type": "session", "thread_id": thread_id, "run_id": int(run_id)}, target)
+    target.write("\n")
+os.chmod(path, 0o600)
+PY
+fi
+printf '\033]0;Codex\007'
+printf '\n──────────────────────────────────────────────────────\n❯ \n──────────────────────────────────────────────────────\n'
+if [ "${FAKE_CODEX_NO_SESSION:-0}" = "1" ]; then
+  # report ONLY the idle lifecycle (comment above explains the per-run
+  # sentinel: env cannot cross into the daemon's split-pane launch env).
+  python3 - "$record" "$thread_id" "$RUN_LABEL" <<'PY'
+import json, os, socket, sys, time
+record_path, thread_id, run_id = sys.argv[1:]
+pane_id = os.environ.get("HERDR_PANE_ID", "")
+socket_path = os.environ.get("HERDR_SOCKET_PATH", "")
+envelope = {
+    "id": f"e2e:herdr:codex:{os.getpid()}:idle",
+    "method": "pane.report_agent",
+    "params": {
+        "pane_id": pane_id,
+        "source": "herdr:codex",
+        "agent": "codex",
+        "seq": time.time_ns(),
+        "state": "idle",
+    },
+}
+result = {"phase": "idle_lifecycle", "request": envelope}
+try:
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(2.0)
+    client.connect(socket_path)
+    client.sendall((json.dumps(envelope, separators=(",", ":")) + "\n").encode())
+    chunks = bytearray()
+    while b"\n" not in chunks:
+        chunk = client.recv(65536)
+        if not chunk:
+            break
+        chunks.extend(chunk)
+    client.close()
+    reply = json.loads(bytes(chunks).splitlines()[0])
+    result["reply"] = reply
+    result["ok"] = "result" in reply and "error" not in reply
+except Exception as error:
+    result["ok"] = False
+    result["error"] = f"{type(error).__name__}: {error}"
+with open(record_path, encoding="utf-8") as source:
+    record = json.load(source)
+record.update({
+    "herdr_pane_id": pane_id,
+    "report_socket": socket_path,
+    "agent_session_id": None,
+    "agent_session_path": None,
+    "session_start_source": None,
+    "thread_id": thread_id,
+    "reports": [result],
+    "readiness_report": "ok" if result["ok"] else "failed:idle_lifecycle",
+    "no_session_report": True,
+})
+with open(record_path, "w", encoding="utf-8") as target:
+    json.dump(record, target, ensure_ascii=False, indent=2)
+    target.write("\n")
+if not result["ok"]:
+    print(f"fake codex: idle lifecycle report failed: {result}", file=sys.stderr)
+    raise SystemExit(2)
+PY
+else
+  python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/managed-agent-report.py" \
+    "$record" codex "$thread_id" "$session_path" startup
+fi
+
+# A rescued pane resumes an existing conversation, so the daemon deliberately
+# sends NO agent.prompt (re-sending the card task would re-run it). Skip the
+# prompt shim entirely and just stay interactive, which is what a resumed
+# session looks like.
+if [ "${BOARD_RESCUE:-0}" = "1" ]; then
+  sleep "${FAKE_MANAGED_HOLD:-60}"
+  exit 0
+fi
+
+# Spawn registration commits only after readiness polling + agent.prompt
+# return. A same-conversation reuse hop re-prompts this SAME process on its
+# pane (no new agent.start), so the fixture loops: read one stage's prompt,
+# comment, done, then block on the next prompt. FAKE_PI_LOOP is the channel
+# lib.sh already forwards to managed workspaces; FAKE_CODEX_LOOP is the
+# canonical name once plumbing exists.
+loop=0
+[ "${FAKE_CODEX_LOOP:-0}" = "1" ] && loop=1
+[ "${FAKE_PI_LOOP:-0}" = "1" ] && loop=1
+trace=""
+if [ "$loop" = "1" ]; then
+  trace="$(dirname "$BOARD_SOCKET")/fake-codex-loop-$RUN_LABEL.log"
+  printf 'pid=%s loop=1 pane=%s record=%s\n' "$$" "${HERDR_PANE_ID:-<unset>}" "$record" >>"$trace"
+fi
+
+run_one_codex_stage() {
+  [ -z "$trace" ] || printf 'stage: shim start\n' >>"$trace"
+  FAKE_MANAGED_KIND=codex FAKE_PI_LOOP="$loop" \
+    python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/managed-terminal-shim.py" "$record" || {
+      rc=$?
+      if [ -n "$trace" ]; then
+        printf 'stage: shim fail rc=%s\n' "$rc" >>"$trace"
+        python3 - "$record" >>"$trace" <<'PY' || true
+import hashlib, json, sys
+try:
+    x=json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception as e:
+    print(f"record_error={type(e).__name__}")
+else:
+    for key in ("prompt_error", "prompt_received_via_stdin", "prompt_matches_run_snapshot"):
+        print(f"{key}={x.get(key)!r}")
+    for key in ("prompt", "expected_prompt"):
+        value=(x.get(key) or "").encode()
+        print(f"{key}_len={len(value)} {key}_sha256={hashlib.sha256(value).hexdigest()}")
+PY
+      fi
+      return "$rc"
+    }
+  [ -z "$trace" ] || printf 'stage: shim ok\n' >>"$trace"
+  sleep "${FAKE_CODEX_SLEEP:-${FAKE_PI_SLEEP:-1.5}}"
+  "${BOARD_BIN:?BOARD_BIN required}" comment "fake codex: agent.prompt delivered the card task; no system-prompt file in argv" || {
+    rc=$?; [ -z "$trace" ] || printf 'stage: comment fail rc=%s\n' "$rc" >>"$trace"; return "$rc"
+  }
+  [ -z "$trace" ] || printf 'stage: comment ok\n' >>"$trace"
+  "$BOARD_BIN" done --outcome ok || {
+    rc=$?; [ -z "$trace" ] || printf 'stage: done fail rc=%s\n' "$rc" >>"$trace"; return "$rc"
+  }
+  [ -z "$trace" ] || printf 'stage: done ok\n' >>"$trace"
+}
+
+if [ "$loop" = "1" ]; then
+  while true; do
+    run_one_codex_stage
+  done
+else
+  run_one_codex_stage
+  sleep "${FAKE_MANAGED_HOLD:-60}"
+fi
