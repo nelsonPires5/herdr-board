@@ -16,12 +16,26 @@ and stop at human gates automatically.
 <details>
 <summary><strong>Interface</strong></summary>
 
-| Guided card creation | Card context and run history | Compact mobile view |
-|:--:|:--:|:--:|
-| <img src="docs/assets/readme/new-card.png" alt="New card form with agent settings and execution target" width="440"> | <img src="docs/assets/readme/card-detail.png" alt="Card detail sheet with runs and comments" width="440"> | <img src="docs/assets/readme/compact-board.png" alt="Compact mobile layout with touch-friendly controls" width="250"> |
+**Guided card creation** — agent settings, execution target, and the action rail.
+
+<p align="center">
+  <img src="docs/assets/readme/new-card.png" alt="New card form with agent settings and execution target" width="640">
+</p>
+
+**Card context and run history** — runs, comments, and actions.
+
+<p align="center">
+  <img src="docs/assets/readme/card-detail.png" alt="Card detail sheet with runs and comments" width="640">
+</p>
 
 The TUI is mobile-first: a compact, touch-friendly layout that fits phones and small terminals —
-the same board, anywhere. Agents run in visible Herdr panes, one stable `card-<id>` tab per card.
+the same board, anywhere.
+
+<p align="center">
+  <img src="docs/assets/readme/compact-board.png" alt="Compact mobile layout with touch-friendly controls" width="360">
+</p>
+
+Agents run in visible Herdr panes, one stable `card-<id>` tab per card.
 
 <p align="center">
   <img src="docs/assets/readme/agent-panes.png" alt="Visible board agent panes labeled per card" width="100%">
@@ -88,8 +102,26 @@ Open the board:
 herdr plugin action invoke open-board --plugin herdr-board
 ```
 
-An optional keybinding (`prefix+shift+k`) opens it from anywhere — see
-[`docs/install.md`](docs/install.md).
+<details>
+<summary><strong>Set up a keybinding to open the board from anywhere</strong></summary>
+
+An optional keybinding (`prefix+shift+k`, so **Shift+K** after your prefix) opens the board from
+anywhere. It is not configured automatically — add it to your Herdr config at
+`~/.config/herdr/config.toml`:
+
+```toml
+[[keys.command]]
+key = "prefix+shift+k"
+type = "shell"
+command = "herdr plugin action invoke open-board --plugin herdr-board"
+description = "open herdr-board kanban (overlay)"
+```
+
+Herdr's default prefix is `ctrl+b`, so with defaults the binding is `Ctrl+B Shift+K` (if your
+prefix is `ctrl+a`, it is `Ctrl+A Shift+K`). Do not reuse `prefix+k` — it is Herdr's
+`focus_pane_up` by default.
+
+</details>
 
 ### Supported harnesses
 
@@ -117,8 +149,8 @@ An optional keybinding (`prefix+shift+k`) opens it from anywhere — see
   herdr plugin pane open --plugin herdr-board --entrypoint board --placement tab --focus
   ```
 
-- Custom CLI directory, keybinding setup, harness integration, optional agent skill, and named
-  sessions: [`docs/install.md`](docs/install.md).
+- Custom CLI directory, harness integration, optional agent skill, and named sessions:
+  [`docs/install.md`](docs/install.md).
 
 </details>
 
@@ -141,10 +173,6 @@ board card create --title "Add retry to the uploader" \
   --space-kind new-workspace --space-ref uploader --space-cwd /path/to/repo
 board move <new-card-id> Execute
 ```
-
-Pi is the default built-in harness; Claude Code, Codex, and OpenCode are available with
-`--harness <name>`, each keeping its own model, effort, and permission behavior — the full reference
-is [`skill/SKILL.md`](skill/SKILL.md) (also printed by `board skill`).
 
 ### Everyday controls
 
