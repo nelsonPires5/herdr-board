@@ -165,8 +165,9 @@ live geometry for both minimum pane sizes. Per-card first allocation is serializ
 socket, workspace, card label)`. Legacy pre-v11 rows retain the `kanban` lookup and old root/split
 behavior.
 Placement, cwd, and env are never passed to `agent.start`. A newly allocated child can briefly retain
-Herdr's previous agent state, so a typed `agent_pane_busy` response gets at most two retries of the
-exact same `agent.start` request on that same board-owned child, with 100ms then 200ms backoff. It
+Herdr's previous agent state, or its login shell can still be booting toward an interactive prompt, so
+a typed `agent_pane_busy` response gets at most five retries of the exact same `agent.start` request
+on that same board-owned child, with 100ms backoff doubling per retry (100/200/400/800/1600ms). It
 never allocates another pane for this transient. Persistent busy is terminal and closes only that
 owned child; the shell anchor remains. `pane_not_found` is a separate placement race that closes the
 child when present, restarts from `tab.list`, and retries complete placement once.
@@ -604,8 +605,9 @@ agent.prompt {target:pane_id, text:task_prompt}
 ```
 
 If Herdr returns typed `agent_pane_busy`, boardd retries the exact `agent.start` parameters—including
-pane, name, args, timeout, and the same system-prompt file—on that same owned pane at most twice,
-backing off 100ms then 200ms. This bounded transient retry never allocates another pane. A
+pane, name, args, timeout, and the same system-prompt file—on that same owned pane at most five times,
+backing off 100ms then doubling per retry (100/200/400/800/1600ms), long enough for a slow login
+shell to reach its prompt. This bounded transient retry never allocates another pane. A
 persistent busy response is terminal: the ordinary error path closes the board-owned child and
 leaves the pre-existing split anchor intact. This is not the `pane_not_found` placement race;
 that error closes the owned child when present, rediscovers from `tab.list`, and retries complete
@@ -742,7 +744,7 @@ executes the returned plan; it performs no Herdr or SQLite I/O in the pure decis
 ## 8. Failure & safety rails
 
 - Per-run timeout (column-configurable) → kill pane, run `fail`, card to `on_fail`.
-- Managed `agent_pane_busy` is retried only on the same newly owned child (two retries, 100ms/200ms backoff); persistent failure closes that child but never the pre-existing anchor. `pane_not_found` instead triggers the separate one-time full placement rediscovery path.
+- Managed `agent_pane_busy` is retried only on the same newly owned child (five retries, 100ms backoff doubling to 1600ms, ≈3.1s window); persistent failure closes that child but never the pre-existing anchor. `pane_not_found` instead triggers the separate one-time full placement rediscovery path.
 - `--max-budget-usd` per run (Claude supports it in print mode; interactive panes rely on timeout + human visibility).
 - Pi has no board tool-permission mode; no permission/approval flag is added and explicit Pi permission is rejected. Claude `bypassPermissions` requires explicit per-card opt-in, never a column default.
 - Cards never auto-move into *Done*; last auto hop is always a human-gated column.

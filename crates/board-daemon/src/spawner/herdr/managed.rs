@@ -368,9 +368,11 @@ impl AgentStartBusyRetryBudget {
     }
 }
 
-/// A newly allocated board-owned pane can briefly retain Herdr's previous
-/// agent state. Retry the exact start request on that same pane before giving
-/// up; the caller's owned-pane cleanup handles a persistent busy response.
+/// A newly allocated board-owned pane can answer `agent_pane_busy` both
+/// because Herdr retains the previous agent state and because its login shell
+/// has not reached an interactive prompt yet (slow shell boot can last
+/// ~0.5s). Retry the exact start request on that same pane before giving up;
+/// the caller's owned-pane cleanup handles a persistent busy response.
 fn agent_start_retry_busy(
     client: &mut HerdrClient,
     params: &AgentStartParams,

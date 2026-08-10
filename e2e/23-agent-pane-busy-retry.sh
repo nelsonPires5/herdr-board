@@ -96,9 +96,9 @@ layout_check "$TRANSIENT_LAYOUT" "$TRANSIENT_PANE" 1 0 "$TRANSIENT_PANE"
 ok "transient busy retried agent.start on one newly allocated child"
 
 step "Persistent agent_pane_busy must clean the owned child"
-# AGENT_START_BUSY_RETRIES=2: persistent busy therefore produces exactly
-# two delayed retries plus the initial start, i.e. three attempts/injections.
-EXPECTED_PERSISTENT_ATTEMPTS=3
+# AGENT_START_BUSY_RETRIES=5: persistent busy therefore produces exactly
+# five delayed retries plus the initial start, i.e. six attempts/injections.
+EXPECTED_PERSISTENT_ATTEMPTS=6
 BEFORE_PERSISTENT="$(e2e_proxy_command status)"
 e2e_proxy_command agent_pane_busy_persistent >/dev/null
 PERSISTENT_CARD_JSON="$($BOARD_BIN card new --title 'Persistent pane busy' \

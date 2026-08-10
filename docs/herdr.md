@@ -181,9 +181,10 @@ After start, `agent.get <target>` exposes `interactive_ready` and
 `launch_pending`. herdr-board waits for `interactive_ready=true` and
 `launch_pending=false`, then submits the exact card task with `agent.prompt`
 instead of startup argv or synthetic keystrokes. A newly allocated child can
-briefly retain prior agent state and return typed `agent_pane_busy`; the board
-retries the exact `agent.start` request on that same child at most twice, with
-bounded 100ms/200ms backoff. It never allocates a second child for that
+briefly retain prior agent state — or a slow login shell can still be booting — and return typed
+`agent_pane_busy`; the board
+retries the exact `agent.start` request on that same child at most five times, with
+bounded 100ms backoff doubling per retry (100/200/400/800/1600ms). It never allocates a second child for that
 response. Persistent busy is a launch failure whose cleanup closes only the
 owned child pane and leaves the anchor; `pane_not_found` is handled separately
 as a placement race that restarts discovery from `tab.list` and retries
