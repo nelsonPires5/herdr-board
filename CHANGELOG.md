@@ -17,6 +17,7 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- [#67](https://github.com/nelsonPires5/herdr-board/pull/67) fix: repair the Prepare Release workflow so release pull requests open correctly.
 - [#64](https://github.com/nelsonPires5/herdr-board/pull/64) fix: retry `agent.start` on a fresh owned pane with backoff so slow login shells stop failing managed runs.
 
 ## [0.12.0] - 2026-08-08
