@@ -397,12 +397,13 @@ pub(crate) fn register_spawned_run(
             spawned.pane_id.as_deref(),
             spawned.anchor_pane_id.as_deref(),
             timeout_deadline_at_ms,
-            // The harness-captured conversation id (codex self-mints its
-            // thread id) is persisted in the SAME transaction as the run
-            // promotion and the card running/session update — the capture
-            // travels through this cancellation critical section, so a cancel
-            // that ended the run while the spawn was in flight discards the
-            // captured id together with the handle.
+            // The harness-captured conversation id (self-minting harnesses
+            // like codex/opencode report it only once the agent is up) is
+            // persisted in the SAME transaction as the run promotion and the
+            // card running/session update — the capture travels through this
+            // cancellation critical section, so a cancel that ended the run
+            // while the spawn was in flight discards the captured id together
+            // with the handle.
             spawned.captured_session_id.as_deref(),
         )?;
         let registered_handle = handle.take().ok_or_else(|| {
@@ -453,19 +454,29 @@ pub(crate) fn register_spawned_run(
 ///   is the mint/resume shape);
 /// - claude fork: `--resume <id> --fork-session` (a plain `--resume` resumes
 ///   in place);
-/// - codex fork/resume are trailing subcommands: `fork <id>` vs `resume <id>`.
+/// - codex fork/resume are trailing subcommands: `fork <id>` vs `resume <id>`;
+/// - opencode fork/resume are trailing session flags: `-s <id> --fork` vs
+///   `-s <id>` (a Mint carries no `-s` at all).
 ///
 /// A Fork records the SOURCE conversation id on the run — the fork's new
 /// thread id replaces it only at promotion — so `run.session_id` cannot tell
 /// a retry-fork from a resume; the argv can. Fork hops must never re-prompt
 /// the prior live same-session pane: re-prompting keeps the old conversation
 /// and the queued `fork <id>` subcommand would never execute.
-fn argv_is_fork(harness: &str, argv: &[String]) -> bool {
+pub(super) fn argv_is_fork(harness: &str, argv: &[String]) -> bool {
     match harness {
         "pi" => argv.iter().any(|arg| arg == "--fork"),
         "claude" => argv.iter().any(|arg| arg == "--fork-session"),
         // Same tail check the spawner uses to detect codex session flags.
         "codex" => argv.len() >= 2 && argv[argv.len() - 2] == "fork",
+        // opencode's session flags close the argv: `-s <id>` (resume) or
+        // `-s <id> --fork` (fork). Only the trailing session-shaped tail
+        // window is inspected — the free-form model value after `-m` could
+        // itself be spelled `--fork` on a Mint, but it can never sit two
+        // tokens behind a trailing `--fork`.
+        "opencode" => {
+            argv.len() >= 3 && argv[argv.len() - 3] == "-s" && argv[argv.len() - 1] == "--fork"
+        }
         _ => false,
     }
 }

@@ -1,0 +1,430 @@
+#!/usr/bin/env bash
+# Hermetic, no-provider OpenCode stand-in for protocol-19 managed launches.
+# OpenCode TUI mints its own `ses_…` session id, has no system-prompt file,
+# and carries no prompt text in startup argv: the card task (Mint:
+# system_prompt + task block; resume/fork: task only) must arrive through the
+# interactive terminal via Herdr's agent.prompt AFTER the integration reported
+# session identity + idle readiness. This fixture pins that contract (mirror of
+# crates/board-core/tests/harness_opencode.rs O3/O6 + the daemon's
+# managed.rs opencode launch):
+#   Mint   opencode [--agent herdr-board | -m M] [--auto]    (no session flag!)
+#   Resume opencode ... -s <session-id>                    (flag, LAST tokens)
+#   Fork   opencode ... -s <session-id> --fork             (flag, LAST tokens)
+#   The root/TUI has NO --variant flag (verified opencode 1.18.15: --variant
+#   exists only on `opencode run`). Board effort therefore never rides argv:
+#   with an effort the adapter selects a stable custom agent
+#   (`--agent herdr-board`) whose model+variant ride the process-local
+#   OPENCODE_CONFIG_CONTENT env JSON — the fixture requires it, parses it with
+#   json.loads, and pins the EXACT structure {"agent":{"herdr-board":
+#   {"model":..., "variant":...}}}; `--variant` is rejected here exactly like
+#   the real TUI rejects it, and `-m` is invalid while the agent owns the
+#   model. Without an effort the model stays `-m provider/model` and no
+#   config env is required. Board `off` maps to opencode variant `none`;
+#   every other level keeps its spelling (minimal|low|medium|high|xhigh|max).
+#   Other values are rejected (the prompt must never ride the config).
+#   Permission (board-facing ids, each with an exact CLI spelling):
+#     default      -> (no flag)
+#     auto-approve -> --auto
+#     The codex-style presets ask-for-approval/approve-for-me/full-access and
+#     any sandbox flag are rejected: they are not opencode board vocabulary.
+#   -s <id> is the ONLY session spelling (resume); --fork closes the argv.
+#     Legacy spellings (--session, --session-id, --resume, --fork-session,
+#     --model) and `--append-system-prompt*`/`--prompt`/`--` are invalid: a
+#     refactor must not drift back onto the flags the plan re-verified against
+#     the real `opencode --help`.
+# The minted session id is deterministic and stable so scenario 32 can predict
+# it: "${FAKE_OPENCODE_SESSION_ID:-ses-$BOARD_CARD_ID}-$RUN_LABEL"
+# (FAKE_OPENCODE_SESSION_ID is an optional base; fork/mint always append the
+# run label, so two mints never collide). Resume reuses the argv id verbatim.
+# The session id is reported to Herdr via pane.report_agent_session
+# (--agent-session-id) exactly like the real OpenCode integration reports
+# AgentInfo.agent_session ({agent: opencode, kind: id, source: herdr:opencode,
+# value}); the daemon's post-launch agent.get capture reads it back. `board
+# comment`/`done` run only after the terminal shim verified agent.prompt bytes
+# equal the committed run's prompt_snapshot.
+set -euo pipefail
+
+: "${BOARD_CARD_ID:?BOARD_CARD_ID required}"
+: "${BOARD_SOCKET:?BOARD_SOCKET required}"
+: "${HERDR_SOCKET_PATH:?HERDR_SOCKET_PATH required}"
+
+# A *rescued* pane never receives BOARD_RUN_ID (the actor credential): it may
+# not write to the immutable historical run row. The inert BOARD_RESCUED_RUN_ID
+# label names its artifacts instead, and rescue must re-attach to the recorded
+# session (`-s <id>`) — minting a new session on rescue would break the
+# byte-for-byte runs-row guarantee.
+if [ "${BOARD_RESCUE:-0}" = "1" ]; then
+  [ -z "${BOARD_RUN_ID:-}" ] \
+    || { echo 'fake opencode: a rescued pane must NOT receive BOARD_RUN_ID' >&2; exit 2; }
+  : "${BOARD_RESCUED_RUN_ID:?BOARD_RESCUED_RUN_ID required on a rescued pane}"
+  RUN_LABEL="$BOARD_RESCUED_RUN_ID"
+else
+  : "${BOARD_RUN_ID:?BOARD_RUN_ID required}"
+  RUN_LABEL="$BOARD_RUN_ID"
+fi
+
+argv=("$@")
+model=""; effort=""; permission=""; auto=""; agent=""
+session=""; session_id=""; fork=""
+while (($#)); do
+  case "$1" in
+    -m)
+      (($# >= 2)) || { echo 'fake opencode: -m missing value' >&2; exit 2; }
+      [ -z "$model" ] || { echo 'fake opencode: duplicate -m' >&2; exit 2; }
+      [ -z "$agent" ] || { echo 'fake opencode: -m is invalid while --agent herdr-board owns the model (effort rides the agent config)' >&2; exit 2; }
+      model="$2"; shift 2 ;;
+    --model)
+      # The verified CLI spelling is the short -m; a refactor to --model is
+      # exactly the drift this fixture exists to catch.
+      echo 'fake opencode: --model is not the pinned opencode spelling (use -m)' >&2; exit 2 ;;
+    --agent)
+      # The root/TUI accepts --agent, and the adapter selects exactly the
+      # stable herdr-board agent when a board effort is set.
+      (($# >= 2)) || { echo 'fake opencode: --agent missing value' >&2; exit 2; }
+      [ -z "$agent" ] || { echo 'fake opencode: duplicate --agent' >&2; exit 2; }
+      [ -z "$model" ] || { echo 'fake opencode: --agent is invalid with -m (the agent config owns the model)' >&2; exit 2; }
+      [ "$2" = "herdr-board" ] \
+        || { echo "fake opencode: only the board's herdr-board agent is valid (got: $2)" >&2; exit 2; }
+      agent="$2"; shift 2 ;;
+    --variant)
+      # The root/TUI rejects --variant (it exists only on `opencode run`).
+      # Board effort rides the OPENCODE_CONFIG_CONTENT agent config instead.
+      echo 'fake opencode: --variant is rejected by the opencode root/TUI; board effort must ride the herdr-board agent config env' >&2; exit 2 ;;
+    --auto)
+      [ -z "$auto" ] || { echo 'fake opencode: duplicate --auto' >&2; exit 2; }
+      auto="1"; permission="auto-approve"; shift 1 ;;
+    --auto-approve|--approve-for-me|--dangerously-bypass-approvals-and-sandbox|--sandbox)
+      echo "fake opencode: invalid approval preset for opencode: $1" >&2; exit 2 ;;
+    -s)
+      (($# >= 2)) || { echo 'fake opencode: -s missing value' >&2; exit 2; }
+      [ -z "$session" ] || { echo 'fake opencode: duplicate -s' >&2; exit 2; }
+      case "$2" in
+        *[!A-Za-z0-9._:-]*) echo "fake opencode: suspicious -s session id (leaked prompt?): $2" >&2; exit 2 ;;
+      esac
+      [ -n "$2" ] || { echo 'fake opencode: -s needs a non-empty session id' >&2; exit 2; }
+      session="1"; session_id="$2"; shift 2 ;;
+    --fork)
+      # --fork only ever closes the argv after `-s <id>` (the adapter appends
+      # `-s <id> --fork` as the LAST three tokens; nothing may follow).
+      [ -n "$session" ] || { echo 'fake opencode: --fork requires -s <id> before it' >&2; exit 2; }
+      [ -z "$fork" ] || { echo 'fake opencode: duplicate --fork' >&2; exit 2; }
+      [ $# -eq 1 ] || { echo "fake opencode: '--fork' must close the argv; unexpected: $2" >&2; exit 2; }
+      fork="1"; shift 1 ;;
+    --session|--session-id|--resume|--fork-session|--append-system-prompt|--append-system-prompt-file|--prompt|--)
+      echo "fake opencode: invalid protocol-19 startup option: $1" >&2; exit 2 ;;
+    -*) echo "fake opencode: unexpected startup option: $1" >&2; exit 2 ;;
+    *) echo "fake opencode: card prompt leaked into startup argv: $1" >&2; exit 2 ;;
+  esac
+done
+
+mode="mint"; resume_id=""; fork_id=""
+case "$session:$fork" in
+  "")           mode="mint" ;;
+  "1:")         mode="resume"; resume_id="$session_id" ;;
+  "1:1")        mode="fork";  fork_id="$session_id" ;;
+esac
+
+# Effort transport: the root/TUI has no --variant, so an effort rides the
+# process-local OPENCODE_CONFIG_CONTENT env as the herdr-board agent's
+# model+variant (the exact JSON `board_core::harness::opencode` builds). With
+# `--agent herdr-board` the config is REQUIRED and parsed fail-closed with
+# json.loads; the exact structure is pinned (only the agent map, only model +
+# variant, non-empty model, known variant spelling) so no prompt text can
+# ever sneak into it. Without `--agent` the model stays `-m` and no config is
+# required. Evidence of the transport layer is recorded below without ever
+# storing prompt text.
+config_env_present=0; config_env_ok=0; config_env_error=""
+config_model=""; config_variant=""
+if [ -n "$agent" ]; then
+  [ -n "${OPENCODE_CONFIG_CONTENT:-}" ] || {
+    echo 'fake opencode: --agent herdr-board requires OPENCODE_CONFIG_CONTENT (board effort rides this config; the TUI has no --variant)' >&2; exit 2
+  }
+  config_env_present=1
+  if parsed="$(OPENCODE_CONFIG_CONTENT_RAW="$OPENCODE_CONFIG_CONTENT" python3 - 2>&1 <<'PY'
+import json, os, sys
+raw = os.environ["OPENCODE_CONFIG_CONTENT_RAW"]
+try:
+    value = json.loads(raw)
+except Exception as error:
+    print(f"invalid JSON: {type(error).__name__}: {error}")
+    raise SystemExit(2)
+if not isinstance(value, dict) or set(value) != {"agent"}:
+    print(f"unexpected config top-level keys: {sorted(value) if isinstance(value, dict) else type(value).__name__}")
+    raise SystemExit(2)
+agents = value["agent"]
+if not isinstance(agents, dict) or set(agents) != {"herdr-board"}:
+    print(f"unexpected config agent keys: {sorted(agents) if isinstance(agents, dict) else type(agents).__name__}")
+    raise SystemExit(2)
+agent_config = agents["herdr-board"]
+if not isinstance(agent_config, dict) or set(agent_config) != {"model", "variant"}:
+    print(f"unexpected herdr-board agent fields: {sorted(agent_config) if isinstance(agent_config, dict) else type(agent_config).__name__}")
+    raise SystemExit(2)
+model = agent_config["model"]
+variant = agent_config["variant"]
+if not isinstance(model, str) or not model.strip():
+    print("herdr-board agent model must be a non-empty string")
+    raise SystemExit(2)
+if not isinstance(variant, str):
+    print("herdr-board agent variant must be a string")
+    raise SystemExit(2)
+if variant not in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
+    print(f"unexpected herdr-board agent variant value: {variant!r}")
+    raise SystemExit(2)
+print(model)
+print(variant)
+PY
+)"; then
+    # The managed pane intentionally narrows PATH to system tools; on macOS
+    # `/usr/bin/env bash` can therefore be Bash 3, which has no `mapfile`.
+    # Keep this fixture portable while preserving each validated JSON field.
+    config_model="$(printf '%s\n' "$parsed" | head -n 1)"
+    config_variant="$(printf '%s\n' "$parsed" | tail -n 1)"
+    config_env_ok=1
+    model="$config_model"
+    effort="$config_variant"
+  else
+    config_env_error="$parsed"
+    echo "fake opencode: invalid OPENCODE_CONFIG_CONTENT: $config_env_error" >&2
+    exit 2
+  fi
+fi
+
+# A rescued pane must re-attach to the recorded session, and the daemon's
+# BOARD_RESUME_SESSION_ID must name exactly the id in `-s <id>`.
+if [ "${BOARD_RESCUE:-0}" = "1" ]; then
+  [ "$mode" = "resume" ] \
+    || { echo "fake opencode: a rescued pane must resume, not $mode" >&2; exit 2; }
+  : "${BOARD_RESUME_SESSION_ID:?BOARD_RESUME_SESSION_ID required on a rescued pane}"
+  [ "$BOARD_RESUME_SESSION_ID" = "$resume_id" ] \
+    || { echo "fake opencode: resume id '$BOARD_RESUME_SESSION_ID' != argv '-s $resume_id'" >&2; exit 2; }
+fi
+
+# Mint/fork create a NEW session (opencode TUI mints its own `ses_…` id; the
+# board must never invent one). Deterministic + stable: scenario 32 can predict
+# the id from the card and run ids, or pin a base with FAKE_OPENCODE_SESSION_ID.
+if [ "$mode" = "resume" ]; then
+  session_identity="$resume_id"
+else
+  session_identity="${FAKE_OPENCODE_SESSION_ID:-ses-$BOARD_CARD_ID}-$RUN_LABEL"
+fi
+
+suffix=""
+if [ "${BOARD_RESCUE:-0}" = "1" ]; then
+  suffix="-rescue"
+fi
+record="$(dirname "$BOARD_SOCKET")/fake-opencode-run-$RUN_LABEL$suffix.json"
+python3 - "$record" "$RUN_LABEL" "$PWD" "$BOARD_CARD_ID" "$BOARD_SOCKET" \
+  "$HERDR_SOCKET_PATH" "$mode" "$model" "$effort" "$permission" \
+  "$session_identity" "$resume_id" "$fork_id" "${BOARD_RESCUE:-0}" \
+  "$agent" "$config_env_present" "$config_env_ok" "$config_env_error" \
+  "$config_model" "$config_variant" "${argv[@]}" <<'PY'
+import json, sys
+(path, run_id, cwd, card_id, board_socket, herdr_socket, mode, model, effort,
+ permission, session_identity, resume_id, fork_id, rescue, agent,
+ config_env_present, config_env_ok, config_env_error, config_model,
+ config_variant, *argv) = sys.argv[1:]
+with open(path, "w", encoding="utf-8") as target:
+    json.dump({
+        "run_id": int(run_id), "card_id": int(card_id), "cwd": cwd,
+        "board_socket": board_socket, "herdr_socket": herdr_socket,
+        "mode": mode, "model": model or None,
+        "effort": effort or None, "permission_mode": permission or None,
+        # Explicit transport-layer evidence: effort/model ride the
+        # process-local OPENCODE_CONFIG_CONTENT agent config, never argv.
+        "agent": agent or None,
+        "config_env_present": config_env_present == "1",
+        "config_env_ok": config_env_ok == "1",
+        "config_env_error": config_env_error or None,
+        "config_env_agent": agent or None,
+        "config_env_model": config_model or None,
+        "config_env_variant": config_variant or None,
+        "session_id": session_identity,
+        "resume_id": resume_id or None, "fork_id": fork_id or None,
+        "argv": argv,
+        "system_prompt_file": None,
+        "startup_argv_has_no_prompt": True,
+        "rescue": rescue == "1",
+    }, target, ensure_ascii=False, indent=2)
+    target.write("\n")
+PY
+
+# Mirror the real OpenCode integration startup ordering: establish a unique
+# transcript path, emit the terminal identity surface, report the minted
+# session id (AgentInfo.agent_session) + idle lifecycle, and only then let
+# Herdr deliver agent.prompt. No fixture path calls board done early.
+#
+# Opt-in degraded-integration mode: report ONLY the idle lifecycle, never a
+# session identity, so Herdr's agent.get carries no agent_session and the
+# daemon's bounded capture degrades — the basic mint still completes, but the
+# run persists NULL and rescue must fail closed. Scenario 32 pins that
+# contract; the record's `reports` proves no session report ran.
+#
+# The managed pane's env is the daemon's launch env (a split pane does not
+# inherit the workspace env), so a scenario-level export cannot reach this
+# process. The fixture therefore also honors the documented per-run sentinel:
+# an effective model value of exactly `no-session` (free-form — it arrives
+# either as `-m no-session` without an effort or as the agent config's model
+# when an effort is set).
+if [ "${FAKE_OPENCODE_NO_SESSION:-0}" != "1" ] && [ "$model" != "no-session" ]; then
+  FAKE_OPENCODE_NO_SESSION=0
+else
+  FAKE_OPENCODE_NO_SESSION=1
+fi
+# The degraded no-session mode skips the transcript and the identity report
+# entirely: there is no session evidence to hand out.
+session_dir="$(dirname "$BOARD_SOCKET")/fake-opencode-sessions"
+mkdir -p "$session_dir"
+# Unique per process: a run can be reopened more than once (each reopen is a
+# fresh launch), and the exclusive-create below must keep catching a genuine
+# double-launch of the SAME process rather than failing a legitimate retry.
+session_path="$session_dir/${session_identity}-${RUN_LABEL}${suffix}-$$.jsonl"
+if [ "${FAKE_OPENCODE_NO_SESSION:-0}" != "1" ]; then
+python3 - "$session_path" "$session_identity" "$RUN_LABEL" <<'PY'
+import json, os, sys
+path, session_id, run_id = sys.argv[1:]
+with open(path, "x", encoding="utf-8") as target:
+    json.dump({"type": "session", "session_id": session_id, "run_id": int(run_id)}, target)
+    target.write("\n")
+os.chmod(path, 0o600)
+PY
+fi
+printf '\033]0;OpenCode\007'
+printf '\n──────────────────────────────────────────────────────\n❯ \n──────────────────────────────────────────────────────\n'
+if [ "${FAKE_OPENCODE_NO_SESSION:-0}" = "1" ]; then
+  # report ONLY the idle lifecycle (comment above explains the per-run
+  # sentinel: env cannot cross into the daemon's split-pane launch env).
+  python3 - "$record" "$session_identity" "$RUN_LABEL" <<'PY'
+import json, os, socket, sys, time
+record_path, session_id, run_id = sys.argv[1:]
+pane_id = os.environ.get("HERDR_PANE_ID", "")
+socket_path = os.environ.get("HERDR_SOCKET_PATH", "")
+envelope = {
+    "id": f"e2e:herdr:opencode:{os.getpid()}:idle",
+    "method": "pane.report_agent",
+    "params": {
+        "pane_id": pane_id,
+        "source": "herdr:opencode",
+        "agent": "opencode",
+        "seq": time.time_ns(),
+        "state": "idle",
+    },
+}
+result = {"phase": "idle_lifecycle", "request": envelope}
+try:
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(2.0)
+    client.connect(socket_path)
+    client.sendall((json.dumps(envelope, separators=(",", ":")) + "\n").encode())
+    chunks = bytearray()
+    while b"\n" not in chunks:
+        chunk = client.recv(65536)
+        if not chunk:
+            break
+        chunks.extend(chunk)
+    client.close()
+    reply = json.loads(bytes(chunks).splitlines()[0])
+    result["reply"] = reply
+    result["ok"] = "result" in reply and "error" not in reply
+except Exception as error:
+    result["ok"] = False
+    result["error"] = f"{type(error).__name__}: {error}"
+with open(record_path, encoding="utf-8") as source:
+    record = json.load(source)
+record.update({
+    "herdr_pane_id": pane_id,
+    "report_socket": socket_path,
+    "agent_session_id": None,
+    "agent_session_path": None,
+    "session_start_source": None,
+    "session_id": session_id,
+    "reports": [result],
+    "readiness_report": "ok" if result["ok"] else "failed:idle_lifecycle",
+    "no_session_report": True,
+})
+with open(record_path, "w", encoding="utf-8") as target:
+    json.dump(record, target, ensure_ascii=False, indent=2)
+    target.write("\n")
+if not result["ok"]:
+    print(f"fake opencode: idle lifecycle report failed: {result}", file=sys.stderr)
+    raise SystemExit(2)
+PY
+else
+  python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/managed-agent-report.py" \
+    "$record" opencode "$session_identity" "$session_path" startup
+fi
+
+# A rescued pane resumes an existing conversation, so the daemon deliberately
+# sends NO agent.prompt (re-sending the card task would re-run it). Skip the
+# prompt shim entirely and just stay interactive, which is what a resumed
+# session looks like.
+if [ "${BOARD_RESCUE:-0}" = "1" ]; then
+  sleep "${FAKE_MANAGED_HOLD:-60}"
+  exit 0
+fi
+
+# Spawn registration commits only after readiness polling + agent.prompt
+# return. A same-conversation reuse hop re-prompts this SAME process on its
+# pane (no new agent.start), so the fixture loops: read one stage's prompt,
+# comment, done, then block on the next prompt. FAKE_PI_LOOP is the channel
+# lib.sh already forwards to managed workspaces; FAKE_OPENCODE_LOOP is the
+# canonical name once plumbing exists.
+loop=0
+[ "${FAKE_OPENCODE_LOOP:-0}" = "1" ] && loop=1
+[ "${FAKE_PI_LOOP:-0}" = "1" ] && loop=1
+trace=""
+if [ "$loop" = "1" ]; then
+  trace="$(dirname "$BOARD_SOCKET")/fake-opencode-loop-$RUN_LABEL.log"
+  printf 'pid=%s loop=1 pane=%s record=%s\n' "$$" "${HERDR_PANE_ID:-<unset>}" "$record" >>"$trace"
+fi
+
+run_one_opencode_stage() {
+  [ -z "$trace" ] || printf 'stage: shim start\n' >>"$trace"
+  FAKE_MANAGED_KIND=opencode FAKE_PI_LOOP="$loop" \
+    python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/managed-terminal-shim.py" "$record" || {
+      rc=$?
+      if [ -n "$trace" ]; then
+        printf 'stage: shim fail rc=%s\n' "$rc" >>"$trace"
+        python3 - "$record" >>"$trace" <<'PY' || true
+import hashlib, json, sys
+try:
+    x=json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception as e:
+    print(f"record_error={type(e).__name__}")
+else:
+    for key in ("prompt_error", "prompt_received_via_stdin", "prompt_matches_run_snapshot"):
+        print(f"{key}={x.get(key)!r}")
+    for key in ("prompt", "expected_prompt"):
+        value=(x.get(key) or "").encode()
+        print(f"{key}_len={len(value)} {key}_sha256={hashlib.sha256(value).hexdigest()}")
+PY
+      fi
+      return "$rc"
+    }
+  [ -z "$trace" ] || printf 'stage: shim ok\n' >>"$trace"
+  if [ "$model" = "no-session" ]; then
+    # The daemon deliberately spends its bounded 10s capture window proving
+    # that no session report exists before it registers the managed run. Keep
+    # this degraded fixture alive past that boundary so its explicit done is
+    # accepted and proves basic execution still continues without an id.
+    sleep "${FAKE_OPENCODE_NO_SESSION_SLEEP:-11}"
+  else
+    sleep "${FAKE_OPENCODE_SLEEP:-${FAKE_PI_SLEEP:-1.5}}"
+  fi
+  "${BOARD_BIN:?BOARD_BIN required}" comment "fake opencode: agent.prompt delivered the card task; no system-prompt file in argv" || {
+    rc=$?; [ -z "$trace" ] || printf 'stage: comment fail rc=%s\n' "$rc" >>"$trace"; return "$rc"
+  }
+  [ -z "$trace" ] || printf 'stage: comment ok\n' >>"$trace"
+  "$BOARD_BIN" done --outcome ok || {
+    rc=$?; [ -z "$trace" ] || printf 'stage: done fail rc=%s\n' "$rc" >>"$trace"; return "$rc"
+  }
+  [ -z "$trace" ] || printf 'stage: done ok\n' >>"$trace"
+}
+
+if [ "$loop" = "1" ]; then
+  while true; do
+    run_one_opencode_stage
+  done
+else
+  run_one_opencode_stage
+  sleep "${FAKE_MANAGED_HOLD:-60}"
+fi

@@ -695,13 +695,24 @@ fn codex_reuse_agent_ready(req: &Value, pane_id: &str, status: &str) -> Value {
 
 /// An `agent.get` reply carrying a protocol-19 `AgentSessionInfo`.
 fn agent_get_with_session(req: &Value, pane_id: &str, session: Value) -> Value {
+    agent_get_with_session_for_kind(req, pane_id, "codex", session)
+}
+
+/// An `agent.get` reply carrying a protocol-19 `AgentSessionInfo` for an
+/// arbitrary harness kind.
+fn agent_get_with_session_for_kind(
+    req: &Value,
+    pane_id: &str,
+    kind: &str,
+    session: Value,
+) -> Value {
     reply(
         req,
         json!({
             "type": "agent_info",
             "agent": {
                 "pane_id": pane_id,
-                "agent": "codex",
+                "agent": kind,
                 "agent_status": "idle",
                 "interactive_ready": true,
                 "launch_pending": false,
@@ -1036,6 +1047,448 @@ fn managed_codex_rescue_shaped_launch_captures_but_never_prompts() {
         .spawn(&codex_req(&["resume", "thread-9"], None))
         .unwrap();
     assert_eq!(handle.captured_session_id.as_deref(), Some("thread-9"));
+    let requests = fake.requests.lock().unwrap();
+    assert!(
+        requests.iter().all(|r| r["method"] != "agent.prompt"),
+        "a rescue-shaped launch must never re-send the card task"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// OpenCode (O5 capture + O7 no-file prompt semantics): the self-minting
+// harness shares codex's contract — no system-prompt file, no prompt in
+// startup argv, bounded `agent.get.agent_session` capture on the gated
+// connection — with two opencode-specific pinning rules:
+// - the reported session is valid iff `{agent: opencode, kind: id,
+//   source: herdr:opencode, value non-empty}` — `source` must be the exact
+//   integration source the Herdr 0.8.0 opencode plugin v9 reports (`const
+//   SOURCE = "herdr:opencode"` in its embedded herdr-agent-state.js), which
+//   Herdr echoes verbatim into agent_session; codex leaves the source
+//   deliberately unconstrained;
+// - Mint detection reads the absence of session flags; the runtime argv
+//   patterns are `-s <id>` and `-s <id> --fork`, always closing the argv.
+// Unlike codex, the capture runs AFTER the prompt: real OpenCode mints its
+// `ses_…` id and reports `agent_session` only once the first `agent.prompt`
+// lands, so the fake mirrors that by reporting no session before the prompt
+// and the session afterward; a prompt-less opencode rescue reduces to
+// capture-after-readiness. Prompt content is identical to codex: Mint gets
+// one delimited system+task block, resume/fork the task alone, rescue
+// nothing.
+// ---------------------------------------------------------------------------
+
+/// A protocol-19 `AgentSessionInfo` owned by the opencode agent.
+fn opencode_session(session_id: &str) -> Value {
+    json!({"agent": "opencode", "kind": "id", "source": "herdr:opencode", "value": session_id})
+}
+
+/// The exact startup tail `board_core::harness::opencode` produces for
+/// `opencode_req`: no prompt file flag, no `--`, no task text, and no
+/// `--variant` (the root/TUI rejects it) — the board effort rides the
+/// process-local `OPENCODE_CONFIG_CONTENT` env in the placement request and
+/// the model stays inside that agent config, so `-m` never appears either.
+const OPENCODE_STARTUP_TAIL: &[&str] = &["--agent", "herdr-board", "--auto"];
+
+/// The exact `OPENCODE_CONFIG_CONTENT` value `opencode_req` carries, matching
+/// `board_core::harness::opencode::effort_agent_config` for the low effort.
+fn opencode_config_env() -> (String, String) {
+    (
+        board_core::harness::opencode::CONFIG_ENV.into(),
+        board_core::harness::opencode::effort_agent_config(
+            "opencode/deepseek-v4-flash-free",
+            board_core::protocol::Effort::Low,
+        ),
+    )
+}
+
+/// Assert the pane placement request received the exact process-local opencode
+/// config env (the legacy tab.create path carries the full launch env; a
+/// fresh card tab would carry it on the run child's split instead).
+fn assert_opencode_config_env(req: &Value) {
+    let env = &req["params"]["env"];
+    let (key, value) = opencode_config_env();
+    assert_eq!(
+        env.get(key.as_str()),
+        Some(&serde_json::Value::String(value.clone())),
+        "the agent config env must reach the pane placement"
+    );
+    assert!(
+        !value.contains("system instructions") && !value.contains("build the widget"),
+        "the config env must never carry prompt text"
+    );
+}
+
+#[test]
+fn managed_opencode_mint_prompts_delimited_block_then_captures_session() {
+    use board_core::harness::opencode::{mint_prompt, MINT_SYSTEM_DELIMITER, MINT_TASK_DELIMITER};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let prompts_for_server = Arc::clone(&prompts);
+    let prompt_deliveries = Arc::new(AtomicUsize::new(0));
+    let prompt_deliveries_for_server = Arc::clone(&prompt_deliveries);
+    let fake = serve_recording_herdr(move |req, _| match req["method"].as_str().unwrap() {
+        "tab.list" => empty_tab_list(req),
+        "tab.create" => {
+            assert_opencode_config_env(req);
+            tab_created(req, "w1:p2")
+        }
+        "agent.start" => {
+            let args: Vec<&str> = req["params"]["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect();
+            assert_eq!(
+                args, OPENCODE_STARTUP_TAIL,
+                "opencode startup argv must be exactly the startup tail — no prompt, no session flag, no --variant"
+            );
+            assert_eq!(req["params"]["kind"], "opencode");
+            agent_started(req, "w1:p2", false, true)
+        }
+        "agent.get" => {
+            assert_eq!(req["params"], json!({"target": "w1:p2"}));
+            assert_eq!(
+                prompt_deliveries_for_server.load(Ordering::SeqCst),
+                1,
+                "the opencode session capture must wait until after the first agent.prompt"
+            );
+            agent_get_with_session_for_kind(req, "w1:p2", "opencode", opencode_session("ses-1"))
+        }
+        "agent.prompt" => {
+            prompts_for_server
+                .lock()
+                .unwrap()
+                .push(req["params"]["text"].as_str().unwrap().to_string());
+            prompt_deliveries_for_server.fetch_add(1, Ordering::SeqCst);
+            agent_prompted(req, "w1:p2", "card-42-execute")
+        }
+        method => panic!("unexpected opencode-mint method {method}"),
+    });
+    let spawner = HerdrSpawner::new(fake.socket.clone());
+
+    let handle = spawner
+        .spawn(&opencode_req(&[], Some("build the widget")))
+        .unwrap();
+    assert_eq!(handle.pane_id.as_deref(), Some("w1:p2"));
+    assert_eq!(
+        handle.captured_session_id.as_deref(),
+        Some("ses-1"),
+        "the captured session id must ride the handle for atomic promotion"
+    );
+
+    let requests = fake.requests.lock().unwrap();
+    let methods: Vec<_> = requests
+        .iter()
+        .map(|r| r["method"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        methods,
+        [
+            "ping",
+            "tab.list",
+            "tab.create",
+            "agent.start",
+            "agent.prompt",
+            "agent.get"
+        ],
+        "the prompt is delivered first; only then does the capture poll agent.get once"
+    );
+    let prompts = prompts.lock().unwrap();
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(
+        prompts[0],
+        mint_prompt("opencode system instructions", "build the widget"),
+        "Mint receives ONE clearly delimited block: system instructions first, then the task"
+    );
+    let block = &prompts[0];
+    assert!(block.starts_with(MINT_SYSTEM_DELIMITER));
+    let task_pos = block.find(MINT_TASK_DELIMITER).unwrap();
+    assert!(block[..task_pos].contains("opencode system instructions"));
+    assert!(block[task_pos..].contains("build the widget"));
+}
+
+#[test]
+fn managed_opencode_resume_and_fork_prompt_task_only_then_capture_the_real_session_id() {
+    // Resume: `-s <root-id>`. Fork: `-s <root-id> --fork`. Both prompt the
+    // task alone — the conversation already has the system instructions —
+    // and the reported session id is the real one, captured only after the
+    // prompt lands.
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    for (tail, session) in [
+        (&["-s", "ses-7"][..], "ses-7"),
+        (&["-s", "ses-7", "--fork"][..], "ses-7"),
+    ] {
+        let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+        let prompts_for_server = Arc::clone(&prompts);
+        let prompt_deliveries = Arc::new(AtomicUsize::new(0));
+        let prompt_deliveries_for_server = Arc::clone(&prompt_deliveries);
+        let fake = serve_recording_herdr(move |req, _| match req["method"].as_str().unwrap() {
+            "tab.list" => empty_tab_list(req),
+            "tab.create" => tab_created(req, "w1:p2"),
+            "agent.start" => {
+                let args: Vec<&str> = req["params"]["args"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap())
+                    .collect();
+                let mut expected = OPENCODE_STARTUP_TAIL.to_vec();
+                expected.extend_from_slice(tail);
+                assert_eq!(args, expected, "the session flags close the argv");
+                agent_started(req, "w1:p2", false, true)
+            }
+            "agent.get" => {
+                assert_eq!(
+                    prompt_deliveries_for_server.load(Ordering::SeqCst),
+                    1,
+                    "the opencode session capture must wait until after the prompt"
+                );
+                agent_get_with_session_for_kind(req, "w1:p2", "opencode", opencode_session(session))
+            }
+            "agent.prompt" => {
+                prompts_for_server
+                    .lock()
+                    .unwrap()
+                    .push(req["params"]["text"].as_str().unwrap().to_string());
+                prompt_deliveries_for_server.fetch_add(1, Ordering::SeqCst);
+                agent_prompted(req, "w1:p2", "card-42-execute")
+            }
+            method => panic!("unexpected opencode-{tail:?} method {method}"),
+        });
+        let spawner = HerdrSpawner::new(fake.socket.clone());
+        let handle = spawner
+            .spawn(&opencode_req(tail, Some("next stage task")))
+            .unwrap();
+        assert_eq!(handle.captured_session_id.as_deref(), Some(session));
+        let requests = fake.requests.lock().unwrap();
+        let methods: Vec<_> = requests
+            .iter()
+            .map(|r| r["method"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            methods,
+            [
+                "ping",
+                "tab.list",
+                "tab.create",
+                "agent.start",
+                "agent.prompt",
+                "agent.get"
+            ],
+            "the prompt is delivered first; only then does the capture poll agent.get once"
+        );
+        let prompts = prompts.lock().unwrap();
+        assert_eq!(
+            prompts.as_slice(),
+            &["next stage task".to_string()],
+            "resume/fork receive the task alone — never a system block"
+        );
+    }
+}
+
+#[test]
+fn managed_opencode_absent_session_degrades_within_bounds_after_the_prompt_and_launch_succeeds() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let gets = Arc::new(AtomicUsize::new(0));
+    let gets_for_server = Arc::clone(&gets);
+    let prompt_deliveries = Arc::new(AtomicUsize::new(0));
+    let prompt_deliveries_for_server = Arc::clone(&prompt_deliveries);
+    let fake = serve_recording_herdr(move |req, _| match req["method"].as_str().unwrap() {
+        "tab.list" => empty_tab_list(req),
+        "tab.create" => tab_created(req, "w1:p2"),
+        "agent.start" => {
+            assert_eq!(
+                req["params"]["args"].as_array().unwrap().len(),
+                OPENCODE_STARTUP_TAIL.len(),
+                "no prompt file flag may be appended when no session is reported"
+            );
+            agent_started(req, "w1:p2", false, true)
+        }
+        "agent.get" => {
+            gets_for_server.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(
+                prompt_deliveries_for_server.load(Ordering::SeqCst),
+                1,
+                "the absent-session capture probes must run only after the prompt"
+            );
+            agent_get_result(req, "w1:p2", "card-42-execute", false, true)
+        }
+        "agent.prompt" => {
+            prompt_deliveries_for_server.fetch_add(1, Ordering::SeqCst);
+            agent_prompted(req, "w1:p2", "card-42-execute")
+        }
+        method => panic!("unexpected opencode-absent method {method}"),
+    });
+    // Zero-delay clock: the bounded capture backoff never hits the wall.
+    let spawner = HerdrSpawner::with_pane_runner_and_delay(
+        fake.socket.clone(),
+        Arc::new(RecordingPaneRunner {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            behavior: Box::new(|_, _| unreachable!("managed launch must not use pane runner")),
+        }),
+        Arc::new(|_: Duration| {}),
+    );
+
+    let handle = spawner
+        .spawn(&opencode_req(&[], Some("build the widget")))
+        .unwrap();
+    assert_eq!(
+        handle.captured_session_id, None,
+        "an absent session report degrades to None"
+    );
+    assert_eq!(
+        gets.load(Ordering::SeqCst),
+        super::super::SESSION_CAPTURE_PROBES,
+        "the capture is bounded: exactly the probe budget, never an unbounded poll"
+    );
+    let requests = fake.requests.lock().unwrap();
+    let methods: Vec<_> = requests
+        .iter()
+        .map(|r| r["method"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        methods.last().copied(),
+        Some("agent.get"),
+        "the bounded capture probes close the launch once no session is reported"
+    );
+    let prompt_at = methods
+        .iter()
+        .position(|m| *m == "agent.prompt")
+        .expect("the prompt must still be delivered");
+    assert!(
+        prompt_at < methods.len() - super::super::SESSION_CAPTURE_PROBES,
+        "the prompt must be delivered before the bounded capture probes start"
+    );
+}
+
+#[test]
+fn managed_opencode_mismatched_session_report_degrades_immediately() {
+    // Wrong owner agent: the pane's session belongs to another agent.
+    let fake = serve_recording_herdr(move |req, _| match req["method"].as_str().unwrap() {
+        "tab.list" => empty_tab_list(req),
+        "tab.create" => tab_created(req, "w1:p2"),
+        "agent.start" => agent_started(req, "w1:p2", false, true),
+        "agent.get" => agent_get_with_session_for_kind(
+            req,
+            "w1:p2",
+            "opencode",
+            json!({"agent": "pi", "kind": "id", "source": "session", "value": "ses-x"}),
+        ),
+        "agent.prompt" => agent_prompted(req, "w1:p2", "card-42-execute"),
+        method => panic!("unexpected opencode-wrong-agent method {method}"),
+    });
+    let spawner = HerdrSpawner::new(fake.socket.clone());
+    let handle = spawner.spawn(&opencode_req(&[], Some("task"))).unwrap();
+    assert_eq!(
+        handle.captured_session_id, None,
+        "a session owned by a different agent must not be captured as the opencode session id"
+    );
+
+    // `path` kind: a filesystem reference is not a resumable session id.
+    let fake = serve_recording_herdr(move |req, _| match req["method"].as_str().unwrap() {
+        "tab.list" => empty_tab_list(req),
+        "tab.create" => tab_created(req, "w1:p2"),
+        "agent.start" => agent_started(req, "w1:p2", false, true),
+        "agent.get" => agent_get_with_session_for_kind(
+            req,
+            "w1:p2",
+            "opencode",
+            json!({"agent": "opencode", "kind": "path", "source": "pane", "value": "/tmp/s.json"}),
+        ),
+        "agent.prompt" => agent_prompted(req, "w1:p2", "card-42-execute"),
+        method => panic!("unexpected opencode-path-kind method {method}"),
+    });
+    let spawner = HerdrSpawner::new(fake.socket.clone());
+    let handle = spawner.spawn(&opencode_req(&[], Some("task"))).unwrap();
+    assert_eq!(
+        handle.captured_session_id, None,
+        "a path-kind reference is not a session id"
+    );
+
+    // Wrong source spelling: opencode pins the exact integration source
+    // `herdr:opencode` (plugin v9's SOURCE) — unlike codex, the source is
+    // not left integration-internal.
+    let fake = serve_recording_herdr(move |req, _| match req["method"].as_str().unwrap() {
+        "tab.list" => empty_tab_list(req),
+        "tab.create" => tab_created(req, "w1:p2"),
+        "agent.start" => agent_started(req, "w1:p2", false, true),
+        "agent.get" => agent_get_with_session_for_kind(
+            req,
+            "w1:p2",
+            "opencode",
+            json!({"agent": "opencode", "kind": "id", "source": "pane", "value": "ses-x"}),
+        ),
+        "agent.prompt" => agent_prompted(req, "w1:p2", "card-42-execute"),
+        method => panic!("unexpected opencode-wrong-source method {method}"),
+    });
+    let spawner = HerdrSpawner::new(fake.socket.clone());
+    let handle = spawner.spawn(&opencode_req(&[], Some("task"))).unwrap();
+    assert_eq!(
+        handle.captured_session_id, None,
+        "a non-herdr:opencode source must not be captured as the opencode session id"
+    );
+
+    // Blank value: nothing to resume against.
+    let fake = serve_recording_herdr(move |req, _| match req["method"].as_str().unwrap() {
+        "tab.list" => empty_tab_list(req),
+        "tab.create" => tab_created(req, "w1:p2"),
+        "agent.start" => agent_started(req, "w1:p2", false, true),
+        "agent.get" => agent_get_with_session_for_kind(
+            req,
+            "w1:p2",
+            "opencode",
+            json!({"agent": "opencode", "kind": "id", "source": "herdr:opencode", "value": "  "}),
+        ),
+        "agent.prompt" => agent_prompted(req, "w1:p2", "card-42-execute"),
+        method => panic!("unexpected opencode-blank-value method {method}"),
+    });
+    let spawner = HerdrSpawner::new(fake.socket.clone());
+    let handle = spawner.spawn(&opencode_req(&[], Some("task"))).unwrap();
+    assert_eq!(handle.captured_session_id, None, "a blank id must degrade");
+}
+
+#[test]
+fn managed_opencode_rescue_shaped_launch_captures_but_never_prompts() {
+    // Rescue shape: `-s <id>` argv with initial_prompt cleared by
+    // `resume_invocation`. The capture still runs (the id is re-confirmed),
+    // but NO agent.prompt is sent — re-sending the task would re-run it.
+    let fake = serve_recording_herdr(move |req, _| match req["method"].as_str().unwrap() {
+        "tab.list" => empty_tab_list(req),
+        "tab.create" => {
+            // Rescue re-threads the PERSISTED execution env (resume_invocation
+            // keeps it), so the agent config env must survive onto the pane.
+            assert_opencode_config_env(req);
+            tab_created(req, "w1:p2")
+        }
+        "agent.start" => {
+            let args: Vec<&str> = req["params"]["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect();
+            let mut expected = OPENCODE_STARTUP_TAIL.to_vec();
+            expected.extend_from_slice(&["-s", "ses-9"]);
+            assert_eq!(
+                args, expected,
+                "the rescued opencode startup argv keeps --agent herdr-board plus the resume tail"
+            );
+            agent_started(req, "w1:p2", false, true)
+        }
+        "agent.get" => {
+            agent_get_with_session_for_kind(req, "w1:p2", "opencode", opencode_session("ses-9"))
+        }
+        method => panic!("unexpected opencode-rescue method {method}"),
+    });
+    let spawner = HerdrSpawner::new(fake.socket.clone());
+
+    let handle = spawner
+        .spawn(&opencode_req(&["-s", "ses-9"], None))
+        .unwrap();
+    assert_eq!(handle.captured_session_id.as_deref(), Some("ses-9"));
     let requests = fake.requests.lock().unwrap();
     assert!(
         requests.iter().all(|r| r["method"] != "agent.prompt"),
