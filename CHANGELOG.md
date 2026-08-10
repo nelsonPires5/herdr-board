@@ -6,13 +6,18 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
-- [#65](https://github.com/nelsonPires5/herdr-board/pull/65) Add the managed OpenCode harness: free-form models with live `opencode models --verbose` discovery and a static OpenCode Zen Nemotron 3 Ultra Free fallback, board effort applied through a process-local `OPENCODE_CONFIG_CONTENT` `herdr-board` agent (model+variant; the root/TUI rejects `--variant`) selected with `--agent herdr-board`, `default`/`auto-approve` (`--auto`) permission modes, self-minted `ses_…` session capture, resume/fork/reuse/rescue, and provider-free E2E coverage.
+### Added
 
-- [#64](https://github.com/nelsonPires5/herdr-board/pull/64) Retry `agent.start` on a fresh owned pane five times with doubling backoff (100→1600ms, ≈3.1s window) so slow login shells (~0.5s zsh+oh-my-zsh+nvm boot) stop failing managed runs with `agent_pane_busy`.
+- [#65](https://github.com/nelsonPires5/herdr-board/pull/65) feat: add OpenCode as a managed harness.
+- [#63](https://github.com/nelsonPires5/herdr-board/pull/63) feat: add Codex as a managed harness.
 
-- [#63](https://github.com/nelsonPires5/herdr-board/pull/63) Add the managed Codex harness with live cached model/effort discovery, native access presets, self-minted thread capture, resume/fork/reuse/rescue, and provider-free E2E coverage.
+### Changed
 
-- [#62](https://github.com/nelsonPires5/herdr-board/pull/62) chore(ci): adopt `dev` as the long-lived integration branch — feature/release PRs target `dev`, Prepare Release defaults to `base=dev` (`main` only for hotfixes), the Promote workflow automatically merges `dev -> main` after green dev CI, and the Release workflow tags the exact green promotion commit; `main` stays production/default with PR-only, merge-commit and signed-commit protection, and `v*` tags remain Release-owned only.
+- [#62](https://github.com/nelsonPires5/herdr-board/pull/62) chore(ci): `dev` is now the long-lived integration branch; `main` stays production-only (automated promotion + release tagging).
+
+### Fixed
+
+- [#64](https://github.com/nelsonPires5/herdr-board/pull/64) fix: retry `agent.start` on a fresh owned pane with backoff so slow login shells stop failing managed runs.
 
 ## [0.12.0] - 2026-08-08
 
