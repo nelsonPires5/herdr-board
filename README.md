@@ -78,7 +78,7 @@ agent skill, and named-session notes, see [`docs/install.md`](docs/install.md).
 3. Press `n` to create a card. Pi is selected by default. Leave model at `(default)` to use Pi's
    configured default, choose thinking effort if needed, then select the session and workspace.
    Permission appears only for harnesses that support it (Pi does not; Codex offers
-   `untrusted|on-request|never`).
+   `untrusted|on-request|never`; OpenCode offers `default|auto-approve`).
 4. Move the card into an automatic column with `m`, `H` / `L`, or drag-and-drop.
 5. Watch the agent appear in its stable `card-<id>` workspace tab. Follow progress with `Enter`
    for card detail; the agent comments and calls `board done` when its stage finishes.
@@ -103,6 +103,19 @@ efforts from `$CODEX_HOME/models_cache.json`. Board effort `off` becomes Codex
 (workspace-write + on-request), `approve-for-me` (automatic reviewer), or `full-access` (no sandbox
 or approvals). Codex mints its own thread id — the board never invents one — and captures the
 integration-reported id after launch so later stages can `resume`/`fork` the same conversation.
+OpenCode is the fourth built-in: `--harness opencode` treats models as free-form
+`provider/model` (the daemon discovers live models plus per-model reasoning variants from
+`opencode models --verbose`, falling back to a static catalog that truthfully lists OpenCode Zen
+Nemotron 3 Ultra Free — `opencode/nemotron-3-ultra-free`, which declares no variants and so offers
+no board effort — alongside a fixture model `opencode/deepseek-v4-flash-free` with `low`/`high`/`max`
+efforts). The board calls the variant dimension **effort**; the root/TUI has **no `--variant` flag**
+(verified: it exists only on `opencode run`), so an effort is applied through a process-local
+`OPENCODE_CONFIG_CONTENT` config defining a stable `herdr-board` agent with exactly `model` +
+`variant` (board `off` → opencode `none`), selected with `--agent herdr-board`, and `--variant`
+never rides argv. Its two permission modes are
+`default` (no flag) and `auto-approve` (`--auto`). Like Codex, OpenCode mints its own `ses_…`
+session id — a Mint carries no session flag and persists `NULL` until the integration-reported id is
+captured after launch, so later stages can `resume`/`fork` the same conversation by id.
 
 ## How it works
 
@@ -134,7 +147,7 @@ The daemon creates one stable `card-<id>` tab per new card. For a workspace the 
 just created (`new_workspace`), that workspace's own initial tab is adopted as the card tab —
 renamed to `card-<id>` — so no unused initial tab is left behind. The tab's root is reserved as a
 labeled `card-<id>-anchor` shell and every run is split into a child from it. A successful
-**managed** (Pi/Claude/Codex) launch then closes the anchor, leaving exactly the harness pane
+**managed** (Pi/Claude/Codex/OpenCode) launch then closes the anchor, leaving exactly the harness pane
 visible; **configured** harnesses keep the anchor because their child exits with the run. Ownership is
 proven from durable pane identity, never from a matching label, so a user tab is never adopted.
 The full placement and recovery rules are in [`docs/design.md`](docs/design.md).
@@ -305,8 +318,8 @@ typed `board_core::client::BoardClient`; only boardd touches SQLite.
 - `scripts/` — `build.sh` (release build used by plugin installation), `install-cli.sh` (managed
   CLI copy), `install.sh` (local-development setup), `open-board.sh` (open-or-focus plugin
   action), and `board-rpc.py` (raw daemon protocol client);
-- `e2e/` — scenarios 01–31 against disposable Herdr sessions/workspaces; checked-in fake Pi,
-  Claude, Codex, and configured harnesses keep the standard suite provider-free. `e2e/test-harness.sh`
+- `e2e/` — scenarios 01–32 against disposable Herdr sessions/workspaces; checked-in fake Pi,
+  Claude, Codex, OpenCode, and configured harnesses keep the standard suite provider-free. `e2e/test-harness.sh`
   performs static ownership/safety checks without starting Herdr; the live suite is a separate
   gate. The catalog is [`e2e/README.md`](e2e/README.md).
 

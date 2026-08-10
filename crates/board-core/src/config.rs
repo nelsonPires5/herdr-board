@@ -87,6 +87,13 @@ pub struct Config {
     /// this in at startup; tests leave it `None` to stay hermetic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_home: Option<PathBuf>,
+    /// OpenCode binary to probe for the live model catalog (`opencode models
+    /// --verbose`). `None` disables live opencode discovery → the `opencode`
+    /// harness reports the static fallback catalog. The daemon fills this in
+    /// at startup (`$OPENCODE_BIN` else `opencode`); tests leave it `None` to
+    /// stay hermetic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode_bin: Option<String>,
 }
 
 /// A config-defined harness: an argv template plus an optional capability
@@ -128,6 +135,7 @@ impl Default for Config {
             harness: HashMap::new(),
             pi_agent_dir: None,
             codex_home: None,
+            opencode_bin: None,
         }
     }
 }

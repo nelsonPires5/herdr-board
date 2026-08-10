@@ -196,12 +196,20 @@ fn configured_harnesses_keep_their_synthetic_mint_fallback() {
 #[test]
 fn codex_is_registered_builtin_after_claude() {
     assert!(is_builtin_harness("codex"));
-    assert_eq!(BUILTIN_HARNESSES.to_vec(), vec!["pi", "claude", "codex"]);
+    assert_eq!(
+        BUILTIN_HARNESSES.to_vec(),
+        vec!["pi", "claude", "codex", "opencode"]
+    );
     let list = available_harnesses(&Config::default());
     assert_eq!(
         list.iter().position(|h| h.as_str() == "codex"),
         Some(2),
         "codex slots into the built-in list right after claude"
+    );
+    assert_eq!(
+        list.iter().position(|h| h.as_str() == "opencode"),
+        Some(3),
+        "opencode slots in right after codex"
     );
 }
 

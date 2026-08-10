@@ -203,8 +203,8 @@ fn new_card_defaults_to_pi_and_lists_both_builtins() {
     assert_eq!(form.current_harness(), "pi");
     assert_eq!(
         opt_labels(form, FieldId::Harness),
-        vec!["pi", "claude", "codex"],
-        "the built-in catalog includes codex after claude"
+        vec!["pi", "claude", "codex", "opencode"],
+        "the built-in catalog includes opencode after codex"
     );
     assert_eq!(form.caps.as_ref().unwrap().harness, "pi");
 }
@@ -224,7 +224,7 @@ fn opening_column_form_loads_only_column_metadata() {
     assert_eq!(form.caps.as_ref().unwrap().harness, "pi");
     assert_eq!(
         opt_labels(form, FieldId::HarnessOverride),
-        vec!["none", "pi", "claude", "codex"]
+        vec!["none", "pi", "claude", "codex", "opencode"]
     );
     assert!(form.spaces.is_empty(), "column forms do not load spaces");
     assert!(

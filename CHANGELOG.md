@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+- [#65](https://github.com/nelsonPires5/herdr-board/pull/65) Add the managed OpenCode harness: free-form models with live `opencode models --verbose` discovery and a static OpenCode Zen Nemotron 3 Ultra Free fallback, board effort applied through a process-local `OPENCODE_CONFIG_CONTENT` `herdr-board` agent (model+variant; the root/TUI rejects `--variant`) selected with `--agent herdr-board`, `default`/`auto-approve` (`--auto`) permission modes, self-minted `ses_…` session capture, resume/fork/reuse/rescue, and provider-free E2E coverage.
+
 - [#64](https://github.com/nelsonPires5/herdr-board/pull/64) Retry `agent.start` on a fresh owned pane five times with doubling backoff (100→1600ms, ≈3.1s window) so slow login shells (~0.5s zsh+oh-my-zsh+nvm boot) stop failing managed runs with `agent_pane_busy`.
 
 - [#63](https://github.com/nelsonPires5/herdr-board/pull/63) Add the managed Codex harness with live cached model/effort discovery, native access presets, self-minted thread capture, resume/fork/reuse/rescue, and provider-free E2E coverage.

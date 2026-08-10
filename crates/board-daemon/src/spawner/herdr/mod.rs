@@ -262,8 +262,9 @@ impl HerdrSpawner {
                         pid: None,
                         herdr_socket: req.herdr_socket.clone(),
                         // The launch captured the integration-reported
-                        // conversation id (codex self-mints its thread id);
-                        // dispatch persists it atomically with the promotion.
+                        // conversation id (codex/opencode self-mint their
+                        // own); dispatch persists it atomically with the
+                        // promotion.
                         captured_session_id,
                     });
                 }

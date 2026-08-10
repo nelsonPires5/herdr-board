@@ -1,7 +1,11 @@
 //! Managed Herdr launch: `agent.start` on a board-owned pane, with the
 //! name/busy retry taxonomy, the wait for the agent to become interactive,
-//! and — for self-minting harnesses like codex — the bounded post-launch
-//! capture of the integration-reported conversation/thread id.
+//! and — for self-minting harnesses like codex and opencode — the bounded
+//! capture of the integration-reported conversation/session id, ordered per
+//! harness: codex captures after readiness and before the prompt, opencode
+//! after the prompt (real OpenCode mints `agent_session` only once its first
+//! prompt lands; a prompt-less opencode rescue reduces to capture-after-
+//! readiness).
 
 use std::fs;
 use std::io::Write;
@@ -32,8 +36,8 @@ pub(crate) type DelayFn = dyn Fn(Duration) + Send + Sync;
 pub(crate) const DEFAULT_AGENT_START_DELAY: &DelayFn = &(thread::sleep as fn(Duration));
 
 /// Launch one managed agent and return the harness-captured conversation id
-/// (self-minting harnesses like codex), or `None` when no capture applies
-/// (pi/claude, same-pane reuse) or none validated.
+/// (self-minting harnesses like codex/opencode), or `None` when no capture
+/// applies (pi/claude, same-pane reuse) or none validated.
 ///
 /// The capture travels through the spawn handle so the daemon persists it
 /// atomically with run promotion inside [`crate::dispatch::launch_plan::
@@ -73,10 +77,12 @@ pub(crate) fn launch_managed(
     }
 
     match kind {
-        // Codex mints its own thread id and has no system-prompt file: startup
-        // argv carries no prompt text, and the reported id is captured after
-        // readiness through the same gated connection (C5/C7).
+        // Self-minting harnesses (codex/opencode) mint their own id and have
+        // no system-prompt file: startup argv carries no prompt text, and the
+        // reported id is captured through the same gated connection after
+        // readiness — codex before the prompt, opencode after it (C5/C7/O7).
         "codex" => launch_managed_codex(client, req, pane_id, delay),
+        "opencode" => launch_managed_opencode(client, req, pane_id, delay),
         // Pi/Claude keep the authoritative 0600 startup system-prompt file.
         "pi" | "claude" => {
             launch_managed_prompt_file(client, req, kind, pane_id, delay)?;
@@ -89,20 +95,86 @@ pub(crate) fn launch_managed(
 /// A codex launch: `agent.start` with the startup-only argv (no prompt file,
 /// no `--` delimiter), readiness polling, the bounded session capture, and
 /// then the prompt — Mint receives one delimited `system + task` block,
-/// resume/fork receive the task alone, a rescue sends nothing.
+/// resume/fork receive the task alone, a rescue sends nothing. The capture
+/// runs before the prompt: the codex integration reports its thread id as
+/// soon as the CLI is interactive.
 fn launch_managed_codex(
     client: &mut HerdrClient,
     req: &HerdrLaunchPlan,
     pane_id: &str,
     delay: &DelayFn,
 ) -> anyhow::Result<Option<String>> {
+    launch_managed_self_minting(
+        client,
+        req,
+        pane_id,
+        delay,
+        codex_prompt_text,
+        capture_codex_session,
+        CaptureTiming::BeforePrompt,
+    )
+}
+
+/// An opencode launch: the same self-minting shape as codex — startup-only
+/// argv, bounded session capture, and prompt delivery (Mint: delimited
+/// system+task block; resume/fork: task alone; rescue: nothing) — with the
+/// capture ordered AFTER the prompt: real OpenCode mints its `ses_…` id and
+/// reports `agent_session` only once the first `agent.prompt` lands, so a
+/// pre-prompt capture would lose the id (and with it the atomic promotion).
+fn launch_managed_opencode(
+    client: &mut HerdrClient,
+    req: &HerdrLaunchPlan,
+    pane_id: &str,
+    delay: &DelayFn,
+) -> anyhow::Result<Option<String>> {
+    launch_managed_self_minting(
+        client,
+        req,
+        pane_id,
+        delay,
+        opencode_prompt_text,
+        capture_opencode_session,
+        CaptureTiming::AfterPrompt,
+    )
+}
+
+/// When the bounded session capture runs relative to prompt delivery for a
+/// self-minting harness.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CaptureTiming {
+    /// Capture first, then deliver the prompt (codex: the integration reports
+    /// the thread id as soon as the CLI is interactive).
+    BeforePrompt,
+    /// Deliver the prompt first, then capture (opencode: the integration
+    /// mints `agent_session` only after the first prompt; a rescue has no
+    /// prompt, so the capture still runs right after readiness).
+    AfterPrompt,
+}
+
+/// The shared self-minting launch body: `agent.start` with the startup-only
+/// argv (no prompt file, no `--` delimiter), readiness polling, the bounded
+/// session capture, and then the prompt — or the prompt and then the capture,
+/// per [`CaptureTiming`].
+fn launch_managed_self_minting(
+    client: &mut HerdrClient,
+    req: &HerdrLaunchPlan,
+    pane_id: &str,
+    delay: &DelayFn,
+    prompt_text: fn(&HerdrLaunchPlan) -> Option<String>,
+    capture: fn(&mut HerdrClient, &str, &DelayFn) -> Option<String>,
+    capture_timing: CaptureTiming,
+) -> anyhow::Result<Option<String>> {
+    let kind = req
+        .agent_kind
+        .as_deref()
+        .ok_or_else(|| anyhow!("managed self-minting invocation has no agent kind"))?;
     let (_, startup_tail) = req
         .argv
         .split_first()
-        .ok_or_else(|| anyhow!("managed codex invocation has empty startup argv"))?;
+        .ok_or_else(|| anyhow!("managed {kind} invocation has empty startup argv"))?;
     let params = AgentStartParams {
         name: req.name.clone(),
-        kind: "codex".to_string(),
+        kind: kind.to_string(),
         pane_id: pane_id.to_string(),
         args: startup_tail.to_vec(),
         timeout_ms: Some(AGENT_START_TIMEOUT_MS),
@@ -111,13 +183,20 @@ fn launch_managed_codex(
         .map_err(|error| map_start_error(req, error))?;
     await_interactive_ready(client, &started)?;
 
-    // Post-launch capture: the minted thread id is reported only once the
+    // Post-launch capture: the minted id is reported only once the
     // integration is up. Bounded poll on the SAME gated connection; a
     // missing/mismatched report degrades to None with a warning and the
-    // launch stays successful (enqueue-time identity is kept as-is).
-    let captured_session_id = capture_codex_session(client, pane_id, delay);
+    // launch stays successful (enqueue-time identity is kept as-is). For
+    // opencode the capture waits until after the prompt, which is what
+    // triggers the mint in the first place.
+    let capture_after_prompt = capture_timing == CaptureTiming::AfterPrompt;
+    let captured_session_id = if capture_after_prompt {
+        None
+    } else {
+        capture(client, pane_id, delay)
+    };
 
-    if let Some(text) = codex_prompt_text(req) {
+    if let Some(text) = prompt_text(req) {
         client
             .agent_prompt(&AgentPromptParams {
                 target: pane_id.to_string(),
@@ -126,6 +205,12 @@ fn launch_managed_codex(
             })
             .with_context(|| format!("herdr agent.prompt for {}", req.name))?;
     }
+
+    let captured_session_id = if capture_after_prompt {
+        capture(client, pane_id, delay)
+    } else {
+        captured_session_id
+    };
     Ok(captured_session_id)
 }
 
@@ -145,6 +230,22 @@ fn codex_prompt_text(req: &HerdrLaunchPlan) -> Option<String> {
     }
 }
 
+/// The `agent.prompt` text for an opencode launch: Mint receives one clearly
+/// delimited block with the system instructions first, then the card task;
+/// resume/fork (fresh pane) receive the task alone; a rescue sends nothing
+/// (`initial_prompt` was cleared by `resume_invocation`). Same-pane reuse is
+/// handled by [`launch_managed`] before this point and delivers the task
+/// alone.
+fn opencode_prompt_text(req: &HerdrLaunchPlan) -> Option<String> {
+    let task = req.initial_prompt.as_deref()?;
+    if is_opencode_mint(&req.argv) {
+        let system = req.system_prompt.as_deref().unwrap_or_default();
+        Some(board_core::harness::opencode::mint_prompt(system, task))
+    } else {
+        Some(task.to_string())
+    }
+}
+
 /// Whether a board-built codex argv is a Mint. The codex session adapter
 /// appends `resume <id>` / `fork <id>` as the LAST two tokens for
 /// resume/fork; a Mint argv carries no session tokens at all. Only the tail
@@ -154,23 +255,37 @@ fn is_codex_mint(argv: &[String]) -> bool {
     !(argv.len() >= 2 && matches!(argv[argv.len() - 2].as_str(), "resume" | "fork"))
 }
 
-/// Bounded post-launch capture of the integration-reported thread id for a
-/// codex pane, over the launch's already-gated connection.
+/// Whether a board-built opencode argv is a Mint. The opencode session
+/// adapter appends `-s <id>` / `-s <id> --fork` as the LAST argv tokens for
+/// resume/fork; a Mint argv carries no session flags at all. Only the tail is
+/// inspected because the model value after `-m` could itself be spelled `-s`
+/// or `--fork`.
+fn is_opencode_mint(argv: &[String]) -> bool {
+    let tail = &argv[argv.len().saturating_sub(3)..];
+    !tail.iter().any(|arg| arg == "-s")
+}
+
+/// Bounded post-launch capture of the integration-reported conversation id for
+/// a self-minting pane, over the launch's already-gated connection.
 ///
 /// The report rides `AgentInfo.agent_session` (`AgentSessionInfo` in the
-/// protocol-19 schema): `{agent, kind, source, value}`. Only an `id`-kind
-/// reference owned by the codex agent (`agent == "codex"`) with a non-empty
-/// value is a usable conversation id; a wrong agent, a `path` kind or a blank
-/// value means the pane's identity is not board-resumable, so the capture
-/// degrades to `None` with a warning. `source` is deliberately not
-/// constrained — its exact spelling is integration-internal and undocumented,
-/// and the plan's rule is to not overfit it. The poll is bounded by
-/// [`SESSION_CAPTURE_PROBES`] and [`SESSION_CAPTURE_TIMEOUT`]; a session that
-/// never appears degrades the same way and the launch continues.
-fn capture_codex_session(
+/// protocol-19 schema): `{agent, kind, source, value}`. A usable id must be
+/// owned by the expected agent (`agent == <expected_agent>`), an `id`-kind
+/// reference with a non-empty value; `expected_source` additionally pins the
+/// exact integration source the pane must report (the opencode contract —
+/// codex deliberately leaves the source unconstrained). A wrong agent, a
+/// `path` kind, a wrong source or a blank value means the pane's identity is
+/// not board-resumable, so the capture degrades to `None` with a warning. The
+/// poll is bounded by [`SESSION_CAPTURE_PROBES`] and
+/// [`SESSION_CAPTURE_TIMEOUT`]; a session that never appears degrades the
+/// same way and the launch continues.
+fn capture_self_minted_session(
     client: &mut HerdrClient,
     pane_id: &str,
     delay: &DelayFn,
+    expected_agent: &str,
+    subject: &str,
+    expected_source: Option<&str>,
 ) -> Option<String> {
     let deadline = Instant::now() + SESSION_CAPTURE_TIMEOUT;
     let mut probes = 0_usize;
@@ -178,14 +293,18 @@ fn capture_codex_session(
         match client.agent_get(pane_id) {
             Ok(agent) => {
                 if let Some(session) = agent.agent_session {
-                    let agent_ok = session.agent == "codex";
+                    let agent_ok = session.agent == expected_agent;
                     let kind_ok = session.kind == "id";
+                    let source_ok = match expected_source {
+                        Some(expected) => session.source == expected,
+                        None => true,
+                    };
                     let value_ok = !session.value.trim().is_empty();
-                    if agent_ok && kind_ok && value_ok {
+                    if agent_ok && kind_ok && source_ok && value_ok {
                         tracing::info!(
                             pane_id,
-                            thread_id = %session.value,
-                            "captured codex thread id"
+                            session_id = %session.value,
+                            "captured {subject}"
                         );
                         return Some(session.value);
                     }
@@ -193,9 +312,10 @@ fn capture_codex_session(
                         pane_id,
                         agent = %session.agent,
                         kind = %session.kind,
+                        source = %session.source,
                         has_value = value_ok,
                         error_category = "harness",
-                        "codex reported an unusable agent_session; run continues without a captured thread id"
+                        "the agent reported an unusable agent_session; run continues without a captured {subject}"
                     );
                     return None;
                 }
@@ -205,7 +325,7 @@ fn capture_codex_session(
                     pane_id,
                     error = %format!("{error:#}"),
                     error_category = "herdr",
-                    "agent.get failed while capturing the codex thread id; run continues without it"
+                    "agent.get failed while capturing the {subject}; run continues without it"
                 );
                 return None;
             }
@@ -216,14 +336,47 @@ fn capture_codex_session(
                 pane_id,
                 probes,
                 error_category = "harness",
-                "codex did not report an agent_session within the capture bound; run continues without a captured thread id"
+                "no agent_session within the capture bound; run continues without a captured {subject}"
             );
             return None;
         }
-        if probes > IMMEDIATE_READINESS_PROBES {
-            delay(READINESS_BACKOFF.min(deadline.saturating_duration_since(Instant::now())));
-        }
+        // Session identity may be minted asynchronously after the first
+        // prompt (OpenCode does this), so do not burn the whole probe budget
+        // in a tight loop. Spread the remaining probes across the wall-clock
+        // bound; the injected delay keeps unit tests deterministic.
+        let interval = SESSION_CAPTURE_TIMEOUT / (SESSION_CAPTURE_PROBES as u32 - 1);
+        delay(interval.min(deadline.saturating_duration_since(Instant::now())));
     }
+}
+
+/// The codex view of [`capture_self_minted_session`]: an `id`-kind reference
+/// owned by the codex agent; the source spelling stays unconstrained.
+fn capture_codex_session(
+    client: &mut HerdrClient,
+    pane_id: &str,
+    delay: &DelayFn,
+) -> Option<String> {
+    capture_self_minted_session(client, pane_id, delay, "codex", "codex thread id", None)
+}
+
+/// The opencode view of [`capture_self_minted_session`]: an `id`-kind
+/// reference owned by the opencode agent, pinned to the exact source the
+/// Herdr 0.8.0 opencode integration (plugin v9, `const SOURCE =
+/// "herdr:opencode"` in the embedded `herdr-agent-state.js`) reports — the
+/// source Herdr echoes verbatim into `AgentInfo.agent_session`.
+fn capture_opencode_session(
+    client: &mut HerdrClient,
+    pane_id: &str,
+    delay: &DelayFn,
+) -> Option<String> {
+    capture_self_minted_session(
+        client,
+        pane_id,
+        delay,
+        "opencode",
+        "opencode session id",
+        Some("herdr:opencode"),
+    )
 }
 
 /// Pi/Claude fresh launch: startup argv plus the authoritative 0600

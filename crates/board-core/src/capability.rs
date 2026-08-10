@@ -3,8 +3,10 @@
 //! Built-in harness catalogs are intentionally small and static. Pi models stay
 //! free-form because they depend on provider/auth/user configuration; Claude's
 //! aliases are field-verified against Claude CLI 2.1.209; codex is free-form
-//! with the full effort ladder and a fixed approval-mode enum. Config-defined
-//! harnesses declare capabilities in `[harness.NAME]`.
+//! with the full effort ladder and a fixed approval-mode enum; opencode is
+//! free-form with a small static fallback catalog (`opencode_catalog`) and the
+//! two verified permission modes. Config-defined harnesses declare
+//! capabilities in `[harness.NAME]`.
 
 use serde::{Deserialize, Serialize};
 
@@ -309,6 +311,73 @@ impl HarnessMeta for Codex {
     }
 }
 
+/// OpenCode reasoning efforts for an omitted/unknown/free-form model: the
+/// full board ladder, ascending. Per-model efforts come from the model's
+/// `variants` map instead ([`crate::opencode_catalog`]); `off` maps to the
+/// opencode variant spelling `none` only while building the process-local
+/// agent config ([`crate::harness::opencode`] — the root/TUI has no
+/// `--variant` flag).
+const OPENCODE_DEFAULT_EFFORTS: [Effort; 7] = [
+    Effort::Off,
+    Effort::Minimal,
+    Effort::Low,
+    Effort::Medium,
+    Effort::High,
+    Effort::Xhigh,
+    Effort::Max,
+];
+
+/// The opencode permission modes (board-facing ids). Each maps to an exact
+/// opencode CLI spelling while building argv (see [`crate::harness::opencode`]):
+/// `default` (no flag) and `auto-approve` (`--auto`). There is deliberately no
+/// third mode: those are the only spellings derived from verified CLI
+/// behavior, and every other value is rejected by the engine's validation.
+const OPENCODE_PERMISSION_MODES: [&str; 2] = ["default", "auto-approve"];
+
+/// Built-in `opencode` harness adapter (zero-sized). Models are free-form,
+/// with a small static fallback catalog ([`crate::opencode_catalog`]) so the
+/// `models` field is defined even before live CLI discovery; the full effort
+/// ladder is accepted for omitted/unknown models, and a known model's
+/// variants narrow it per model — a known model with no variants (e.g.
+/// `opencode/nemotron-3-ultra-free`, which really declares `variants: {}`)
+/// offers no effort at all. Permissions are the two verified modes; resume/
+/// fork are `-s <id>` / `-s <id> --fork`.
+pub struct OpenCode;
+
+impl HarnessMeta for OpenCode {
+    fn id(&self) -> &str {
+        "opencode"
+    }
+    fn models(&self) -> Vec<ModelInfo> {
+        crate::opencode_catalog::fallback_models()
+    }
+    fn efforts(&self, model: Option<&str>) -> Vec<Effort> {
+        // A known fallback model carries its variant efforts (possibly
+        // empty — a variant-less model offers no effort); an
+        // omitted/unknown/free-form model gets the full ladder.
+        if let Some(id) = model {
+            if let Some(known) = self.models().into_iter().find(|m| m.id == id) {
+                return known.efforts;
+            }
+        }
+        OPENCODE_DEFAULT_EFFORTS.to_vec()
+    }
+    fn permissions(&self) -> Vec<String> {
+        OPENCODE_PERMISSION_MODES
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+    fn model_freeform(&self) -> bool {
+        true
+    }
+    fn resume(&self) -> ResumeSupport {
+        // `-s <id>` re-opens a recorded session (verified against the
+        // installed opencode CLI: `-s, --session  session id to continue`).
+        ResumeSupport::ByConversationId
+    }
+}
+
 /// Owning adapter for a config-defined harness (`[harness.NAME]`).
 pub struct ConfigHarness {
     name: String,
@@ -375,6 +444,7 @@ pub fn meta_for(harness: &str, config: &Config) -> Option<Box<dyn HarnessMeta>> 
         "pi" => Some(Box::new(Pi)),
         "claude" => Some(Box::new(Claude)),
         "codex" => Some(Box::new(Codex)),
+        "opencode" => Some(Box::new(OpenCode)),
         _ => config.harness.get(harness).map(|def| {
             Box::new(ConfigHarness {
                 name: harness.to_string(),
@@ -384,12 +454,12 @@ pub fn meta_for(harness: &str, config: &Config) -> Option<Box<dyn HarnessMeta>> 
     }
 }
 
-/// Every harness the daemon knows about: built-ins (`pi`, `claude`) in their
-/// declared/default order (pi is the card default, so it stays first) followed
-/// by every config-defined `[harness.NAME]` sorted, de-duplicated. This is the
-/// single source for the `harness.list` RPC and BOTH the card `harness` and
-/// column `harness_override` selects in the TUI, so every harness menu shares
-/// one list in one (default-first) order.
+/// Every harness the daemon knows about: built-ins (`pi`, `claude`, `codex`,
+/// `opencode`) in their declared/default order (pi is the card default, so it
+/// stays first) followed by every config-defined `[harness.NAME]` sorted,
+/// de-duplicated. This is the single source for the `harness.list` RPC and
+/// BOTH the card `harness` and column `harness_override` selects in the TUI,
+/// so every harness menu shares one list in one (default-first) order.
 pub fn available_harnesses(config: &Config) -> Vec<String> {
     let mut out: Vec<String> = BUILTIN_HARNESSES.iter().map(|s| s.to_string()).collect();
     let mut config_keys: Vec<String> = config.harness.keys().cloned().collect();
@@ -421,6 +491,12 @@ pub fn codex_capabilities() -> HarnessCapabilities {
     HarnessCapabilities::from_meta(&Codex)
 }
 
+/// Built-in opencode capabilities (static fallback catalog + verified
+/// permission modes).
+pub fn opencode_capabilities() -> HarnessCapabilities {
+    HarnessCapabilities::from_meta(&OpenCode)
+}
+
 /// Resolve capabilities for a built-in or config-defined harness via its
 /// [`HarnessMeta`] adapter. Unknown harness → `None`.
 pub fn capabilities_for(harness: &str, config: &Config) -> Option<HarnessCapabilities> {
@@ -428,7 +504,8 @@ pub fn capabilities_for(harness: &str, config: &Config) -> Option<HarnessCapabil
 }
 
 /// Capabilities for a harness when no [`Config`] is at hand: the built-in
-/// snapshot for `pi`/`claude`, and a permissive-but-safe fallback otherwise.
+/// snapshot for `pi`/`claude`/`codex`/`opencode`, and a
+/// permissive-but-safe fallback otherwise.
 ///
 /// Prefer [`capabilities_for`] wherever the config is available — it is the
 /// only path that can honour a `[harness.NAME]` declaration. This function
@@ -445,6 +522,7 @@ pub fn default_capabilities(harness: &str) -> HarnessCapabilities {
         "pi" => pi_capabilities(),
         "claude" => claude_capabilities(),
         "codex" => codex_capabilities(),
+        "opencode" => opencode_capabilities(),
         _ => HarnessCapabilities {
             harness: harness.to_string(),
             models: Vec::new(),

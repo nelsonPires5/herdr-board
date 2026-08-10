@@ -43,16 +43,20 @@ fn reuse_decision_server() -> FakeHerdr {
         .serve()
 }
 
-/// A codex card whose prior durable run ended in `w1:p-prior` — the pane
-/// stays open in herdr (finished panes remain visible by design). When
-/// `source` is set, the prior run captured that conversation id and the card
-/// keeps it, so the next hop carries the same `session_id` whether it
-/// resumes or forks.
-fn codex_card_with_ended_prior_run(d: &Arc<Daemon>, source: Option<&str>) -> (i64, i64) {
+/// A self-minting harness card (codex/opencode) whose prior durable run ended
+/// in `w1:p-prior` — the pane stays open in herdr (finished panes remain
+/// visible by design). When `source` is set, the prior run captured that
+/// conversation id and the card keeps it, so the next hop carries the same
+/// `session_id` whether it resumes or forks.
+fn self_minted_card_with_ended_prior_run(
+    d: &Arc<Daemon>,
+    harness: &str,
+    source: Option<&str>,
+) -> (i64, i64) {
     let db = d.store.lock();
     let column = db
         .create_column(&ColumnCreateParams {
-            name: "Codex".into(),
+            name: harness.into(),
             trigger: Some(Trigger::Auto),
             ..Default::default()
         })
@@ -60,8 +64,8 @@ fn codex_card_with_ended_prior_run(d: &Arc<Daemon>, source: Option<&str>) -> (i6
     let card = db
         .create_card(&CardCreateParams {
             column_id: Some(column.id),
-            title: "codex retry".into(),
-            harness: Some("codex".into()),
+            title: format!("{harness} retry"),
+            harness: Some(harness.into()),
             description: Some("build the widget".into()),
             space_kind: Some(SpaceKind::NewWorkspace),
             space_ref: Some("Feature".into()),
@@ -73,9 +77,9 @@ fn codex_card_with_ended_prior_run(d: &Arc<Daemon>, source: Option<&str>) -> (i6
         db.set_card_session(card.id, source).unwrap();
     }
     let spec = RunLaunchSpec::v1(ExecutionSpec {
-        argv: vec!["codex".into()],
+        argv: vec![harness.into()],
         env: Vec::new(),
-        agent_kind: Some("codex".into()),
+        agent_kind: Some(harness.into()),
         initial_prompt: Some("prior".into()),
         system_prompt: Some("system".into()),
     });
@@ -83,7 +87,7 @@ fn codex_card_with_ended_prior_run(d: &Arc<Daemon>, source: Option<&str>) -> (i6
         .enqueue_run_uow(&EnqueueRun {
             card_id: card.id,
             column_id: card.column_id,
-            harness: "codex",
+            harness,
             argv_json: &serde_json::to_string(&spec.execution().argv).unwrap(),
             prompt_snapshot: "prior",
             system_prompt_snapshot: Some("system"),
@@ -106,6 +110,11 @@ fn codex_card_with_ended_prior_run(d: &Arc<Daemon>, source: Option<&str>) -> (i6
     })
     .unwrap();
     (card.id, card.column_id)
+}
+
+/// The codex view of [`self_minted_card_with_ended_prior_run`].
+fn codex_card_with_ended_prior_run(d: &Arc<Daemon>, source: Option<&str>) -> (i64, i64) {
+    self_minted_card_with_ended_prior_run(d, "codex", source)
 }
 
 /// A daemon whose default herdr session is the fake server, with a recording
@@ -216,4 +225,57 @@ async fn codex_mint_hop_finds_no_reuse_match() {
         requests[0].reuse_pane_id, None,
         "a mint hop has no source conversation to reuse"
     );
+}
+
+/// An opencode retry records the SOURCE session id (the fork's new `ses_…` id
+/// arrives only at promotion) and its argv ends `-s <source-id> --fork`. With
+/// a live prior pane holding that same id, the reuse candidate resolves — but
+/// re-prompting it would keep the old conversation and the fork would never
+/// execute. The retry must launch fresh with `reuse_pane_id: None`.
+#[tokio::test]
+async fn opencode_fork_retry_never_reuses_the_prior_live_pane() {
+    let spawner = Arc::new(CapturingSpawner::default());
+    let herdr = reuse_decision_server();
+    let d = reuse_decision_daemon(spawner.clone(), &herdr);
+    let (card_id, column_id) =
+        self_minted_card_with_ended_prior_run(&d, "opencode", Some(SOURCE_SESSION));
+
+    let retry = enqueue_run(&d, card_id, column_id, true).unwrap();
+    let argv: Vec<String> = serde_json::from_str(&retry.argv_json).unwrap();
+    assert_eq!(
+        argv,
+        ["opencode", "-s", SOURCE_SESSION, "--fork"],
+        "the opencode fork spelling is `-s <source-id> --fork`"
+    );
+    assert_eq!(retry.session_id.as_deref(), Some(SOURCE_SESSION));
+
+    dispatch_pass(&d).await;
+
+    let requests = spawner.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1, "exactly one launch request");
+    let req = &requests[0];
+    assert_eq!(req.argv, ["opencode", "-s", SOURCE_SESSION, "--fork"]);
+    assert_eq!(
+        req.reuse_pane_id, None,
+        "an opencode retry (`-s <source-id> --fork`) must never re-prompt the \
+         prior live same-session pane — it must launch fresh so opencode actually forks"
+    );
+    // Nothing was re-prompted or re-spawned against herdr: the launch made
+    // only the resolution calls.
+    assert_eq!(
+        herdr.methods(),
+        [
+            "ping",
+            "workspace.list",
+            "session.snapshot",
+            "session.snapshot"
+        ]
+    );
+    assert!(
+        herdr.requests_for("agent.prompt").is_empty(),
+        "a fork launch must not prompt any pane"
+    );
+    // The fresh launch registered as a running run.
+    let run = d.store.lock().get_run(retry.id).unwrap();
+    assert!(run.started_at.is_some());
 }
