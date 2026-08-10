@@ -114,8 +114,9 @@ Full layering, test placement, harness details, and how to add tests live in
   push, move, or delete release tags manually: a maintainer starts **Prepare Release**, merges its
   PR into `dev`, the **Promote** workflow merges `dev -> main`, and the **Release** workflow creates
   the tag only after `main` CI is green at that promotion SHA. Repository rulesets protect `main`
-  (PR-only, merge-commit, signed commits) and `v*` tags (deletion/force-update); this is policy and
-  workflow validation together.
+  (PR-only, merge-commit, required fast CI) and `v*` tags (deletion/force-update); this is
+  policy and workflow validation together. Bot-created PRs (release, promotion) need one manual
+  approval of their workflow runs before CI executes — see `docs/releasing.md`.
 - Branching: `dev` is the long-lived integration branch and the default target for feature PRs;
   `main` is production (default branch, Release's only publish path). The `dev -> main` promotion
   and hotfix PRs are opened/merged by the workflows themselves. After every promotion or hotfix,
