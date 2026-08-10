@@ -1,9 +1,14 @@
 //! Harness adapters: turn resolved settings + a prompt into `(argv, env)`.
 //!
-//! Two kinds:
-//! - built-ins `pi` and `claude` — flags exactly per `docs/protocol.md`;
+//! Three kinds:
+//! - built-ins `pi`, `claude`, `codex` and `opencode` — flags exactly per
+//!   `docs/protocol.md` (the codex adapter lives in [`codex`], the opencode
+//!   adapter in [`opencode`]);
 //! - config-defined harnesses — an argv template with `{model}`/`{effort}`/
 //!   `{permission_mode}` placeholders; prompt via `BOARD_PROMPT` env.
+
+pub mod codex;
+pub mod opencode;
 
 use crate::capability::ResumeSupport;
 use crate::config::Config;
@@ -13,7 +18,7 @@ use crate::prompt::EffectiveSettings;
 /// Harness stored on newly-created cards when the caller omits one.
 pub const DEFAULT_HARNESS: &str = "pi";
 /// Built-ins routed without config-defined argv/env reconstruction.
-pub const BUILTIN_HARNESSES: [&str; 2] = ["pi", "claude"];
+pub const BUILTIN_HARNESSES: [&str; 4] = ["pi", "claude", "codex", "opencode"];
 
 pub fn is_builtin_harness(name: &str) -> bool {
     BUILTIN_HARNESSES.contains(&name)
@@ -78,6 +83,13 @@ pub enum HarnessError {
     MissingForkTargetSession,
     #[error("pi does not support permission modes")]
     PiPermissionModeUnsupported,
+    /// OpenCode effort is applied through a per-model agent config, so the
+    /// model is required. Failing loudly beats silently dropping the effort.
+    #[error(
+        "opencode effort is set but no model is defined: effort rides the herdr-board agent's \
+         per-model variant, so a model is required"
+    )]
+    OpenCodeEffortRequiresModel,
     /// The harness declares no way to resume a conversation by id. There is
     /// deliberately no fallback: launching a *fresh* conversation instead would
     /// silently re-run the task.
@@ -160,6 +172,8 @@ pub fn session_argv(
                 Some(id.clone()),
             )),
         },
+        "codex" => codex::session_argv(session, target_uuid),
+        "opencode" => opencode::session_argv(session, target_uuid),
         other => Err(HarnessError::UnknownHarness(other.to_string())),
     }
 }
@@ -176,12 +190,25 @@ fn session_flags(harness_name: &str) -> &'static [(&'static str, bool)] {
             ("--resume", true),
             ("--fork-session", false),
         ],
+        "codex" => codex::SESSION_FLAGS,
+        "opencode" => opencode::SESSION_FLAGS,
         _ => &[],
     }
 }
 
 /// Drop every session-carrying flag (and its value) from a persisted argv.
 fn strip_session_flags(harness_name: &str, argv: &[String]) -> Vec<String> {
+    // Codex session syntax is a trailing bare-word subcommand. Its model is
+    // free-form, so `--model resume`/`--model fork` must not be mistaken for
+    // session syntax; only the adapter-owned final pair is removable.
+    if harness_name == "codex" {
+        return if argv.len() >= 2 && matches!(argv[argv.len() - 2].as_str(), "resume" | "fork") {
+            argv[..argv.len() - 2].to_vec()
+        } else {
+            argv.to_vec()
+        };
+    }
+
     let flags = session_flags(harness_name);
     let mut out = Vec::with_capacity(argv.len());
     let mut index = 0;
@@ -409,6 +436,12 @@ pub fn build_invocation(
     }
     if harness_name == "claude" {
         return managed_claude_invocation(settings, session, minted_uuid, prompt);
+    }
+    if harness_name == "codex" {
+        return codex::managed_codex_invocation(settings, session, minted_uuid, prompt);
+    }
+    if harness_name == "opencode" {
+        return opencode::managed_opencode_invocation(settings, session, minted_uuid, prompt);
     }
 
     let def = config

@@ -221,8 +221,15 @@ fn add_rescuable_run(
             session: None,
         })
         .unwrap();
-    db.promote_run_with_anchor_uow(run.id, Some("w1"), Some("w1:p9"), Some("w1:anchor"), None)
-        .unwrap();
+    db.promote_run_with_anchor_uow(
+        run.id,
+        Some("w1"),
+        Some("w1:p9"),
+        Some("w1:anchor"),
+        None,
+        None,
+    )
+    .unwrap();
     // A rescue must work on a *finished* run: the row below is exactly what the
     // tests then assert stays untouched.
     db.finalize_run_uow(&FinalizeRun {

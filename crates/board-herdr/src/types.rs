@@ -109,6 +109,21 @@ pub struct PaneInfo {
     pub revision: u64,
 }
 
+/// A protocol-19 agent-session reference (the `AgentSessionInfo` object that
+/// `AgentInfo.agent_session` carries): a `{agent, kind, source, value}` DTO
+/// where `kind` is `"id"` or `"path"`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AgentSession {
+    #[serde(default)]
+    pub agent: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub value: String,
+}
+
 /// An agent-bearing pane, as listed in `session.snapshot.agents`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct AgentInfo {
@@ -131,6 +146,10 @@ pub struct AgentInfo {
     pub launch_pending: bool,
     #[serde(default)]
     pub interactive_ready: bool,
+    /// Session reference (`AgentSessionInfo | null` in the protocol-19
+    /// schema); absent on panes without a reported agent session.
+    #[serde(default)]
+    pub agent_session: Option<AgentSession>,
 }
 
 /// Live session state (subset the daemon consumes).

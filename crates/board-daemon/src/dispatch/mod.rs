@@ -62,6 +62,13 @@ pub(crate) fn map_harness_err(e: HarnessError) -> Error {
         HarnessError::PiPermissionModeUnsupported => {
             Error::BadRequest("pi does not support permission modes".into())
         }
+        // OpenCode effort rides the herdr-board agent's per-model variant, so a
+        // model is required up front: failing loudly beats dropping the effort.
+        HarnessError::OpenCodeEffortRequiresModel => Error::BadRequest(
+            "opencode effort requires a model: effort rides the herdr-board agent's \
+             per-model variant, so set a model on the card or column"
+                .into(),
+        ),
         // Both are refusals about an existing run, not malformed requests: the
         // run exists and is valid, it just cannot be reopened. Code 3.
         HarnessError::ResumeUnsupported(harness) => Error::InvalidState(format!(

@@ -191,6 +191,14 @@ pub(super) async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result
         // current queued run has no pane yet, so it cannot be its own match).
         let self_run_id = run.id;
         let self_session_id = run.session_id.clone();
+        // A Fork (retry) hop must NEVER re-prompt the prior live pane: the
+        // fork's whole point is a fresh conversation from the source, and
+        // re-prompting the old pane would keep the old conversation so the
+        // queued `fork <id>` argv never executes. The run's `session_id`
+        // still records the SOURCE id (the fork's new thread id arrives
+        // only at promotion), so the id alone cannot tell a retry-fork
+        // from a resume — the exact launch argv can.
+        let hop_is_fork = argv_is_fork(&run.harness, &req.argv);
         let resolved = tokio::task::spawn_blocking(move || {
             let mut client = HerdrClient::connect(&socket)
                 .map_err(|e| anyhow::anyhow!("herdr unavailable: {e}"))?;
@@ -231,23 +239,28 @@ pub(super) async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result
             // Reuse the prior run's pane iff this hop resumes the SAME harness
             // conversation: a non-fresh resume keeps the card's `session_id`,
             // so a prior durable run in this session/workspace that recorded
-            // that id is the source pane to re-prompt. Mint (fresh column) and
-            // Fork (retry) mint a new id and therefore find no match.
-            let reuse_pane_id = self_session_id.as_deref().and_then(|sid| {
-                prior_runs
-                    .iter()
-                    .filter(|r| {
-                        r.id != self_run_id
-                            && r.ended_at.is_some()
-                            && r.launch_spec.is_some()
-                            && r.session.as_deref() == session
-                            && r.herdr_workspace_id.as_deref() == Some(workspace_id.as_str())
-                            && r.session_id.as_deref() == Some(sid)
-                    })
-                    .max_by_key(|r| r.id)
-                    .and_then(|r| r.herdr_pane_id.clone())
-                    .filter(|pane| !pane.is_empty())
-            });
+            // that id is the source pane to re-prompt. Mint (fresh column)
+            // mints a new id and finds no match; Fork (retry) is excluded
+            // outright above — it must launch fresh so the fork actually runs.
+            let reuse_pane_id = if hop_is_fork {
+                None
+            } else {
+                self_session_id.as_deref().and_then(|sid| {
+                    prior_runs
+                        .iter()
+                        .filter(|r| {
+                            r.id != self_run_id
+                                && r.ended_at.is_some()
+                                && r.launch_spec.is_some()
+                                && r.session.as_deref() == session
+                                && r.herdr_workspace_id.as_deref() == Some(workspace_id.as_str())
+                                && r.session_id.as_deref() == Some(sid)
+                        })
+                        .max_by_key(|r| r.id)
+                        .and_then(|r| r.herdr_pane_id.clone())
+                        .filter(|pane| !pane.is_empty())
+                })
+            };
             Ok::<_, anyhow::Error>((
                 workspace_id,
                 cwd,
@@ -384,6 +397,14 @@ pub(crate) fn register_spawned_run(
             spawned.pane_id.as_deref(),
             spawned.anchor_pane_id.as_deref(),
             timeout_deadline_at_ms,
+            // The harness-captured conversation id (self-minting harnesses
+            // like codex/opencode report it only once the agent is up) is
+            // persisted in the SAME transaction as the run promotion and the
+            // card running/session update — the capture travels through this
+            // cancellation critical section, so a cancel that ended the run
+            // while the spawn was in flight discards the captured id together
+            // with the handle.
+            spawned.captured_session_id.as_deref(),
         )?;
         let registered_handle = handle.take().ok_or_else(|| {
             Error::InvalidState(format!(
@@ -420,6 +441,43 @@ pub(crate) fn register_spawned_run(
             }
             other
         }
+    }
+}
+
+/// Whether a queued run's hop is a Fork (retry) rather than a Resume, read
+/// from the exact launch argv that will be spawned.
+///
+/// The per-harness spellings mirror `board_core::harness::session_argv`, the
+/// single source of truth for how a
+/// [`SessionPlan`](board_core::harness::SessionPlan) is spelled in argv:
+/// - pi fork: `--fork <source> --session-id <target>` (a bare `--session-id`
+///   is the mint/resume shape);
+/// - claude fork: `--resume <id> --fork-session` (a plain `--resume` resumes
+///   in place);
+/// - codex fork/resume are trailing subcommands: `fork <id>` vs `resume <id>`;
+/// - opencode fork/resume are trailing session flags: `-s <id> --fork` vs
+///   `-s <id>` (a Mint carries no `-s` at all).
+///
+/// A Fork records the SOURCE conversation id on the run — the fork's new
+/// thread id replaces it only at promotion — so `run.session_id` cannot tell
+/// a retry-fork from a resume; the argv can. Fork hops must never re-prompt
+/// the prior live same-session pane: re-prompting keeps the old conversation
+/// and the queued `fork <id>` subcommand would never execute.
+pub(super) fn argv_is_fork(harness: &str, argv: &[String]) -> bool {
+    match harness {
+        "pi" => argv.iter().any(|arg| arg == "--fork"),
+        "claude" => argv.iter().any(|arg| arg == "--fork-session"),
+        // Same tail check the spawner uses to detect codex session flags.
+        "codex" => argv.len() >= 2 && argv[argv.len() - 2] == "fork",
+        // opencode's session flags close the argv: `-s <id>` (resume) or
+        // `-s <id> --fork` (fork). Only the trailing session-shaped tail
+        // window is inspected — the free-form model value after `-m` could
+        // itself be spelled `--fork` on a Mint, but it can never sit two
+        // tokens behind a trailing `--fork`.
+        "opencode" => {
+            argv.len() >= 3 && argv[argv.len() - 3] == "-s" && argv[argv.len() - 1] == "--fork"
+        }
+        _ => false,
     }
 }
 

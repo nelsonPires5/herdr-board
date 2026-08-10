@@ -519,12 +519,12 @@ s=open(sys.argv[1],encoding='utf-8').read()
 assert not re.search(r'''printf\s+'%s(?:\\n)?'\s+"\$show"''',s)
 PY
 ! rg -n '^\s*assert\b.*,[[:space:]]*(x(\[[^]]+\])?|prompt|system_prompt|show\[[^]]+\])[[:space:]]*$' \
-  "$E2E_LIB_DIR"/[0-9][0-9]-*.sh "$E2E_LIB_DIR"/real-*-smoke.sh "$E2E_LIB_DIR"/fake-bin/{pi,claude} >/dev/null \
+  "$E2E_LIB_DIR"/[0-9][0-9]-*.sh "$E2E_LIB_DIR"/real-*-smoke.sh "$E2E_LIB_DIR"/fake-bin/{pi,claude,codex,opencode} >/dev/null \
   || { echo 'unsafe sensitive assertion message remains' >&2; exit 1; }
 python3 - "$E2E_LIB_DIR" <<'PY'
 import ast,pathlib,re,sys
 root=pathlib.Path(sys.argv[1])
-for path in [*root.glob('[0-9][0-9]-*.sh'), *root.glob('real-*-smoke.sh'), root/'fake-bin/pi', root/'fake-bin/claude']:
+for path in [*root.glob('[0-9][0-9]-*.sh'), *root.glob('real-*-smoke.sh'), root/'fake-bin/pi', root/'fake-bin/claude', root/'fake-bin/codex', root/'fake-bin/opencode']:
     text=path.read_text(encoding='utf-8')
     for match in re.finditer(r"<<'PY'\n(.*?)\nPY(?:\n|$)", text, re.S):
         tree=ast.parse(match.group(1))

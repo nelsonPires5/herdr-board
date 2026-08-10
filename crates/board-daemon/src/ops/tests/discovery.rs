@@ -288,9 +288,10 @@ fn run_focus_rescue_gives_the_new_pane_the_board_env_but_never_the_run_credentia
     // `board comment`/`done`/`__pane-exited`. A rescued pane belongs to no run
     // and must not be able to write to the immutable historical row, so it is
     // withheld; the id travels as an inert label instead.
-    assert!(
-        !env.contains_key("BOARD_RUN_ID"),
-        "a rescued pane must not receive the run credential: {env:?}"
+    assert_eq!(
+        env.get("BOARD_RUN_ID"),
+        Some(&String::new()),
+        "a rescued pane must explicitly clear an inherited run credential: {env:?}"
     );
     assert_eq!(env.get("BOARD_RESCUED_RUN_ID"), Some(&run_id.to_string()));
 }
@@ -605,7 +606,15 @@ fn harness_list_builtin_only() {
     let d = test_daemon(Config::default());
     let v = handle_request(&d, "harness.list", json!({})).unwrap();
     let names: Vec<String> = serde_json::from_value(v["harnesses"].clone()).unwrap();
-    assert_eq!(names, vec!["pi".to_string(), "claude".to_string()]);
+    assert_eq!(
+        names,
+        vec![
+            "pi".to_string(),
+            "claude".to_string(),
+            "codex".to_string(),
+            "opencode".to_string(),
+        ]
+    );
 }
 
 #[test]
@@ -621,7 +630,7 @@ fn harness_list_includes_config_defined() {
     let d = test_daemon(config);
     let v = handle_request(&d, "harness.list", json!({})).unwrap();
     let names: Vec<String> = serde_json::from_value(v["harnesses"].clone()).unwrap();
-    assert_eq!(names, vec!["pi", "claude", "fake"]);
+    assert_eq!(names, vec!["pi", "claude", "codex", "opencode", "fake"]);
 }
 
 #[test]
@@ -700,6 +709,242 @@ fn harness_capabilities_pi_falls_back_to_static_without_agent_dir() {
     let d = test_daemon(Config::default());
     let v = handle_request(&d, "harness.capabilities", json!({ "harness": "pi" })).unwrap();
     assert!(v["models"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn harness_capabilities_codex_overlays_live_catalog_from_codex_home() {
+    // A CODEX_HOME with models_cache.json → the daemon overlays the visible
+    // model slugs (per-model supported_reasoning_levels) onto the codex
+    // catalog, exactly like the pi overlay. `hide` models and levels the
+    // board does not know (`ultra`) never reach the wire.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("models_cache.json"),
+        r#"{"models": [
+          {"slug": "gpt-5.6-sol", "visibility": "list",
+           "supported_reasoning_levels": [
+             {"effort": "low"}, {"effort": "medium"}, {"effort": "high"},
+             {"effort": "xhigh"}, {"effort": "max"}, {"effort": "ultra"}]},
+          {"slug": "gpt-5.4", "visibility": "list",
+           "supported_reasoning_levels": [{"effort": "none"}, {"effort": "low"}]},
+          {"slug": "codex-auto-review", "visibility": "hide",
+           "supported_reasoning_levels": [{"effort": "low"}]}
+        ]}"#,
+    )
+    .unwrap();
+    let config = Config {
+        codex_home: Some(dir.path().to_path_buf()),
+        ..Config::default()
+    };
+    let d = test_daemon(config);
+
+    let v = handle_request(&d, "harness.capabilities", json!({ "harness": "codex" })).unwrap();
+    let models = v["models"].as_array().unwrap();
+    let ids: Vec<&str> = models.iter().map(|m| m["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, vec!["gpt-5.4", "gpt-5.6-sol"]);
+    let sol = models.iter().find(|m| m["id"] == "gpt-5.6-sol").unwrap();
+    let efforts: Vec<&str> = sol["efforts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        efforts,
+        vec!["low", "medium", "high", "xhigh", "max"],
+        "ultra is filtered, not added to the protocol"
+    );
+    let gpt54 = models.iter().find(|m| m["id"] == "gpt-5.4").unwrap();
+    let efforts: Vec<&str> = gpt54["efforts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        efforts,
+        vec!["off", "low"],
+        "codex `none` maps to board `off`"
+    );
+    // model_freeform stays true: arbitrary model strings are still accepted.
+    assert_eq!(v["model_freeform"], true);
+    // The preset approval vocabulary is untouched by the overlay.
+    let presets: Vec<&str> = v["permission_modes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        presets,
+        vec!["ask-for-approval", "approve-for-me", "full-access"]
+    );
+}
+
+#[test]
+fn harness_capabilities_codex_falls_back_to_static_without_codex_home() {
+    // No codex_home (tests) → static free-form catalog (models: []).
+    let d = test_daemon(Config::default());
+    let v = handle_request(&d, "harness.capabilities", json!({ "harness": "codex" })).unwrap();
+    assert!(v["models"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn harness_capabilities_codex_falls_back_to_static_on_malformed_cache() {
+    // A malformed models_cache.json must not break codex capabilities: the
+    // daemon keeps the static free-form catalog.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("models_cache.json"), "{not json").unwrap();
+    let config = Config {
+        codex_home: Some(dir.path().to_path_buf()),
+        ..Config::default()
+    };
+    let d = test_daemon(config);
+    let v = handle_request(&d, "harness.capabilities", json!({ "harness": "codex" })).unwrap();
+    assert!(v["models"].as_array().unwrap().is_empty());
+}
+
+/// A fake `opencode` executable printing the verbose model catalog shape.
+fn fixture_opencode_bin(dir: &tempfile::TempDir, stdout: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let script = format!("#!/bin/sh\ncat <<'HBEOF'\n{stdout}\nHBEOF\n");
+    let bin = dir.path().join("opencode-fixture");
+    std::fs::write(&bin, script).unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+    bin
+}
+
+/// Mirror of `opencode models --verbose` (repeated `provider/model` header
+/// lines + one JSON object each, with a per-model `variants` map).
+/// `opencode/nemotron-3-ultra-free` declares `variants: {}` for real
+/// (verified live): a valid model that stays listed with empty efforts.
+const OPENCODE_VERBOSE_FIXTURE: &str = r#"opencode/nemotron-3-ultra-free
+{
+  "id": "nemotron-3-ultra-free",
+  "providerID": "opencode",
+  "variants": {}
+}
+opencode/deepseek-v4-flash-free
+{
+  "id": "deepseek-v4-flash-free",
+  "variants": {
+    "low": {"reasoningEffort": "low"},
+    "high": {"reasoningEffort": "high"},
+    "max": {"reasoningEffort": "max"}
+  }
+}
+openai/gpt-5.6-sol
+{
+  "id": "gpt-5.6-sol",
+  "variants": {
+    "low": {"reasoningEffort": "low"},
+    "thinking": {"reasoningEffort": "thinking"}
+  }
+}
+"#;
+
+#[test]
+fn harness_capabilities_opencode_overlays_live_catalog_from_cli() {
+    // An `opencode_bin` resolving to a working CLI → the daemon overlays the
+    // live model catalog (per-model variant efforts) onto the opencode
+    // capabilities, exactly like the pi/codex overlays. Variants the board
+    // does not know (`thinking`) never reach the wire; a valid model with no
+    // variants (nemotron) stays listed with EMPTY efforts.
+    let dir = tempfile::tempdir().unwrap();
+    let bin = fixture_opencode_bin(&dir, OPENCODE_VERBOSE_FIXTURE);
+    let config = Config {
+        opencode_bin: Some(bin.to_str().unwrap().to_string()),
+        ..Config::default()
+    };
+    let d = test_daemon(config);
+
+    let v = handle_request(&d, "harness.capabilities", json!({ "harness": "opencode" })).unwrap();
+    assert_eq!(v["harness"], "opencode");
+    let models = v["models"].as_array().unwrap();
+    let ids: Vec<&str> = models.iter().map(|m| m["id"].as_str().unwrap()).collect();
+    assert_eq!(
+        ids,
+        vec![
+            "openai/gpt-5.6-sol",
+            "opencode/deepseek-v4-flash-free",
+            "opencode/nemotron-3-ultra-free",
+        ]
+    );
+    let nemotron = models
+        .iter()
+        .find(|m| m["id"] == "opencode/nemotron-3-ultra-free")
+        .unwrap();
+    assert_eq!(
+        nemotron["efforts"].as_array().unwrap().len(),
+        0,
+        "nemotron really has variants {{}} → listed with NO board efforts"
+    );
+    let deepseek = models
+        .iter()
+        .find(|m| m["id"] == "opencode/deepseek-v4-flash-free")
+        .unwrap();
+    let efforts: Vec<&str> = deepseek["efforts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        efforts,
+        vec!["low", "high", "max"],
+        "verified live variant keys map onto board efforts in canonical order"
+    );
+    // model_freeform stays true: arbitrary model strings are still accepted.
+    assert_eq!(v["model_freeform"], true);
+    // The permission vocabulary is untouched by the overlay.
+    let modes: Vec<&str> = v["permission_modes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p.as_str().unwrap())
+        .collect();
+    assert_eq!(modes, vec!["default", "auto-approve"]);
+}
+
+#[test]
+fn harness_capabilities_opencode_falls_back_to_static_without_bin() {
+    // No opencode_bin (tests) → the static fallback catalog, which truthfully
+    // lists opencode/nemotron-3-ultra-free (empty efforts — real `variants:
+    // {}`) plus the fixture model opencode/deepseek-v4-flash-free
+    // (low/high/max).
+    let d = test_daemon(Config::default());
+    let v = handle_request(&d, "harness.capabilities", json!({ "harness": "opencode" })).unwrap();
+    let models = v["models"].as_array().unwrap();
+    assert_eq!(models.len(), 2, "static fallback models are defined");
+    assert_eq!(models[0]["id"], "opencode/nemotron-3-ultra-free");
+    assert_eq!(
+        models[0]["efforts"].as_array().unwrap().len(),
+        0,
+        "nemotron offers no board effort"
+    );
+    assert_eq!(models[1]["id"], "opencode/deepseek-v4-flash-free");
+    let efforts: Vec<&str> = models[1]["efforts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e.as_str().unwrap())
+        .collect();
+    assert_eq!(efforts, vec!["low", "high", "max"]);
+}
+
+#[test]
+fn harness_capabilities_opencode_falls_back_to_static_on_failing_cli() {
+    // A configured bin that fails (missing executable, non-zero exit) must
+    // not break opencode capabilities: the daemon keeps the static fallback
+    // catalog.
+    let config = Config {
+        opencode_bin: Some("/nonexistent/opencode-binary".to_string()),
+        ..Config::default()
+    };
+    let d = test_daemon(config);
+    let v = handle_request(&d, "harness.capabilities", json!({ "harness": "opencode" })).unwrap();
+    assert_eq!(v["models"][0]["id"], "opencode/nemotron-3-ultra-free");
 }
 
 #[test]

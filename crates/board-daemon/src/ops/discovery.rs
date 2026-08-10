@@ -1,6 +1,6 @@
 use super::*;
 use board_core::capability::{available_harnesses, capabilities_for};
-use board_core::pi_catalog;
+use board_core::{codex_catalog, opencode_catalog, pi_catalog};
 pub(super) fn harness_capabilities(d: &Arc<Daemon>, p: HarnessCapabilitiesParams) -> Result<Value> {
     match capabilities_for(&p.harness, &d.config) {
         Some(mut caps) => {
@@ -9,6 +9,26 @@ pub(super) fn harness_capabilities(d: &Arc<Daemon>, p: HarnessCapabilitiesParams
             // leave `pi_agent_dir` unset, so this stays the static catalog.
             if p.harness == "pi" {
                 let models = pi_catalog::live_models(d.config.pi_agent_dir.as_deref(), "pi");
+                if !models.is_empty() {
+                    caps.models = models;
+                }
+            }
+            // Codex mirrors Pi: the static catalog is free-form; overlay the
+            // live models read from the codex home's models_cache.json when
+            // one is configured. Tests leave `codex_home` unset, so this
+            // stays the static catalog.
+            if p.harness == "codex" {
+                let models = codex_catalog::live_models(d.config.codex_home.as_deref());
+                if !models.is_empty() {
+                    caps.models = models;
+                }
+            }
+            // OpenCode mirrors both: the static fallback catalog stays; when
+            // an `opencode_bin` is configured the live CLI catalog
+            // (`opencode models --verbose`) is preferred. Tests leave
+            // `opencode_bin` unset, so this stays the static fallback.
+            if p.harness == "opencode" {
+                let models = opencode_catalog::live_models(d.config.opencode_bin.as_deref());
                 if !models.is_empty() {
                     caps.models = models;
                 }

@@ -20,7 +20,7 @@ Ownership is strict: edit your crate(s) + append to root `[workspace.dependencie
 source of truth: `docs/protocol.md` + `docs/design.md`. Docs live in `docs/` (index: `docs/README.md`);
 `schema.sql` is the fresh-schema source of truth and `board-core::db` owns upgrades. Final compatibility
 is board protocol v1, SQLite schema v13, and exactly Herdr 0.8.0 / socket protocol 19. The complete
-live catalog is `e2e/README.md` (scenarios 01–30); `e2e/test-harness.sh` is the provider-free static
+live catalog is `e2e/README.md` (scenarios 01–32); `e2e/test-harness.sh` is the provider-free static
 safety gate.
 
 ## Build / test gates (keep green)
@@ -35,7 +35,7 @@ The gate list has one maintained copy: **[`docs/README.md` → Test gates](docs/
 
 - `#[ignore]`'d tests hit a live herdr (run only when `HERDR_SOCK`/`HERDR_SOCKET_PATH` exists).
 - End-to-end: `e2e/run-all.sh` (compat: `scripts/e2e.sh`) drives a REAL Herdr; checked-in fake
-  Pi/Claude executables keep the standard suite (scenarios 01–30) provider-free and zero-cost.
+  Pi/Claude/Codex/OpenCode executables keep the standard suite (scenarios 01–32) provider-free and zero-cost.
   **Hard rules an agent must never violate:** run only against the scenario's own **ephemeral**
   `hb-e2e-<slug>-<pid>-<random64>` session and **disposable** workspaces it created — never a user
   session, workspace, or tab — and prefix every Herdr mutation with `HERDR MUTATION:`.
@@ -109,7 +109,7 @@ Full layering, test placement, harness details, and how to add tests live in
 - Auto-start creates one child process-group leader (no double-fork/`setsid`); stop is an exact
   socket/identity-gated operation. The active-run summary drives TUI timers, and the always-on
   per-session supervisor reconnects and reconciles conservatively.
-- Definition of done for a user-facing change: update the docs and `CHANGELOG.md` in the same change. Keep each `CHANGELOG.md` entry to one line prefixed by a clickable link to its PR, e.g. `- [#31](https://github.com/nelsonPires5/herdr-board/pull/31) Pin Herdr plugin installs to a released tag.` (GitHub does not auto-link bare `#NN` inside rendered markdown files, so use the full link) so the changelog links the PR rather than reproducing it — long rationale lives in the PR body. Write the one-line description first, then fill in the PR link once the PR is open.
+- Definition of done for a user-facing change: update the docs and `CHANGELOG.md` in the same change. `Unreleased` entries are grouped under Keep-a-Changelog categories (`### Added` / `### Changed` / `### Fixed` / `### Removed`), one entry per PR, and each entry is one short sentence of user-facing outcome — what the user can do or see, never env var names, internal flags, module names, or tuning numbers (an internal refactor with no visible change gets one short line or none). Every entry starts with the clickable PR link — GitHub does not auto-link bare `#NN` inside rendered markdown — and fits ≤ 200 chars total: `- [#31](https://github.com/nelsonPires5/herdr-board/pull/31) feat: Pin Herdr plugin installs to a released tag.` The PR body holds the rationale. `scripts/tests/test_docs.py` enforces these rules for `Unreleased` (released sections are exempt). Write the entry first, then fill in the PR link once the PR is open.
 - Release/version changes follow [`docs/releasing.md`](docs/releasing.md). Agents must never create,
   push, move, or delete release tags manually: a maintainer starts **Prepare Release**, merges its
   PR into `dev`, the **Promote** workflow merges `dev -> main`, and the **Release** workflow creates

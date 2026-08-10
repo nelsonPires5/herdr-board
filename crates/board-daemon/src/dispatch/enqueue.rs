@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use board_core::db::Db;
 use board_core::engine::{decide_resumability, validate_effective_settings, ResumabilityDecision};
-use board_core::harness::{build_invocation, plan_session, SessionPlan};
+use board_core::harness::{build_invocation, is_builtin_harness, plan_session, SessionPlan};
 use board_core::launch::{ExecutionSpec, RunLaunchSpec};
 use board_core::model::{Card, Run};
 use board_core::prompt::{assemble_prompt, effective_settings};
@@ -89,8 +89,18 @@ pub(crate) fn prepare_enqueue_values(
         .resulting_session_id
         .clone()
         .or_else(|| match &plan {
-            SessionPlan::Mint => target_session.clone(),
-            SessionPlan::Resume(id) | SessionPlan::Fork(id) => Some(id.clone()),
+            // The synthetic mint fallback exists only for config-defined
+            // harnesses. Built-ins either report a real resulting id (pi/claude
+            // mint, every resume/fork) or self-mint their own thread id (codex
+            // Mint reports `None`), so a codex Mint must persist NULL — the
+            // board never invents a uuid for a harness that mints its own.
+            SessionPlan::Mint if !is_builtin_harness(&settings.harness) => target_session.clone(),
+            SessionPlan::Resume(id) | SessionPlan::Fork(id)
+                if !is_builtin_harness(&settings.harness) =>
+            {
+                Some(id.clone())
+            }
+            _ => None,
         });
     Ok(PreparedEnqueue {
         card_id: card.id,

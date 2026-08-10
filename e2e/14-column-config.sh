@@ -31,11 +31,11 @@ step "harness.list advertises built-ins + config-defined harnesses"
 brpc harness.list '{}' | python3 -c '
 import json, sys
 hs = json.load(sys.stdin)["harnesses"]
-# Built-ins first in default order (pi before claude), then config-defined sorted.
-assert hs == ["pi", "claude", "fake", "fake-ov"], hs
+# Built-ins first in default order, then config-defined sorted.
+assert hs == ["pi", "claude", "codex", "opencode", "fake", "fake-ov"], hs
 print("  harnesses:", ", ".join(hs))
 '
-ok "harness.list returns built-ins (pi, claude) and config-defined (fake, fake-ov)"
+ok "harness.list returns built-ins (pi, claude, codex, opencode) and config-defined (fake, fake-ov)"
 
 step "HERDR MUTATION: create disposable workspace for the override column"
 e2e_ws_create board-colcfg-e2e; WS_ID="$E2E_WS"

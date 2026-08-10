@@ -16,7 +16,8 @@ CLI, cards, runs, comments, columns, and Herdr-backed spaces; it does not prescr
 prototype, test, or release herdr-board itself.
 
 A **card** is a title/description plus harness/model/effort, optional harness permission, and a target
-Herdr session and workspace. New cards default to Pi. **Columns** are pipeline stages: `manual` waits
+Herdr session and workspace. New cards default to Pi; the built-in catalog is `pi`, `claude`, `codex`
+(in that order), then any config-defined `[harness.NAME]`. **Columns** are pipeline stages: `manual` waits
 for a person and `auto` dispatches a visible agent run on entry. Each canonical Git root (or exact
 non-Git CWD) has an independent board; the preserved `Global` board remains available. Agents report
 through `board`; never edit the database. The daemon owns state and column transitions.
@@ -104,7 +105,15 @@ board card delete ID [--yes] [--json]
 ```
 
 `card new` is retained as an alias for `card create`. A new card defaults to Pi; an omitted model or
-effort uses the harness default. `new-workspace` requires both `--space-ref` and `--space-cwd`.
+effort uses the harness default. `--harness codex` selects the built-in Codex adapter: models are
+free-form (`--model` any string), every effort level is accepted (`off|minimal|low|medium|high|xhigh|max`;
+`off` is delivered to codex as `model_reasoning_effort=none`), and `--permission` takes
+`untrusted|on-request|never` (codex's `--ask-for-approval`; its `--sandbox` stays your own codex
+config and is never derived from the permission field). Codex mints its own conversation thread id —
+the board never invents one — and captures the integration-reported id after launch, so later stages
+can `resume`/`fork` the same conversation; a minted run whose id was never reported cannot be
+reopened by id (`card run focus` refuses; use `card run retry` for a new run).
+`new-workspace` requires both `--space-ref` and `--space-cwd`.
 Creating directly in an `auto` column dispatches immediately. `card list` defaults to active cards;
 `all` includes archived cards and `archived` returns only archived cards. `card show` includes current
 comments and run history; soft-deleted comments are omitted.
@@ -167,8 +176,8 @@ rescue never re-sends the card task and never writes to the database, so the reo
 ephemeral: it has no run row and is not watched or timed out. It gets `BOARD_CARD_ID`/`BOARD_SOCKET`
 but deliberately **no** `BOARD_RUN_ID`, so from inside it `board comment` still records on the card
 (as a human comment) while `board done` does not apply — the run stays closed. Closing the pane is up
-to you. Resuming requires an explicit per-harness capability (`pi` and
-`claude` have it; a `[harness.NAME]` harness needs `resume = true`) and a recorded conversation id;
+to you. Resuming requires an explicit per-harness capability (`pi`, `claude`, and
+`codex` have it; a `[harness.NAME]` harness needs `resume = true`) and a recorded conversation id;
 without either, focus is refused explicitly — use `card run retry` for a new run instead.
 
 Done/cancel/retry return `{run, card}` in JSON. Retry creates a new run while preserving history.

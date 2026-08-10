@@ -74,7 +74,12 @@ Installing one **writes into that harness's own config** (`pi` installs
 updates integrations** — running `herdr integration install <harness>` is a **user
 prerequisite** for live lifecycle signals. Check the reported version with
 `herdr integration status`; the board's current support matrix expects Pi v8 and
-Claude v7 when those harnesses are dispatched.
+Claude v7 when those harnesses are dispatched. For codex, the integration is what
+reports `AgentInfo.agent_session` (the thread id the board captures so a minted
+conversation can later be resumed/forked); the opencode integration reports its
+`ses_…` session id the same way. Without the matching integration a codex or
+opencode run still executes and completes, but its conversation cannot be
+reopened by id.
 
 ### 0.8.0 lifecycle implications
 
@@ -126,6 +131,19 @@ The delta is additive and outside the board client surface:
 - `antigravity_cli` (CLI spelling `antigravity-cli`) and `grok` are new
   integration targets with session reporting/native restore. They do not add
   board built-in harnesses.
+- `AgentInfo.agent_session` carries an `AgentSessionInfo | null` reference —
+  `{agent, kind, source, value}` with `kind` ∈ {`id`, `path`} — for panes whose
+  integration reported a session. It is absent on panes without one. `board-herdr`
+  decodes it (`AgentInfo.agent_session`) because the self-minting built-in
+  harnesses need the reported id: a codex/opencode Mint persists `session_id =
+  NULL` at enqueue, and the daemon's bounded post-launch `agent.get` capture
+  accepts only an `id`-kind reference owned by the expected agent with a
+  non-empty value — codex leaves `source` unconstrained, while opencode pins the
+  exact source the current Herdr opencode integration reports — promoting it
+  atomically onto the run and card. A wrong-agent, wrong-source, `path`-kind,
+  blank, or never-reported session degrades the capture to `None` (run still
+  executes); the pane then keeps no recorded conversation id, so reuse/rescue
+  fail closed.
 
 The client does not call the new workspace method. It preserves unknown additive
 events rather than treating them as a change to the used transport. The current
@@ -168,9 +186,10 @@ After start, `agent.get <target>` exposes `interactive_ready` and
 `launch_pending`. herdr-board waits for `interactive_ready=true` and
 `launch_pending=false`, then submits the exact card task with `agent.prompt`
 instead of startup argv or synthetic keystrokes. A newly allocated child can
-briefly retain prior agent state and return typed `agent_pane_busy`; the board
-retries the exact `agent.start` request on that same child at most twice, with
-bounded 100ms/200ms backoff. It never allocates a second child for that
+briefly retain prior agent state — or a slow login shell can still be booting — and return typed
+`agent_pane_busy`; the board
+retries the exact `agent.start` request on that same child at most five times, with
+bounded 100ms backoff doubling per retry (100/200/400/800/1600ms). It never allocates a second child for that
 response. Persistent busy is a launch failure whose cleanup closes only the
 owned child pane and leaves the anchor; `pane_not_found` is handled separately
 as a placement race that restarts discovery from `tab.list` and retries
@@ -180,6 +199,31 @@ both tab and anchor are selected only from scoped durable pane identities.
 Labels are display metadata and never authorize a tab or pane.
 `agent.read` remains a terminal screen/scrollback read, not a semantic result
 channel.
+
+**Codex and OpenCode are managed kinds with no prompt file.** `kind:"codex"`
+starts the interactive Codex CLI and `kind:"opencode"` the OpenCode TUI, both
+with the same pane-first readiness contract, but neither has a system-prompt-file
+equivalent: startup argv carries neither system nor task text (no
+`--append-system-prompt*`, no `--` delimiter), and the prompt travels
+exclusively through `agent.prompt` after readiness — a Mint receives one
+delimited block (`## herdr-board system instructions` then
+`## herdr-board card task`), a resume/fork fresh pane the task alone, same-pane
+reuse the task alone, a rescue nothing. Around the prompt, the daemon
+bounded-polls `agent.get.agent_session` (5 probes / 10s) for the
+integration-reported id (expected agent, `kind:"id"`, non-empty value; opencode
+also pins the integration's source) and persists it atomically with the run
+promotion; a missing or unusable report degrades to `None` (see the protocol-19
+delta above). The capture is ordered per harness: **codex captures between
+readiness and the prompt**, while **opencode captures after the prompt** — real
+OpenCode mints its `ses_…` id and reports `agent_session` only once the first
+`agent.prompt` lands, so a pre-prompt capture would lose the id; an opencode
+rescue sends no prompt and simply reduces to capture-after-readiness. The
+OpenCode launch is the TUI (`opencode [project]`), so the
+board's session flags are the TUI's `-s <id>` (resume) and `-s <id> --fork`
+(retry); the TUI has no `--variant`, so its effort rides the process-local
+`OPENCODE_CONFIG_CONTENT` config env as a `herdr-board` agent (model+variant)
+selected with `--agent herdr-board`, and `--auto` is the
+`auto-approve` permission mode.
 
 The rescue depends on two runtime facts that are not guaranteed by the request
 shapes: a pane label set with `pane.rename` must survive a subsequent

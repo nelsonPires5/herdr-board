@@ -218,6 +218,84 @@ fn claude_req() -> HerdrLaunchPlan {
     }
 }
 
+/// A board-built codex launch plan: startup-only argv (Mint) or with the
+/// `resume <id>` / `fork <id>` subcommand pair appended last (the exact shape
+/// `board_core::harness::codex::managed_codex_invocation` persists).
+fn codex_req(session_tail: &[&str], initial_prompt: Option<&str>) -> HerdrLaunchPlan {
+    let mut argv = vec![
+        "codex".into(),
+        "--model".into(),
+        "gpt-5.6".into(),
+        "-c".into(),
+        "model_reasoning_effort=low".into(),
+    ];
+    argv.extend(session_tail.iter().map(|s| s.to_string()));
+    HerdrLaunchPlan {
+        name: "card-42-execute".into(),
+        name_fallback: Some("card-42-execute-r7".into()),
+        agent_kind: Some("codex".into()),
+        initial_prompt: initial_prompt.map(str::to_string),
+        system_prompt: Some("codex system instructions".into()),
+        tab_label: Some("kanban".into()),
+        owned_tab_id: None,
+        durable_pane_ids: Vec::new(),
+        reclaimable_pane_ids: Vec::new(),
+        durable_anchor_pane_ids: Vec::new(),
+        reuse_pane_id: None,
+        cwd: Some(PathBuf::from("/tmp/card cwd")),
+        workspace_ref: Some("w1".into()),
+        herdr_socket: None,
+        bootstrap: None,
+        env: vec![("BOARD_CARD_ID".into(), "42".into())],
+        argv,
+    }
+}
+
+/// A board-built opencode launch plan: startup-only argv (Mint) or with the
+/// `-s <id>` / `-s <id> --fork` session flags appended last (the exact shape
+/// `board_core::harness::opencode::managed_opencode_invocation` persists).
+///
+/// The board effort rides a process-local config env — the TUI has no
+/// `--variant` — so the plan carries the exact `OPENCODE_CONFIG_CONTENT` JSON
+/// alongside the `--agent herdr-board` startup flags; `-m` never appears.
+fn opencode_req(session_tail: &[&str], initial_prompt: Option<&str>) -> HerdrLaunchPlan {
+    let mut argv = vec![
+        "opencode".into(),
+        "--agent".into(),
+        board_core::harness::opencode::AGENT_NAME.into(),
+        "--auto".into(),
+    ];
+    argv.extend(session_tail.iter().map(|s| s.to_string()));
+    HerdrLaunchPlan {
+        name: "card-42-execute".into(),
+        name_fallback: Some("card-42-execute-r7".into()),
+        agent_kind: Some("opencode".into()),
+        initial_prompt: initial_prompt.map(str::to_string),
+        system_prompt: Some("opencode system instructions".into()),
+        tab_label: Some("kanban".into()),
+        owned_tab_id: None,
+        durable_pane_ids: Vec::new(),
+        reclaimable_pane_ids: Vec::new(),
+        durable_anchor_pane_ids: Vec::new(),
+        reuse_pane_id: None,
+        cwd: Some(PathBuf::from("/tmp/card cwd")),
+        workspace_ref: Some("w1".into()),
+        herdr_socket: None,
+        bootstrap: None,
+        env: vec![
+            ("BOARD_CARD_ID".into(), "42".into()),
+            (
+                board_core::harness::opencode::CONFIG_ENV.into(),
+                board_core::harness::opencode::effort_agent_config(
+                    "opencode/deepseek-v4-flash-free",
+                    board_core::protocol::Effort::Low,
+                ),
+            ),
+        ],
+        argv,
+    }
+}
+
 fn assert_startup_prompt_file(
     req: &Value,
     expected_base_args: &[&str],
@@ -390,12 +468,15 @@ fn assert_composed_busy_name_sequence(sequence: &[&str], expected_names: &[&str]
     assert!(err.to_string().contains("pane is still busy"));
     assert_eq!(starts.load(Ordering::SeqCst), sequence.len());
     assert_eq!(expected_names.len(), sequence.len());
+    let mut expected_delays = Vec::new();
+    let mut delay = super::AGENT_START_BUSY_BACKOFF;
+    for _ in 0..super::AGENT_START_BUSY_RETRIES {
+        expected_delays.push(delay);
+        delay = delay.saturating_mul(2);
+    }
     assert_eq!(
         delays.lock().unwrap().as_slice(),
-        &[
-            super::AGENT_START_BUSY_BACKOFF,
-            super::AGENT_START_BUSY_BACKOFF.saturating_mul(2),
-        ],
+        expected_delays.as_slice(),
         "busy delays must be globally bounded across the name fallback",
     );
 

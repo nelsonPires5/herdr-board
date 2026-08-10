@@ -22,6 +22,14 @@ WORKSPACE_VERSION_RE = re.compile(
 # quote the ref that was current at the time and must never be repinned.
 INSTALL_REF_DOCS = ("README.md", "docs/install.md", "docs/operations.md")
 
+# Changelog convention, enforced for the `Unreleased` section only. Released
+# sections document the conventions of their time and are never rewritten.
+CHANGELOG_CATEGORIES = ("### Added", "### Changed", "### Fixed", "### Removed")
+CHANGELOG_ENTRY_RE = re.compile(
+    r"^\- \[#(\d+)\]\(https://github\.com/nelsonPires5/herdr-board/pull/\d+\)"
+)
+CHANGELOG_ENTRY_MAX_CHARS = 200
+
 # Every markdown file this repo maintains as documentation (not vendored, not
 # generated). Used by the link and scenario-catalog contracts below.
 MAINTAINED_MARKDOWN = (
@@ -315,6 +323,50 @@ class DocumentationContractTests(unittest.TestCase):
                 self.assertTrue(
                     any(fnmatch.fnmatch(module, pattern) for pattern in patterns),
                     f"{module} matches no CI pattern {patterns}; it would never run",
+                )
+
+    def test_unreleased_changelog_entries_follow_the_convention(self) -> None:
+        """Unreleased entries are one short, PR-linked, user-facing line each.
+
+        Entries used to be one physical line that read as a paragraph of
+        implementation detail (env var names, backoff values, module renames).
+        The PR link already carries the rationale; the entry must say only
+        what the user gains, sit under a Keep-a-Changelog category heading,
+        and stay within CHANGELOG_ENTRY_MAX_CHARS so the section stays
+        scannable. Historical released sections are deliberately exempt.
+        """
+        text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        body = text.split("## [Unreleased]", 1)[1]
+        unreleased = body.split("\n## ", 1)[0]
+        category = None
+        for line in unreleased.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            with self.subTest(line=stripped[:60]):
+                if stripped.startswith("### "):
+                    category = stripped
+                    self.assertIn(
+                        stripped,
+                        CHANGELOG_CATEGORIES,
+                        f"{stripped!r} is not a Keep-a-Changelog category "
+                        f"(use one of {CHANGELOG_CATEGORIES})",
+                    )
+                    continue
+                self.assertIsNotNone(
+                    category,
+                    f"entry has no category heading above it: {stripped[:60]!r}",
+                )
+                self.assertIsNotNone(
+                    CHANGELOG_ENTRY_RE.match(stripped),
+                    "entry must start with `- [#NN](https://github.com/"
+                    "nelsonPires5/herdr-board/pull/NN)`: " + stripped[:60],
+                )
+                self.assertLessEqual(
+                    len(stripped),
+                    CHANGELOG_ENTRY_MAX_CHARS,
+                    f"entry exceeds {CHANGELOG_ENTRY_MAX_CHARS} chars; move the "
+                    f"detail to the PR body: {stripped[:60]!r}",
                 )
 
     def test_release_workflow_stages_what_the_tool_writes(self) -> None:

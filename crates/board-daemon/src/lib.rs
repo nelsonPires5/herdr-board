@@ -89,6 +89,17 @@ async fn async_main(db_path: PathBuf, socket_path: PathBuf) -> anyhow::Result<()
     if config.pi_agent_dir.is_none() {
         config.pi_agent_dir = board_core::pi_catalog::default_agent_dir();
     }
+    // Same for the codex home: `$CODEX_HOME` else `~/.codex` (mirror of the
+    // codex CLI's own default). Tests leave `codex_home` None and get the
+    // static free-form catalog.
+    if config.codex_home.is_none() {
+        config.codex_home = board_core::codex_catalog::default_codex_home();
+    }
+    // Same for the opencode binary: `$OPENCODE_BIN` else `opencode` on PATH.
+    // Tests leave `opencode_bin` None and get the static fallback catalog.
+    if config.opencode_bin.is_none() {
+        config.opencode_bin = board_core::opencode_catalog::default_opencode_bin();
+    }
     tracing::info!(
         "spawner={:?} max_concurrent={}",
         settings.spawner,

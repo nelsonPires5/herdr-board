@@ -488,3 +488,129 @@ fn delete_column_rolls_back_card_migration_and_both_position_compactions() {
         source.id
     );
 }
+
+#[test]
+fn captured_session_promotion_rolls_back_when_card_write_fails() {
+    let (_dir, path, card) = create_file_db("capture atomic");
+    let db = Db::open(&path).unwrap();
+    let run = db
+        .enqueue_run_uow(&enqueue(card.id, card.column_id))
+        .unwrap();
+    drop(db);
+    let before = reopened_state(&path, card.id);
+    let db = Db::open(&path).unwrap();
+    arm_fault(
+        &path,
+        "CREATE TRIGGER abort_capture BEFORE UPDATE OF session_id ON cards
+         BEGIN SELECT RAISE(ABORT,'fault: capture'); END;",
+    );
+
+    assert!(db
+        .promote_captured_session_uow(run.id, "thread-abc")
+        .is_err());
+    drop(db);
+
+    assert_eq!(
+        reopened_state(&path, card.id),
+        before,
+        "a failed capture must leave the run AND the card exactly as found"
+    );
+}
+
+#[test]
+fn integrated_capture_promotion_rolls_back_when_card_write_fails() {
+    // The daemon's launch path persists the captured id inside the promotion
+    // UOW: a card-side failure must roll back the run promotion AND the
+    // session id together — never a started run without its identity.
+    let (_dir, path, card) = create_file_db("capture promotion atomic");
+    let db = Db::open(&path).unwrap();
+    let run = db
+        .enqueue_run_uow(&enqueue(card.id, card.column_id))
+        .unwrap();
+    drop(db);
+    let before = reopened_state(&path, card.id);
+    let db = Db::open(&path).unwrap();
+    arm_fault(
+        &path,
+        "CREATE TRIGGER abort_capture_promotion BEFORE UPDATE OF session_id ON cards
+         BEGIN SELECT RAISE(ABORT,'fault: capture promotion'); END;",
+    );
+
+    assert!(db
+        .promote_run_with_anchor_uow(
+            run.id,
+            Some("workspace"),
+            Some("pane"),
+            None,
+            None,
+            Some("thread-captured"),
+        )
+        .is_err());
+    drop(db);
+
+    assert_eq!(
+        reopened_state(&path, card.id),
+        before,
+        "a failed capture promotion must leave the run queued, the card queued, and no session id anywhere"
+    );
+}
+
+#[test]
+fn capture_crash_fault_hook_child() {
+    if std::env::var_os(CRASH_CHILD_ENV).is_none() {
+        return;
+    }
+    let path = std::path::PathBuf::from(std::env::var_os("DB_PATH").unwrap());
+    let run_id: i64 = std::env::var("RUN_ID").unwrap().parse().unwrap();
+    let effect_path = std::path::PathBuf::from(std::env::var_os("EFFECT_PATH").unwrap());
+    let event_path = std::path::PathBuf::from(std::env::var_os("EVENT_PATH").unwrap());
+    let db = Db::open_with_lifecycle_fault_hook(&path, |point| {
+        if point == LifecycleFaultPoint::CaptureAfterRunUpdate {
+            std::process::exit(87);
+        }
+        Ok(())
+    })
+    .unwrap();
+    let run = db
+        .promote_captured_session_uow(run_id, "thread-crash")
+        .unwrap();
+    fs::write(effect_path, format!("{:?}", run)).unwrap();
+    fs::write(event_path, "captured").unwrap();
+}
+
+#[test]
+fn subprocess_crash_before_capture_commit_reopens_exact_prior_state() {
+    if std::env::var_os(CRASH_CHILD_ENV).is_some() {
+        return;
+    }
+    let (_dir, path, card) = create_file_db("capture crash atomic");
+    let db = Db::open(&path).unwrap();
+    let run = db
+        .enqueue_run_uow(&enqueue(card.id, card.column_id))
+        .unwrap();
+    drop(db);
+    let before = reopened_state(&path, card.id);
+    let effect_path = path.with_extension("effects");
+    let event_path = path.with_extension("events");
+    fs::File::create(&effect_path).unwrap();
+    fs::File::create(&event_path).unwrap();
+
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "atomic::capture_crash_fault_hook_child",
+            "--nocapture",
+        ])
+        .env(CRASH_CHILD_ENV, "1")
+        .env("DB_PATH", &path)
+        .env("RUN_ID", run.id.to_string())
+        .env("EFFECT_PATH", &effect_path)
+        .env("EVENT_PATH", &event_path)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(87), "{output:?}");
+
+    assert_eq!(reopened_state(&path, card.id), before);
+    assert_eq!(fs::read(&effect_path).unwrap(), b"");
+    assert_eq!(fs::read(&event_path).unwrap(), b"");
+}

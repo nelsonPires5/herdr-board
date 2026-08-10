@@ -5,7 +5,9 @@ pub(super) use std::time::{Duration, Instant};
 
 pub(super) use super::enqueue::enqueue_run;
 pub(super) use super::finalize::{finalize_run, finalize_run_timeout};
-pub(super) use super::launch_plan::{board_env, harness_prompt_env, register_spawned_run};
+pub(super) use super::launch_plan::{
+    argv_is_fork, board_env, harness_prompt_env, register_spawned_run,
+};
 pub(super) use super::ownership::{owned_pane_ids, reconstruct_owned_tab_id, OwnedPanes};
 pub(super) use super::pass::{dispatch_pass, launch_session};
 pub(super) use super::space::{
@@ -290,6 +292,8 @@ mod atomicity;
 mod concurrency;
 mod enqueue;
 mod finalize;
+mod launch_plan;
 mod ownership;
+mod pane_reuse;
 mod registration;
 mod space;

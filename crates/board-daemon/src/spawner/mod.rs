@@ -98,6 +98,12 @@ pub struct RuntimeHandle {
     /// herdr socket this pane lives on (its session), so kill/liveness target
     /// the right session after a daemon restart. `None` = default socket.
     pub herdr_socket: Option<PathBuf>,
+    /// Harness-reported conversation/thread id captured after launch
+    /// (self-minting integrations like codex report it only once the agent is
+    /// up, via `agent.get.agent_session`). The daemon persists it atomically
+    /// with run promotion + card running/session update; `None` means no
+    /// capture was attempted (pi/claude, reuse) or none validated.
+    pub captured_session_id: Option<String>,
 }
 
 /// Launch, kill, and liveness-check agent processes.
@@ -120,8 +126,21 @@ pub trait Spawner: Send + Sync {
 }
 
 pub(crate) const AGENT_START_TIMEOUT_MS: u64 = 30_000;
-pub(crate) const AGENT_START_BUSY_RETRIES: usize = 2;
+/// How many delayed retries `agent.start` may take on a freshly split owned
+/// pane before the run fails. Herdr answers `agent_pane_busy` until the pane's
+/// login shell reaches an interactive prompt; a slow shell (zsh + oh-my-zsh +
+/// nvm) can need ~0.5s while the residual-agent-state window is only a few
+/// hundred ms. The backoff doubles per retry (100/200/400/800/1600ms), so five
+/// retries extend the window to roughly 3.1s after the initial attempt.
+pub(crate) const AGENT_START_BUSY_RETRIES: usize = 5;
 pub(crate) const AGENT_START_BUSY_BACKOFF: Duration = Duration::from_millis(100);
 pub(crate) const READINESS_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const READINESS_BACKOFF: Duration = Duration::from_millis(100);
 pub(crate) const IMMEDIATE_READINESS_PROBES: usize = 3;
+/// Total `agent.get` probes of the post-launch session capture (self-minting
+/// harnesses like codex). After the immediate probes the capture backs off
+/// with [`READINESS_BACKOFF`], and [`SESSION_CAPTURE_TIMEOUT`] is the hard
+/// wall-clock cap — the capture is bounded and degrades to `None` instead of
+/// polling forever, so a late or missing thread report never stalls launch.
+pub(crate) const SESSION_CAPTURE_PROBES: usize = 5;
+pub(crate) const SESSION_CAPTURE_TIMEOUT: Duration = Duration::from_secs(10);

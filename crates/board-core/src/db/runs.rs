@@ -66,12 +66,21 @@ impl Db {
             pane_id,
             None,
             timeout_deadline_at_ms,
+            None,
         )
     }
 
     /// Atomically promote an exact queued run and persist the runtime card-tab
     /// anchor alongside its child pane. Legacy callers use
     /// [`Self::promote_run_uow`] and retain a NULL anchor.
+    ///
+    /// `captured_session_id` is the harness-reported conversation/thread id of
+    /// a self-minting integration (codex): when present it is written to the
+    /// run **and** the card in this same transaction, so the promotion and the
+    /// session identity can never be half-committed (a cancel-during-spawn
+    /// that ended the run fails the promotion before either row is touched).
+    /// `None` keeps the enqueue-time id — a fork whose new thread id was not
+    /// captured degrades to the recorded source id instead of wiping it.
     pub fn promote_run_with_anchor_uow(
         &self,
         run_id: i64,
@@ -79,6 +88,7 @@ impl Db {
         pane_id: Option<&str>,
         anchor_pane_id: Option<&str>,
         timeout_deadline_at_ms: Option<i64>,
+        captured_session_id: Option<&str>,
     ) -> Result<Run> {
         let tx = self.conn.unchecked_transaction()?;
         let card_id: i64 = tx
@@ -94,13 +104,68 @@ impl Db {
                 other => Error::Sqlite(other),
             })?;
         tx.execute(
-            "UPDATE runs SET started_at=datetime('now'),herdr_workspace_id=?1,herdr_pane_id=?2,herdr_anchor_pane_id=?3,timeout_deadline_at_ms=?5,timeout_paused_at_ms=NULL WHERE id=?4",
-            params![workspace_id,pane_id,anchor_pane_id,run_id,timeout_deadline_at_ms],
+            "UPDATE runs SET started_at=datetime('now'),herdr_workspace_id=?1,herdr_pane_id=?2,herdr_anchor_pane_id=?3,timeout_deadline_at_ms=?5,timeout_paused_at_ms=NULL,session_id=COALESCE(?6,session_id) WHERE id=?4",
+            params![workspace_id,pane_id,anchor_pane_id,run_id,timeout_deadline_at_ms,captured_session_id],
         )?;
         self.lifecycle_fault(LifecycleFaultPoint::PromoteAfterRunUpdate)?;
+        // The captured-session write is part of the same promotion: a crash or
+        // injected fault between the two updates must roll back the run row
+        // too, exactly like the card-status update below.
+        if captured_session_id.is_some() {
+            self.lifecycle_fault(LifecycleFaultPoint::CaptureAfterRunUpdate)?;
+        }
         tx.execute(
-            "UPDATE cards SET status='running',awaiting_reason=NULL,updated_at=datetime('now') WHERE id=?1",
-            params![card_id],
+            "UPDATE cards SET status='running',awaiting_reason=NULL,session_id=COALESCE(?2,session_id),updated_at=datetime('now') WHERE id=?1",
+            params![card_id, captured_session_id],
+        )?;
+        tx.commit()?;
+        self.get_run(run_id)
+    }
+
+    /// Atomically persist a harness-captured session id on the exact open run
+    /// **and** its card, in one transaction.
+    ///
+    /// The daemon's launch path persists a captured id through
+    /// [`Self::promote_run_with_anchor_uow`] instead (promotion + session in
+    /// one commit). This primitive remains the single-row owner for captures
+    /// written outside promotion — e.g. a capture that races promotion while
+    /// the run is still queued — and pins the same atomicity contract: the
+    /// run and its card must never disagree about the conversation id a
+    /// resume/fork would re-attach to.
+    ///
+    /// The run must still be open (`ended_at IS NULL`): a cancel-during-spawn
+    /// that ended the run while the capture was in flight makes the write fail
+    /// closed instead of resurrecting identity on a dead run. A blank id is
+    /// rejected the same way. Replacing an id (e.g. a fork whose NEW thread id
+    /// supersedes the source id recorded at enqueue) is the intended use;
+    /// schema stays v13 — this only writes the existing columns.
+    pub fn promote_captured_session_uow(&self, run_id: i64, session_id: &str) -> Result<Run> {
+        if session_id.trim().is_empty() {
+            return Err(Error::BadRequest(
+                "captured session id must not be empty".into(),
+            ));
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let card_id: i64 = tx
+            .query_row(
+                "SELECT card_id FROM runs WHERE id=?1 AND ended_at IS NULL",
+                params![run_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    Error::InvalidState(format!("run {run_id} is not open"))
+                }
+                other => Error::Sqlite(other),
+            })?;
+        tx.execute(
+            "UPDATE runs SET session_id=?1 WHERE id=?2",
+            params![session_id, run_id],
+        )?;
+        self.lifecycle_fault(LifecycleFaultPoint::CaptureAfterRunUpdate)?;
+        tx.execute(
+            "UPDATE cards SET session_id=?1,updated_at=datetime('now') WHERE id=?2",
+            params![session_id, card_id],
         )?;
         tx.commit()?;
         self.get_run(run_id)

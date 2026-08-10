@@ -6,7 +6,21 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
-- [#62](https://github.com/nelsonPires5/herdr-board/pull/62) chore(ci): adopt `dev` as the long-lived integration branch — feature/release PRs target `dev`, Prepare Release defaults to `base=dev` (`main` only for hotfixes), the Promote workflow automatically merges `dev -> main` after green dev CI, and the Release workflow tags the exact green promotion commit; `main` stays production/default with PR-only, merge-commit and signed-commit protection, and `v*` tags remain Release-owned only.
+## [0.13.0] - 2026-08-10
+
+### Added
+
+- [#65](https://github.com/nelsonPires5/herdr-board/pull/65) feat: add OpenCode as a managed harness.
+- [#63](https://github.com/nelsonPires5/herdr-board/pull/63) feat: add Codex as a managed harness.
+
+### Changed
+
+- [#62](https://github.com/nelsonPires5/herdr-board/pull/62) chore(ci): `dev` is now the long-lived integration branch; `main` stays production-only (automated promotion + release tagging).
+
+### Fixed
+
+- [#67](https://github.com/nelsonPires5/herdr-board/pull/67) fix: repair the Prepare Release workflow so release pull requests open correctly.
+- [#64](https://github.com/nelsonPires5/herdr-board/pull/64) fix: retry `agent.start` on a fresh owned pane with backoff so slow login shells stop failing managed runs.
 
 ## [0.12.0] - 2026-08-08
 
@@ -347,7 +361,8 @@ a visible herdr pane. Ships as a single `board` binary (TUI + daemon + CLI) and 
 - **Packaging.** `herdr-plugin.toml` manifest, and `scripts/` for build, install (guarded behind
   `--yes`), the open-or-focus launcher, a raw protocol client, and a live-herdr e2e smoke test.
 
-[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.13.0
 [0.12.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.12.0
 [0.11.1]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.11.1
 [0.11.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.11.0
