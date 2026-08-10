@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
-- Retry `agent.start` on a fresh owned pane five times with doubling backoff (100→1600ms, ≈3.1s window) so slow login shells (~0.5s zsh+oh-my-zsh+nvm boot) stop failing managed runs with `agent_pane_busy`. (PR link to be filled in when the PR is opened)
+- [#64](https://github.com/nelsonPires5/herdr-board/pull/64) Retry `agent.start` on a fresh owned pane five times with doubling backoff (100→1600ms, ≈3.1s window) so slow login shells (~0.5s zsh+oh-my-zsh+nvm boot) stop failing managed runs with `agent_pane_busy`.
 
 - [#63](https://github.com/nelsonPires5/herdr-board/pull/63) Add the managed Codex harness with live cached model/effort discovery, native access presets, self-minted thread capture, resume/fork/reuse/rescue, and provider-free E2E coverage.
 
