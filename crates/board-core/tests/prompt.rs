@@ -77,6 +77,7 @@ fn base_card() -> Card {
         created_at: "t".into(),
         updated_at: "t".into(),
         archived_at: None,
+        labels: board_core::protocol::CardLabels::default(),
     }
 }
 

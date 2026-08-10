@@ -36,9 +36,9 @@ fn editing_nullable_fields_emits_explicit_clears() {
         .find(|field| field.id == FieldId::Model)
         .unwrap()
         .set_text("");
-    set_choice(&mut card_form, FieldId::Effort, "(default)");
-    set_choice(&mut card_form, FieldId::Permission, "(default)");
-    set_choice(&mut card_form, FieldId::Session, "(default)");
+    set_choice(&mut card_form, FieldId::Effort, "default effort");
+    set_choice(&mut card_form, FieldId::Permission, "default permission");
+    set_choice(&mut card_form, FieldId::Session, "default session");
     for id in [FieldId::SpaceRef, FieldId::SpaceCwd] {
         card_form
             .fields
@@ -84,8 +84,8 @@ fn editing_nullable_fields_emits_explicit_clears() {
     set_choice(&mut column_form, FieldId::OnSuccess, "none");
     set_choice(&mut column_form, FieldId::OnFail, "none");
     set_choice(&mut column_form, FieldId::HarnessOverride, "none");
-    set_choice(&mut column_form, FieldId::EffortOverride, "(default)");
-    set_choice(&mut column_form, FieldId::PermissionOverride, "(default)");
+    set_choice(&mut column_form, FieldId::EffortOverride, "default effort");
+    set_choice(&mut column_form, FieldId::PermissionOverride, "default permission");
     match column_form.submit().unwrap() {
         Submit::ColumnUpdate(params) => {
             assert!(matches!(params.system_prompt, Patch::Clear));
@@ -185,12 +185,12 @@ fn choice_cycling_wraps() {
         .iter()
         .position(|f| f.id == FieldId::Effort)
         .unwrap();
-    // Fallback effort menu (no catalog yet): (default)/low/medium/high/xhigh/max.
+    // Fallback effort menu (no catalog yet): default effort/low/medium/high/xhigh/max.
     // Cycle back one from 0 -> last.
     form.fields[eff_idx].cycle(-1);
     assert_eq!(form.fields[eff_idx].display(), "max");
     form.fields[eff_idx].cycle(1);
-    assert_eq!(form.fields[eff_idx].display(), "(default)");
+    assert_eq!(form.fields[eff_idx].display(), "default effort");
 }
 
 // -- Feature 1: guided card-form selectors -----------------------------------
@@ -265,7 +265,7 @@ fn opening_card_form_fetches_capabilities_and_spaces() {
     // Model became a guided selector (was free text before the fetch).
     assert!(is_choice(form, FieldId::Model));
     // Effort menu starts with the "unset" sentinel.
-    assert_eq!(opt_labels(form, FieldId::Effort)[0], "(default)");
+    assert_eq!(opt_labels(form, FieldId::Effort)[0], "default effort");
 }
 
 #[test]
@@ -289,7 +289,7 @@ fn pi_form_defaults_model_hides_permission_and_offers_low() {
     form.apply_options(Some(pi_capabilities()), None, Some(vec![]), None);
     assert_eq!(
         opt_labels(&form, FieldId::Model),
-        vec!["(default)", "(custom)"]
+        vec!["default model", "(custom)"]
     );
     assert_eq!(
         form.fields
@@ -297,7 +297,7 @@ fn pi_form_defaults_model_hides_permission_and_offers_low() {
             .find(|field| field.id == FieldId::Model)
             .unwrap()
             .display(),
-        "(default)"
+        "default model"
     );
     assert!(opt_labels(&form, FieldId::Effort).contains(&"low".to_string()));
     let permission_idx = form
@@ -354,7 +354,7 @@ fn selecting_codex_in_card_form_shows_exact_efforts_and_approval_and_submits() {
     assert_eq!(
         opt_labels(form, FieldId::Effort),
         vec![
-            "(default)",
+            "default effort",
             "off",
             "minimal",
             "low",
@@ -373,7 +373,7 @@ fn selecting_codex_in_card_form_shows_exact_efforts_and_approval_and_submits() {
     assert_eq!(
         opt_labels(form, FieldId::Permission),
         vec![
-            "(default)",
+            "default permission",
             "Ask for approval",
             "Approve for me",
             "Full access"
@@ -415,7 +415,7 @@ fn selecting_codex_in_column_form_shows_exact_efforts_and_approval_and_submits()
     assert_eq!(
         opt_labels(form, FieldId::EffortOverride),
         vec![
-            "(default)",
+            "default effort",
             "off",
             "minimal",
             "low",
@@ -434,7 +434,7 @@ fn selecting_codex_in_column_form_shows_exact_efforts_and_approval_and_submits()
     assert_eq!(
         opt_labels(form, FieldId::PermissionOverride),
         vec![
-            "(default)",
+            "default permission",
             "Ask for approval",
             "Approve for me",
             "Full access"
@@ -477,7 +477,7 @@ fn codex_selectors_survive_capabilities_fetch_failure() {
     assert_eq!(
         opt_labels(form, FieldId::Effort),
         vec![
-            "(default)",
+            "default effort",
             "off",
             "minimal",
             "low",
@@ -496,7 +496,7 @@ fn codex_selectors_survive_capabilities_fetch_failure() {
     assert_eq!(
         opt_labels(form, FieldId::Permission),
         vec![
-            "(default)",
+            "default permission",
             "Ask for approval",
             "Approve for me",
             "Full access"
@@ -560,7 +560,7 @@ fn switching_from_pi_to_claude_resets_incompatible_effort() {
             .find(|field| field.id == FieldId::Effort)
             .unwrap()
             .display(),
-        "(default)"
+        "default effort"
     );
 }
 
@@ -595,7 +595,7 @@ fn model_selector_cycles_catalog_plus_custom() {
     form.apply_options(Some(split_effort_caps()), None, Some(vec![]), None);
     assert_eq!(
         opt_labels(&form, FieldId::Model),
-        vec!["(default)", "opus", "haiku", "(custom)"]
+        vec!["default model", "opus", "haiku", "(custom)"]
     );
 }
 
@@ -633,6 +633,9 @@ fn effort_options_follow_corrected_gpt_capabilities_and_reset_when_invalid() {
         ],
         permission_modes: vec![],
         resume: Default::default(),
+        default_effort_label: board_core::labels::default_effort_label().to_string(),
+        default_permission_label: board_core::labels::default_permission_label().to_string(),
+        default_model_label: board_core::labels::default_model_label().to_string(),
     };
     let mut form = Form::card_create(1);
     form.apply_options(Some(caps), None, Some(vec![]), None);
@@ -642,7 +645,7 @@ fn effort_options_follow_corrected_gpt_capabilities_and_reset_when_invalid() {
     assert_eq!(
         opt_labels(&form, FieldId::Effort),
         vec![
-            "(default)",
+            "default effort",
             "off",
             "minimal",
             "low",
@@ -658,14 +661,14 @@ fn effort_options_follow_corrected_gpt_capabilities_and_reset_when_invalid() {
     form.on_model_changed();
     assert_eq!(
         opt_labels(&form, FieldId::Effort),
-        vec!["(default)", "off", "minimal", "high", "max"]
+        vec!["default effort", "off", "minimal", "high", "max"]
     );
     let effort = form
         .fields
         .iter()
         .find(|field| field.id == FieldId::Effort)
         .unwrap();
-    assert_eq!(effort.display(), "(default)");
+    assert_eq!(effort.display(), "default effort");
 }
 
 #[test]
@@ -864,8 +867,8 @@ fn changing_session_refetches_spaces() {
         .iter()
         .position(|f| f.id == FieldId::Session)
         .unwrap();
-    // Session options are [(default), default, feature]; cycle to "feature".
-    d.handle(key(KeyCode::Right)); // (default) -> default (re-fetch)
+    // Session options are [default session, default, feature]; cycle to "feature".
+    d.handle(key(KeyCode::Right)); // default session -> default (re-fetch)
     d.handle(key(KeyCode::Right)); // default -> feature (re-fetch)
     let form = d.app.form.as_ref().unwrap();
     assert_eq!(
@@ -888,8 +891,8 @@ fn session_selector_offers_default_plus_running() {
     let mut d = driver_of(demo_client().unwrap());
     d.handle(key(KeyCode::Char('n')));
     let labels = opt_labels(d.app.form.as_ref().unwrap(), FieldId::Session);
-    // (default) first, then the running demo sessions.
-    assert_eq!(labels[0], "(default)");
+    // default session first, then the running demo sessions.
+    assert_eq!(labels[0], "default session");
     assert!(labels.contains(&"default".to_string()));
     assert!(labels.contains(&"feature".to_string()));
 }

@@ -6,7 +6,26 @@ use board_core::engine::{
     validate_card_settings, validate_card_values, validate_effective_settings,
 };
 use board_core::harness::DEFAULT_HARNESS;
+use board_core::labels::card_labels;
 use board_core::model::Card;
+
+/// Stamp the daemon-owned display labels onto a card (ready strings; the
+/// clients render them verbatim). The session label resolves an unset session
+/// through the session registry — the herdr session matching the daemon's
+/// bound socket — and falls back to the `default session` marker when herdr
+/// is unreachable. Effort / permission / model labels derive from the card
+/// alone. Wire fields are untouched: `None` keeps meaning default.
+pub(super) fn stamp_card_labels(d: &Daemon, card: &mut Card) {
+    let resolved_default = if card.session.is_none() {
+        d.session_registry
+            .as_ref()
+            .and_then(|reg| reg.resolve(None).ok())
+            .map(|r| r.name)
+    } else {
+        None
+    };
+    card.labels = card_labels(card, resolved_default.as_deref());
+}
 
 fn pending_create_card(db: &Db, p: &CardCreateParams) -> Result<Card> {
     let board_id = p.board_id.unwrap_or(BOARD_ID);
@@ -42,6 +61,8 @@ fn pending_create_card(db: &Db, p: &CardCreateParams) -> Result<Card> {
         created_at: String::new(),
         updated_at: String::new(),
         archived_at: None,
+        // Stamped daemon-side with resolved display labels at serve time.
+        labels: board_core::protocol::CardLabels::default(),
     })
 }
 
@@ -57,7 +78,7 @@ pub(super) fn card_create(d: &Arc<Daemon>, p: CardCreateParams) -> Result<Value>
         &d.config,
     )?;
 
-    let (card, enqueue) = {
+    let (mut card, enqueue) = {
         // Scheduler state and card creation/enqueue share one critical
         // section. The DB UoW below contains no Herdr or process I/O.
         let mut _sched = d.sched.lock().unwrap();
@@ -83,6 +104,7 @@ pub(super) fn card_create(d: &Arc<Daemon>, p: CardCreateParams) -> Result<Value>
     if enqueue {
         d.wake_dispatch();
     }
+    stamp_card_labels(d, &mut card);
     Ok(json!(card))
 }
 
@@ -95,7 +117,7 @@ pub(super) fn card_update(d: &Arc<Daemon>, p: CardUpdateParams) -> Result<Value>
         || p.space_kind.is_some()
         || !p.space_ref.is_unchanged()
         || !p.space_cwd.is_unchanged();
-    let card = {
+    let mut card = {
         let _sched = d.sched.lock().unwrap();
         let db = d.store.lock();
         let card = db.require_card(p.id)?;
@@ -112,6 +134,7 @@ pub(super) fn card_update(d: &Arc<Daemon>, p: CardUpdateParams) -> Result<Value>
         db.update_card(&p)?
     };
     d.emit_changed(BoardChangedReason::CardUpdated, Some(card.id), None);
+    stamp_card_labels(d, &mut card);
     Ok(json!(card))
 }
 
@@ -132,7 +155,7 @@ pub(super) fn card_delete(d: &Arc<Daemon>, p: CardIdParams) -> Result<Value> {
 }
 
 pub(super) fn card_archive(d: &Arc<Daemon>, p: CardArchiveParams) -> Result<Value> {
-    let card = {
+    let mut card = {
         let _sched = d.sched.lock().unwrap();
         let db = d.store.lock();
         let card = db.require_card(p.id)?;
@@ -147,11 +170,12 @@ pub(super) fn card_archive(d: &Arc<Daemon>, p: CardArchiveParams) -> Result<Valu
         db.set_card_archived(p.id, p.archived)?
     };
     d.emit_changed(BoardChangedReason::CardArchived, Some(p.id), None);
+    stamp_card_labels(d, &mut card);
     Ok(json!(card))
 }
 
 pub(super) fn card_move(d: &Arc<Daemon>, p: CardMoveParams) -> Result<Value> {
-    let (card, target, source_board_id, source_column_id, enqueue) = {
+    let (mut card, target, source_board_id, source_column_id, enqueue) = {
         let mut _sched = d.sched.lock().unwrap();
         let db = d.store.lock();
         let current = db.require_card(p.id)?;
@@ -273,12 +297,14 @@ pub(super) fn card_move(d: &Arc<Daemon>, p: CardMoveParams) -> Result<Value> {
     if enqueue {
         d.wake_dispatch();
     }
+    stamp_card_labels(d, &mut card);
     Ok(json!(card))
 }
 
 pub(super) fn card_get(d: &Arc<Daemon>, p: CardIdParams) -> Result<Value> {
     let db = d.store.lock();
-    let card = db.require_card(p.id)?;
+    let mut card = db.require_card(p.id)?;
+    stamp_card_labels(d, &mut card);
     Ok(json!(CardDetail {
         comments: db.list_comments(p.id)?,
         runs: db.list_runs(p.id)?,
@@ -303,6 +329,10 @@ pub(super) fn card_list(d: &Arc<Daemon>, p: CardListParams) -> Result<Value> {
         }
         None => db.list_cards_visible(board_id, visibility)?,
     };
+    let mut cards = cards;
+    for card in &mut cards {
+        stamp_card_labels(d, card);
+    }
     Ok(json!(cards))
 }
 

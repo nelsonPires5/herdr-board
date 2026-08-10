@@ -52,7 +52,7 @@ impl Form {
         let values = CardValues::from_card(None, session);
         Form {
             kind: FormKind::CardCreate { column_id },
-            fields: build_card_fields(&values, None, &default_harnesses(), &[], &[]),
+            fields: build_card_fields(&values, None, &default_harnesses(), &[], &[], None),
             focus: 0,
             return_to: Screen::Board,
             caps: None,
@@ -60,6 +60,7 @@ impl Form {
             columns: Vec::new(),
             spaces: Vec::new(),
             sessions: Vec::new(),
+            session_default_label: None,
         }
     }
 
@@ -67,7 +68,7 @@ impl Form {
         let values = CardValues::from_card(Some(card), None);
         Form {
             kind: FormKind::CardEdit { card_id: card.id },
-            fields: build_card_fields(&values, None, &default_harnesses(), &[], &[]),
+            fields: build_card_fields(&values, None, &default_harnesses(), &[], &[], None),
             focus: 0,
             return_to: Screen::Board,
             caps: None,
@@ -75,6 +76,7 @@ impl Form {
             columns: Vec::new(),
             spaces: Vec::new(),
             sessions: Vec::new(),
+            session_default_label: None,
         }
     }
 
@@ -89,6 +91,7 @@ impl Form {
             columns: columns.to_vec(),
             spaces: Vec::new(),
             sessions: Vec::new(),
+            session_default_label: None,
         }
     }
 
@@ -103,6 +106,7 @@ impl Form {
             columns: columns.to_vec(),
             spaces: Vec::new(),
             sessions: Vec::new(),
+            session_default_label: None,
         }
     }
 
@@ -117,6 +121,7 @@ impl Form {
             columns: Vec::new(),
             spaces: Vec::new(),
             sessions: Vec::new(),
+            session_default_label: None,
         }
     }
 
@@ -138,6 +143,7 @@ impl Form {
             columns: Vec::new(),
             spaces: Vec::new(),
             sessions: Vec::new(),
+            session_default_label: None,
         }
     }
 
@@ -203,11 +209,12 @@ fn harness_override_opts(harnesses: &[String], current: Option<&str>) -> (Vec<Ch
     (opts, idx)
 }
 
-/// Shared effort selector: `(default)` (wire `None`) + each effort. Used by
-/// both the card `Effort` field and the column `EffortOverride` field so the
-/// two forms share one source of truth for the effort menu.
-fn effort_choice_opts(efforts: &[Effort], current: Option<&str>) -> (Vec<ChoiceOpt>, usize) {
-    let mut opts = vec![ChoiceOpt::default_opt()];
+/// Shared effort selector: the daemon-sent `default effort` option (wire
+/// `None`) + each effort. Used by both the card `Effort` field and the column
+/// `EffortOverride` field so the two forms share one source of truth for the
+/// effort menu.
+fn effort_choice_opts(efforts: &[Effort], current: Option<&str>, default_label: &str) -> (Vec<ChoiceOpt>, usize) {
+    let mut opts = vec![ChoiceOpt::default_opt(default_label)];
     for e in efforts {
         opts.push(ChoiceOpt::str(e.as_str()));
     }
@@ -217,21 +224,17 @@ fn effort_choice_opts(efforts: &[Effort], current: Option<&str>) -> (Vec<ChoiceO
     (opts, idx)
 }
 
-/// Shared permission selector: `(default)` (wire `None`) + each mode. Used by
-/// both the card `Permission` field and the column `PermissionOverride` field.
-/// Codex's stable wire ids get the same human labels as its `/permissions`
-/// picker; config-defined modes remain verbatim.
-fn permission_choice_opts(modes: &[String], current: Option<&str>) -> (Vec<ChoiceOpt>, usize) {
-    let mut opts = vec![ChoiceOpt::default_opt()];
+/// Shared permission selector: the daemon-sent `default permission` option
+/// (wire `None`) + each mode. Used by both the card `Permission` field and
+/// the column `PermissionOverride` field. Codex's stable wire ids get the
+/// same human labels as its `/permissions` picker; config-defined modes
+/// remain verbatim. The label mapping lives in board-core so the daemon's
+/// stamped card labels and these option labels cannot drift.
+fn permission_choice_opts(modes: &[String], current: Option<&str>, default_label: &str) -> (Vec<ChoiceOpt>, usize) {
+    let mut opts = vec![ChoiceOpt::default_opt(default_label)];
     for mode in modes {
-        let label = match mode.as_str() {
-            "ask-for-approval" => "Ask for approval",
-            "approve-for-me" => "Approve for me",
-            "full-access" => "Full access",
-            other => other,
-        };
         opts.push(ChoiceOpt {
-            label: label.to_string(),
+            label: board_core::labels::permission_label(mode),
             val: ChoiceVal::Str(mode.clone()),
         });
     }
@@ -305,6 +308,7 @@ pub(super) fn build_card_fields(
     harnesses: &[String],
     spaces: &[SpaceInfo],
     sessions: &[SessionInfo],
+    session_default_label: Option<&str>,
 ) -> Vec<Field> {
     let v = values;
 
@@ -322,7 +326,7 @@ pub(super) fn build_card_fields(
 
     let model_field = match caps {
         Some(caps) => {
-            let mut opts = vec![ChoiceOpt::default_opt()];
+            let mut opts = vec![ChoiceOpt::default_opt(&caps.default_model_label)];
             opts.extend(caps.models.iter().map(|model| ChoiceOpt::str(&model.id)));
             if caps.model_freeform {
                 opts.push(ChoiceOpt::custom());
@@ -368,16 +372,24 @@ pub(super) fn build_card_fields(
         None
     };
     let efforts: Vec<Effort> = efforts_for(effective, selected_id.as_deref());
-    let (eff_opts, eff_idx) = effort_choice_opts(&efforts, v.effort.as_deref());
+    let (eff_opts, eff_idx) =
+        effort_choice_opts(&efforts, v.effort.as_deref(), &effective.default_effort_label);
     let effort_field = Field::choice(FieldId::Effort, "effort", eff_opts, eff_idx);
 
     // -- permission ----------------------------------------------------------
     let modes: Vec<String> = effective.permission_modes.clone();
-    let (perm_opts, perm_idx) = permission_choice_opts(&modes, v.permission.as_deref());
+    let (perm_opts, perm_idx) = permission_choice_opts(
+        &modes,
+        v.permission.as_deref(),
+        &effective.default_permission_label,
+    );
     let permission_field = Field::choice(FieldId::Permission, "permission", perm_opts, perm_idx);
 
-    // -- session (running sessions + `(default)` = daemon's default) ---------
-    let session_field = session_field(v.session.as_deref(), sessions);
+    // -- session (running sessions + the daemon's default-session option) ----
+    let session_label = session_default_label
+        .map(str::to_string)
+        .unwrap_or_else(|| board_core::labels::default_session_label().to_string());
+    let session_field = session_field(v.session.as_deref(), sessions, &session_label);
 
     // -- space kind (exactly workspace / new workspace) ----------------------
     let space_opts = vec![
@@ -471,13 +483,15 @@ pub(super) fn build_card_fields(
     ]
 }
 
-/// Build the session selector: `(default)` (the daemon's default session, wire
-/// value `None`) plus every running session by name. `current` (the preselected
-/// session name, `None` = default) is always offered even if it is not in the
-/// fetched list — so the env-detected session survives the empty→fetched
-/// rebuild and edits of cards whose session is stopped stay visible.
-fn session_field(current: Option<&str>, sessions: &[SessionInfo]) -> Field {
-    let mut opts = vec![ChoiceOpt::default_opt()];
+/// Build the session selector: the daemon's `default session` option (wire
+/// value `None`) plus every running session by name. `current` (the
+/// preselected session name, `None` = default) is always offered even if it is
+/// not in the fetched list — so the env-detected session survives the
+/// empty→fetched rebuild and edits of cards whose session is stopped stay
+/// visible. The option label is daemon-sent; before the fetch lands the shared
+/// board-core marker string stands in.
+fn session_field(current: Option<&str>, sessions: &[SessionInfo], default_label: &str) -> Field {
+    let mut opts = vec![ChoiceOpt::default_opt(default_label)];
     for s in sessions.iter().filter(|s| s.running) {
         opts.push(ChoiceOpt::str(&s.name));
     }
@@ -626,7 +640,11 @@ pub(super) fn column_fields_from_values(
         v.harness_override.as_deref().unwrap_or(DEFAULT_HARNESS),
     );
     let efforts: Vec<Effort> = efforts_for(effective, None);
-    let (eff_opts, eff_idx) = effort_choice_opts(&efforts, v.effort_override.as_deref());
+    let (eff_opts, eff_idx) = effort_choice_opts(
+        &efforts,
+        v.effort_override.as_deref(),
+        &effective.default_effort_label,
+    );
     let effort_override_field = Field::choice(
         FieldId::EffortOverride,
         "effort override",
@@ -648,7 +666,11 @@ pub(super) fn column_fields_from_values(
     // values the column-override validator rejects, and is hidden (via
     // field_visible) when the harness has no permission modes (Pi).
     let modes: Vec<String> = column_override_permission_modes(effective);
-    let (po_opts, po_idx) = permission_choice_opts(&modes, v.permission_override.as_deref());
+    let (po_opts, po_idx) = permission_choice_opts(
+        &modes,
+        v.permission_override.as_deref(),
+        &effective.default_permission_label,
+    );
     let permission_override_field = Field::choice(
         FieldId::PermissionOverride,
         "permission override",

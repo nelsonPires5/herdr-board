@@ -211,6 +211,13 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
   `null`, but the field is never serialized onto the board wire. Schema v7 writes this nullable
   snapshot only for new runs; legacy `NULL` rows are not backfilled and retain their historical
   launch behavior.
+- Every `Card` served by a read/card op carries `labels: {session, effort, permission, model}` —
+  **ready display strings stamped by the daemon** (clients render them verbatim; they are never
+  round-tripped). `labels.session` is the resolved default-session name (the herdr session
+  matching the daemon's bound socket, normally named `default`), or `default session` when the
+  card's `session` is unset and nothing resolves; `labels.effort` / `labels.permission` /
+  `labels.model` are the value, or `default effort` / `default permission` / `default model` when
+  the card has no override. Wire fields keep their `None`-means-default semantics unchanged.
 - `card.list {board_id?, column_id?, visibility?}` → `[Card…]`; omitted `board_id` means `Global`,
   and a column filter must belong to the requested board. `visibility` defaults to `"active"` and
   accepts `"active"`, `"all"`, or `"archived"`.
@@ -394,7 +401,7 @@ and promoted atomically onto run+card. See [Dispatch semantics](#dispatch-semant
   - error 2 (not found) for an unknown harness, listing the known harnesses.
 - `harness.list` (no params) → `{harnesses:[…]}` — every harness the daemon knows about: the built-ins `pi`/`claude`/`codex`/`opencode` in their default order (pi first), then every config-defined `[harness.NAME]` sorted, de-duplicated. This is the single source for BOTH the card `harness` and column `harness_override` selects in the TUI, so every harness menu shares one list in one (default-first) order.
 - `space.list {session?}` → `{spaces:[{id, label}]}` — workspaces in the given session (`null` = default), filled from that session's herdr `workspace.list`. Unknown/not-running session → error 4 listing the known sessions.
-- `session.list` (no params) → `{sessions:[{name, default: bool, running: bool}]}` — the daemon shells out to `herdr session list --json` (session enumeration is not in the herdr socket API; a session only knows itself). Binary resolved via `$HERDR_BIN_PATH`, else `herdr` on `$PATH`. Error 4 if herdr is unavailable / the CLI fails. That shell-out has a **10-second wall-clock budget** and the child is killed when it expires (error 4, naming the timeout): the session registry sits on the path of every request that resolves a session, and every caller reaches it through the blocking pool, so a hung `herdr` must not pin one of those threads forever. A normal `session list` is sub-100ms; the result is cached for the registry TTL.
+- `session.list` (no params) → `{sessions:[{name, default: bool, running: bool}], default_label:"default session"}` — the daemon shells out to `herdr session list --json` (session enumeration is not in the herdr socket API; a session only knows itself). `default_label` is the ready display marker for the default session (and for the TUI session selector's unset option), sent so clients never format it themselves. Binary resolved via `$HERDR_BIN_PATH`, else `herdr` on `$PATH`. Error 4 if herdr is unavailable / the CLI fails. That shell-out has a **10-second wall-clock budget** and the child is killed when it expires (error 4, naming the timeout): the session registry sits on the path of every request that resolves a session, and every caller reaches it through the blocking pool, so a hung `herdr` must not pin one of those threads forever. A normal `session list` is sub-100ms; the result is cached for the registry TTL.
 
 ### panes
 

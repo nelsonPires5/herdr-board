@@ -208,7 +208,8 @@ impl DemoClient {
         self
     }
 
-    /// Make `session.list` fail (session selector keeps just `(default)`).
+    /// Make `session.list` fail (session selector keeps just the daemon's
+    /// `default session` option).
     pub fn without_sessions(mut self) -> DemoClient {
         self.sessions = None;
         self
@@ -248,7 +249,8 @@ impl BoardClient for DemoClient {
             },
             "session.list" => match &self.sessions {
                 Some(s) => Ok(json!(SessionListResult {
-                    sessions: s.clone()
+                    sessions: s.clone(),
+                    default_label: board_core::labels::default_session_label().to_string(),
                 })),
                 None => anyhow::bail!("session.list: stubbed failure"),
             },
