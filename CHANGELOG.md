@@ -15,6 +15,7 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- [#71](https://github.com/nelsonPires5/herdr-board/pull/71) chore(ci): drop the signed-commits rule on main so automated promotion PRs merge without manual signature rewrites.
 - [#62](https://github.com/nelsonPires5/herdr-board/pull/62) chore(ci): `dev` is now the long-lived integration branch; `main` stays production-only (automated promotion + release tagging).
 
 ### Fixed
