@@ -264,7 +264,10 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
   exception is a configured harness: its `board done` must provide the exact queued run id and may
   arrive before runner registration. A queued built-in (pi/claude/codex/opencode) run is rejected because
   managed completion requires a registered pane. A mismatched id/pane, missing id for the queued
-  exception, or otherwise ineligible run returns an error.
+  exception, or otherwise ineligible run returns an error. Error precedence is deliberate: an
+  unknown card returns `not found: card <id>` before run lookup; an existing idle card in a manual
+  column returns `no active run` with `board move <id> <column>` guidance; and a configured run that
+  is queued without `run_id` returns `queued run for card <id> requires run_id`.
 - `run.cancel {card_id}` → `{run, card}` — kills the pane (herdr `pane.close`), outcome `cancelled`, card status `failed`, no transition.
 - `run.retry {card_id}` → `{run, card}` — re-enqueue in the current column as a fresh run. Claude
   resumes with `--fork-session`; Pi uses `--fork <old-id> --session-id <new-id>` and persists it;

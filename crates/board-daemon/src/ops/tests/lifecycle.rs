@@ -5,6 +5,40 @@
 use super::*;
 
 #[test]
+fn run_done_reports_a_missing_card_before_the_absent_run() {
+    let d = test_daemon(Config::default());
+
+    let err =
+        handle_request(&d, "run.done", json!({"card_id": 9999, "outcome": "ok"})).unwrap_err();
+
+    assert_eq!(err.to_string(), "not found: card 9999");
+}
+
+#[test]
+fn run_done_guides_an_idle_manual_card_to_move_instead() {
+    let d = test_daemon(Config::default());
+    let card = d
+        .store
+        .lock()
+        .create_card(&CardCreateParams {
+            title: "manual handoff".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let err =
+        handle_request(&d, "run.done", json!({"card_id": card.id, "outcome": "ok"})).unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "not found: no active run for card {}; manual column: close via board move {} <column>",
+            card.id, card.id
+        )
+    );
+}
+
+#[test]
 fn run_done_ok_without_target_column_marks_card_done() {
     let d = test_daemon(Config::default());
     let (card_id, run_id) = {
@@ -181,7 +215,17 @@ fn run_done_rejects_queued_configured_runs_without_or_with_stale_run_id() {
             json!({"card_id": card_id, "outcome": "ok"})
         };
         let err = handle_request(&d, "run.done", params).unwrap_err();
-        assert!(err.to_string().contains("no active run"), "{err}");
+        if stale {
+            assert!(
+                err.to_string().contains("does not match active run"),
+                "{err}"
+            );
+        } else {
+            assert_eq!(
+                err.to_string(),
+                format!("invalid state: queued run for card {card_id} requires run_id")
+            );
+        }
 
         let db = d.store.lock();
         let run = db.get_run(run_id).unwrap();
