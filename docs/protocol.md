@@ -134,7 +134,7 @@ Boards are independent pipelines keyed by canonical path. `Global` is board `id=
 - `column.create {name, board_id?, position?, system_prompt?, trigger?, on_success_column_id?, on_fail_column_id?, fresh_session?, harness_override?, model_override?, effort_override?, permission_override?, timeout_minutes?}` → `Column`; omitted `board_id` means `Global`.
 - `column.update {id, …any subset of the above}` → `Column` (name/trigger/etc.; nullable update fields use the tri-state encoding below)
 - `column.reorder {id, position}` → `[Column…]`
-- `column.delete {id, move_cards_to?}` → `{deleted:true}`; destination must belong to the same board; error 3 if cards lack a destination or any card has an open run (`queued|running|blocked|awaiting`; `done` is not open).
+- `column.delete {id, move_cards_to?}` → `{deleted:true}`; destination must belong to the same board; error 3 if cards lack a destination or any card has an open run (`queued|running|blocked|awaiting`; `done` is not open). With a destination, the bulk move includes archived cards; unlike `card.move`, they do not need to be restored first.
 - `template.apply {name:"pipeline", board_id?}` → the requested board's full column set (omitted = `Global`; error 3 unless it has only seed `Todo` and no cards).
 
 The store enforces board boundaries: card create, column-delete destinations,
@@ -499,7 +499,7 @@ parks the card in `awaiting` instead of failing the run.
 
 Coarse by design — the TUI refetches only its selected `board.get {board_id}` on any event; payload is for logs/toasts.
 
-- `{"event":"board_changed","reason":"card_moved|card_created|card_updated|card_deleted|card_archived|column_changed|comment_added|run_started|run_ended|run_blocked","board_id"?:N,"card_id"?:N,"column_id"?:N}` — `board_id` scopes the change to a specific board; a cross-board card transfer emits one event per affected board (source + destination). Omitted `board_id` means a coarse, board-agnostic refresh.
+- `{"event":"board_changed","reason":"card_moved|card_created|card_updated|card_deleted|card_archived|column_changed|comment_added|run_started|run_ended|run_blocked","board_id"?:N,"card_id"?:N,"column_id"?:N}` — `board_id` scopes the change to a specific board; a same-board move reports the destination `column_id`, while a cross-board transfer emits a source-board event with the source column and a destination-board event with the destination column. Omitted `board_id` means a coarse, board-agnostic refresh.
 - `{"event":"run_ended","card_id":N,"run_id":N,"outcome":"ok|fail|cancelled|lost"}` (also emitted as board_changed; `lost` is legacy — no longer produced, see Card statuses)
 
 ## Dispatch semantics (column engine — lives in board-core, pure; daemon executes effects)

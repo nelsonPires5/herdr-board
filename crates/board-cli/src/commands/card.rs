@@ -156,8 +156,8 @@ fn card_archive(ctx: &mut Ctx, id: i64, archived: bool) -> Result<()> {
 /// landing on.
 ///
 /// Destination precedence, unchanged: an explicit `--destination-board`, else
-/// the global `--board` selector (deprecated — it warns), else the card's own
-/// board. A named destination costs two RPCs (`board.open`/`board.get` plus
+/// the global `--board` selector (deprecated for cross-board moves), else the
+/// card's own board. A named destination costs two RPCs (`board.open`/`board.get` plus
 /// `card.move`); the "stay on the card's board" case still needs three, because
 /// protocol v1 has no way to learn a card's board without `card.get` and no way
 /// to move a card by column *name*. A `card.move` that accepted a column name
@@ -173,22 +173,26 @@ pub(crate) fn cmd_move(
     if position.is_some_and(|p| p < 0) {
         bail!("--position must be zero-based (0 = first card)")
     }
-    let destination = match explicit_destination {
-        Some(destination) => Some(destination),
+    let (destination, selector_fallback) = match explicit_destination {
+        Some(destination) => (Some(destination), false),
         None => match ctx.selector() {
-            Some(selector) => {
-                eprintln!(
-                    "board: warning: `move` is using the global --board {selector} as the move \
-                     destination; this fallback is deprecated, pass --destination-board \
-                     {selector} to cross boards"
-                );
-                Some(selector)
-            }
-            None => None,
+            Some(selector) => (Some(selector), true),
+            None => (None, false),
         },
     };
 
     let board = destination_board(ctx, card_id, destination)?;
+    if selector_fallback {
+        let source_board_id = ctx.client()?.card_get(card_id)?.card.board_id;
+        if source_board_id != board.board.id {
+            let selector = destination.expect("selector fallback has a destination");
+            eprintln!(
+                "board: warning: `move` is using the global --board {selector} as the move \
+                 destination; this fallback is deprecated, pass --destination-board \
+                 {selector} to cross boards"
+            );
+        }
+    }
     let column_id = resolve_column_in(&board, column)?;
     let card = ctx.client()?.card_move(&CardMoveParams {
         id: card_id,

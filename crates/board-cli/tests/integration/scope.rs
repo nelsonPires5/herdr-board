@@ -145,6 +145,13 @@ fn cross_board_move_prefers_destination_board_and_deprecates_the_selector() {
             ..Default::default()
         })
         .unwrap();
+    let same_board = client
+        .card_create(&CardCreateParams {
+            board_id: Some(beta.id),
+            title: "same-board selector".into(),
+            ..Default::default()
+        })
+        .unwrap();
 
     let out = td.board(&[
         "move",
@@ -160,6 +167,21 @@ fn cross_board_move_prefers_destination_board_and_deprecates_the_selector() {
     assert!(
         String::from_utf8_lossy(&out.stderr).is_empty(),
         "the explicit spelling must not warn"
+    );
+
+    let out = td.board(&[
+        "--board",
+        &beta.id.to_string(),
+        "move",
+        &same_board.id.to_string(),
+        "Done",
+        "--json",
+    ]);
+    let moved = json_output(&out);
+    assert_eq!(moved["column_id"], beta_done.id);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).is_empty(),
+        "the global selector must stay quiet when the card is already on that board"
     );
 
     let out = td.board(&[
