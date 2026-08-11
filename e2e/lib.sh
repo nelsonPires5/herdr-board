@@ -228,6 +228,7 @@ e2e_enable_fake_pi() {
     printf 'export BASH_ENV=/dev/null ENV=/dev/null\n'
     printf 'pi() { exec %q/pi "$@"; }\n' "$E2E_FAKE_PI_BIN_DIR"
     printf 'claude() { exec %q/claude "$@"; }\n' "$E2E_FAKE_PI_BIN_DIR"
+    printf 'codex() { exec %q/codex "$@"; }\n' "$E2E_FAKE_PI_BIN_DIR"
   } >"$E2E_MANAGED_ZDOTDIR/.zshenv"
   cp "$E2E_MANAGED_ZDOTDIR/.zshenv" "$E2E_MANAGED_ZDOTDIR/.zshrc"
   cp "$E2E_MANAGED_ZDOTDIR/.zshenv" "$E2E_MANAGED_HOME/.bashrc"
@@ -240,7 +241,8 @@ e2e_enable_fake_pi() {
   # these names to the checked-in fixtures even before its controlled rc runs.
   pi() { exec "$E2E_FAKE_PI_BIN_DIR/pi" "$@"; }
   claude() { exec "$E2E_FAKE_PI_BIN_DIR/claude" "$@"; }
-  export -f pi claude
+  codex() { exec "$E2E_FAKE_PI_BIN_DIR/codex" "$@"; }
+  export -f pi claude codex
 }
 
 # Resolve Herdr while the caller's PATH is still available. Managed panes use a
