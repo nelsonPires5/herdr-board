@@ -25,6 +25,7 @@ All notable changes to this project are documented here. The format is based on
 ### Fixed
 
 - [#81](https://github.com/nelsonPires5/herdr-board/pull/81) fix: `f` types normally in form text fields; the popup/fullscreen toggle now works only on picker fields.
+- [#78](https://github.com/nelsonPires5/herdr-board/pull/78) fix: Keep same-board moves quiet while preserving the deprecation warning for cross-board use of the global board selector.
 
 ## [0.13.0] - 2026-08-10
 
