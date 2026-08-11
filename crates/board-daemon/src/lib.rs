@@ -23,6 +23,7 @@ mod supervisor;
 mod testkit;
 mod watchers;
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -215,6 +216,13 @@ async fn async_main(db_path: PathBuf, socket_path: PathBuf) -> anyhow::Result<()
     }
     let listener = tokio::net::UnixListener::bind(&socket_path)
         .with_context(|| format!("cannot bind the boardd socket {socket_path:?}"))?;
+    if let Err(error) =
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
+    {
+        let _ = std::fs::remove_file(&socket_path);
+        return Err(error)
+            .with_context(|| format!("cannot secure the boardd socket {socket_path:?}"));
+    }
     tracing::info!("boardd listening");
 
     server::serve(daemon.clone(), listener).await;

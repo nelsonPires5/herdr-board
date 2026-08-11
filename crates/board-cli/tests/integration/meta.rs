@@ -1,9 +1,22 @@
 //! Cross-cutting CLI surface: the command tree's refusals, `template apply`,
 //! version/status separation, `skill`, and the JSON error envelope.
 
+use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
 
 use super::{json_error, json_output, TestDaemon};
+
+#[test]
+fn daemon_socket_is_owner_only() {
+    let td = TestDaemon::start(&[]);
+    let mode = std::fs::metadata(&td.socket)
+        .expect("boardd socket metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+
+    assert_eq!(mode, 0o600, "boardd socket must be owner-only");
+}
 
 #[test]
 fn top_level_status_is_rejected() {
