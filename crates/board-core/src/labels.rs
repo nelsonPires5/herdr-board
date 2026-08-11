@@ -123,14 +123,8 @@ mod tests {
     #[test]
     fn unset_session_uses_resolved_default_then_marker() {
         let card = card_with(None, None);
-        assert_eq!(
-            card_labels(&card, Some("default")).session,
-            "default"
-        );
-        assert_eq!(
-            card_labels(&card, Some("other")).session,
-            "other"
-        );
+        assert_eq!(card_labels(&card, Some("default")).session, "default");
+        assert_eq!(card_labels(&card, Some("other")).session, "other");
         assert_eq!(card_labels(&card, None).session, "default session");
     }
 

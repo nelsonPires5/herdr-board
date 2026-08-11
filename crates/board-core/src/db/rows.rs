@@ -2,7 +2,9 @@ use rusqlite::{types::Type, Error as SqliteError, Result as SqliteResult, Row};
 
 use super::conv_err;
 use crate::model::{Board, Card, Column, Comment, CommentHistory, CommentRecord, Run};
-use crate::protocol::{AwaitingReason, CardLabels, CardStatus, Effort, RunOutcome, SpaceKind, Trigger};
+use crate::protocol::{
+    AwaitingReason, CardLabels, CardStatus, Effort, RunOutcome, SpaceKind, Trigger,
+};
 use crate::{Error, Result};
 
 pub(super) fn opt<T>(r: SqliteResult<T>) -> Result<Option<T>> {

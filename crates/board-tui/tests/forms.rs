@@ -249,9 +249,9 @@ fn card_selectors_fall_back_to_default_capabilities_per_harness() {
             default_efforts: vec![Effort::Low],
             permission_modes: vec!["ask".into()],
             resume: Default::default(),
-        default_effort_label: board_core::labels::default_effort_label().to_string(),
-        default_permission_label: board_core::labels::default_permission_label().to_string(),
-        default_model_label: board_core::labels::default_model_label().to_string(),
+            default_effort_label: board_core::labels::default_effort_label().to_string(),
+            default_permission_label: board_core::labels::default_permission_label().to_string(),
+            default_model_label: board_core::labels::default_model_label().to_string(),
         }),
         None,
         None,
@@ -660,7 +660,10 @@ fn column_effort_override_follows_catalog() {
     form.apply_options(Some(caps), None, None, None);
     let labels = choice_labels(&form, FieldId::EffortOverride);
     // `default effort` plus the single declared effort.
-    assert_eq!(labels, vec!["default effort".to_string(), "low".to_string()]);
+    assert_eq!(
+        labels,
+        vec!["default effort".to_string(), "low".to_string()]
+    );
 }
 
 #[test]

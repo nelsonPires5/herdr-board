@@ -85,7 +85,11 @@ fn editing_nullable_fields_emits_explicit_clears() {
     set_choice(&mut column_form, FieldId::OnFail, "none");
     set_choice(&mut column_form, FieldId::HarnessOverride, "none");
     set_choice(&mut column_form, FieldId::EffortOverride, "default effort");
-    set_choice(&mut column_form, FieldId::PermissionOverride, "default permission");
+    set_choice(
+        &mut column_form,
+        FieldId::PermissionOverride,
+        "default permission",
+    );
     match column_form.submit().unwrap() {
         Submit::ColumnUpdate(params) => {
             assert!(matches!(params.system_prompt, Patch::Clear));

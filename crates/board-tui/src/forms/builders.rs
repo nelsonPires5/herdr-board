@@ -213,7 +213,11 @@ fn harness_override_opts(harnesses: &[String], current: Option<&str>) -> (Vec<Ch
 /// `None`) + each effort. Used by both the card `Effort` field and the column
 /// `EffortOverride` field so the two forms share one source of truth for the
 /// effort menu.
-fn effort_choice_opts(efforts: &[Effort], current: Option<&str>, default_label: &str) -> (Vec<ChoiceOpt>, usize) {
+fn effort_choice_opts(
+    efforts: &[Effort],
+    current: Option<&str>,
+    default_label: &str,
+) -> (Vec<ChoiceOpt>, usize) {
     let mut opts = vec![ChoiceOpt::default_opt(default_label)];
     for e in efforts {
         opts.push(ChoiceOpt::str(e.as_str()));
@@ -230,7 +234,11 @@ fn effort_choice_opts(efforts: &[Effort], current: Option<&str>, default_label: 
 /// same human labels as its `/permissions` picker; config-defined modes
 /// remain verbatim. The label mapping lives in board-core so the daemon's
 /// stamped card labels and these option labels cannot drift.
-fn permission_choice_opts(modes: &[String], current: Option<&str>, default_label: &str) -> (Vec<ChoiceOpt>, usize) {
+fn permission_choice_opts(
+    modes: &[String],
+    current: Option<&str>,
+    default_label: &str,
+) -> (Vec<ChoiceOpt>, usize) {
     let mut opts = vec![ChoiceOpt::default_opt(default_label)];
     for mode in modes {
         opts.push(ChoiceOpt {
@@ -372,8 +380,11 @@ pub(super) fn build_card_fields(
         None
     };
     let efforts: Vec<Effort> = efforts_for(effective, selected_id.as_deref());
-    let (eff_opts, eff_idx) =
-        effort_choice_opts(&efforts, v.effort.as_deref(), &effective.default_effort_label);
+    let (eff_opts, eff_idx) = effort_choice_opts(
+        &efforts,
+        v.effort.as_deref(),
+        &effective.default_effort_label,
+    );
     let effort_field = Field::choice(FieldId::Effort, "effort", eff_opts, eff_idx);
 
     // -- permission ----------------------------------------------------------
