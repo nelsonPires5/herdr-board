@@ -79,6 +79,7 @@ SCENARIOS=(
   24-cross-board-move.sh 25-card-tabs.sh 26-compact-mobile.sh
   27-rescue-dead-pane.sh 28-pi-effort-catalog.sh 29-diagnostic-logs.sh
   30-pane-reuse.sh 31-managed-codex.sh 32-managed-opencode.sh
+  33-reorder-card-tui.sh
 )
 run_this() {
   [ "${#FILTERS[@]}" -eq 0 ] && return 0

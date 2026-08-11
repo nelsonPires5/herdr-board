@@ -9,7 +9,7 @@ exercises the herdr wire integration end to end.
 For the layers below this one (unit, daemon+CLI integration, TUI snapshots), the
 isolation/safety design, and the **how-to-write-a-scenario** guide, see
 [`../docs/testing.md`](../docs/testing.md). This file is the authoritative use-case catalog for board protocol v1 / SQLite schema v13:
-every numbered scenario from **01 through 32** must appear here and in `run-all.sh`. The provider-free
+every numbered scenario from **01 through 33** must appear here and in `run-all.sh`. The provider-free
 safe boundary is `fake-agent.sh`,
 `fake-bin/{pi,claude,codex,opencode}`, and `test-harness.sh`; prompt/system-prompt contents are never logged.
 Scenario 21 is the active-run timer/event-refresh characterization. The CI live gate is configured to
@@ -51,6 +51,7 @@ exercise the complete catalog after the cheaper static checks succeed.
 | A non-fresh auto chain reuses ONE managed agent pane (and one conversation) across stages via `agent.prompt` (no new `pane.split`/`agent.start`); the managed tab stays anchorless with exactly one harness pane; a fresh column still mints a new pane, and a manual landing keeps the pane open | `30-pane-reuse.sh` | live, checked-in fake `pi`, zero provider cost |
 | Managed Codex mint captures its self-minted thread id from `agent.get.agent_session` (mint persists NULL at enqueue, the captured id atomically at promotion) and receives ONE delimited system+task `agent.prompt` block; retry runs `codex fork <id>` and captures the NEW thread; a non-fresh hop reuses the same pane with the task alone; a rescue reopens the dead pane with `codex resume <id>` without re-sending the task; a missing session report degrades the capture (mint completes NULL) and rescue fails closed with an actionable refusal; every managed tab converges anchorless to exactly one Codex pane | `31-managed-codex.sh` | live, checked-in fake `codex`, zero provider cost |
 | Managed OpenCode TUI mint captures its self-minted `ses_…` session id from `agent.get.agent_session` ({agent: opencode, kind: id, source: herdr:opencode}; mint persists NULL at enqueue, the captured id atomically at promotion) and receives ONE delimited system+task `agent.prompt` block; retry runs `opencode -s <id> --fork` and captures the NEW session; a non-fresh hop reuses the same pane with the task alone; a rescue reopens the dead pane with `opencode -s <id>` without re-sending the task; a missing session report degrades the capture (mint completes NULL) and rescue fails closed with an actionable refusal; every managed tab converges anchorless to exactly one OpenCode pane | `32-managed-opencode.sh` | live, checked-in fake `opencode`, zero provider cost |
+| The `O` TUI mini-mode reorders a card within its own column via ONE same-column `card.move` carrying the staged position (j/k stage, Enter commits, Esc cancels without persisting); the CLI `card move --position N` reorders through the same path; and a same-column reorder inside an auto column never dispatches (a failed card parked in place keeps its single run row, its status, and the new position) | `33-reorder-card-tui.sh` | live, zero provider cost |
 
 ### How the live scenario produces Herdr `done`
 
@@ -123,7 +124,7 @@ unmarked, or out-of-root paths. Named-session sockets must be at most 92 bytes, 
 short `/tmp/hb-e2e.XXXXXX` isolated root. `TMPDIR` is pinned to that exact marker-owned root, so
 generated configured-harness scripts remain contained even if asynchronous `pane run` never opens
 their normal self-removing script. The forced-build standard suite is configured and required to exercise
-scenarios 01–32 without provider calls; this is a coverage requirement, not a claim that a live run
+scenarios 01–33 without provider calls; this is a coverage requirement, not a claim that a live run
 has completed. Scenarios 18–29 use only the configured or managed
 fake harnesses and never record prompt or system-prompt bodies.
 
@@ -197,7 +198,7 @@ personal Claude state. Its intended contract is one authorized attempt with no r
 | `12-cwd-boards.sh` | Scoped board identity/isolation plus real TUI title/picker. |
 | `13-jump-to-pane.sh` | Canonical CLI and same-session TUI focus of a deliberately selected run through a real plugin overlay. |
 | `NN-*.sh` | The scenarios above. |
-| `run-all.sh` | Builds once, runs scenarios 01–32 as environment-scrubbed children with their own sessions, captures artifacts, and prints the summary (`--require-all` forbids skips). |
+| `run-all.sh` | Builds once, runs scenarios 01–33 as environment-scrubbed children with their own sessions, captures artifacts, and prints the summary (`--require-all` forbids skips). |
 | `ci.sh` | Pins, caches, and verifies Herdr for Linux x86_64; runs the complete suite with `--require-all`; exports only its exact private artifact root to `e2e-artifacts/`. |
 
 Columns have no `board` CLI verb, so scenarios configure them over the boardd
