@@ -23,6 +23,7 @@ const EXPECTED: &[(Screen, &str, &str)] = &[
     (Screen::Board, "e", "edit card"),
     (Screen::Board, "E", "edit focused column"),
     (Screen::Board, "a", "archive / restore card"),
+    (Screen::Board, "C", "duplicate card"),
     (Screen::Board, "v", "cycle active/all/archived"),
     (Screen::Board, "d", "delete card"),
     (Screen::Board, "D", "delete/move column cards"),
@@ -38,6 +39,7 @@ const EXPECTED: &[(Screen, &str, &str)] = &[
     (Screen::CardDetail, "Enter", "confirm done (awaiting)"),
     (Screen::CardDetail, "e", "edit card / comment"),
     (Screen::CardDetail, "a", "archive / restore card"),
+    (Screen::CardDetail, "C", "duplicate card"),
     (Screen::CardDetail, "c", "add comment"),
     (Screen::CardDetail, "d", "delete focused comment"),
     (Screen::CardDetail, "h", "comment history"),
@@ -83,11 +85,11 @@ const EXPECTED: &[(Screen, &str, &str)] = &[
 ];
 
 #[test]
-fn contract_freezes_the_exact_65_row_interaction_table() {
+fn contract_freezes_the_exact_67_row_interaction_table() {
     assert_eq!(
         HELP_KEYS.len(),
-        65,
-        "the interaction contract must stay at exactly 65 bindings"
+        67,
+        "the interaction contract must stay at exactly 67 bindings"
     );
     assert_eq!(EXPECTED.len(), HELP_KEYS.len());
     for (idx, (expected, actual)) in EXPECTED.iter().zip(HELP_KEYS.iter()).enumerate() {

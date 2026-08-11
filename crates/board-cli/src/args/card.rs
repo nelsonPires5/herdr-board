@@ -80,6 +80,8 @@ pub(crate) enum CardCmd {
         #[command(flatten)]
         confirm: ConfirmArgs,
     },
+    /// Duplicate a card into a fresh idle copy directly below it.
+    Duplicate { id: i64 },
     /// Archive an idle/done/failed card without deleting its history.
     Archive { id: i64 },
     /// Restore an archived card to the active board.

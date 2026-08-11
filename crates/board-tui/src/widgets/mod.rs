@@ -53,6 +53,7 @@ pub enum UiAction {
     EditCard,
     EditColumn,
     ArchiveCard,
+    DuplicateCard,
     CycleFilter,
     DeleteCard,
     DeleteColumn,

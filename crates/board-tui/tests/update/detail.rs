@@ -68,6 +68,19 @@ fn detail_comment_scroll_clamps_to_wrapped_rows() {
     assert_eq!(app.detail_comments_scroll, latest);
 }
 
+#[test]
+fn detail_duplicate_shortcut_emits_card_duplicate_for_open_card() {
+    let mut app = demo_app_with_detail(CardStatus::Done);
+    let card_id = app.detail.as_ref().unwrap().card.id;
+    let effects = update(&mut app, key(KeyCode::Char('C')));
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::CardDuplicate(id)] if *id == card_id
+    ));
+    // The detail popup stays open on the original card.
+    assert_eq!(app.screen, Screen::CardDetail);
+}
+
 /// Give `card_id` `n` extra finished runs, each recording pane `p-<i>` unless
 /// `panes` says otherwise. Returns the new run ids, oldest → newest.
 fn seed_runs(

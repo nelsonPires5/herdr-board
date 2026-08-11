@@ -29,7 +29,7 @@ board wire DTOs; `board-herdr` owns only the verified Herdr socket surface; and 
 and `docs/protocol.md` explain behavior rather than defining duplicate serde shapes. Schema v13 adds
 soft-deleted comments and immutable comment-history snapshots; the CLI exposes their nested CRUD
 and history commands while boardd remains the sole SQLite writer. The complete live use-case catalog
-is [`../e2e/README.md`](../e2e/README.md), scenarios **01–32** (through `e2e/32-managed-opencode.sh`); the safe
+is [`../e2e/README.md`](../e2e/README.md), scenarios **01–33** (through `e2e/33-duplicate.sh`); the safe
 static harness is `e2e/test-harness.sh`, while `e2e/run-all.sh` is the opt-in live gate.
 
 The current Herdr boundary is deliberately narrower than the upstream schema. The 0.8.0/protocol-19

@@ -73,6 +73,18 @@ impl Driver {
                 let r = self.client.card_create(&p);
                 self.mutate(r, After::Board);
             }
+            Effect::CardDuplicate(id) => {
+                // `mutate` consumes the result, so resolve the copy's id for
+                // the confirmation toast first.
+                let r = self.client.card_duplicate(id);
+                let copy_id = match self.guard(r) {
+                    Some(copy) => copy.id,
+                    None => return,
+                };
+                self.refetch();
+                self.app
+                    .set_toast(format!("card duplicated as #{copy_id}"), false);
+            }
             Effect::CardUpdate(p) => {
                 let r = self.client.card_update(&p);
                 self.mutate(r, After::BoardThenDetail);

@@ -9,6 +9,57 @@ use board_tui::app::{update, CardFilter, Effect, PickerPurpose, Screen};
 use crossterm::event::KeyCode;
 
 #[test]
+fn duplicate_shortcut_emits_card_duplicate_for_selected_card() {
+    let mut app = demo_app();
+    let card_id = app.selected_card_id().unwrap();
+    let effects = update(&mut app, key(KeyCode::Char('C')));
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::CardDuplicate(id)] if *id == card_id
+    ));
+    assert_eq!(app.screen, Screen::Board);
+}
+
+#[test]
+fn duplicate_driver_roundtrip_creates_copy_below_and_toasts() {
+    let mut d = driver_of(demo_client().unwrap());
+    let id = d.app.selected_card_id().unwrap();
+    let before = d.app.board.clone();
+    let card = before
+        .cards
+        .iter()
+        .find(|card| card.id == id)
+        .unwrap()
+        .clone();
+
+    d.handle(key(KeyCode::Char('C')));
+
+    let after = d.app.board.clone();
+    let copy = after
+        .cards
+        .iter()
+        .find(|c| c.id != id && c.title == format!("{} (copy)", card.title))
+        .unwrap_or_else(|| panic!("no copy of #{} in board", id))
+        .clone();
+    // Fresh idle card with full config, directly below the original; the
+    // original row is untouched.
+    assert_eq!(copy.column_id, card.column_id);
+    assert_eq!(copy.position, card.position + 1);
+    assert_eq!(copy.description, card.description);
+    assert_eq!(copy.harness, card.harness);
+    assert_eq!(copy.status, board_core::protocol::CardStatus::Idle);
+    assert_eq!(
+        after.cards.iter().find(|c| c.id == id).unwrap(),
+        before.cards.iter().find(|c| c.id == id).unwrap()
+    );
+    assert!(d
+        .app
+        .toast
+        .as_ref()
+        .is_some_and(|toast| { !toast.is_error && toast.text.contains(&format!("#{}", copy.id)) }));
+}
+
+#[test]
 fn archive_shortcut_archives_and_restores_selected_card() {
     let mut app = demo_app();
     let card_id = app.selected_card_id().unwrap();

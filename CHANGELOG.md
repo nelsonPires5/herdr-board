@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- [#82](https://github.com/nelsonPires5/herdr-board/pull/82) feat: duplicate a card from the TUI (`C`) or CLI, creating an idle copy right below it with all settings and no dispatch.
+
 ### Changed
 
 - [#73](https://github.com/nelsonPires5/herdr-board/pull/73) feat: the daemon stamps resolved labels (`default session`, `default effort`, …) onto card payloads; TUI and CLI render them verbatim.

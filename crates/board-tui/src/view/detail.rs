@@ -42,6 +42,12 @@ fn detail_card_action_buttons(detail: &CardDetail) -> Vec<ActionButton<'static>>
             tone: ActionTone::Normal,
         },
         ActionButton {
+            label: "Duplicate card",
+            compact_label: "Duplicate",
+            action: UiAction::DuplicateCard,
+            tone: ActionTone::Normal,
+        },
+        ActionButton {
             label: if card.archived_at.is_some() {
                 "Restore card"
             } else {

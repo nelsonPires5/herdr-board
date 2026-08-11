@@ -111,6 +111,14 @@ pub(crate) fn cmd_card(sub: CardCmd, ctx: &mut Ctx) -> Result<()> {
             let result = ctx.client()?.card_delete(id)?;
             emit_line(&result, json, format!("Deleted card #{id}"))
         }
+        CardCmd::Duplicate { id } => {
+            let card = ctx.client()?.card_duplicate(id)?;
+            emit_line(
+                &card,
+                json,
+                format!("Duplicated card #{id} as #{} \"{}\"", card.id, card.title),
+            )
+        }
         CardCmd::Archive { id } => card_archive(ctx, id, true),
         CardCmd::Restore { id } => card_archive(ctx, id, false),
         CardCmd::Show { id } => {

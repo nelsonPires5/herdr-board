@@ -383,6 +383,21 @@ same-board path); pressing `b` inside it switches to the destination-board picke
 move (board → column). Validation errors from the blocking check surface as the existing red
 footer toast (the `guard()` path is unchanged). The help line reads `m  move card (board→column)`.
 
+### Card duplication
+
+`card.duplicate {id}` (CLI `board card duplicate <id>`, TUI `C` on the board or in card detail)
+creates a fresh **idle** copy directly below the original in one transaction
+(`Db::duplicate_card`): the copy inherits the full run configuration — title with a ` (copy)`
+suffix, description, harness, model, effort, permission mode, session, and space settings — while
+`status`, `awaiting_reason`, `session_id`, `archived_at`, runs, and comments all start empty, and
+the timestamps are the copy's own. The insert + column renumber are atomic, so a failure leaves
+the column untouched; the followers shift down and the column stays compacted.
+
+Duplication is deliberately **not** a `card.create`: it never runs `decide_entry`, so a copy in an
+auto column stays idle with no run row — the dispatcher only ever picks up queued runs, so the
+copy waits for an explicit move/run like any idle card. The daemon emits the normal `CardCreated`
+event for the copy, and the TUI shows a `card duplicated as #N` toast after the board refetch.
+
 ### Scope selection
 
 At the CLI/TUI boundary, non-empty `BOARD_SCOPE_PATH` wins. TUI otherwise uses
