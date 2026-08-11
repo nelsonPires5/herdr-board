@@ -39,7 +39,7 @@ exercise the complete catalog after the cheaper static checks succeed.
 | Nullable omitted/null/value semantics, merged capability validation, atomic rejection, and provider-free dispatch after clears | `18-nullable-clear.sh` | live, zero provider cost |
 | Daemon starts before Herdr; late supervisor connection observes one exact pane exit | `19-daemon-before-herdr.sh` | live, zero provider cost |
 | Proxy outage/restart preserves `Unknown` and timeout budget; reconnect snapshot repairs an event gap once | `20-herdr-recovery.sh` | live, zero provider cost |
-| Active-run summary survives a card timestamp update and drives the timer in the real TUI | `21-active-run-timer.sh` | live, zero provider cost |
+| Active-run summary drives the real-TUI timer; after boardd crashes, the TUI reconnects and refetches an outage-window update that emitted no event | `21-active-run-timer.sh` | live, zero provider cost |
 | The `M` (Shift+m) TUI mini-mode reorders the focused column via one `column.reorder` (Enter commits, Esc cancels) | `22-move-column-tui.sh` | live, zero provider cost |
 | `agent_pane_busy` transient retry reuses one owned child after one anchor split; persistent busy cleans only that child and leaves the shell anchor intact; a successful managed launch closes its anchor so the tab holds only the harness pane | `23-agent-pane-busy-retry.sh` | live, zero provider cost |
 | A card moves to a column of another board via `card.move` with `board_id` (atomic transfer, both columns recompacted); a board/column mismatch is rejected with nothing written | `24-cross-board-move.sh` | live, zero provider cost |
@@ -180,7 +180,7 @@ personal Claude state. Its intended contract is one authorized attempt with no r
 | `18-nullable-clear.sh` | Nullable clearing, merged validation, atomic rejection, and post-clear configured dispatch; no prompt-body logging. |
 | `19-daemon-before-herdr.sh` | Late Herdr availability and exact pane-exit observation. |
 | `20-herdr-recovery.sh` / `herdr-proxy.py` | Controllable owned proxy for conservative outage/restart, dropped-stream recovery, and typed `agent_pane_busy` fault injection. |
-| `21-active-run-timer.sh` | Real-TUI active-run timer and event-refresh check; provider-free. |
+| `21-active-run-timer.sh` | Real-TUI active-run timer, event refresh, and crash/restart reconnect + gap-refetch check; provider-free. |
 | `22-move-column-tui.sh` | TUI column reorder mini-mode and one committed `column.reorder`; provider-free. |
 | `23-agent-pane-busy-retry.sh` | Transient/persistent `agent_pane_busy`: same-pane retry, no second split, owned-child cleanup, and anchor closure after a successful managed launch (persistent failure preserves the anchor). |
 | `24-cross-board-move.sh` | Cross-board `card.move` transfer with source/destination recompaction and mismatch rejection; provider-free. |

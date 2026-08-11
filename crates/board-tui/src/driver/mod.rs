@@ -12,9 +12,10 @@ mod dispatch;
 mod load;
 
 use anyhow::Result;
-use board_core::client::BoardClient;
+use board_core::client::{BoardClient, UnixClient};
 use board_core::protocol::{BoardSnapshot, Event};
 use ratatui::layout::Rect;
+use std::path::{Path, PathBuf};
 
 use crate::app::{update, App, CardFilter, Msg};
 use crate::editor::{EditorLauncher, RealEditor};
@@ -133,6 +134,28 @@ impl Driver {
     /// error and the loop falls back to action-driven refetch.
     pub(crate) fn subscribe(&mut self) -> Result<Box<dyn Iterator<Item = Event> + Send>> {
         self.client.subscribe()
+    }
+
+    /// The local transport endpoint that can replace this client's stale
+    /// request connection after the daemon restarts.
+    pub(crate) fn reconnect_path(&self) -> Option<PathBuf> {
+        self.client.reconnect_path()
+    }
+
+    /// Replace the stale request connection before the runtime asks for a
+    /// full snapshot. Keeping this on the driver ensures later user actions
+    /// also use the replacement daemon, not only the first recovery refetch.
+    pub(crate) fn reconnect(&mut self, path: &Path) -> bool {
+        match UnixClient::connect(path) {
+            Ok(client) => {
+                self.client = Box::new(client);
+                true
+            }
+            Err(error) => {
+                self.app.set_toast(error.to_string(), true);
+                false
+            }
+        }
     }
 
     /// Turn a client error into a toast and swallow it: no client failure is

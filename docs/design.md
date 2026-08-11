@@ -576,7 +576,10 @@ execution, not to resurrect it as a run. Two consequences follow and are not wor
   cycles `ACTIVE` / `ALL` / `ARCHIVED`; `c` comment, with `e`/`d`/`h` managing the focused one in
   card detail; `Enter` card detail; `o` focuses the **selected** run's
   pane when it belongs to the current Herdr session (help: `o  jump to selected run pane`); `r` refreshes the selected board
-  on demand); `?` help overlay listing **all** keybinds; column config form (rename, system prompt,
+  on demand). The live subscription reconnects with bounded backoff after boardd is replaced,
+  replaces its stale request connection, and immediately refetches the currently selected board so
+  changes from the outage window cannot leave the TUI stale. `?` opens the help overlay listing
+  **all** keybinds; column config form (rename, system prompt,
   trigger, on_success/on_fail, overrides, reorder, delete). **Column reorder** is reachable by mouse
   drag or the `M` (Shift+m) mini-mode: it mirrors the move-card picker's stage→commit→cancel shape —
   `←`/`→` (or `h`/`l`) slide the focused column locally, `Enter` commits a single `column.reorder`,
