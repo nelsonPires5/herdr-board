@@ -5,7 +5,7 @@ expression: output
 " ◈ herdr-board ● 1 running                         [ Global ▾ ]                          [ Active ] [ All ] [ Archived ]"
 "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────"
 "┌ TODO · MANUAL · 2 ─────────┐┌ PLAN · AUTO · 1 ───────────┐┌ EXECUTE · AUTO · 2 ────────┐┌ REVIEW · AUTO · 2 ─────────┐"
-"│┌──────────┌ Edit card  ·  f: fullscreen  ·  Tab: field · Enter: save · Esc: cancel ──────────────────────┐──────────┐│"
+"│┌──────────┌ Edit card  ·  Tab: field · Enter: save · Esc: cancel ────────────────────────────────────────┐──────────┐│"
 "││#1 Update │┌ Task ──────────────────────────────────────────────────────────────────────────────────────┐│ module   ││"
 "││· idle    ││  title                                                                                     ││          ││"
 "││claude    ││Long description demo                                                                       ││dium      ││"

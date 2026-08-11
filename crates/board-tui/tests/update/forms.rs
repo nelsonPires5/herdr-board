@@ -1,17 +1,18 @@
 //! Form tests: field cycling, capabilities, model/effort/harness/space selectors.
 
 use super::helpers::{
-    demo_client, driver_of, is_choice, key, opt_labels, set_choice, split_effort_caps, CodexClient,
-    RecordingClient,
+    demo_app, demo_app_with_detail, demo_client, driver_of, is_choice, key, opt_labels, set_choice,
+    split_effort_caps, CodexClient, RecordingClient,
 };
 use board_core::capability::{
     claude_capabilities, pi_capabilities, HarnessCapabilities, ModelInfo,
 };
 use board_core::client::BoardClient;
 use board_core::model::Comment;
-use board_core::protocol::{Effort, Patch, SpaceInfo, SpaceKind};
+use board_core::protocol::{CardStatus, Effort, Patch, SpaceInfo, SpaceKind};
 use board_tui::app::{update, Effect, Screen};
-use board_tui::forms::{ChoiceVal, FieldId, Form, Submit};
+use board_tui::forms::{ChoiceVal, FieldId, FieldKind, Form, FormKind, Submit};
+use board_tui::testkit::draw;
 use crossterm::event::KeyCode;
 use std::sync::{Arc, Mutex};
 
@@ -936,4 +937,139 @@ fn comment_edit_form_rejects_an_empty_body() {
     let mut form = Form::comment_edit(&comment);
     form.fields[0].set_text("   ");
     assert!(form.submit().is_err());
+}
+
+// -- `f` is text in text fields; the popup/fullscreen toggle is picker-only ----
+
+/// `f`/`F` must type into a focused text field; the popup/fullscreen toggle
+/// may only fire while focus sits on a non-text (picker) field. Card form.
+#[test]
+fn f_types_into_card_form_text_fields_without_toggling_fullscreen() {
+    let mut app = demo_app();
+    update(&mut app, key(KeyCode::Char('n')));
+    assert_eq!(app.screen, Screen::CardForm);
+    assert!(
+        !app.form.as_ref().unwrap().focused_is_choice(),
+        "title is a text field"
+    );
+
+    update(&mut app, key(KeyCode::Char('f')));
+    assert_eq!(
+        app.form.as_ref().unwrap().focused().get_text(),
+        "f",
+        "lowercase f must be inserted as text"
+    );
+    assert!(
+        !app.form_fullscreen,
+        "typing f in a text field must not toggle fullscreen"
+    );
+
+    update(&mut app, key(KeyCode::Char('F')));
+    assert_eq!(
+        app.form.as_ref().unwrap().focused().get_text(),
+        "fF",
+        "uppercase F must be inserted as text"
+    );
+    assert!(!app.form_fullscreen);
+}
+
+/// Column form: same guarantee for the name field.
+#[test]
+fn f_types_into_column_form_text_fields_without_toggling_fullscreen() {
+    let mut app = demo_app();
+    update(&mut app, key(KeyCode::Char('N')));
+    assert_eq!(app.screen, Screen::ColumnForm);
+    assert!(!app.form.as_ref().unwrap().focused_is_choice());
+
+    update(&mut app, key(KeyCode::Char('f')));
+    assert_eq!(
+        app.form.as_ref().unwrap().focused().get_text(),
+        "f",
+        "column name must accept f as text"
+    );
+    assert!(!app.form_fullscreen, "column form must not toggle");
+}
+
+/// Comment form (add): same guarantee for the multiline body.
+#[test]
+fn f_types_into_comment_form_text_fields_without_toggling_fullscreen() {
+    let mut app = demo_app_with_detail(CardStatus::Running);
+    update(&mut app, key(KeyCode::Char('c'))); // add comment
+    assert_eq!(app.screen, Screen::CardForm);
+    assert!(matches!(
+        app.form.as_ref().unwrap().kind,
+        FormKind::Comment { .. }
+    ));
+    assert!(!app.form.as_ref().unwrap().focused_is_choice());
+
+    update(&mut app, key(KeyCode::Char('f')));
+    assert_eq!(
+        app.form.as_ref().unwrap().focused().get_text(),
+        "f",
+        "comment body must accept f as text"
+    );
+    assert!(!app.form_fullscreen, "comment form must not toggle");
+}
+
+/// The toggle survives: with focus on a non-text (picker) field, `f` still
+/// flips between popup and fullscreen and never cycles the picker.
+#[test]
+fn f_still_toggles_fullscreen_on_picker_fields() {
+    let mut app = demo_app();
+    update(&mut app, key(KeyCode::Char('n')));
+    let form = app.form.as_mut().unwrap();
+    let harness = form
+        .fields
+        .iter()
+        .position(|f| matches!(f.kind, FieldKind::Choice { .. }))
+        .expect("card form has a picker field");
+    form.focus = harness;
+    let before = app.form.as_ref().unwrap().focused().display();
+
+    update(&mut app, key(KeyCode::Char('f')));
+    assert!(
+        app.form_fullscreen,
+        "f on a picker field must go fullscreen"
+    );
+    assert_eq!(
+        app.form.as_ref().unwrap().focused().display(),
+        before,
+        "the toggle must not cycle the picker selection"
+    );
+
+    update(&mut app, key(KeyCode::Char('f')));
+    assert!(
+        !app.form_fullscreen,
+        "f on a picker field must toggle back to popup"
+    );
+}
+
+/// The form title hint advertises the toggle only while a picker field is
+/// focused; on a text field the hint disappears so the binding is never
+/// misadvertised mid-typing.
+#[test]
+fn form_title_advertises_the_toggle_only_on_picker_fields() {
+    let mut app = demo_app();
+    update(&mut app, key(KeyCode::Char('n')));
+    let text_field_frame = draw(&app, 96, 30);
+    assert!(
+        !text_field_frame.contains("f: fullscreen"),
+        "text-field title must not advertise the f toggle:\n{text_field_frame}"
+    );
+    assert!(
+        !text_field_frame.contains("f: popup"),
+        "text-field title must not advertise the f toggle:\n{text_field_frame}"
+    );
+
+    let form = app.form.as_mut().unwrap();
+    form.focus = form
+        .fields
+        .iter()
+        .position(|f| matches!(f.kind, FieldKind::Choice { .. }))
+        .expect("card form has a picker field");
+    let picker_field_frame = draw(&app, 96, 30);
+    assert!(
+        picker_field_frame.contains("f: fullscreen"),
+        "picker-field title must advertise the f toggle:\n{picker_field_frame}"
+    );
 }
