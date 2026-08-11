@@ -25,6 +25,7 @@ All notable changes to this project are documented here. The format is based on
 ### Fixed
 
 - [#81](https://github.com/nelsonPires5/herdr-board/pull/81) fix: `f` types normally in form text fields; the popup/fullscreen toggle now works only on picker fields.
+- [#76](https://github.com/nelsonPires5/herdr-board/pull/76) fix: Make workspace dispatch use an explicit cwd or fail on conflicting live pane directories, and correct Codex permission presets.
 
 ## [0.13.0] - 2026-08-10
 
