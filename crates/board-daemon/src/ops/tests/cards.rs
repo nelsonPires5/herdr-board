@@ -405,3 +405,176 @@ fn card_move_cross_board_emits_one_event_per_board() {
         "destination-board event missing: {board_ids:?}"
     );
 }
+
+// -- same-column reorder (pure reorder, never a dispatch) -------------------
+
+/// Seed an auto column with three idle cards and return `(column_id, [ids])`.
+///
+/// Cards are created through the DB layer (not `card.create`, which would
+/// auto-dispatch them): an idle card sitting in an auto column is exactly the
+/// state a same-column reorder must NOT re-dispatch.
+fn seed_auto_column(d: &Arc<Daemon>) -> (i64, Vec<i64>) {
+    let column_id = handle_request(
+        d,
+        "column.create",
+        json!({ "name": "Auto", "trigger": "auto" }),
+    )
+    .unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    let mut ids = Vec::new();
+    let db = d.store.lock();
+    for title in ["first", "second", "third"] {
+        let card = db
+            .create_card(&CardCreateParams {
+                title: title.into(),
+                column_id: Some(column_id),
+                ..Default::default()
+            })
+            .unwrap();
+        ids.push(card.id);
+    }
+    drop(db);
+    (column_id, ids)
+}
+
+fn card_order(d: &Arc<Daemon>, column_id: i64) -> Vec<i64> {
+    let db = d.store.lock();
+    db.list_cards_in_column(column_id)
+        .unwrap()
+        .into_iter()
+        .map(|c| c.id)
+        .collect()
+}
+
+#[test]
+fn card_move_same_column_reorders_without_enqueueing_or_status_change() {
+    let d = test_daemon(Config::default());
+    let (column_id, ids) = seed_auto_column(&d);
+    // An idle card in an auto column would normally be dispatched on entry;
+    // a same-column move must NOT enqueue.
+    assert!(card_order(&d, column_id) == ids);
+
+    // Move the first card to the last position.
+    let moved = handle_request(
+        &d,
+        "card.move",
+        json!({ "id": ids[0], "column_id": column_id, "position": 2 }),
+    )
+    .unwrap();
+    assert_eq!(moved["column_id"], column_id);
+    assert_eq!(moved["status"], "idle", "status must be unchanged");
+    assert_eq!(moved["position"], 2, "the card reports its new position");
+
+    let order = card_order(&d, column_id);
+    assert_eq!(order, vec![ids[1], ids[2], ids[0]], "order must flip");
+
+    // No run may exist: same-column reordering never dispatches.
+    let db = d.store.lock();
+    for id in &ids {
+        assert!(db.open_run_for_card(*id).unwrap().is_none());
+        assert_eq!(db.require_card(*id).unwrap().status.as_str(), "idle");
+    }
+    // Positions stay contiguous and deterministic.
+    let positions: Vec<i64> = order
+        .iter()
+        .map(|id| db.require_card(*id).unwrap().position)
+        .collect();
+    assert_eq!(positions, vec![0, 1, 2]);
+}
+
+#[test]
+fn card_move_same_column_never_triggers_auto_column() {
+    let d = test_daemon(Config::default());
+    let (column_id, ids) = seed_auto_column(&d);
+    let mut rx = d.events_tx.subscribe();
+
+    handle_request(
+        &d,
+        "card.move",
+        json!({ "id": ids[2], "column_id": column_id, "position": 0 }),
+    )
+    .unwrap();
+
+    let order = card_order(&d, column_id);
+    assert_eq!(order, vec![ids[2], ids[0], ids[1]]);
+    let db = d.store.lock();
+    assert!(db.list_runs(ids[0]).unwrap().is_empty(), "no run enqueued");
+    // The dispatcher must not have been woken: the move is not a dispatch.
+    assert!(
+        rx.try_recv().is_err() || {
+            // Drain any events and make sure none is a dispatch wake.
+            while let Ok(ev) = rx.try_recv() {
+                match ev {
+                    Event::BoardChanged { .. } => {}
+                    _ => panic!("unexpected non-board event: {ev:?}"),
+                }
+            }
+            true
+        },
+        "same-column move must never wake the dispatcher"
+    );
+}
+
+#[test]
+fn card_move_same_column_keeps_an_open_run_untouched() {
+    let d = test_daemon(Config::default());
+    let (column_id, ids) = seed_auto_column(&d);
+    // Promote a real open run on the card to be reordered (status running).
+    let (_, run_id) = {
+        let db = d.store.lock();
+        let run = db
+            .enqueue_run_uow(&EnqueueRun {
+                card_id: ids[1],
+                column_id,
+                harness: "pi",
+                argv_json: "[]",
+                prompt_snapshot: "p",
+                system_prompt_snapshot: None,
+                launch_spec_json: None,
+                session_id: None,
+                session: None,
+            })
+            .unwrap();
+        db.promote_run_uow(run.id, Some("w1"), Some("p1"), None)
+            .unwrap();
+        (db.require_card(ids[1]).unwrap(), run.id)
+    };
+
+    // Reorder the running card to the front.
+    let moved = handle_request(
+        &d,
+        "card.move",
+        json!({ "id": ids[1], "column_id": column_id, "position": 0 }),
+    )
+    .unwrap();
+    assert_eq!(moved["status"], "running", "run card keeps its status");
+    assert_eq!(card_order(&d, column_id), vec![ids[1], ids[0], ids[2]]);
+
+    let db = d.store.lock();
+    let run = db.get_run(run_id).unwrap();
+    assert!(run.ended_at.is_none(), "the open run survives untouched");
+    assert_eq!(run.column_id, column_id);
+}
+
+#[test]
+fn card_move_same_column_clamps_position_and_compacts() {
+    let d = test_daemon(Config::default());
+    let (column_id, ids) = seed_auto_column(&d);
+    // A position past the end appends; the column stays contiguous.
+    handle_request(
+        &d,
+        "card.move",
+        json!({ "id": ids[0], "column_id": column_id, "position": 99 }),
+    )
+    .unwrap();
+    assert_eq!(card_order(&d, column_id), vec![ids[1], ids[2], ids[0]]);
+    let db = d.store.lock();
+    let positions: Vec<i64> = db
+        .list_cards_in_column(column_id)
+        .unwrap()
+        .iter()
+        .map(|c| c.position)
+        .collect();
+    assert_eq!(positions, vec![0, 1, 2]);
+}
