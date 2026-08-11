@@ -13,10 +13,24 @@ pub(super) fn run_done(d: &Arc<Daemon>, p: RunDoneParams) -> Result<Value> {
         // eligibility, including the narrow queued configured-run exception.
         let _sched = d.sched.lock().unwrap();
         let db = d.store.lock();
-        let run = db
-            .open_run_for_card(p.card_id)?
-            .ok_or_else(|| Error::NotFound(format!("no active run for card {}", p.card_id)))?;
         let card = db.require_card(p.card_id)?;
+        let run = match db.open_run_for_card(p.card_id)? {
+            Some(run) => run,
+            None => {
+                let manual_idle = card.status == CardStatus::Idle
+                    && db.require_column(card.column_id)?.trigger == Trigger::Manual;
+                let message = if manual_idle {
+                    format!(
+                        "no active run for card {}; manual column: close via board move {} <column>",
+                        p.card_id,
+                        p.card_id
+                    )
+                } else {
+                    format!("no active run for card {}", p.card_id)
+                };
+                return Err(Error::NotFound(message));
+            }
+        };
         // A reused agent pane keeps its first stage's BOARD_RUN_ID (a running
         // process's env cannot change); when its HERDR_PANE_ID matches this
         // open run's pane, the caller is this run's pane, so the stale id is
