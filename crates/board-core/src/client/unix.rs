@@ -165,6 +165,10 @@ impl BoardClient for UnixClient {
         writer.flush()?;
         Ok(Box::new(EventStream { reader }))
     }
+
+    fn reconnect_path(&self) -> Option<PathBuf> {
+        Some(self.path.clone())
+    }
 }
 
 /// Iterator over streamed events; skips the subscribe ack and any non-event lines.
