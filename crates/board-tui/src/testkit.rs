@@ -494,6 +494,11 @@ pub fn demo_client() -> anyhow::Result<DemoClient> {
     c.db()
         .set_card_awaiting(awaiting, AwaitingReason::AgentDone)?;
 
+    // Fixture determinism: finalized runs carry wall-clock `datetime('now')`
+    // timestamps; pin elapsed to 0 so no snapshot can flip `0s` to `1s` when
+    // a promote→finalize pair straddles a second boundary on a loaded machine.
+    c.db().pin_finalized_run_elapsed()?;
+
     // Done — idle
     c.card_create(&card("Ship v0.1", done, "Cut the first release."))?;
 

@@ -748,6 +748,10 @@ fn card_detail_history_overflow_starts_latest_and_scrolls_sections() {
         .db()
         .set_card_status(card.id, CardStatus::Failed)
         .unwrap();
+    // The fixture's own runs above use wall-clock `datetime('now')`; pin
+    // elapsed to 0 so a promote→finalize pair straddling a second boundary
+    // (slow/loaded CI) cannot flip a deterministic `0s` row to `1s`.
+    client.db().pin_finalized_run_elapsed().unwrap();
 
     let mut d = driver(client);
     d.app.last_area = Rect::new(0, 0, 120, 35);
