@@ -3,6 +3,7 @@
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/lib.sh"
 
+export E2E_FAKE_ENV="FAKE_AGENT_HOLD=300"
 e2e_boot   # e2e_init + e2e_build + e2e_isolate + e2e_daemon_start (in that order)
 
 board_at() {
@@ -93,5 +94,46 @@ VISIBLE_REPO_PREFIX="$(dirname "$REPO")/project"
 grep -Fq "$VISIBLE_REPO_PREFIX" <<<"$screen" \
   || fail "canonical repo path prefix missing from narrow board picker -- got: $screen"
 ok "TUI uses focused pane Git root and picker includes Global"
+
+step "HERDR MUTATION: make the workspace cwd heterogeneous"
+foreign_tab="$(e2e_herdr_mutate -- tab create --workspace "$WS_ID" --cwd "$PLAIN" \
+  --label heterogeneous-cwd --no-focus)"
+FOREIGN_PANE_ID="$(printf '%s' "$foreign_tab" | jget pane_id)"
+[ -n "$FOREIGN_PANE_ID" ] || fail "heterogeneous cwd pane was not created"
+distinct_cwds="$(hrpc pane.list "{\"workspace_id\":\"$WS_ID\"}" | python3 -c '
+import json,sys
+values=sorted({p.get("cwd") for p in json.load(sys.stdin).get("panes",[]) if p.get("cwd")})
+print("\n".join(values))
+')"
+grep -Fxq "$SUB" <<<"$distinct_cwds" || fail "workspace lost its original cwd: $distinct_cwds"
+grep -Fxq "$PLAIN" <<<"$distinct_cwds" || fail "workspace lacks the second cwd: $distinct_cwds"
+
+step "Explicit space_cwd controls auto-spawn placement"
+brpc column.create "{\"board_id\":$REPO_BOARD_ID,\"name\":\"Cwd Execute\",\"trigger\":\"auto\"}" >/dev/null
+explicit_card="$(board_at "$REPO" card create --title explicit-cwd --harness fake \
+  --space-kind workspace --space-ref "$WS_ID" --space-cwd "$REPO" --json)"
+EXPLICIT_CARD_ID="$(printf '%s' "$explicit_card" | jget id)"
+BOARD_SCOPE_PATH="$REPO" e2e_board_herdr_mutate -- move "$EXPLICIT_CARD_ID" "Cwd Execute" --json >/dev/null
+outcome="$(wait_ok "$EXPLICIT_CARD_ID")" || fail "explicit cwd card outcome '$outcome'"
+run_cwd="$(hrpc pane.list "{\"workspace_id\":\"$WS_ID\"}" | python3 -c '
+import json,re,sys
+card=re.escape(sys.argv[1])
+pattern=re.compile(rf"^card-{card}-cwd-execute(?:-r[0-9]+)?$")
+print(next((p.get("cwd") or "" for p in json.load(sys.stdin).get("panes",[]) if pattern.match(p.get("label") or "")), ""))
+' "$EXPLICIT_CARD_ID")"
+[ "$run_cwd" = "$REPO" ] || fail "explicit cwd pane landed at '$run_cwd' (expected '$REPO')"
+ok "auto-spawn pane landed at the explicit Git root"
+
+step "Missing override fails closed for heterogeneous workspace cwd"
+ambiguous_card="$(board_at "$REPO" card create --title ambiguous-cwd --harness fake \
+  --space-kind workspace --space-ref "$WS_ID" --json)"
+AMBIGUOUS_CARD_ID="$(printf '%s' "$ambiguous_card" | jget id)"
+BOARD_SCOPE_PATH="$REPO" e2e_board_herdr_mutate -- move "$AMBIGUOUS_CARD_ID" "Cwd Execute" --json >/dev/null
+ambiguous_outcome="$(wait_ok "$AMBIGUOUS_CARD_ID" || true)"
+[ "$ambiguous_outcome" = fail ] || fail "ambiguous cwd outcome '$ambiguous_outcome' (expected fail)"
+ambiguous_show="$(board_at "$REPO" card show "$AMBIGUOUS_CARD_ID" --json)"
+grep -Fq 'multiple live pane cwd candidates' <<<"$ambiguous_show" \
+  || fail "ambiguous cwd failure did not explain the candidates"
+ok "heterogeneous workspace without space_cwd failed closed"
 
 step "12-cwd-boards: ALL CHECKS PASSED"

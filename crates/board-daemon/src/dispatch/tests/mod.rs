@@ -210,12 +210,12 @@ fn ws(id: &str, label: &str) -> WorkspaceInfo {
     }
 }
 
-/// Serve exactly the three calls made by `resolve_space`: protocol gate,
-/// workspace discovery, and the live pane snapshot. Keeping the fixture
+/// Serve exactly the four connections made by `resolve_space`: the connect
+/// probe, protocol gate, workspace discovery, and the live pane snapshot. Keeping the fixture
 /// single-purpose makes cwd failure tests deterministic and independent of
 /// a real Herdr process.
 fn workspace_resolution_server(snapshot: Option<Value>) -> FakeHerdr {
-    workspace_resolution_server_take(snapshot, 3)
+    workspace_resolution_server_take(snapshot, 4)
 }
 
 /// [`workspace_resolution_server`] with a configurable connection budget.

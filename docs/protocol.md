@@ -180,7 +180,7 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
 - `card.create {title, board_id?, description?, column_id?(default Todo), harness?(default "pi"), model?, effort?, permission_mode?, session?, space_kind?("workspace"|"new_workspace"), space_ref?, space_cwd?, position?}` → `Card`; omitted `board_id` means `Global`, and an explicit column must belong to that board.
   - Pi rejects a non-null `permission_mode` with error 1; Pi has no board-level tool permission mode.
   - `space_kind`:
-    - `workspace` — an ALREADY-OPEN workspace in the session; `space_ref` = its workspace id (a case-insensitive label is also accepted at dispatch).
+    - `workspace` — an ALREADY-OPEN workspace in the session; `space_ref` = its workspace id (a case-insensitive label is also accepted at dispatch). An optional non-empty `space_cwd` is an explicit launch-directory override. Without it, all non-empty cwd values in the workspace's live panes must agree; heterogeneous values fail dispatch with the pane/cwd candidates instead of choosing by snapshot order.
     - `new_workspace` — the daemon creates the workspace on first dispatch (label = `space_ref`, cwd = `space_cwd`), reusing an open workspace with that label if one exists. **Requires** non-empty `space_ref` and `space_cwd` on create (else error 1).
     - The wire vocabulary is exactly `"workspace"` and `"new_workspace"`: `SpaceKind` is serde
       `snake_case`, so a hyphenated `"new-workspace"` on the socket is still rejected (error 1,
