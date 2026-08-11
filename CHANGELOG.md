@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+
+- [#73](https://github.com/nelsonPires5/herdr-board/pull/73) feat: the daemon stamps resolved labels (`default session`, `default effort`, …) onto card payloads; TUI and CLI render them verbatim.
+
 ## [0.13.0] - 2026-08-10
 
 ### Added

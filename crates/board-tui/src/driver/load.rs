@@ -199,7 +199,8 @@ impl Driver {
             }
             None => None,
         };
-        // Sessions failing is non-fatal: keep `(default)` + any preselection.
+        // Sessions failing is non-fatal: keep the default-session option
+        // (daemon-sent label) + any preselection.
         let sessions_opt = sessions.and_then(Result::ok);
         if let Some(form) = self.app.form.as_mut() {
             form.apply_options(caps_opt, harnesses_opt, spaces_opt, sessions_opt);
@@ -228,7 +229,9 @@ fn fetch_spaces(client: &mut dyn BoardClient, session: Option<&str>) -> Result<V
     Ok(client.space_list(session)?.spaces)
 }
 
-/// Fetch `session.list` through the typed client API.
-fn fetch_sessions(client: &mut dyn BoardClient) -> Result<Vec<SessionInfo>> {
-    Ok(client.session_list()?.sessions)
+/// Fetch `session.list` through the typed client API: the session list plus
+/// the daemon-sent `default session` marker label.
+fn fetch_sessions(client: &mut dyn BoardClient) -> Result<(Vec<SessionInfo>, String)> {
+    let result = client.session_list()?;
+    Ok((result.sessions, result.default_label))
 }

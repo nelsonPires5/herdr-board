@@ -24,7 +24,7 @@ expression: output
 "│ ││  model override                                                                            ││ │"
 "│ ││                                                                                            ││ │"
 "│ ││  effort override                                                                           ││ │"
-"│ ││[ ‹ ]  (default)  [ › ]                                                                     ││ │"
+"│ ││[ ‹ ]  default effort  [ › ]                                                                ││ │"
 "│ ││  harness override                                                                          ││ │"
 "│ ││[ ‹ ]  none  [ › ]                                                                          ││ │"
 "│ ││  timeout (minutes)                                                                         ││ │"

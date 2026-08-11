@@ -3,6 +3,7 @@ use serde_json::Value;
 use crate::db::{ColumnTarget, ColumnWiring, Db, FinalizeEffects, FinalizeRun, BOARD_ID};
 
 use crate::engine;
+use crate::labels::card_labels;
 
 use crate::protocol::{
     BoardGetParams, BoardListResult, BoardOpenParams, BoardRenameParams, BoardSnapshot,
@@ -153,6 +154,19 @@ macro_rules! fake_methods {
     };
 }
 
+/// Stamp the daemon-owned display labels onto a card. The DB-only fake has no
+/// herdr to resolve an unset session through, so `None` yields the
+/// `default session` marker — exactly the daemon's fallback when herdr is
+/// unreachable.
+fn stamp(mut card: crate::model::Card) -> crate::model::Card {
+    card.labels = card_labels(&card, None);
+    card
+}
+
+fn stamp_all(cards: Vec<crate::model::Card>) -> Vec<crate::model::Card> {
+    cards.into_iter().map(stamp).collect()
+}
+
 fake_methods!(db, config, params, {
     "board.get" => {
         let p: BoardGetParams = serde_json::from_value(params)?;
@@ -160,7 +174,7 @@ fake_methods!(db, config, params, {
         let snap = BoardSnapshot {
             board: db.get_board(board_id)?,
             columns: db.list_columns(board_id)?,
-            cards: db.list_cards(board_id)?,
+            cards: stamp_all(db.list_cards(board_id)?),
             active_runs: db.active_run_summaries(board_id)?,
         };
         serde_json::to_value(snap)?
@@ -170,7 +184,7 @@ fake_methods!(db, config, params, {
         let board = db.open_board(&p.scope_path)?;
         serde_json::to_value(BoardSnapshot {
             columns: db.list_columns(board.id)?,
-            cards: db.list_cards(board.id)?,
+            cards: stamp_all(db.list_cards(board.id)?),
             active_runs: db.active_run_summaries(board.id)?,
             board,
         })?
@@ -204,11 +218,11 @@ fake_methods!(db, config, params, {
     },
     "card.create" => {
         let p: CardCreateParams = serde_json::from_value(params)?;
-        serde_json::to_value(db.create_card(&p)?)?
+        serde_json::to_value(stamp(db.create_card(&p)?))?
     },
     "card.update" => {
         let p: CardUpdateParams = serde_json::from_value(params)?;
-        serde_json::to_value(db.update_card(&p)?)?
+        serde_json::to_value(stamp(db.update_card(&p)?))?
     },
     "card.delete" => {
         let id = params["id"].as_i64().unwrap_or_default();
@@ -221,7 +235,7 @@ fake_methods!(db, config, params, {
             .get_card(p.id)?
             .ok_or_else(|| anyhow::anyhow!("card {} not found", p.id))?;
         engine::validate_card_archive(card.status)?;
-        serde_json::to_value(db.set_card_archived(p.id, p.archived)?)?
+        serde_json::to_value(stamp(db.set_card_archived(p.id, p.archived)?))?
     },
     "card.move" => {
         let p: CardMoveParams = serde_json::from_value(params)?;
@@ -239,7 +253,7 @@ fake_methods!(db, config, params, {
             }
             _ => db.move_card(p.id, p.column_id, p.position)?,
         };
-        serde_json::to_value(card)?
+        serde_json::to_value(stamp(card))?
     },
     "card.get" => {
         let id = params["id"].as_i64().unwrap_or_default();
@@ -247,7 +261,7 @@ fake_methods!(db, config, params, {
             .get_card(id)?
             .ok_or_else(|| anyhow::anyhow!("card {id} not found"))?;
         let detail = CardDetail {
-            card,
+            card: stamp(card),
             comments: db.list_comments(id)?,
             runs: db.list_runs(id)?,
         };
@@ -271,7 +285,7 @@ fake_methods!(db, config, params, {
             }
             None => db.list_cards_visible(board_id, visibility)?,
         };
-        serde_json::to_value(cards)?
+        serde_json::to_value(stamp_all(cards))?
     },
     "run.done" => {
         let p: RunDoneParams = serde_json::from_value(params)?;

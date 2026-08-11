@@ -224,7 +224,11 @@ impl Render for CardDetail {
                 ""
             }
         )?;
-        if let Some(session) = &self.card.session {
+        // Daemon-stamped label: the resolved session name, or the
+        // `default session` marker. Old-daemon fallback: the raw wire field.
+        if !self.card.labels.session.is_empty() {
+            writeln!(out, "session: {}", self.card.labels.session)?;
+        } else if let Some(session) = &self.card.session {
             writeln!(out, "session: {session}")?;
         }
         if !self.card.description.is_empty() {
@@ -379,6 +383,14 @@ impl Render for SpaceListResult {
 
 impl Render for SessionListResult {
     fn render(&self, out: &mut dyn Write) -> io::Result<()> {
+        // The marker for the default session is daemon-sent (ready string).
+        // Empty only when an older daemon predates the field: fall back to the
+        // legacy marker rather than blanking the column.
+        let default_label = if self.default_label.is_empty() {
+            "(default)".to_string()
+        } else {
+            self.default_label.clone()
+        };
         let rows: Vec<Vec<String>> = self
             .sessions
             .iter()
@@ -391,7 +403,11 @@ impl Render for SessionListResult {
                         "stopped"
                     }
                     .to_string(),
-                    if session.default { "(default)" } else { "" }.to_string(),
+                    if session.default {
+                        default_label.clone()
+                    } else {
+                        String::new()
+                    },
                 ]
             })
             .collect();

@@ -20,6 +20,9 @@ fn efforts_for_uses_model_policy_and_freeform_defaults() {
         default_efforts: vec![Effort::Low],
         permission_modes: vec![],
         resume: Default::default(),
+        default_effort_label: String::new(),
+        default_permission_label: String::new(),
+        default_model_label: String::new(),
     };
     assert_eq!(efforts_for(&caps, Some("known")), vec![Effort::High]);
     assert_eq!(
