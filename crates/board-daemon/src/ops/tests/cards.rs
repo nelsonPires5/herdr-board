@@ -406,6 +406,147 @@ fn card_move_cross_board_emits_one_event_per_board() {
     );
 }
 
+#[test]
+fn card_duplicate_copies_config_resets_state_and_emits_card_created() {
+    let d = test_daemon(Config::default());
+    let effects = Arc::new(Mutex::new(Vec::new()));
+    *d.effect_log.lock().unwrap() = Some(effects.clone());
+    let mut rx = d.events_tx.subscribe();
+
+    let original_id = {
+        let db = d.store.lock();
+        let card = db
+            .create_card(&CardCreateParams {
+                title: "Ship it".into(),
+                description: Some("base prompt".into()),
+                harness: Some("claude".into()),
+                model: Some("opus".into()),
+                effort: Some(Effort::High),
+                permission_mode: Some("acceptEdits".into()),
+                session: Some("work".into()),
+                space_kind: Some(SpaceKind::NewWorkspace),
+                space_ref: Some("widget-build".into()),
+                space_cwd: Some("/tmp/widget".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let run = db
+            .enqueue_run_uow(&EnqueueRun {
+                card_id: card.id,
+                column_id: card.column_id,
+                harness: "claude",
+                argv_json: "[]",
+                prompt_snapshot: "p",
+                system_prompt_snapshot: None,
+                launch_spec_json: None,
+                session_id: Some("conv-9"),
+                session: Some("work"),
+            })
+            .unwrap();
+        db.promote_run_uow(run.id, Some("w1"), Some("p1"), None)
+            .unwrap();
+        db.set_card_session(card.id, "conv-9").unwrap();
+        db.add_comment(card.id, "agent:1", "draft").unwrap();
+        card.id
+    };
+    // Capture the post-setup original: running with a conversation id.
+    let original = d.store.lock().require_card(original_id).unwrap();
+
+    let result = handle_request(&d, "card.duplicate", json!({"id": original_id})).unwrap();
+    let copy: board_core::model::Card = serde_json::from_value(result).unwrap();
+    assert_ne!(copy.id, original.id);
+    assert_eq!(copy.title, "Ship it (copy)");
+    assert_eq!(copy.status, CardStatus::Idle);
+    assert_eq!(copy.awaiting_reason, None);
+    assert_eq!(copy.session_id, None);
+    assert_eq!(copy.archived_at, None);
+    assert_eq!(copy.description, original.description);
+    assert_eq!(copy.harness, original.harness);
+    assert_eq!(copy.model, original.model);
+    assert_eq!(copy.effort, original.effort);
+    assert_eq!(copy.permission_mode, original.permission_mode);
+    assert_eq!(copy.session, original.session);
+    assert_eq!(copy.space_kind, original.space_kind);
+    assert_eq!(copy.space_ref, original.space_ref);
+    assert_eq!(copy.space_cwd, original.space_cwd);
+    assert_eq!(copy.column_id, original.column_id);
+    assert_eq!(copy.position, original.position + 1);
+
+    // Copy has no execution state; the original is byte-identical.
+    let db = d.store.lock();
+    assert!(db.list_runs(copy.id).unwrap().is_empty());
+    assert!(db.list_comments(copy.id).unwrap().is_empty());
+    assert_eq!(db.require_card(original_id).unwrap(), original);
+
+    // Normal CardCreated notification; never a dispatch wake.
+    let mut events = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        events.push(ev);
+    }
+    let created = events.iter().any(|ev| match ev {
+        Event::BoardChanged {
+            reason: BoardChangedReason::CardCreated,
+            card_id,
+            ..
+        } => *card_id == Some(copy.id),
+        _ => false,
+    });
+    assert!(created, "no CardCreated for the copy in {events:?}");
+    let logged = effects.lock().unwrap();
+    assert!(
+        !logged.contains(&"dispatch_wake"),
+        "duplicate must not wake dispatch: {logged:?}"
+    );
+}
+
+#[test]
+fn card_duplicate_in_auto_column_never_enqueues() {
+    let d = test_daemon(Config::default());
+    let effects = Arc::new(Mutex::new(Vec::new()));
+    *d.effect_log.lock().unwrap() = Some(effects.clone());
+
+    let card_id = {
+        let db = d.store.lock();
+        let auto = db
+            .create_column(&ColumnCreateParams {
+                name: "Execute".into(),
+                trigger: Some(Trigger::Auto),
+                ..Default::default()
+            })
+            .unwrap();
+        let card = db
+            .create_card(&CardCreateParams {
+                title: "Run me".into(),
+                column_id: Some(auto.id),
+                ..Default::default()
+            })
+            .unwrap();
+        card.id
+    };
+
+    let result = handle_request(&d, "card.duplicate", json!({"id": card_id})).unwrap();
+    let copy: board_core::model::Card = serde_json::from_value(result).unwrap();
+    let db = d.store.lock();
+    assert_eq!(copy.status, CardStatus::Idle);
+    assert!(db.list_runs(copy.id).unwrap().is_empty());
+    assert!(db.open_run_for_card(copy.id).unwrap().is_none());
+    assert_eq!(db.require_card(card_id).unwrap().status, CardStatus::Idle);
+    let logged = effects.lock().unwrap();
+    assert!(
+        !logged.contains(&"dispatch_wake"),
+        "duplicate into an auto column must not dispatch: {logged:?}"
+    );
+}
+
+#[test]
+fn card_duplicate_rejects_unknown_card_without_writing() {
+    let d = test_daemon(Config::default());
+    let err = handle_request(&d, "card.duplicate", json!({"id": 9999})).unwrap_err();
+    assert_eq!(err.code(), 2);
+    assert!(err.to_string().contains("card 9999"));
+    assert!(d.store.lock().list_all_cards().unwrap().is_empty());
+}
+
 // -- same-column reorder (pure reorder, never a dispatch) -------------------
 
 /// Seed an auto column with three idle cards and return `(column_id, [ids])`.

@@ -101,10 +101,18 @@ board card edit ID [--title TITLE] [-d DESCRIPTION] [--clear-description] \
 board card show ID [--json]
 board card list [--column COLUMN] [--visibility active|all|archived] [--json]
 board card move ID COLUMN [--position ZERO_BASED_POSITION] [--destination-board ID|PATH] [--json]
+board card duplicate ID [--json]
 board card archive ID [--json]
 board card restore ID [--json]
 board card delete ID [--yes] [--json]
 ```
+
+`card duplicate` copies a card into a fresh idle card inserted directly below it: title gains
+` (copy)`, and description, harness, model, effort, permission mode, session, and space
+configuration are copied verbatim — but status is `idle` with no runs, comments, conversation id,
+or archive flag. The original is never modified, and the copy is never dispatched, even in an
+auto column; run it (or move it) explicitly like any idle card. In the TUI, `C` duplicates the
+focused card from the board or card detail.
 
 `card new` is retained as an alias for `card create`. A new card defaults to Pi; an omitted model or
 effort uses the harness default. `--harness codex` selects the built-in Codex adapter: models are

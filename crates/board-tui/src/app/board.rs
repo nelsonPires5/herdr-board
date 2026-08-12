@@ -72,6 +72,11 @@ pub(super) fn board_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
             }
         }
         KeyCode::Char('a') => return archive_selected_card(app),
+        KeyCode::Char('C') => {
+            if let Some(id) = app.selected_card_id() {
+                return vec![Effect::CardDuplicate(id)];
+            }
+        }
         KeyCode::Char('v') => return set_card_filter(app, app.card_filter.next()),
         KeyCode::Char('d') => {
             if let Some(id) = app.selected_card_id() {

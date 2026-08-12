@@ -220,6 +220,10 @@ fake_methods!(db, config, params, {
         let p: CardCreateParams = serde_json::from_value(params)?;
         serde_json::to_value(stamp(db.create_card(&p)?))?
     },
+    "card.duplicate" => {
+        let id = params["id"].as_i64().unwrap_or_default();
+        serde_json::to_value(stamp(db.duplicate_card(id)?))?
+    },
     "card.update" => {
         let p: CardUpdateParams = serde_json::from_value(params)?;
         serde_json::to_value(stamp(db.update_card(&p)?))?

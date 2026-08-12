@@ -108,6 +108,29 @@ pub(super) fn card_create(d: &Arc<Daemon>, p: CardCreateParams) -> Result<Value>
     Ok(json!(card))
 }
 
+/// `card.duplicate`: copy `id` into a fresh idle card directly below it.
+///
+/// The copy inherits the full run configuration but none of the execution
+/// state, and — unlike `card.create` — duplication never enqueues a run even
+/// in an auto column: the copy stays idle with no run row until someone moves
+/// or runs it. The insert and column renumber are one transaction, and the
+/// normal `CardCreated` notification is emitted for the new card.
+pub(super) fn card_duplicate(d: &Arc<Daemon>, p: CardIdParams) -> Result<Value> {
+    let mut card = {
+        let _sched = d.sched.lock().unwrap();
+        let db = d.store.lock();
+        db.require_card(p.id)?;
+        db.duplicate_card(p.id)?
+    };
+    d.emit_changed(
+        BoardChangedReason::CardCreated,
+        Some(card.id),
+        Some(card.column_id),
+    );
+    stamp_card_labels(d, &mut card);
+    Ok(json!(card))
+}
+
 pub(super) fn card_update(d: &Arc<Daemon>, p: CardUpdateParams) -> Result<Value> {
     let edits_locked = p.harness.is_some()
         || !p.model.is_unchanged()
