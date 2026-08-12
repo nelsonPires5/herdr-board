@@ -1,6 +1,6 @@
 //! Interaction contract for the functional 1:1 TUI redesign.
 //!
-//! Freezes the exact current interaction surface (the 62-row `view::HELP_KEYS`
+//! Freezes the exact current interaction surface (the 70-row `view::HELP_KEYS`
 //! contract): every documented binding, in order. Any keyboard/mouse behavior
 //! change must be mirrored here deliberately — this is the "nothing removed,
 //! nothing added, nothing remapped" gate for the redesign.
@@ -28,6 +28,7 @@ const EXPECTED: &[(Screen, &str, &str)] = &[
     (Screen::Board, "D", "delete/move column cards"),
     (Screen::Board, "m", "move card (board→column)"),
     (Screen::Board, "M", "move focused column"),
+    (Screen::Board, "O", "reorder card in column"),
     (Screen::Board, "H / L", "shove card left / right"),
     (Screen::Board, "Enter", "card detail"),
     (Screen::Board, "T", "apply template (empty)"),
@@ -68,6 +69,10 @@ const EXPECTED: &[(Screen, &str, &str)] = &[
     (Screen::MoveColumn, "←/→ h/l", "stage the reorder"),
     (Screen::MoveColumn, "Enter", "commit the reorder"),
     (Screen::MoveColumn, "q / Esc", "discard"),
+    (Screen::ReorderCard, "--", "-- reorder card (O) --"),
+    (Screen::ReorderCard, "j/k ↑/↓", "stage the reorder"),
+    (Screen::ReorderCard, "Enter", "commit the reorder"),
+    (Screen::ReorderCard, "q / Esc", "discard"),
     (Screen::Switcher, "--", "-- sheets --"),
     (Screen::Switcher, "k/j Enter", "switcher: move / open"),
     (Screen::Switcher, "q / Esc", "switcher: close / back"),
@@ -83,11 +88,11 @@ const EXPECTED: &[(Screen, &str, &str)] = &[
 ];
 
 #[test]
-fn contract_freezes_the_exact_65_row_interaction_table() {
+fn contract_freezes_the_exact_70_row_interaction_table() {
     assert_eq!(
         HELP_KEYS.len(),
-        65,
-        "the interaction contract must stay at exactly 65 bindings"
+        70,
+        "the interaction contract must stay at exactly 70 bindings"
     );
     assert_eq!(EXPECTED.len(), HELP_KEYS.len());
     for (idx, (expected, actual)) in EXPECTED.iter().zip(HELP_KEYS.iter()).enumerate() {

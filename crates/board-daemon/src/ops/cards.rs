@@ -185,6 +185,22 @@ pub(super) fn card_move(d: &Arc<Daemon>, p: CardMoveParams) -> Result<Value> {
             ));
         }
         let target = db.require_column(p.column_id)?;
+        // Moving a card within its own column is a pure reorder: it never
+        // enqueues, never changes status, and never triggers the column's
+        // automatic dispatch — even on an auto column with an
+        // idle/failed/done card (the states `decide_entry` would re-dispatch)
+        // or a card with an open run (which must survive untouched).
+        if p.column_id == current.column_id {
+            let mut card = db.move_card(p.id, p.column_id, p.position)?;
+            d.emit_changed_board(
+                BoardChangedReason::CardMoved,
+                current.board_id,
+                Some(card.id),
+                Some(p.column_id),
+            );
+            stamp_card_labels(d, &mut card);
+            return Ok(json!(card));
+        }
         let cross = p.board_id.is_some_and(|bid| bid != current.board_id);
         if cross {
             // The destination board must actually exist; the declared board

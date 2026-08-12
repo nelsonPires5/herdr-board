@@ -8,7 +8,7 @@ use crate::view::LayoutMode;
 use super::nav::nav_delta;
 use super::{
     column_options, App, CardFilter, Confirm, ConfirmPurpose, Effect, MoveColumnState, Picker,
-    PickerPurpose, Screen, SwitcherLevel, SwitcherState,
+    PickerPurpose, ReorderCardState, Screen, SwitcherLevel, SwitcherState,
 };
 
 pub(super) fn board_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
@@ -86,6 +86,7 @@ pub(super) fn board_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
         KeyCode::Char('D') => return delete_column(app),
         KeyCode::Char('m') => return open_move_picker(app),
         KeyCode::Char('M') => return open_move_column_mode(app),
+        KeyCode::Char('O') => return open_reorder_card_mode(app),
         KeyCode::Char('H') => return shove_card(app, -1),
         KeyCode::Char('L') => return shove_card(app, 1),
         KeyCode::Enter => {
@@ -227,6 +228,23 @@ fn open_move_column_mode(app: &mut App) -> Vec<Effect> {
         staged_index: app.sel_col,
     });
     app.screen = Screen::MoveColumn;
+    vec![]
+}
+
+fn open_reorder_card_mode(app: &mut App) -> Vec<Effect> {
+    if app.reject_archived_move() {
+        return vec![];
+    }
+    let Some(card) = app.selected_card() else {
+        return vec![];
+    };
+    app.reorder_card = Some(ReorderCardState {
+        card_id: card.id,
+        column_id: card.column_id,
+        original_index: app.sel_card,
+        staged_index: app.sel_card,
+    });
+    app.screen = Screen::ReorderCard;
     vec![]
 }
 
