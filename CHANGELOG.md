@@ -14,6 +14,10 @@ All notable changes to this project are documented here. The format is based on
 
 - [#73](https://github.com/nelsonPires5/herdr-board/pull/73) feat: the daemon stamps resolved labels (`default session`, `default effort`, …) onto card payloads; TUI and CLI render them verbatim.
 
+### Fixed
+
+- [#81](https://github.com/nelsonPires5/herdr-board/pull/81) fix: `f` types normally in form text fields; the popup/fullscreen toggle now works only on picker fields.
+
 ## [0.13.0] - 2026-08-10
 
 ### Added

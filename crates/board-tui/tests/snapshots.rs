@@ -303,6 +303,21 @@ fn new_card_modal() {
 }
 
 #[test]
+fn form_title_advertises_toggle_when_focus_is_on_a_picker_field() {
+    // `f` is literal text in text fields, so the popup/fullscreen hint only
+    // appears (and the binding only fires) while focus sits on a picker field.
+    let mut d = driver(demo_client().unwrap());
+    key(&mut d, KeyCode::Char('n'));
+    let form = d.app.form.as_mut().unwrap();
+    form.focus = form
+        .fields
+        .iter()
+        .position(|f| matches!(f.kind, FieldKind::Choice { .. }))
+        .expect("card form has a picker field");
+    insta::assert_snapshot!("new_card_modal_picker_focused", render(&mut d, 80, 24));
+}
+
+#[test]
 fn new_card_modal_pi_custom_model_low() {
     let mut d = driver(demo_client().unwrap());
     key(&mut d, KeyCode::Char('n'));

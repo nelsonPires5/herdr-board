@@ -228,7 +228,7 @@ pub const HELP_KEYS: &[(Screen, &str, &str)] = &[
     (Screen::CardForm, "Ctrl+E", "edit textarea in $EDITOR"),
     (Screen::CardForm, "Shift+Enter", "newline in textarea"),
     (Screen::CardForm, "Ctrl+J", "newline in textarea"),
-    (Screen::CardForm, "f", "toggle popup / fullscreen"),
+    (Screen::CardForm, "f (picker)", "toggle popup / fullscreen"),
     (Screen::CardForm, "Enter", "submit"),
     (Screen::CardForm, "Esc", "cancel"),
     (Screen::Picker, "--", "-- picker / confirm --"),
