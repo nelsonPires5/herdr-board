@@ -13,7 +13,7 @@ The reference detail behind the [root README](../README.md). Start here to find 
 | Herdr integrations | Pi v8; Claude v7 (installed and updated by the user) | [herdr.md](herdr.md), [install.md](install.md) |
 | Runtime launch | daemon-owned `Spawner`, placement, process/pane handles | [implementation.md](implementation.md) |
 | Config | typed `RootConfig`, one parse, environment overrides after parse | [configuration.md](configuration.md), [design.md](design.md) |
-| Live catalog | scenarios 01–34; provider-free fake/safe harness boundary | [e2e/README.md](../e2e/README.md) |
+| Live catalog | scenarios 01–35; provider-free fake/safe harness boundary | [e2e/README.md](../e2e/README.md) |
 | Branches | `dev` integration; `main` production (PR-only, merge-commit, signed); action-owned promotion; tags only from green `main` | [releasing.md](releasing.md) |
 
 Keep these links as navigation, not duplicate wire definitions: serde types and migrations are the
@@ -36,7 +36,7 @@ isolation is an agent prompt concern, not a board space primitive.
 The [`schema.sql`](../schema.sql) at the repo root is the fresh SQLite schema; migration behavior
 and upgrade tests live in `board-core::db`. Before handoff, check that docs still point to existing
 files, that the version matrix above says board protocol v1 / schema v13 / Herdr 0.8.0 / socket protocol 19, and that
-the scenario catalog lists every `e2e/NN-*.sh` from 01 through 34.
+the scenario catalog lists every `e2e/NN-*.sh` from 01 through 35.
 
 ## Test gates (single source)
 

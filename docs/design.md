@@ -446,9 +446,23 @@ that never recorded a pane at all. End to end:
    refused instead of rewritten;
 6. the board environment is added, and one variable is pointedly left out — see **Credentials**
    below;
-7. `spawner::rescue` takes the same per-card-tab allocation lock as dispatch (so a focus racing
+7. the **placement workspace is decided**. The run's recorded workspace is probed with the same
+   liveness test placement uses (a workspace is usable iff one of its live panes still has a cwd).
+   When it is usable, the rescue places there exactly as before. When it is not — the user closed
+   the workspace, or it lost its last pane — the rescue resolves a replacement from the card's
+   **current** space config (`space_kind`/`space_ref`/`space_cwd`), the exact resolution dispatch
+   uses (`dispatch::space::resolve_space`), inside the run's own Herdr session: a `new_workspace`
+   card gets a fresh workspace created with its label and cwd (its initial tab is adopted as the
+   card tab, same as a first dispatch), while a `workspace`-kind ref to an open workspace resolves
+   to that one. The rescue never picks a workspace on its own: if the recorded workspace is gone
+   and the card's current config cannot supply a replacement, the refusal names both the dead
+   workspace and the config failure, and nothing is created. The choice is final before the plan
+   exists because the per-card-tab allocation lock is keyed by the placement workspace;
+8. `spawner::rescue` takes the same per-card-tab allocation lock as dispatch (so a focus racing
    another focus, or a dispatch, cannot each create a pane or a tab), scans for a *live* pane an
-   earlier rescue left (`action=focused_rescued_pane` if found), closes dead remains carrying this
+   earlier rescue left (`action=focused_rescued_pane` if found) in the placement workspace — which
+   is also what makes a second `o` after a workspace recreation reuse the replacement (found by its
+   label) and the pane it holds — closes dead remains carrying this
    run's marker, else splits a new child in the card tab using the same placement helpers as dispatch
    — with `reclaimable_pane_ids` deliberately empty, so reopening one run never closes another's pane
    — labels it, launches the harness, and focuses it (`action=rescued`). A managed rescue then closes
@@ -456,8 +470,11 @@ that never recorded a pane at all. End to end:
    counts as closed, and any other close failure warns and keeps the successful rescue (configured
    rescues keep their persistent anchor). A failed launch closes the
    pane it created, plus the tab anchor when placement had to create the tab; it also registers the
-   exact tab/anchor it kept, so a later dispatch reuses that tab instead of making another;
-8. the TUI toasts what happened and **stays up** on a rescue (Herdr already moved focus to the new
+   exact tab/anchor it kept, so a later dispatch reuses that tab instead of making another — and
+   when this very resolution created the workspace, the failure additionally closes that workspace,
+   so a rescue that created it leaves no partial resource behind and the next `o` resolves (and
+   creates) a fresh one;
+9. the TUI toasts what happened and **stays up** on a rescue (Herdr already moved focus to the new
    pane, so quitting would only discard the explanation). Refusals and Herdr errors stay visible as a
    non-fatal toast that leaves the board usable, and never fall back to a different run's pane.
 
@@ -488,7 +505,12 @@ execution, not to resurrect it as a run. Two consequences follow and are not wor
   reliably idempotent for panes the daemon created, but a user who renames the pane or its agent can
   defeat the scan. This is a diagnostic hint, not an authoritative record, and it is the direct cost
   of the no-database-writes decision. The marker derives from card id + run id only, precisely so
-  that renaming a *column* cannot break it.
+  that renaming a *column* cannot break it. When the recorded workspace is gone, the replacement
+  is likewise found by the card's current space config: a `new_workspace` card reuses its
+  replacement by **label** (`dispatch::space::resolve_space`'s find-or-create), so a user who
+  renames the replacement workspace defeats that half of the dedup too — a second `o` then creates
+  yet another workspace (with the configured label) and resumes in it, leaving the renamed one
+  alone; the same no-DB-writes trade-off as the pane marker.
 - for a **configured** (unmanaged) harness, a rescued pane that outlived its harness cannot be
   detected. Herdr tracks no `agent` for unmanaged panes, so the label is the only evidence and a
   leftover shell looks exactly like a live resume; `o` will focus it rather than resuming again.
