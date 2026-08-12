@@ -153,8 +153,9 @@ hrpc pane.get "{\"pane_id\":\"$RESCUED_PANE\"}" >/dev/null \
 [ "$(pane_field_ws "$WS_NEW" "$RESCUED_PANE" workspace_id)" = "$WS_NEW" ] \
   || fail "rescued pane $RESCUED_PANE is not in the new workspace $WS_NEW"
 # The pane was split with the card's configured space-cwd, exactly like a
-# normal dispatch into a freshly created workspace.
-[ "$(pane_field_ws "$WS_NEW" "$RESCUED_PANE" cwd)" = "$E2E_TMP" ] \
+# normal dispatch into a freshly created workspace. (macOS /tmp is a symlink
+# to /private/tmp, so compare canonical paths.)
+[ "$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$(pane_field_ws "$WS_NEW" "$RESCUED_PANE" cwd)")" = "$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$E2E_TMP")" ] \
   || fail "rescued pane cwd is not the card's space-cwd ($E2E_TMP)"
 e2e_ws_defer_close "$WS_NEW"
 rescue_label="$(pane_field_ws "$WS_NEW" "$RESCUED_PANE" label)"
@@ -172,6 +173,7 @@ done
 python3 - "$RESCUE_RECORD" "$CONV_ID" "$RUN_ID" "$CARD_ID" "$E2E_TMP" <<'PY'
 import json, sys
 path, conv_id, run_id, card_id, expected_cwd = sys.argv[1:6]
+import json, os, sys
 record = json.load(open(path, encoding="utf-8"))
 # Resume: Pi re-attaches by handing back a session id it already knows.
 assert record["session_id"] == conv_id
@@ -180,7 +182,7 @@ assert record["run_id"] == int(run_id)
 assert record["card_id"] == int(card_id)
 # The persisted execution environment is preserved, not rebuilt from config.
 assert record["model"] == "rescue/pi-model"
-assert record["cwd"] == expected_cwd
+assert os.path.realpath(record["cwd"]) == os.path.realpath(expected_cwd)
 # The card task must NOT appear in startup argv, and no agent.prompt is sent at
 # all for a rescue, so the shim's prompt evidence must be absent.
 assert not any("work to continue" in arg for arg in record["argv"])
