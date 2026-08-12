@@ -8,7 +8,7 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
-- [#74](https://github.com/nelsonPires5/herdr-board/pull/74) feat: reorder a card within its column via TUI (`O` mini-mode or same-column drag) and `board card move --position`.
+- [#80](https://github.com/nelsonPires5/herdr-board/pull/80) feat: reorder a card within its column via TUI (`O` mini-mode or same-column drag) and `board card move --position`.
 
 ### Changed
 
