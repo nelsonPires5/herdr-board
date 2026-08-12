@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 33-duplicate.sh — `board card duplicate` (CLI) and `C` (TUI) create a fresh
+# 34-duplicate.sh — `board card duplicate` (CLI) and `C` (TUI) create a fresh
 # idle copy directly below the original.
 #
 # Asserts (all provider-free; the only dispatch is the auto-column control
@@ -173,4 +173,4 @@ printf '%s\n' "$toast" | grep -Fq "card duplicated as #" \
 wait_titles "Dupe Me|Dupe Me (copy)|Dupe Me (copy)|Dupe Me (copy)|Follower"
 ok "TUI C duplicated the focused card (toast + persisted order)"
 
-step "33-duplicate: ALL CHECKS PASSED"
+step "34-duplicate: ALL CHECKS PASSED"

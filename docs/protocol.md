@@ -206,7 +206,11 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
   `board_id`/`column_id` are moved atomically (both columns recompacted) after a blocking sanity
   check (merged effective capabilities + session resolve) — incompatible settings/sessions abort
   the move with an explicit error. Omitted (or equal to the card's board) keeps the historical
-  intra-board move.
+  intra-board move. **Same-column reorder:** when `column_id` equals the card's current column,
+  the move is a pure reorder — `position` (zero-based, clamped, appended when omitted) places the
+  card inside its column and every card's position is recompacted contiguously. A same-column
+  reorder never enqueues, never changes status (open runs included), and never triggers the
+  column's automatic dispatch, even on an `auto` column with a dispatchable card.
 - `card.get {id}` → `{card, comments:[…], runs:[…]}`. Run objects deliberately omit the internal
   `system_prompt_snapshot` field and its contents; missing snapshot input deserializes as legacy
   `null`, but the field is never serialized onto the board wire. Schema v7 writes this nullable

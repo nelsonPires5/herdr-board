@@ -182,11 +182,11 @@ board move <new-card-id> Execute
 | `b` | Switch project/Global board | `n` | New card |
 | `N` | New column | `Enter` | Card detail |
 | `m` | Move card picker | `o` (detail) | Jump to selected run's pane |
-| `H / L` | Move card left/right | `a` | Archive/restore card |
-| `C` | Duplicate card (board + detail) | `e` | Edit card |
-| `E` | Edit column | `v` | Active/all/archived view |
-| `?` | Full help overlay | `q / Esc` | Back/quit |
-| mouse drag | Move card/reorder column | | |
+| `M` / `O` | Reorder focused column / selected card | `H / L` | Move card left/right |
+| `C` | Duplicate card (board + detail) | `a` | Archive/restore card |
+| `E` | Edit column | `e` | Edit card |
+| `v` | Active/all/archived view | `?` | Full help overlay |
+| `q / Esc` | Back/quit | mouse drag | Move card/reorder column |
 
 <details>
 <summary><strong>Full keyboard and mouse reference</strong></summary>
@@ -206,7 +206,8 @@ board move <new-card-id> Execute
 | `d` | delete card | | `c` | add comment |
 | `D` | delete column | | `Tab` | focus comments / runs |
 | `m` | move card picker | | `↑/↓ k/j` | select comment / run (section follows) |
-| `H / L` | move card left / right | | `o` | jump to the selected run's same-session pane |
+| `M` | reorder focused column | | `o` | jump to the selected run's same-session pane |
+| `O` | reorder card in column (`j/k`, `Enter`, `Esc`) | | `H / L` | move card left / right |
 | | | | `Enter` | confirm done (`awaiting` card) |
 | **forms** | | | `x` / `r` | cancel / retry run |
 | `Tab` / `Shift+Tab` | next / previous field | | `Tab`, `↑/↓` | choose/scroll detail history |
@@ -282,7 +283,7 @@ The exit status carries the same number, so scripts branch on `$?` instead of pa
 
 - [`docs/README.md`](docs/README.md) — the documentation index (design, protocol, herdr facts,
   testing, releasing), the single source of the
-  [test gates](docs/README.md#test-gates-single-source), and the `e2e/` catalog (scenarios 01–33);
+  [test gates](docs/README.md#test-gates-single-source), and the `e2e/` catalog (scenarios 01–34);
 - [`docs/configuration.md`](docs/configuration.md) — `config.toml`, `[daemon]` settings,
   config-defined harnesses, and every environment variable;
 - [`docs/operations.md`](docs/operations.md) — update, uninstall, and local-development

@@ -111,13 +111,42 @@ pub(super) fn on_mouse(app: &mut App, m: MouseEvent) -> Vec<Effect> {
             }
         }
         MouseEventKind::Drag(MouseButton::Left) => {
-            if let Some(col_idx) = layout.hit_any_column(m.column) {
-                app.drag_hover(col_idx);
+            // Track the hovered card too: a same-column drop reorders the
+            // card onto the hovered card's position. Hovering a column's
+            // empty space clears the card target (drop = no-op); hovering
+            // another column keeps only the column target (drop = move).
+            if let Some((col_idx, card_idx)) = layout.hit_card(m.column, m.row) {
+                app.drag_hover_card(col_idx, Some(card_idx));
+            } else if let Some(col_idx) = layout.hit_any_column(m.column) {
+                app.drag_hover_card(col_idx, None);
             }
         }
         MouseEventKind::Up(MouseButton::Left) => {
-            if let Some(col_idx) = layout.hit_any_column(m.column) {
-                app.drag_hover(col_idx);
+            // Final hit-test: the drop position decides a same-column
+            // reorder. A drop below the last visible card means "move it to
+            // the end of the column"; anywhere else off a card row is a
+            // no-op (the drag state keeps its origin position).
+            if let Some((col_idx, card_idx)) = layout.hit_card(m.column, m.row) {
+                app.drag_hover_card(col_idx, Some(card_idx));
+            } else if let Some(col_idx) = layout.hit_any_column(m.column) {
+                let below_last = layout
+                    .cols
+                    .iter()
+                    .find(|c| c.idx == col_idx)
+                    .and_then(|c| c.cards.last())
+                    .is_some_and(|(_, r)| m.row >= r.y.saturating_add(r.height));
+                if below_last {
+                    let last = layout
+                        .cols
+                        .iter()
+                        .find(|c| c.idx == col_idx)
+                        .and_then(|c| c.cards.last())
+                        .map(|(ci, _)| *ci)
+                        .unwrap_or(0);
+                    app.drag_hover_card(col_idx, Some(last + 1));
+                } else {
+                    app.drag_hover_card(col_idx, None);
+                }
             }
             return app.finish_drag();
         }
@@ -371,6 +400,7 @@ fn action_event(screen: Screen, action: UiAction) -> Option<KeyEvent> {
         (Screen::Board, A::DeleteColumn) => (KeyCode::Char('D'), KeyModifiers::SHIFT),
         (Screen::Board, A::MoveCard) => (KeyCode::Char('m'), KeyModifiers::NONE),
         (Screen::Board, A::MoveColumn) => (KeyCode::Char('M'), KeyModifiers::SHIFT),
+        (Screen::Board, A::ReorderCard) => (KeyCode::Char('O'), KeyModifiers::SHIFT),
         (Screen::Board, A::ShoveCardLeft) => (KeyCode::Char('H'), KeyModifiers::SHIFT),
         (Screen::Board, A::ShoveCardRight) => (KeyCode::Char('L'), KeyModifiers::SHIFT),
         (Screen::Board, A::OpenCard) => (KeyCode::Enter, KeyModifiers::NONE),
@@ -381,6 +411,7 @@ fn action_event(screen: Screen, action: UiAction) -> Option<KeyEvent> {
         (
             Screen::Picker
             | Screen::MoveColumn
+            | Screen::ReorderCard
             | Screen::Confirm
             | Screen::Switcher
             | Screen::CommentHistory,
@@ -418,6 +449,10 @@ fn action_event(screen: Screen, action: UiAction) -> Option<KeyEvent> {
         (Screen::MoveColumn, A::StageColumnRight) => (KeyCode::Right, KeyModifiers::NONE),
         (Screen::MoveColumn, A::CommitColumnMove) => (KeyCode::Enter, KeyModifiers::NONE),
         (Screen::MoveColumn, A::CancelColumnMove) => (KeyCode::Esc, KeyModifiers::NONE),
+        (Screen::ReorderCard, A::StageCardUp) => (KeyCode::Char('j'), KeyModifiers::NONE),
+        (Screen::ReorderCard, A::StageCardDown) => (KeyCode::Char('k'), KeyModifiers::NONE),
+        (Screen::ReorderCard, A::CommitCardReorder) => (KeyCode::Enter, KeyModifiers::NONE),
+        (Screen::ReorderCard, A::CancelCardReorder) => (KeyCode::Esc, KeyModifiers::NONE),
         (Screen::Switcher, A::ChooseSwitcherRow) => (KeyCode::Enter, KeyModifiers::NONE),
         (Screen::Switcher, A::CloseSwitcher) => (KeyCode::Esc, KeyModifiers::NONE),
         (Screen::CommentHistory, A::CloseCommentHistory) => (KeyCode::Esc, KeyModifiers::NONE),

@@ -303,6 +303,21 @@ fn new_card_modal() {
 }
 
 #[test]
+fn form_title_advertises_toggle_when_focus_is_on_a_picker_field() {
+    // `f` is literal text in text fields, so the popup/fullscreen hint only
+    // appears (and the binding only fires) while focus sits on a picker field.
+    let mut d = driver(demo_client().unwrap());
+    key(&mut d, KeyCode::Char('n'));
+    let form = d.app.form.as_mut().unwrap();
+    form.focus = form
+        .fields
+        .iter()
+        .position(|f| matches!(f.kind, FieldKind::Choice { .. }))
+        .expect("card form has a picker field");
+    insta::assert_snapshot!("new_card_modal_picker_focused", render(&mut d, 80, 24));
+}
+
+#[test]
 fn new_card_modal_pi_custom_model_low() {
     let mut d = driver(demo_client().unwrap());
     key(&mut d, KeyCode::Char('n'));
@@ -1453,3 +1468,63 @@ sheet_size_matrix_test!(size_matrix_switcher_columns_and_boards, |w, h| {
         render_sized(&mut d, w, h)
     );
 });
+
+#[test]
+fn reorder_card_mini_mode_then_enter() {
+    let mut d = driver(demo_client().unwrap());
+    // Focus the Review column's first card (three rights: Todo → Plan →
+    // Execute → Review).
+    for _ in 0..3 {
+        key(&mut d, KeyCode::Right);
+    }
+    let column_id = d.app.col_id_at(3).unwrap();
+    let original: Vec<i64> = d.app.cards_of(column_id).iter().map(|c| c.id).collect();
+    let first_id = original[0];
+    let second_id = original[1];
+    key(&mut d, KeyCode::Char('O')); // enter reorder-card mini-mode
+    key(&mut d, KeyCode::Char('j')); // stage one slot down
+    let in_mode = render(&mut d, 120, 35);
+    assert_eq!(d.app.screen, Screen::ReorderCard);
+    assert!(
+        in_mode.contains("Reorder card"),
+        "banner visible: {in_mode}"
+    );
+    insta::assert_snapshot!("reorder_card_mini_mode", in_mode);
+
+    key(&mut d, KeyCode::Enter); // commit one same-column card.move
+    assert_eq!(d.app.screen, Screen::Board);
+    let order: Vec<i64> = d.app.cards_of(column_id).iter().map(|c| c.id).collect();
+    assert_eq!(
+        order,
+        vec![second_id, first_id],
+        "order flipped after commit"
+    );
+    assert_ne!(order[0], first_id, "the reordered card no longer leads");
+    assert_eq!(
+        d.app
+            .cards_of(column_id)
+            .iter()
+            .position(|c| c.id == first_id),
+        Some(1),
+        "the reordered card sits at position 1 after the refetch"
+    );
+    insta::assert_snapshot!("reorder_card_committed", render(&mut d, 120, 35));
+}
+
+#[test]
+fn reorder_card_mini_mode_esc_cancels() {
+    let mut d = driver(demo_client().unwrap());
+    for _ in 0..3 {
+        key(&mut d, KeyCode::Right);
+    }
+    let column_id = d.app.col_id_at(3).unwrap();
+    let original: Vec<i64> = d.app.cards_of(column_id).iter().map(|c| c.id).collect();
+    key(&mut d, KeyCode::Char('O'));
+    key(&mut d, KeyCode::Char('j'));
+    key(&mut d, KeyCode::Char('j'));
+    key(&mut d, KeyCode::Esc);
+    assert_eq!(d.app.screen, Screen::Board);
+    let after: Vec<i64> = d.app.cards_of(column_id).iter().map(|c| c.id).collect();
+    assert_eq!(after, original, "Esc must restore the original card order");
+    assert_eq!(d.app.sel_card, 0, "selection returns to the original index");
+}

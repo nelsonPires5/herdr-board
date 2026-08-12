@@ -95,10 +95,15 @@ pub(crate) enum CardCmd {
         #[arg(long, value_parser = ["active", "all", "archived"])]
         visibility: Option<String>,
     },
-    /// Move a card, optionally across boards.
+    /// Move a card, optionally across boards. With `--position`, the card is
+    /// reordered within its current column (same-column move, never triggers
+    /// an automatic column).
     Move {
         id: i64,
         column: String,
+        /// Zero-based index to place the card at within the destination column.
+        #[arg(long)]
+        position: Option<i64>,
         #[arg(long, alias = "to-board", value_name = "ID|PATH")]
         destination_board: Option<String>,
     },
