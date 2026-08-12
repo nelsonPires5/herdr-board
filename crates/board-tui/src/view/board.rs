@@ -22,7 +22,10 @@ use super::{
 
 pub(super) fn draw_board(app: &App, f: &mut Frame, area: Rect) {
     let layout = board_layout(app, area);
-    let focused = app.screen == Screen::Board;
+    // The reorder mini-mode keeps the board's selection chrome: the cyan card
+    // outline must follow the card being staged, and the column border stays
+    // highlighted so the in-column scope of the move stays visible.
+    let focused = app.screen == Screen::Board || app.screen == Screen::ReorderCard;
     let compact = app.layout_mode() == LayoutMode::Compact;
 
     // The board title/running/scope chrome and bottom action row stay visible

@@ -1,6 +1,6 @@
 ---
 source: crates/board-tui/tests/snapshots.rs
-assertion_line: 1475
+assertion_line: 1477
 expression: in_mode
 ---
 " ◈ herdr-board ● 1 running                         [ Global ▾ ]                          [ Active ] [ All ] [ Archived ]"
@@ -19,7 +19,7 @@ expression: in_mode
 "│                            ││                            ││                            ││                            │"
 "│                            ││                            ││                            ││                            │"
 "│                            ││┌ Reorder card ────────────────────────────────────[ X ]─┐││                            │"
-"│                            │││[ j /… ]     reorder Refactor auth module     [ k / ↓ ] │││                            │"
+"│                            │││ [ ↑ ]       reorder Refactor auth module       [ ↓ ]   │││                            │"
 "│                            │││                                                        │││                            │"
 "│                            │││        [ Confirm ]                  [ Cancel ]         │││                            │"
 "│                            ││└────────────────────────────────────────────────────────┘││                            │"

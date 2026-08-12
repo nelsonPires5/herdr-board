@@ -379,7 +379,7 @@ pub(super) fn draw_reorder_card(app: &App, f: &mut Frame, area: Rect) {
     render_button_chip_at(
         f,
         move_controls[0],
-        "j / ↑",
+        "↑",
         &mut hit_map,
         Zone::Action(UiAction::StageCardUp),
     );
@@ -392,7 +392,7 @@ pub(super) fn draw_reorder_card(app: &App, f: &mut Frame, area: Rect) {
     render_button_chip_at(
         f,
         move_controls[2],
-        "k / ↓",
+        "↓",
         &mut hit_map,
         Zone::Action(UiAction::StageCardDown),
     );
