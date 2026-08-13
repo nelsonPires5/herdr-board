@@ -33,8 +33,8 @@ Normal release flow:
    cuts `release/vX.Y.Z` from `dev` and opens (or updates) its PR to `dev`.
 2. The PR is reviewed and merged into `dev` with a merge commit. CI runs on that `dev` push —
    the full workflow including the dependent live E2E job — but never publishes.
-3. A maintainer opens a `dev -> main` promotion PR (merge commit). CI runs on the merge into
-   `main`.
+3. The **Promote** workflow opens the `dev -> main` promotion PR; a maintainer merges it with a
+   merge commit. CI runs on the merge into `main`.
 4. The **Release** workflow consumes the green `main` CI run, sees the version bump versus the
    merge's first parent, and creates the tag at that exact promotion SHA. The tag therefore lands
    on `main` and the release commit at the same time.
@@ -86,10 +86,12 @@ but it does not authorize publication.
 ## Promotion to main (action-owned)
 
 For a normal release the release PR merges into `dev`, not `main`. The bump reaches `main` only
-through the **Promote** workflow, which opens the `dev -> main` PR, waits for its required checks,
-and merges it with a merge commit. CI runs on the merge, and Release creates the tag at that exact
-SHA — "tag and main at the same time" means the tag points to the promotion commit. The tag is
-still created only after CI is green; there is no manual or pre-CI tagging anywhere in the flow.
+through the **Promote** workflow, which opens the `dev -> main` PR; a maintainer then merges it
+with a merge commit. The merge must be a maintainer action: GitHub never creates workflow runs for
+pushes made with `GITHUB_TOKEN`, so an automated merge would silently skip CI and the Release
+workflow could never tag it. CI runs on the merge, and Release creates the tag at that exact SHA —
+"tag and main at the same time" means the tag points to the promotion commit. The tag is still
+created only after CI is green; there is no manual or pre-CI tagging anywhere in the flow.
 A commit on `main` that does not bump the version (back-merge, documentation, other branches'
 merges) is a no-op.
 
@@ -98,8 +100,8 @@ merges) is a no-op.
 `main` is protected by an active branch ruleset: every change must come through a pull request
 merged with a **merge commit** (squash/rebase are not allowed), and the six fast CI jobs are
 required status checks with a strict policy. Direct pushes to `main` are blocked by the
-pull-request rule; the only writer in practice is the automation (`github-actions[bot]`), whose
-promotion and hotfix merges are GitHub-verified merge commits. `dev` is protected the same way
+pull-request rule; the only writers in practice are maintainers merging PRs (promotion, hotfix,
+back-merge) with GitHub-verified merge commits. `dev` is protected the same way
 (PR + merge commit + required checks). There is no signature requirement on either branch: the
 former `required_signatures` rule on `main` was removed because it rejects every PR whose source
 commits are unsigned — including the release commit written by `github-actions[bot]` — so the
@@ -143,8 +145,8 @@ missing tag must be repaired manually and then rerun.
 
 Promotion failures recover the same way: if the promotion PR's checks fail or its merge is
 blocked, rerun the green `dev` CI run — the Promote workflow re-evaluates the same SHA under its
-per-SHA lock, updates the PR, and retries the merge. If a promotion already landed, a rerun is a
-no-op (the dev tip is an ancestor of `main`).
+per-SHA lock and updates the PR; the maintainer merges it once the checks are green. If a
+promotion already landed, a rerun is a no-op (the dev tip is an ancestor of `main`).
 
 Expected assets:
 
