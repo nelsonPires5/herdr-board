@@ -41,7 +41,6 @@ fn card() -> Card {
         created_at: "now".into(),
         updated_at: "now".into(),
         archived_at: None,
-        labels: board_core::protocol::CardLabels::default(),
     }
 }
 

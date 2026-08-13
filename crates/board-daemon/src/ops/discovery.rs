@@ -85,9 +85,5 @@ pub(super) fn session_list(d: &Arc<Daemon>) -> Result<Value> {
     let sessions = reg
         .session_infos()
         .map_err(|e| Error::HerdrUnavailable(format!("session.list: {e:#}")))?;
-    Ok(json!(SessionListResult {
-        sessions,
-        // Ready display string: clients never format the marker themselves.
-        default_label: board_core::labels::default_session_label().to_string(),
-    }))
+    Ok(json!(SessionListResult { sessions }))
 }

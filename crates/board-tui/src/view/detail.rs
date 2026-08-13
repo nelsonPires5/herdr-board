@@ -42,12 +42,6 @@ fn detail_card_action_buttons(detail: &CardDetail) -> Vec<ActionButton<'static>>
             tone: ActionTone::Normal,
         },
         ActionButton {
-            label: "Duplicate card",
-            compact_label: "Duplicate",
-            action: UiAction::DuplicateCard,
-            tone: ActionTone::Normal,
-        },
-        ActionButton {
             label: if card.archived_at.is_some() {
                 "Restore card"
             } else {
@@ -314,19 +308,27 @@ fn preferred_section_height(available: u16, preferred: u16) -> u16 {
 
 fn detail_metadata(detail: &CardDetail) -> (String, String) {
     let card = &detail.card;
-    // Daemon-stamped labels: ready display strings, rendered verbatim. The
-    // `default …` markers mean "unset → harness/daemon default".
+    let model = card.model.clone().unwrap_or_else(|| "default".into());
+    let effort = card
+        .effort
+        .map(|v| v.as_str().to_owned())
+        .unwrap_or_else(|| "default".into());
+    let permission = card
+        .permission_mode
+        .clone()
+        .unwrap_or_else(|| "default".into());
     let configuration = format!(
         "Harness · Model: {} · {} · effort {} · perm {}",
-        card.harness, card.labels.model, card.labels.effort, card.labels.permission
+        card.harness, model, effort, permission
     );
 
+    let session = card.session.clone().unwrap_or_else(|| "default".into());
     let space = format!(
         "{}:{}",
         card.space_kind.as_str(),
         card.space_ref.as_deref().unwrap_or("-")
     );
-    let session = format!("Herdr session: {} · Space: {space}", card.labels.session);
+    let session = format!("Herdr session: {session} · Space: {space}");
     (configuration, session)
 }
 

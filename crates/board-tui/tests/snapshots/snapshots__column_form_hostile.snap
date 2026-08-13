@@ -4,7 +4,7 @@ expression: hostile_output
 ---
 " ◈ herdr-board ● 1 running     [ Global ▾ ]      [ Active ] [ All ] [ Archived ]"
 "────────────────────────────────────────────────────────────────────────────────"
-"┌ New column  ·  Tab: field · Enter: save · Esc: cancel ───────────────────────┐"
+"┌ New column  ·  f: fullscreen  ·  Tab: field · Enter: save · Esc: cancel ─────┐"
 "│┌ Definition ───────────────────────────────────────────────────────────────┐▲│"
 "││▌ name                                                                     │█│"
 "││▏                                                                          │█│"

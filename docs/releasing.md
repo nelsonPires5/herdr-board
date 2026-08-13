@@ -96,21 +96,13 @@ merges) is a no-op.
 ## main protection
 
 `main` is protected by an active branch ruleset: every change must come through a pull request
-merged with a **merge commit** (squash/rebase are not allowed), and the six fast CI jobs are
-required status checks with a strict policy. Direct pushes to `main` are blocked by the
-pull-request rule; the only writer in practice is the automation (`github-actions[bot]`), whose
-promotion and hotfix merges are GitHub-verified merge commits. `dev` is protected the same way
-(PR + merge commit + required checks). There is no signature requirement on either branch: the
-former `required_signatures` rule on `main` was removed because it rejects every PR whose source
-commits are unsigned — including the release commit written by `github-actions[bot]` — so the
-automated promotion could never merge.
-
-PRs opened by `github-actions[bot]` (release PRs from Prepare Release, promotion PRs from
-Promote) hit GitHub's approval gate for bot-created PRs: their `pull_request` workflow runs stay
-in `action_required` until a maintainer approves them — click **Approve workflows to run** in
-the PR merge box, or call the workflow-run approval endpoint
-(`POST /repos/{owner}/{repo}/actions/runs/{id}/approve`). Once approved, the runs complete as
-usual and the PR becomes mergeable.
+merged with a **merge commit** (squash/rebase are not allowed), the six fast CI jobs are required
+status checks with a strict policy, and **signed commits** are required — merge commits created
+by GitHub for a PR merge are GitHub-verified, so every commit on `main` carries a verified
+signature. Direct pushes to `main` are blocked by the pull-request rule; the only writer in
+practice is the automation (`github-actions[bot]`), whose promotion and hotfix merges are
+GitHub-verified. `dev` is protected the same way (PR + merge commit + required checks) but has no
+signature requirement.
 
 ## Release gate
 

@@ -208,8 +208,7 @@ impl DemoClient {
         self
     }
 
-    /// Make `session.list` fail (session selector keeps just the daemon's
-    /// `default session` option).
+    /// Make `session.list` fail (session selector keeps just `(default)`).
     pub fn without_sessions(mut self) -> DemoClient {
         self.sessions = None;
         self
@@ -249,8 +248,7 @@ impl BoardClient for DemoClient {
             },
             "session.list" => match &self.sessions {
                 Some(s) => Ok(json!(SessionListResult {
-                    sessions: s.clone(),
-                    default_label: board_core::labels::default_session_label().to_string(),
+                    sessions: s.clone()
                 })),
                 None => anyhow::bail!("session.list: stubbed failure"),
             },
@@ -493,11 +491,6 @@ pub fn demo_client() -> anyhow::Result<DemoClient> {
         .promote_run_uow(awaiting_run.id, Some("w1"), Some("p-awaiting"), None)?;
     c.db()
         .set_card_awaiting(awaiting, AwaitingReason::AgentDone)?;
-
-    // Fixture determinism: finalized runs carry wall-clock `datetime('now')`
-    // timestamps; pin elapsed to 0 so no snapshot can flip `0s` to `1s` when
-    // a promote→finalize pair straddles a second boundary on a loaded machine.
-    c.db().pin_finalized_run_elapsed()?;
 
     // Done — idle
     c.card_create(&card("Ship v0.1", done, "Cut the first release."))?;

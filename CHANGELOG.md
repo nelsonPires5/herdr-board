@@ -6,22 +6,6 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
-## [0.14.0] - 2026-08-13
-
-### Added
-
-- [#82](https://github.com/nelsonPires5/herdr-board/pull/82) feat: duplicate a card from the TUI (`C`) or CLI, creating an idle copy right below it with all settings and no dispatch.
-- [#80](https://github.com/nelsonPires5/herdr-board/pull/80) feat: reorder a card within its column via TUI (`O` mini-mode or same-column drag) and `board card move --position`.
-- [#83](https://github.com/nelsonPires5/herdr-board/pull/83) feat: reopening a run whose workspace was closed recreates the workspace from the card's space config and resumes there.
-
-### Changed
-
-- [#73](https://github.com/nelsonPires5/herdr-board/pull/73) feat: the daemon stamps resolved labels (`default session`, `default effort`, …) onto card payloads; TUI and CLI render them verbatim.
-
-### Fixed
-
-- [#81](https://github.com/nelsonPires5/herdr-board/pull/81) fix: `f` types normally in form text fields; the popup/fullscreen toggle now works only on picker fields.
-
 ## [0.13.0] - 2026-08-10
 
 ### Added
@@ -31,7 +15,6 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
-- [#71](https://github.com/nelsonPires5/herdr-board/pull/71) chore(ci): drop the signed-commits rule on main so automated promotion PRs merge without manual signature rewrites.
 - [#62](https://github.com/nelsonPires5/herdr-board/pull/62) chore(ci): `dev` is now the long-lived integration branch; `main` stays production-only (automated promotion + release tagging).
 
 ### Fixed
@@ -378,8 +361,7 @@ a visible herdr pane. Ships as a single `board` binary (TUI + daemon + CLI) and 
 - **Packaging.** `herdr-plugin.toml` manifest, and `scripts/` for build, install (guarded behind
   `--yes`), the open-or-focus launcher, a raw protocol client, and a live-herdr e2e smoke test.
 
-[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.14.0...HEAD
-[0.14.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.14.0
+[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.13.0...HEAD
 [0.13.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.13.0
 [0.12.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.12.0
 [0.11.1]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.11.1

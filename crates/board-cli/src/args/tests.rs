@@ -228,16 +228,6 @@ fn card_new_and_to_board_remain_aliases() {
     }
 }
 
-#[test]
-fn card_duplicate_parses_by_id() {
-    assert!(matches!(
-        parse(&["board", "card", "duplicate", "7"]).cmd,
-        Cmd::Card {
-            sub: CardCmd::Duplicate { id: 7 }
-        }
-    ));
-}
-
 /// D3: `--destination-board` is the explicit cross-board spelling on both the
 /// nested and the legacy verb.
 #[test]

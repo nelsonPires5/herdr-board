@@ -147,11 +147,6 @@ pub trait BoardClient {
             self.call("card.create", serde_json::to_value(p)?)?,
         )?)
     }
-    fn card_duplicate(&mut self, id: i64) -> anyhow::Result<Card> {
-        Ok(serde_json::from_value(
-            self.call("card.duplicate", json!({ "id": id }))?,
-        )?)
-    }
     fn card_update(&mut self, p: &CardUpdateParams) -> anyhow::Result<Card> {
         Ok(serde_json::from_value(
             self.call("card.update", serde_json::to_value(p)?)?,

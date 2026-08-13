@@ -2,9 +2,7 @@ use rusqlite::{types::Type, Error as SqliteError, Result as SqliteResult, Row};
 
 use super::conv_err;
 use crate::model::{Board, Card, Column, Comment, CommentHistory, CommentRecord, Run};
-use crate::protocol::{
-    AwaitingReason, CardLabels, CardStatus, Effort, RunOutcome, SpaceKind, Trigger,
-};
+use crate::protocol::{AwaitingReason, CardStatus, Effort, RunOutcome, SpaceKind, Trigger};
 use crate::{Error, Result};
 
 pub(super) fn opt<T>(r: SqliteResult<T>) -> Result<Option<T>> {
@@ -78,8 +76,6 @@ pub(super) fn row_to_card(row: &Row) -> SqliteResult<Card> {
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
         archived_at: row.get("archived_at")?,
-        // Stamped daemon-side with resolved display labels at serve time.
-        labels: CardLabels::default(),
     })
 }
 
