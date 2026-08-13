@@ -22,7 +22,10 @@ use super::{
 
 pub(super) fn draw_board(app: &App, f: &mut Frame, area: Rect) {
     let layout = board_layout(app, area);
-    let focused = app.screen == Screen::Board;
+    // The reorder mini-mode keeps the board's selection chrome: the cyan card
+    // outline must follow the card being staged, and the column border stays
+    // highlighted so the in-column scope of the move stays visible.
+    let focused = app.screen == Screen::Board || app.screen == Screen::ReorderCard;
     let compact = app.layout_mode() == LayoutMode::Compact;
 
     // The board title/running/scope chrome and bottom action row stay visible
@@ -522,15 +525,24 @@ fn draw_card(app: &App, f: &mut Frame, card: &Card, r: Rect, selected: bool, com
     } else {
         card.status.as_str().to_string()
     };
-    let permission = card
-        .permission_mode
-        .clone()
-        .unwrap_or_else(|| "-".to_string());
-    let model = card.model.clone().unwrap_or_else(|| "-".to_string());
-    let effort = card
-        .effort
-        .map(|e| e.as_str().to_string())
-        .unwrap_or_else(|| "default".to_string());
+    // Daemon-stamped display labels when set; `-` (the standard empty-cell
+    // mark, not a label) when the card has no override — compact tiles must
+    // not truncate the long `default …` markers into misleading fragments.
+    let permission = if card.permission_mode.is_some() {
+        card.labels.permission.clone()
+    } else {
+        "-".to_string()
+    };
+    let model = if card.model.is_some() {
+        card.labels.model.clone()
+    } else {
+        "-".to_string()
+    };
+    let effort = if card.effort.is_some() {
+        card.labels.effort.clone()
+    } else {
+        "-".to_string()
+    };
     let mut status = format!("{glyph} {status_text}");
     if !archived && card.status == CardStatus::Running {
         let started = app

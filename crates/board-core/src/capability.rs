@@ -111,6 +111,15 @@ pub struct HarnessCapabilities {
     /// therefore read as [`ResumeSupport::Unsupported`] — failing closed.
     #[serde(default)]
     pub resume: ResumeSupport,
+    /// The `default effort` display label, daemon-sent so clients never format
+    /// it themselves. Same for every harness; carried here because the effort
+    /// selector is fed from this payload. Missing on older serialized payloads.
+    #[serde(default)]
+    pub default_effort_label: String,
+    #[serde(default)]
+    pub default_permission_label: String,
+    #[serde(default)]
+    pub default_model_label: String,
 }
 
 impl HarnessCapabilities {
@@ -123,6 +132,9 @@ impl HarnessCapabilities {
             default_efforts: m.efforts(None),
             permission_modes: m.permissions(),
             resume: m.resume(),
+            default_effort_label: crate::labels::default_effort_label().to_string(),
+            default_permission_label: crate::labels::default_permission_label().to_string(),
+            default_model_label: crate::labels::default_model_label().to_string(),
         }
     }
 }
@@ -539,6 +551,9 @@ pub fn default_capabilities(harness: &str) -> HarnessCapabilities {
             .to_vec(),
             permission_modes: Vec::new(),
             resume: ResumeSupport::Unsupported,
+            default_effort_label: crate::labels::default_effort_label().to_string(),
+            default_permission_label: crate::labels::default_permission_label().to_string(),
+            default_model_label: crate::labels::default_model_label().to_string(),
         },
     }
 }

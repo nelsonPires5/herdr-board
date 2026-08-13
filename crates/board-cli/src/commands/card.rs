@@ -111,6 +111,14 @@ pub(crate) fn cmd_card(sub: CardCmd, ctx: &mut Ctx) -> Result<()> {
             let result = ctx.client()?.card_delete(id)?;
             emit_line(&result, json, format!("Deleted card #{id}"))
         }
+        CardCmd::Duplicate { id } => {
+            let card = ctx.client()?.card_duplicate(id)?;
+            emit_line(
+                &card,
+                json,
+                format!("Duplicated card #{id} as #{} \"{}\"", card.id, card.title),
+            )
+        }
         CardCmd::Archive { id } => card_archive(ctx, id, true),
         CardCmd::Restore { id } => card_archive(ctx, id, false),
         CardCmd::Show { id } => {
@@ -129,8 +137,9 @@ pub(crate) fn cmd_card(sub: CardCmd, ctx: &mut Ctx) -> Result<()> {
         CardCmd::Move {
             id,
             column,
+            position,
             destination_board,
-        } => cmd_move(ctx, id, &column, destination_board.as_deref()),
+        } => cmd_move(ctx, id, &column, destination_board.as_deref(), position),
         CardCmd::Comment { sub } => cmd_card_comment(sub, ctx),
         CardCmd::Run { sub } => cmd_card_run(sub, ctx),
     }
@@ -158,8 +167,12 @@ pub(crate) fn cmd_move(
     card_id: i64,
     column: &str,
     explicit_destination: Option<&str>,
+    position: Option<i64>,
 ) -> Result<()> {
     let json = ctx.json();
+    if position.is_some_and(|p| p < 0) {
+        bail!("--position must be zero-based (0 = first card)")
+    }
     let destination = match explicit_destination {
         Some(destination) => Some(destination),
         None => match ctx.selector() {
@@ -181,7 +194,7 @@ pub(crate) fn cmd_move(
         id: card_id,
         column_id,
         board_id: Some(board.board.id),
-        position: None,
+        position,
     })?;
     emit_line(
         &card,

@@ -106,15 +106,23 @@ pub(super) fn draw_form(app: &App, form: &Form, f: &mut Frame, area: Rect) {
 
     let mut hit_map = app.hit_map.borrow_mut();
     let compact = mode == LayoutMode::Compact;
-    let toggle = if app.form_fullscreen {
+    // `f` is literal text inside text fields, so the popup/fullscreen toggle is
+    // advertised (and bound) only while focus sits on a picker field.
+    let toggle = form.focused_is_choice().then_some(if app.form_fullscreen {
         "f: popup"
     } else {
         "f: fullscreen"
+    });
+    let full_title = match toggle {
+        Some(toggle) => format!(
+            "{}  ·  {toggle}  ·  Tab: field · Enter: save · Esc: cancel",
+            form.title()
+        ),
+        None => format!(
+            "{}  ·  Tab: field · Enter: save · Esc: cancel",
+            form.title()
+        ),
     };
-    let full_title = format!(
-        "{}  ·  {toggle}  ·  Tab: field · Enter: save · Esc: cancel",
-        form.title()
-    );
     let inner = render_sheet_frame(
         f,
         box_area,
