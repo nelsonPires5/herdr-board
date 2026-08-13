@@ -101,6 +101,9 @@ pub fn split_effort_caps() -> HarnessCapabilities {
         default_efforts: vec![Effort::Low, Effort::Medium, Effort::High],
         permission_modes: vec!["manual".to_string()],
         resume: Default::default(),
+        default_effort_label: board_core::labels::default_effort_label().to_string(),
+        default_permission_label: board_core::labels::default_permission_label().to_string(),
+        default_model_label: board_core::labels::default_model_label().to_string(),
     }
 }
 

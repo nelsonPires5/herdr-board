@@ -12,12 +12,13 @@ use std::sync::Arc;
 
 use board_core::capability;
 use board_core::harness;
-use board_core::model::Run;
+use board_core::model::{Card, Run};
 use board_core::protocol::{RunFocusAction, RunFocusParams, RunFocusResult};
 use board_core::{Error, Result};
 use serde_json::{json, Value};
 
-use crate::dispatch::{owned_pane_ids, reconstruct_owned_tab_id, OwnedPanes};
+use crate::dispatch::workspace_cwd;
+use crate::dispatch::{owned_pane_ids, reconstruct_owned_tab_id, resolve_space, OwnedPanes};
 use crate::herdr_conn::normalize_socket;
 use crate::spawner::{rescue_run_pane, CardOwnership, RescueOutcome, RescuePlan};
 use crate::state::Daemon;
@@ -25,6 +26,9 @@ use crate::state::Daemon;
 pub(crate) fn focus_run(d: &Arc<Daemon>, p: RunFocusParams) -> Result<Value> {
     // The caller names the exact run; ownership is validated in the db layer.
     let run = d.store.lock().run_for_card(p.card_id, p.run_id)?;
+    // The card's CURRENT space config is what a rescue falls back to when the
+    // run's recorded workspace is gone (see `rescue_run`).
+    let card = d.store.lock().require_card(p.card_id)?;
     // Dead-end #1: no recorded pane at all (the run never reached a pane, or
     // predates pane recording). The rescue below covers it exactly like a pane
     // that has since disappeared — in both cases there is no live pane for this
@@ -103,7 +107,7 @@ pub(crate) fn focus_run(d: &Arc<Daemon>, p: RunFocusParams) -> Result<Value> {
         Some(identity) => identity,
         None => rescue_identity(d, &run, recorded_pane_id.as_deref())?,
     };
-    let (action, pane_id) = rescue_run(d, &run, identity, &target_socket)?;
+    let (action, pane_id) = rescue_run(d, &run, &card, identity, &target_socket)?;
     Ok(json!(RunFocusResult {
         action,
         recorded_pane_id,
@@ -189,7 +193,11 @@ fn rescue_identity(
             .map_err(crate::dispatch::map_harness_err)?;
     rescue_board_env(d, run, &mut execution)?;
 
-    // 4. The workspace the run actually ran in. A rescue never picks another.
+    // 4. The workspace the run actually ran in. Its liveness is probed later
+    //    (against live Herdr); here only the recorded id is required, and a
+    //    rescue prefers it. When the recorded workspace is gone, `rescue_run`
+    //    falls back to the card's current space config — it never picks a
+    //    workspace on its own.
     let workspace_id = run.herdr_workspace_id.clone().ok_or_else(|| {
         Error::HerdrUnavailable(format!(
             "run {} of card {}: {pane_state}, and it recorded no Herdr workspace, so a \
@@ -269,6 +277,7 @@ fn rescue_board_env(
 fn rescue_run(
     d: &Arc<Daemon>,
     run: &Run,
+    card: &Card,
     identity: RescueIdentity,
     target_socket: &Path,
 ) -> Result<(RunFocusAction, String)> {
@@ -291,20 +300,83 @@ fn rescue_run(
     // a record — see `spawner::rescue::find_rescued_pane`.
     let marker_name = format!("card-{}-r{}-rescue", run.card_id, run.id);
     let tab_label = format!("card-{}", run.card_id);
-    let durable_pane_ids = owned_pane_ids(
-        &prior_runs,
-        run.session.as_deref(),
-        &workspace_id,
-        OwnedPanes::DurableChildren,
-    );
-    let durable_anchor_pane_ids = owned_pane_ids(
-        &prior_runs,
-        run.session.as_deref(),
-        &workspace_id,
-        OwnedPanes::Anchors,
-    );
 
-    // 6. Reconstruct the exact card tab from durable pane identity (labels are
+    // 6. The placement workspace is the run's recorded workspace when it is
+    //    still usable; otherwise it is a replacement resolved from the card's
+    //    CURRENT space config — the exact resolution dispatch uses — inside
+    //    the run's own Herdr session (the cross-session guard above already
+    //    settled the socket). The rescue never picks a workspace on its own:
+    //    if the recorded workspace is gone and the card's current config
+    //    cannot supply one, the error names both, and nothing is created.
+    //
+    //    Usability is the same test placement uses: a workspace is usable iff
+    //    one of its live panes still has a cwd (the supported Herdr launch
+    //    contract never inherits a workspace cwd, so a pane-less workspace is
+    //    no better than a closed one). The probe must come before the plan
+    //    exists because the per-card-tab allocation lock is keyed by the
+    //    placement workspace.
+    let mut client = crate::herdr_conn::connect_checked(target_socket)
+        .map_err(|e| Error::HerdrUnavailable(format!("connecting to Herdr: {e}")))?;
+    let (recorded_usable, workspace_id, cwd, bootstrap) =
+        match workspace_cwd(&mut client, &workspace_id) {
+            Ok(cwd) => (true, workspace_id, std::path::PathBuf::from(cwd), None),
+            Err(recorded_error) => {
+                let space = resolve_space(
+                    &mut client,
+                    card.space_kind,
+                    card.space_ref.as_deref(),
+                    card.space_cwd.as_deref(),
+                )
+                .map_err(|error| {
+                    Error::HerdrUnavailable(format!(
+                        "run {} of card {}: its recorded workspace {workspace_id} no longer has \
+                         a usable pane/cwd ({recorded_error:#}), and the card's current space \
+                         configuration cannot supply a replacement workspace ({error:#}); retry \
+                         the card to start a new run instead",
+                        run.id, run.card_id
+                    ))
+                })?;
+                // `resolve_space` may have created the workspace (a card with a
+                // `new_workspace` space, whose label no longer matches any open
+                // workspace): the bootstrap hint is exactly that one-shot
+                // creation evidence, and it travels into the placement so the
+                // card tab adopts the workspace's initial tab.
+                (
+                    false,
+                    space.workspace_id,
+                    std::path::PathBuf::from(space.cwd),
+                    space.bootstrap,
+                )
+            }
+        };
+
+    // 7. Durable ownership evidence counts only inside the recorded workspace:
+    //    prior runs' panes lived there, and panes of a dead workspace can prove
+    //    nothing in a replacement. A replacement starts with no durable
+    //    evidence — the rescued pane's label carries the dedup identity instead
+    //    (and the spawner's registry memory carries the tab it allocated).
+    let durable_pane_ids = if recorded_usable {
+        owned_pane_ids(
+            &prior_runs,
+            run.session.as_deref(),
+            &workspace_id,
+            OwnedPanes::DurableChildren,
+        )
+    } else {
+        Vec::new()
+    };
+    let durable_anchor_pane_ids = if recorded_usable {
+        owned_pane_ids(
+            &prior_runs,
+            run.session.as_deref(),
+            &workspace_id,
+            OwnedPanes::Anchors,
+        )
+    } else {
+        Vec::new()
+    };
+
+    // 8. Reconstruct the exact card tab from durable pane identity (labels are
     //    never ownership), then place + launch. Everything Herdr-side lives in
     //    `spawner::rescue`, which shares the placement/launch helpers with
     //    dispatch instead of duplicating them — and never calls a UoW.
@@ -314,8 +386,6 @@ fn rescue_run(
         if ownership_proof.is_empty() {
             None
         } else {
-            let mut client = crate::herdr_conn::connect_checked(target_socket)
-                .map_err(|e| Error::HerdrUnavailable(format!("connecting to Herdr: {e}")))?;
             let snapshot = client.session_snapshot().map_err(|e| {
                 Error::HerdrUnavailable(format!("session.snapshot before rescue: {e}"))
             })?;
@@ -323,21 +393,24 @@ fn rescue_run(
         }
     };
 
+    let ownership = CardOwnership {
+        owned_tab_id: owned_tab_id.as_deref(),
+        bootstrap: bootstrap.as_ref(),
+        durable_pane_ids: &durable_pane_ids,
+        reclaimable_pane_ids: &[],
+        durable_anchor_pane_ids: &durable_anchor_pane_ids,
+        remembered_anchor_id: None,
+        reuse_pane_id: None,
+        reuse_agent_kind: None,
+    };
     let plan = RescuePlan {
         marker_name: &marker_name,
         tab_label: &tab_label,
         workspace_id: &workspace_id,
+        cwd,
+        bootstrap: bootstrap.as_ref(),
         socket: target_socket,
-        ownership: CardOwnership {
-            owned_tab_id: owned_tab_id.as_deref(),
-            bootstrap: None,
-            durable_pane_ids: &durable_pane_ids,
-            reclaimable_pane_ids: &[],
-            durable_anchor_pane_ids: &durable_anchor_pane_ids,
-            remembered_anchor_id: None,
-            reuse_pane_id: None,
-            reuse_agent_kind: None,
-        },
+        ownership,
         execution,
         // Serialize against dispatch and against another concurrent rescue of
         // this same card tab, and register whatever gets allocated.

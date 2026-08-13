@@ -16,7 +16,7 @@ pub(crate) use finalize::{finalize_run, finalize_run_timeout};
 pub(crate) use launch_plan::board_env;
 pub(crate) use ownership::{owned_pane_ids, reconstruct_owned_tab_id, OwnedPanes};
 pub(crate) use pass::dispatch_pass;
-pub(crate) use space::{validate_space_resolvable, workspace_cwd};
+pub(crate) use space::{resolve_space, validate_space_resolvable, workspace_cwd};
 
 use board_core::db::EnqueueRun;
 use board_core::harness::HarnessError;

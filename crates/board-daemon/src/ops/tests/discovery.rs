@@ -1,6 +1,214 @@
 use super::*;
 
 #[test]
+fn run_focus_rescues_into_a_new_workspace_when_the_recorded_workspace_is_gone() {
+    // The run's pane AND its workspace were closed. The rescue must resolve the
+    // card's CURRENT space config (new_workspace: label + cwd) and create a
+    // fresh workspace in the run's own session, then resume the conversation in
+    // an ephemeral pane there. A second focus reuses both the workspace (by
+    // label) and the pane (by its marker) — never creating a second of either.
+    let fake = fake_rescue_herdr(RescueFakeFaults {
+        workspace_gone: true,
+        ..Default::default()
+    });
+    let d = test_daemon_with_herdr_spawner(Config::default(), fake.socket.clone());
+    let (card_id, run_id) = add_rescuable_run_with_space(
+        &d,
+        "pi",
+        Some("pi"),
+        Some("conv-1"),
+        true,
+        Some((
+            SpaceKind::NewWorkspace,
+            "ws-new".to_string(),
+            "/tmp/ws-cwd".to_string(),
+        )),
+    );
+    let before = runs_fingerprint(&d, card_id);
+
+    let result = handle_request(
+        &d,
+        "run.focus",
+        json!({"card_id":card_id,"run_id":run_id,"origin_socket":fake.socket}),
+    )
+    .unwrap();
+
+    assert_eq!(result["action"], "rescued");
+    assert_eq!(result["recorded_pane_id"], "w1:p9");
+    // The recorded workspace `w1` is gone; the replacement is a fresh `w2`.
+    let pane_id = result["pane_id"].as_str().unwrap();
+    assert!(pane_id.starts_with("w2:"), "pane_id: {pane_id}");
+    assert_eq!(result["session_id"], "conv-1");
+
+    // The replacement workspace was created from the card's CURRENT space
+    // config — label and cwd — inside the run's own session.
+    let creates = fake.workspace_creates();
+    assert_eq!(creates.len(), 1, "exactly one workspace.create");
+    assert_eq!(creates[0]["params"]["label"], "ws-new");
+    assert_eq!(creates[0]["params"]["cwd"], "/tmp/ws-cwd");
+    assert_eq!(fake.workspace_ids(), vec!["w2".to_string()]);
+    // The harness was resumed in the fresh workspace with the persisted
+    // conversation id and the recorded execution, exactly like an in-workspace
+    // rescue: one agent.start, resume argv, no task re-send.
+    let starts = fake.agent_starts();
+    assert_eq!(starts.len(), 1);
+    let args: Vec<String> = starts[0]["params"]["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a.as_str().unwrap().to_string())
+        .collect();
+    let resume_at = args
+        .iter()
+        .position(|a| a == "--session-id")
+        .expect("--session-id");
+    assert_eq!(args[resume_at + 1], "conv-1");
+    assert!(args.contains(&"recorded-model".to_string()));
+    assert!(!args.iter().any(|a| a.contains("the original task")));
+    assert_eq!(
+        fake.count("agent.prompt"),
+        0,
+        "the task must not be re-sent"
+    );
+    // The rescued pane is in the fresh workspace and carries the run marker.
+    let live = fake.pane_ids();
+    assert_eq!(live, vec![pane_id.to_string()], "panes: {live:?}");
+    let starts = fake.agent_starts();
+    assert!(starts[0]["params"]["name"]
+        .as_str()
+        .unwrap()
+        .ends_with("-rescue"));
+
+    // Second focus: the recorded workspace is still gone, but the resolution
+    // now finds the replacement by its label and the scan finds the pane the
+    // first rescue left there. Nothing new is created.
+    let again = handle_request(
+        &d,
+        "run.focus",
+        json!({"card_id":card_id,"run_id":run_id,"origin_socket":fake.socket}),
+    )
+    .unwrap();
+    assert_eq!(again["action"], "focused_rescued_pane");
+    assert_eq!(again["pane_id"], pane_id);
+    assert_eq!(
+        fake.workspace_creates().len(),
+        1,
+        "a second workspace was created"
+    );
+    assert_eq!(fake.workspace_ids(), vec!["w2".to_string()]);
+    assert_eq!(
+        fake.count("pane.split"),
+        1,
+        "a second rescue pane was created"
+    );
+    assert_eq!(fake.count("agent.start"), 1, "the harness was restarted");
+
+    // THE central constraint still holds: nothing was written to the database.
+    assert_eq!(runs_fingerprint(&d, card_id), before);
+    assert_eq!(d.store.lock().list_runs(card_id).unwrap().len(), 1);
+}
+
+#[test]
+fn run_focus_rescue_failure_closes_the_workspace_it_created() {
+    // The workspace was created by this very rescue and the harness then
+    // refused to start. A failed rescue must leave NO partial resources: the
+    // pane, the adopted card tab AND the workspace it created are all undone,
+    // so a later press of `o` resolves and creates a fresh workspace instead of
+    // colliding with an empty one that has no live pane cwd.
+    let fake = fake_rescue_herdr(RescueFakeFaults {
+        workspace_gone: true,
+        agent_start_fails: true,
+        ..Default::default()
+    });
+    let d = test_daemon_with_herdr_spawner(Config::default(), fake.socket.clone());
+    let (card_id, run_id) = add_rescuable_run_with_space(
+        &d,
+        "pi",
+        Some("pi"),
+        Some("conv-1"),
+        true,
+        Some((
+            SpaceKind::NewWorkspace,
+            "ws-new".to_string(),
+            "/tmp/ws-cwd".to_string(),
+        )),
+    );
+    let before = runs_fingerprint(&d, card_id);
+
+    for attempt in 1..=2 {
+        let err = handle_request(
+            &d,
+            "run.focus",
+            json!({"card_id":card_id,"run_id":run_id,"origin_socket":fake.socket}),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), 4, "attempt {attempt}: {err}");
+        assert!(
+            err.to_string().contains("harness refused to start"),
+            "attempt {attempt}: {err}"
+        );
+        // A fresh workspace per attempt, and it is closed again on failure —
+        // never accumulated, never left empty for the next attempt to trip on.
+        assert_eq!(fake.workspace_creates().len(), attempt, "attempt {attempt}");
+        assert_eq!(fake.count("workspace.close"), attempt, "attempt {attempt}");
+        assert_eq!(
+            fake.workspace_ids(),
+            Vec::<String>::new(),
+            "attempt {attempt}"
+        );
+        assert_eq!(fake.pane_ids(), Vec::<String>::new(), "attempt {attempt}");
+    }
+    assert_eq!(runs_fingerprint(&d, card_id), before);
+}
+
+#[test]
+fn run_focus_rescue_refuses_when_the_card_config_cannot_replace_the_workspace() {
+    // The recorded workspace is gone AND the card's current space config points
+    // at a workspace that no longer exists (a `workspace`-kind card that still
+    // references the closed id). The rescue must refuse explicitly, naming both
+    // the dead workspace and the config failure — and create nothing.
+    let fake = fake_rescue_herdr(RescueFakeFaults {
+        workspace_gone: true,
+        ..Default::default()
+    });
+    let d = test_daemon_with_herdr_spawner(Config::default(), fake.socket.clone());
+    let (card_id, run_id) = add_rescuable_run_with_space(
+        &d,
+        "pi",
+        Some("pi"),
+        Some("conv-1"),
+        true,
+        Some((SpaceKind::Workspace, "w1".to_string(), String::new())),
+    );
+    let before = runs_fingerprint(&d, card_id);
+
+    let err = handle_request(
+        &d,
+        "run.focus",
+        json!({"card_id":card_id,"run_id":run_id,"origin_socket":fake.socket}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), 4);
+    let msg = err.to_string();
+    assert!(
+        msg.contains("recorded workspace w1"),
+        "names the dead workspace: {msg}"
+    );
+    assert!(
+        msg.contains("current space configuration"),
+        "names the config dead end: {msg}"
+    );
+    assert!(
+        msg.contains("w1"),
+        "names the unresolvable space_ref: {msg}"
+    );
+    // Nothing was created and nothing was written.
+    assert_eq!(fake.workspace_creates().len(), 0);
+    assert_eq!(fake.count("pane.split"), 0);
+    assert_eq!(runs_fingerprint(&d, card_id), before);
+}
+
+#[test]
 fn run_focus_rejects_missing_pane_and_cross_session_socket() {
     let d = test_daemon(Config::default());
     let (card_id, run_id) = add_run_with_pane(&d, None);

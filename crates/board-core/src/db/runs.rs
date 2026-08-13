@@ -310,6 +310,19 @@ impl Db {
         })
     }
 
+    /// Fixture determinism: pin every finalized run's `ended_at` to its
+    /// `started_at`, so snapshot rendering never sees a promote→finalize pair
+    /// that straddled a wall-clock second boundary (a deterministic `0s`
+    /// fixture flipping to `1s` on a loaded machine). Demo/fixture code calls
+    /// it after seeding; production paths never do.
+    pub fn pin_finalized_run_elapsed(&self) -> Result<()> {
+        self.conn.execute(
+            "UPDATE runs SET ended_at = started_at WHERE ended_at IS NOT NULL",
+            [],
+        )?;
+        Ok(())
+    }
+
     pub fn get_run(&self, id: i64) -> Result<Run> {
         rows::opt(self.conn.query_row(
             "SELECT * FROM runs WHERE id=?1",

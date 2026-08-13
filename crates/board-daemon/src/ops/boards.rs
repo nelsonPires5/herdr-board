@@ -24,10 +24,14 @@ pub(super) fn daemon_status(d: &Arc<Daemon>) -> Result<Value> {
 
 fn board_snapshot(d: &Arc<Daemon>, board_id: i64) -> Result<Value> {
     let db = d.store.lock();
+    let mut cards = db.list_cards(board_id)?;
+    for card in &mut cards {
+        crate::ops::cards::stamp_card_labels(d, card);
+    }
     Ok(json!(BoardSnapshot {
         board: db.get_board(board_id)?,
         columns: db.list_columns(board_id)?,
-        cards: db.list_cards(board_id)?,
+        cards,
         active_runs: db.active_run_summaries(board_id)?,
     }))
 }

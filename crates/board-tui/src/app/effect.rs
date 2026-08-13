@@ -31,6 +31,9 @@ pub enum Effect {
     CardCreate(board_core::protocol::CardCreateParams),
     CardUpdate(board_core::protocol::CardUpdateParams),
     CardDelete(i64),
+    /// Duplicate a card: the daemon creates an idle copy directly below the
+    /// original, never dispatching a run.
+    CardDuplicate(i64),
     CardArchive {
         id: i64,
         archived: bool,
