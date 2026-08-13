@@ -20,7 +20,8 @@ pub enum FieldId {
     ModelCustom,
     Effort,
     Permission,
-    /// herdr session selector; `(default)` = the daemon's default session.
+    /// herdr session selector; the `default session` option = the daemon's
+    /// default session (label daemon-sent).
     Session,
     SpaceKind,
     SpaceRef,
@@ -79,10 +80,11 @@ impl ChoiceOpt {
             val: ChoiceVal::None,
         }
     }
-    /// The "unset / harness default" option (extracts to `None`).
-    pub(super) fn default_opt() -> ChoiceOpt {
+    /// The "unset / harness default" option (extracts to `None`). The label
+    /// is daemon-sent (ready strings, never formatted client-side).
+    pub(super) fn default_opt(label: &str) -> ChoiceOpt {
         ChoiceOpt {
-            label: "(default)".to_string(),
+            label: label.to_string(),
             val: ChoiceVal::None,
         }
     }
@@ -230,9 +232,13 @@ pub struct Form {
     /// unfetched / failed → the space ref falls back to free-text.
     pub spaces: Vec<SpaceInfo>,
     /// Live herdr session list for the session selector (card forms only).
-    /// Empty when unfetched / failed → only `(default)` (plus any preselected
-    /// session) is offered.
+    /// Empty when unfetched / failed → only the `default session` option
+    /// (plus any preselected session) is offered.
     pub sessions: Vec<SessionInfo>,
+    /// The daemon-sent `default session` label for the session selector's
+    /// unset option. `None` = not yet fetched → the shared board-core marker
+    /// string is used (single source; the daemon sends the same value).
+    pub session_default_label: Option<String>,
 }
 
 /// The params produced by a successful submit, ready for a client call.

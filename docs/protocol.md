@@ -196,6 +196,7 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
     `space_ref` kept).
 - `card.update {id, …subset}` → `Card`; nullable update fields use the tri-state encoding below. Harness/model/effort/permission/session/space fields are refused while the card has an open run (`queued|running|blocked|awaiting`). Title/description remain editable; `done` is not open.
 - `card.delete {id}` → `{deleted:true}`; refused while the card has an open run (`queued|running|blocked|awaiting`; cancel first). `done` is not open.
+- `card.duplicate {id}` → `Card` — creates a fresh idle copy inserted **immediately below** the original, shifting the following cards (the column stays compacted). The copy inherits the full run configuration — title with the ` (copy)` suffix, description, harness, model, effort, permission mode, session, and space settings — but none of the execution state: status `idle`, no `awaiting_reason`, no `session_id`, no runs/comments/history, no archive flag, and fresh timestamps. The original is never modified, the insert + renumber is one transaction, and — unlike `card.create` — duplication **never enqueues a run**, even in an `auto` column (the copy stays idle until moved or run). The normal `CardCreated` event is emitted for the copy.
 - `card.archive {id, archived:true|false}` → `Card` — archives or restores without deleting
   comments/runs. Archiving is refused while the card has an open run (`queued|running|blocked|awaiting`); `done` cards can be archived. Archived cards must be restored before move/retry.
 - `card.move {id, column_id, board_id?, position?}` → `Card` — THE trigger: target must belong to the
@@ -205,12 +206,23 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
   `board_id`/`column_id` are moved atomically (both columns recompacted) after a blocking sanity
   check (merged effective capabilities + session resolve) — incompatible settings/sessions abort
   the move with an explicit error. Omitted (or equal to the card's board) keeps the historical
-  intra-board move.
+  intra-board move. **Same-column reorder:** when `column_id` equals the card's current column,
+  the move is a pure reorder — `position` (zero-based, clamped, appended when omitted) places the
+  card inside its column and every card's position is recompacted contiguously. A same-column
+  reorder never enqueues, never changes status (open runs included), and never triggers the
+  column's automatic dispatch, even on an `auto` column with a dispatchable card.
 - `card.get {id}` → `{card, comments:[…], runs:[…]}`. Run objects deliberately omit the internal
   `system_prompt_snapshot` field and its contents; missing snapshot input deserializes as legacy
   `null`, but the field is never serialized onto the board wire. Schema v7 writes this nullable
   snapshot only for new runs; legacy `NULL` rows are not backfilled and retain their historical
   launch behavior.
+- Every `Card` served by a read/card op carries `labels: {session, effort, permission, model}` —
+  **ready display strings stamped by the daemon** (clients render them verbatim; they are never
+  round-tripped). `labels.session` is the resolved default-session name (the herdr session
+  matching the daemon's bound socket, normally named `default`), or `default session` when the
+  card's `session` is unset and nothing resolves; `labels.effort` / `labels.permission` /
+  `labels.model` are the value, or `default effort` / `default permission` / `default model` when
+  the card has no override. Wire fields keep their `None`-means-default semantics unchanged.
 - `card.list {board_id?, column_id?, visibility?}` → `[Card…]`; omitted `board_id` means `Global`,
   and a column filter must belong to the requested board. `visibility` defaults to `"active"` and
   accepts `"active"`, `"all"`, or `"archived"`.
@@ -295,6 +307,20 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
   re-threaded onto a resume without re-sending that task, so it is refused (error 3) rather than
   rewritten.
 
+  **Placement workspace.** The rescue places in the run's recorded workspace while it is still
+  usable, probing it with the same test placement uses (a live pane must still carry a cwd). When
+  the recorded workspace is gone — the user closed it, or it lost its last pane — the rescue
+  resolves a replacement from the card's **current** space config
+  (`space_kind`/`space_ref`/`space_cwd`), the exact resolution dispatch uses, inside the run's own
+  Herdr session: a card with a `new_workspace` space gets a fresh workspace created with its label
+  and cwd (the initial tab is adopted as the card tab, same as a first dispatch); a `workspace`-kind
+  ref to an open workspace resolves to that one. The rescue never picks a workspace on its own: if
+  the recorded workspace is gone and the card's current config cannot supply a replacement (a
+  `workspace`-kind ref to the closed workspace, or a `new_workspace` space missing its label/cwd),
+  the error names both the dead workspace and the config failure, and nothing is created. A
+  replacement created by the rescue is reused on later `run.focus` calls by the same resolution
+  (label find-or-create), so repeated presses neither duplicate the workspace nor the pane.
+
   **Environment of a rescued pane.** Pane-first placement establishes the environment on the
   `pane.split` that creates the pane. A rescued pane receives the persisted run
   environment plus `BOARD_CARD_ID`, `BOARD_SOCKET`, `BOARD_BIN`, `BOARD_RESCUE=1`,
@@ -322,7 +348,8 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
   with error 2 — no recorded conversation id) and the next stage mints fresh instead of
   re-attaching to a conversation the board cannot name.
 
-  Rescue is **idempotent**: before creating anything the daemon scans the workspace for a pane left
+  Rescue is **idempotent**: before creating anything the daemon scans the placement workspace for a
+  pane left
   by an earlier rescue of this exact run, identified by its pane label / agent name
   `card-<id>-r<run>-rescue`. That name depends only on **stable identity** — deliberately not on the
   column name, because renaming a column would otherwise change the marker and resume the same
@@ -330,7 +357,9 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
   available and it is a *diagnostic hint*, not an authoritative record: it is deterministic for panes
   the daemon creates, but a user who renames the pane or its agent can defeat it (for a managed
   harness a second attempt then usually fails closed on `agent_name_taken`, since Herdr agent names
-  are exclusive while the pane is open).
+  are exclusive while the pane is open). When the recorded workspace had to be replaced, the
+  replacement is found by the card's space config (label find-or-create), so renaming the
+  replacement workspace defeats that half of the dedup the same way.
 
   Matching is on the pane **label**, the one field the daemon both sets (`pane.rename`) and reads
   back (`PaneInfo.label`); the same string is also used as the `agent.start` name purely for Herdr's
@@ -352,10 +381,13 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
   pre-v11 run with no durable launch spec — is error 2 (the same code this dead end reported before
   the rescue existed; the message names the dead pane and points at `run.retry`). A harness that
   does not declare resume support is error 3 and names the harness. Cross-session focus is error 3.
-  Herdr/registry unavailable, a run with no recorded workspace, tab/pane creation failure, and a
+  Herdr/registry unavailable, a run with no recorded workspace, a recorded workspace that is gone
+  **and** has no current card space config to supply a replacement (error 4, naming both), tab/pane
+  creation failure, and a
   harness that will not start in the new pane are error 4. A failed launch closes the pane it
   created **and**, when placement had to create the `card-<id>` tab, that tab's shell anchor too
-  (which removes the empty tab), so a refused or failed rescue leaves nothing behind — a rescue has
+  (which removes the empty tab) — and when this very resolution created the workspace, the failure
+  also closes that workspace, so a refused or failed rescue leaves nothing behind — a rescue has
   neither a retry nor a run row, so anything orphaned here would be permanent. A `pane.focus` that
   fails *after* a successful launch is logged as a warning and still reported as `rescued`: the pane
   exists and the conversation is resumed, only the focus move was lost. The daemon resolves the run's
@@ -394,7 +426,7 @@ and promoted atomically onto run+card. See [Dispatch semantics](#dispatch-semant
   - error 2 (not found) for an unknown harness, listing the known harnesses.
 - `harness.list` (no params) → `{harnesses:[…]}` — every harness the daemon knows about: the built-ins `pi`/`claude`/`codex`/`opencode` in their default order (pi first), then every config-defined `[harness.NAME]` sorted, de-duplicated. This is the single source for BOTH the card `harness` and column `harness_override` selects in the TUI, so every harness menu shares one list in one (default-first) order.
 - `space.list {session?}` → `{spaces:[{id, label}]}` — workspaces in the given session (`null` = default), filled from that session's herdr `workspace.list`. Unknown/not-running session → error 4 listing the known sessions.
-- `session.list` (no params) → `{sessions:[{name, default: bool, running: bool}]}` — the daemon shells out to `herdr session list --json` (session enumeration is not in the herdr socket API; a session only knows itself). Binary resolved via `$HERDR_BIN_PATH`, else `herdr` on `$PATH`. Error 4 if herdr is unavailable / the CLI fails. That shell-out has a **10-second wall-clock budget** and the child is killed when it expires (error 4, naming the timeout): the session registry sits on the path of every request that resolves a session, and every caller reaches it through the blocking pool, so a hung `herdr` must not pin one of those threads forever. A normal `session list` is sub-100ms; the result is cached for the registry TTL.
+- `session.list` (no params) → `{sessions:[{name, default: bool, running: bool}], default_label:"default session"}` — the daemon shells out to `herdr session list --json` (session enumeration is not in the herdr socket API; a session only knows itself). `default_label` is the ready display marker for the default session (and for the TUI session selector's unset option), sent so clients never format it themselves. Binary resolved via `$HERDR_BIN_PATH`, else `herdr` on `$PATH`. Error 4 if herdr is unavailable / the CLI fails. That shell-out has a **10-second wall-clock budget** and the child is killed when it expires (error 4, naming the timeout): the session registry sits on the path of every request that resolves a session, and every caller reaches it through the blocking pool, so a hung `herdr` must not pin one of those threads forever. A normal `session list` is sub-100ms; the result is cached for the registry TTL.
 
 ### panes
 

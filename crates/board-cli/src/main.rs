@@ -132,8 +132,15 @@ fn dispatch(cli: Cli) -> Result<()> {
         Cmd::Move {
             card_id,
             column,
+            position,
             destination_board,
-        } => cmd_move(&mut ctx, card_id, &column, destination_board.as_deref()),
+        } => cmd_move(
+            &mut ctx,
+            card_id,
+            &column,
+            destination_board.as_deref(),
+            position,
+        ),
         Cmd::PaneExited { card_id, run_id } => cmd_pane_exited(card_id, run_id, &mut ctx),
     }
 }

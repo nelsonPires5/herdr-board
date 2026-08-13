@@ -383,6 +383,21 @@ same-board path); pressing `b` inside it switches to the destination-board picke
 move (board → column). Validation errors from the blocking check surface as the existing red
 footer toast (the `guard()` path is unchanged). The help line reads `m  move card (board→column)`.
 
+### Card duplication
+
+`card.duplicate {id}` (CLI `board card duplicate <id>`, TUI `C` on the board or in card detail)
+creates a fresh **idle** copy directly below the original in one transaction
+(`Db::duplicate_card`): the copy inherits the full run configuration — title with a ` (copy)`
+suffix, description, harness, model, effort, permission mode, session, and space settings — while
+`status`, `awaiting_reason`, `session_id`, `archived_at`, runs, and comments all start empty, and
+the timestamps are the copy's own. The insert + column renumber are atomic, so a failure leaves
+the column untouched; the followers shift down and the column stays compacted.
+
+Duplication is deliberately **not** a `card.create`: it never runs `decide_entry`, so a copy in an
+auto column stays idle with no run row — the dispatcher only ever picks up queued runs, so the
+copy waits for an explicit move/run like any idle card. The daemon emits the normal `CardCreated`
+event for the copy, and the TUI shows a `card duplicated as #N` toast after the board refetch.
+
 ### Scope selection
 
 At the CLI/TUI boundary, non-empty `BOARD_SCOPE_PATH` wins. TUI otherwise uses
@@ -431,9 +446,23 @@ that never recorded a pane at all. End to end:
    refused instead of rewritten;
 6. the board environment is added, and one variable is pointedly left out — see **Credentials**
    below;
-7. `spawner::rescue` takes the same per-card-tab allocation lock as dispatch (so a focus racing
+7. the **placement workspace is decided**. The run's recorded workspace is probed with the same
+   liveness test placement uses (a workspace is usable iff one of its live panes still has a cwd).
+   When it is usable, the rescue places there exactly as before. When it is not — the user closed
+   the workspace, or it lost its last pane — the rescue resolves a replacement from the card's
+   **current** space config (`space_kind`/`space_ref`/`space_cwd`), the exact resolution dispatch
+   uses (`dispatch::space::resolve_space`), inside the run's own Herdr session: a `new_workspace`
+   card gets a fresh workspace created with its label and cwd (its initial tab is adopted as the
+   card tab, same as a first dispatch), while a `workspace`-kind ref to an open workspace resolves
+   to that one. The rescue never picks a workspace on its own: if the recorded workspace is gone
+   and the card's current config cannot supply a replacement, the refusal names both the dead
+   workspace and the config failure, and nothing is created. The choice is final before the plan
+   exists because the per-card-tab allocation lock is keyed by the placement workspace;
+8. `spawner::rescue` takes the same per-card-tab allocation lock as dispatch (so a focus racing
    another focus, or a dispatch, cannot each create a pane or a tab), scans for a *live* pane an
-   earlier rescue left (`action=focused_rescued_pane` if found), closes dead remains carrying this
+   earlier rescue left (`action=focused_rescued_pane` if found) in the placement workspace — which
+   is also what makes a second `o` after a workspace recreation reuse the replacement (found by its
+   label) and the pane it holds — closes dead remains carrying this
    run's marker, else splits a new child in the card tab using the same placement helpers as dispatch
    — with `reclaimable_pane_ids` deliberately empty, so reopening one run never closes another's pane
    — labels it, launches the harness, and focuses it (`action=rescued`). A managed rescue then closes
@@ -441,8 +470,11 @@ that never recorded a pane at all. End to end:
    counts as closed, and any other close failure warns and keeps the successful rescue (configured
    rescues keep their persistent anchor). A failed launch closes the
    pane it created, plus the tab anchor when placement had to create the tab; it also registers the
-   exact tab/anchor it kept, so a later dispatch reuses that tab instead of making another;
-8. the TUI toasts what happened and **stays up** on a rescue (Herdr already moved focus to the new
+   exact tab/anchor it kept, so a later dispatch reuses that tab instead of making another — and
+   when this very resolution created the workspace, the failure additionally closes that workspace,
+   so a rescue that created it leaves no partial resource behind and the next `o` resolves (and
+   creates) a fresh one;
+9. the TUI toasts what happened and **stays up** on a rescue (Herdr already moved focus to the new
    pane, so quitting would only discard the explanation). Refusals and Herdr errors stay visible as a
    non-fatal toast that leaves the board usable, and never fall back to a different run's pane.
 
@@ -473,7 +505,12 @@ execution, not to resurrect it as a run. Two consequences follow and are not wor
   reliably idempotent for panes the daemon created, but a user who renames the pane or its agent can
   defeat the scan. This is a diagnostic hint, not an authoritative record, and it is the direct cost
   of the no-database-writes decision. The marker derives from card id + run id only, precisely so
-  that renaming a *column* cannot break it.
+  that renaming a *column* cannot break it. When the recorded workspace is gone, the replacement
+  is likewise found by the card's current space config: a `new_workspace` card reuses its
+  replacement by **label** (`dispatch::space::resolve_space`'s find-or-create), so a user who
+  renames the replacement workspace defeats that half of the dedup too — a second `o` then creates
+  yet another workspace (with the configured label) and resumes in it, leaving the renamed one
+  alone; the same no-DB-writes trade-off as the pane marker.
 - for a **configured** (unmanaged) harness, a rescued pane that outlived its harness cannot be
   detected. Herdr tracks no `agent` for unmanaged panes, so the label is the only evidence and a
   leftover shell looks exactly like a live resume; `o` will focus it rather than resuming again.
@@ -548,7 +585,7 @@ execution, not to resurrect it as a run. Two consequences follow and are not wor
   title (`Board [<scope> · ACTIVE|ALL|ARCHIVED]`); the board has no persistent footer hint row, and transient toasts remain available above the action rail. Archived cards are
   inert until restored and render dimmed with `▣ ARCHIVED` when visible.
 - **Content-sized overlays (Regular/Wide):** within the `sheet_area` centered popup, card/column forms, move pickers, and help panels shrink to their content on large terminals and clamp to the available viewport on small terminals; Compact always gets the fullscreen sheet described above instead.
-- **Guided card & column forms** share one metadata source: both fetch `harness.capabilities` (models/efforts/permissions via the daemon-side `HarnessMeta` adapter trait) and `harness.list` (built-ins + config-defined harnesses). For cards: Pi is selected for new cards; Claude remains selectable. On open/harness change the form also fetches `space.list`. Model starts at `(default)` (unset), then catalog aliases and `(custom)` when free-form is supported. Effort follows the selected model's declared set, or the catalog default for omitted/free-form models. For Pi, that declared set comes from its documented `thinkingLevelMap` tri-state contract: omitted standard levels (`off`–`high`) remain supported, omitted extended levels (`xhigh`/`max`) do not, strings opt levels in, and `null` opts them out. Codex models and per-model efforts come from `$CODEX_HOME/models_cache.json`, with free-form fallback; its permission selector labels the three stable wire presets as `Ask for approval`, `Approve for me`, and `Full access`. OpenCode models are free-form, with the daemon's live `opencode models --verbose` discovery (`$OPENCODE_BIN` else `opencode` on PATH) overlaying a static fallback that truthfully lists OpenCode Zen Nemotron 3 Ultra Free (which declares no variants and therefore offers no effort) plus a fixture model `opencode/deepseek-v4-flash-free` (low/high/max); its effort selector follows the selected model's discovered variants — empty for a variant-less model — or the full ladder for omitted/free-form models, with `off` mapped to the opencode variant `none` only when building the process-local agent config (the root/TUI has no `--variant` flag), and its permission selector offers exactly the two verified modes `Default` and `Auto-approve` (`--auto`). Permission is hidden and submits `None` for Pi; Claude shows its modes. The rule is one predicate — `!permission_modes.is_empty()` against the effective capabilities — never a harness-name comparison, so it holds in the *not-yet-fetched* case too: a harness board-core does not know answers with an empty permission vocabulary, and the selector stays hidden until `harness.capabilities` returns. Inventing another CLI's enum is never safe; the old fallback guessed a six-item list that included a value the daemon rejects. Switching harness resets only incompatible values. Workspace labels are shown but ids are persisted. Fetch failures degrade to free text with a warning. For column config the same source drives the override fields: `harness_override` is a **select** over the available harnesses (`(none)` = no override), `effort_override` follows the override harness's catalog, and `permission_override` is **hidden** when the driving harness has no permission modes (e.g. Pi); changing the override harness refetches capabilities and resets only overrides that became invalid. The column `system_prompt` field is **hidden when the trigger is `manual`** (a manual column never launches a run, so the prompt is unused) and reappears when the trigger is switched to `auto`; it is hidden from the UI, not omitted, so submit still sends a `system_prompt` Patch that preserves whatever the column already stores.
+- **Guided card & column forms** share one metadata source: both fetch `harness.capabilities` (models/efforts/permissions via the daemon-side `HarnessMeta` adapter trait) and `harness.list` (built-ins + config-defined harnesses). For cards: Pi is selected for new cards; Claude remains selectable. On open/harness change the form also fetches `space.list`. Model starts at the daemon-sent `default model` option (unset), then catalog aliases and `(custom)` when free-form is supported. Effort follows the selected model's declared set, or the catalog default for omitted/free-form models. For Pi, that declared set comes from its documented `thinkingLevelMap` tri-state contract: omitted standard levels (`off`–`high`) remain supported, omitted extended levels (`xhigh`/`max`) do not, strings opt levels in, and `null` opts them out. Codex models and per-model efforts come from `$CODEX_HOME/models_cache.json`, with free-form fallback; its permission selector labels the three stable wire presets as `Ask for approval`, `Approve for me`, and `Full access`. OpenCode models are free-form, with the daemon's live `opencode models --verbose` discovery (`$OPENCODE_BIN` else `opencode` on PATH) overlaying a static fallback that truthfully lists OpenCode Zen Nemotron 3 Ultra Free (which declares no variants and therefore offers no effort) plus a fixture model `opencode/deepseek-v4-flash-free` (low/high/max); its effort selector follows the selected model's discovered variants — empty for a variant-less model — or the full ladder for omitted/free-form models, with `off` mapped to the opencode variant `none` only when building the process-local agent config (the root/TUI has no `--variant` flag), and its permission selector offers exactly the two verified modes `Default` and `Auto-approve` (`--auto`). Permission is hidden and submits `None` for Pi; Claude shows its modes. The rule is one predicate — `!permission_modes.is_empty()` against the effective capabilities — never a harness-name comparison, so it holds in the *not-yet-fetched* case too: a harness board-core does not know answers with an empty permission vocabulary, and the selector stays hidden until `harness.capabilities` returns. Inventing another CLI's enum is never safe; the old fallback guessed a six-item list that included a value the daemon rejects. Switching harness resets only incompatible values. Workspace labels are shown but ids are persisted. Fetch failures degrade to free text with a warning. For column config the same source drives the override fields: `harness_override` is a **select** over the available harnesses (`(none)` = no override), `effort_override` follows the override harness's catalog, and `permission_override` is **hidden** when the driving harness has no permission modes (e.g. Pi); changing the override harness refetches capabilities and resets only overrides that became invalid. The column `system_prompt` field is **hidden when the trigger is `manual`** (a manual column never launches a run, so the prompt is unused) and reappears when the trigger is switched to `auto`; it is hidden from the UI, not omitted, so submit still sends a `system_prompt` Patch that preserves whatever the column already stores.
 - Long text (card description, column system prompt): modal textarea, `Ctrl+E` suspends the TUI into `$EDITOR`. The form's multiline field value now renders as a real wrapped paragraph (`Wrap { trim: false }`) with the same strong focused reverse treatment and white unfocused readability as title/name values; windowed field scrolling keeps the focused field wholly visible, and `Ctrl+J`/`Shift+Enter` remain newline paths; it previously joined the textarea's lines with a literal `"  ⏎  "` separator and hard-truncated the result to one line with `…` at every width, so most multiline content was unreadable. Returning from `$EDITOR` now forces a full terminal repaint (`terminal.clear()`) before the next draw, and so does a terminal resize; `RealEditor` re-entering the alternate screen behind `ratatui::Terminal`'s back previously left the next frame diffing against a stale cached buffer, so the screen stayed blank until some other full redraw happened to occur.
 - **Every destructive action confirms, and the confirmation is gated on the action being possible.** `x` (cancel a run) only opens the confirm sheet when the card actually has an open run, and otherwise toasts — `run.cancel` on a finished card is refused by the daemon, so "cancel the running run?" was a question with no true answer. `r` (retry) now confirms too: it relaunches a real agent, which is strictly more consequential than the cancel that already confirmed. Deleting a column with cards asks where to move them **and then confirms** — picking a destination is not consent to the delete, and that riskier path was the one left unguarded while the empty-column path had always confirmed. A running card's column can't be deleted at all. Both answers land on `Confirm::return_to`, the screen recorded on the way in.
 - Optional: apply a board template (e.g. the example pipeline above) onto an empty board — `T` on the

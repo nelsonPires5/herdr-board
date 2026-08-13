@@ -1,5 +1,6 @@
 ---
 source: crates/board-tui/tests/snapshots.rs
+assertion_line: 1420
 expression: "render_sized(&mut d, w, h)"
 ---
 " ◈ herdr-board ● 1 running     [ Global ▾ ]      [ Active ] [ All ] [ Archived ]"
@@ -14,15 +15,15 @@ expression: "render_sized(&mut d, w, h)"
 "││e           edit card                                                      │││"
 "││E           edit focused column                                            │││"
 "││a           archive / restore card                                         │││"
+"││C           duplicate card                                                 │││"
 "││v           cycle active/all/archived                                      │││"
 "││d           delete card                                                    │││"
 "││D           delete/move column cards                                       │││"
 "││m           move card (board→column)                                       │││"
 "││M           move focused column                                            │││"
+"││O           reorder card in column                                         │││"
 "││H / L       shove card left / right                                        │││"
-"││Enter       card detail                                                    │││"
-"││T           apply template (empty)                                         │││"
-"││r / R       refresh board                                                  │▼│"
+"││Enter       card detail                                                    │▼│"
 "└──────────────────────────────────────────────────────────────────────────────┘"
 " [ + New card ]  [ Open card ]  [ Archive card ][ + New column ][ Edit column ] "
 " [ Delete column ]    [ Move column ]       [ Template ]         [ ? Help ]     "

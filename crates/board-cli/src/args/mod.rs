@@ -95,10 +95,14 @@ pub(crate) enum Cmd {
         #[arg(long)]
         run_id: i64,
     },
-    /// Move a card to a column (name, case-insensitive, or id).
+    /// Move a card to a column (name, case-insensitive, or id). With
+    /// `--position`, the card is reordered within its current column.
     Move {
         card_id: i64,
         column: String,
+        /// Zero-based index to place the card at within the destination column.
+        #[arg(long)]
+        position: Option<i64>,
         /// Destination board for a cross-board move. The global --board is also
         /// accepted, but that fallback is deprecated.
         #[arg(long, alias = "to-board", value_name = "ID|PATH")]

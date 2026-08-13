@@ -68,6 +68,7 @@ fn sections_for(file: &str) -> Option<Vec<&'static str>> {
         "help.rs" => vec!["Help"],
         "switcher.rs" => vec!["Switcher"],
         "move_column.rs" => vec!["MoveColumn"],
+        "reorder_card.rs" => vec!["ReorderCard"],
         "comment_history.rs" => vec!["CommentHistory"],
         // `mod.rs` holds the global pre-dispatch (`?`) and `nav.rs` the shared
         // `↑/↓`+`k/j` decoder every list screen reads through. Neither belongs
@@ -82,6 +83,7 @@ fn sections_for(file: &str) -> Option<Vec<&'static str>> {
             "Help",
             "Switcher",
             "MoveColumn",
+            "ReorderCard",
             "CommentHistory",
         ],
         // `mouse.rs` *synthesizes* key events to reuse a screen's handler (for
@@ -155,6 +157,7 @@ fn every_screen_with_bindings_has_help_rows() {
         Screen::CardForm,
         Screen::Picker,
         Screen::MoveColumn,
+        Screen::ReorderCard,
         Screen::Confirm,
         Screen::Help,
         Screen::Switcher,

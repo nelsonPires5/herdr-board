@@ -91,7 +91,7 @@ wait_for "gpt-effort-e2e" || {
   fail "Pi catalog model did not appear in the real TUI"
 }
 e2e_herdr_mutate -- pane send-keys "$TUI_PANE" tab >/dev/null
-wait_for "[ ‹ ]  (default)  [ › ]" || fail "effort field did not start at (default)"
+wait_for "[ ‹ ]  default effort  [ › ]" || fail "effort field did not start at default effort"
 
 step "Cycle the real TUI effort field through the exact corrected ordering"
 for level in off minimal low medium high xhigh max; do

@@ -48,8 +48,10 @@ board done --outcome fail --summary "2 integration tests still fail; needs schem
 ## TUI
 
 Run `board tui` or invoke the `open-board` Herdr plugin action. Use arrows or `h/j/k/l` to navigate,
-`n` for a card, `N` for a column, `m` to move a card, `Enter` for detail, `e`/`E` to edit a
-card/column, `a` to archive/restore, `v` for active/all/archived visibility, and `?` for help.
+`n` for a card, `N` for a column, `m` to move a card, `M` to reorder the focused column, `O` to
+reorder the selected card within its column (`j`/`k` stage, `Enter` commits, `Esc` cancels),
+`Enter` for detail, `e`/`E` to edit a card/column, `a` to archive/restore, `v` for
+active/all/archived visibility, and `?` for help.
 Moving into an `auto` column dispatches a run. `o` focuses the newest same-session run pane; `Enter`
 on an `awaiting` card confirms it through the same completion channel as `board done --outcome ok`.
 Below 60 columns the TUI switches to a single-column Compact layout with a tappable
@@ -98,11 +100,19 @@ board card edit ID [--title TITLE] [-d DESCRIPTION] [--clear-description] \
   [--space-ref REF|--clear-space-ref] [--space-cwd DIR|--clear-space-cwd] [--json]
 board card show ID [--json]
 board card list [--column COLUMN] [--visibility active|all|archived] [--json]
-board card move ID COLUMN [--destination-board ID|PATH] [--json]
+board card move ID COLUMN [--position ZERO_BASED_POSITION] [--destination-board ID|PATH] [--json]
+board card duplicate ID [--json]
 board card archive ID [--json]
 board card restore ID [--json]
 board card delete ID [--yes] [--json]
 ```
+
+`card duplicate` copies a card into a fresh idle card inserted directly below it: title gains
+` (copy)`, and description, harness, model, effort, permission mode, session, and space
+configuration are copied verbatim — but status is `idle` with no runs, comments, conversation id,
+or archive flag. The original is never modified, and the copy is never dispatched, even in an
+auto column; run it (or move it) explicitly like any idle card. In the TUI, `C` duplicates the
+focused card from the board or card detail.
 
 `card new` is retained as an alias for `card create`. A new card defaults to Pi; an omitted model or
 effort uses the harness default. `--harness codex` selects the built-in Codex adapter: models are
