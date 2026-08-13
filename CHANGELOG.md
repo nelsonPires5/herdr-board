@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- [#89](https://github.com/nelsonPires5/herdr-board/pull/89) fix: the promotion PR is now merged by a maintainer so the Release workflow can tag the green main commit.
+
 ## [0.14.0] - 2026-08-13
 
 ### Added
