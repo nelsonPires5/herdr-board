@@ -17,24 +17,6 @@ cargo build            # or ./scripts/build.sh for the release binary herdr's [[
 cargo run -p board-cli -- tui   # run the board locally
 ```
 
-## Architecture
-
-One `board` binary, five workspace crates: `board-core` (models, protocol, database, engine,
-prompts, config, harness adapters), `board-daemon` (orchestration and dispatch), `board-herdr`
-(Herdr socket client), `board-tui` (Ratatui application), and `board-cli` (the `board` binary).
-
-| Role | Responsibility |
-|---|---|
-| `board daemon` | Owns SQLite state, run queue, orchestration, workspace resolution, pane spawning, and status watching. |
-| `board tui` | Ratatui board opened inside a Herdr overlay/tab; talks to and auto-starts the daemon. |
-| `board <verb>` | CLI used by humans and dispatched agents (`comment`, `done`, `move`, and others). |
-
-The CLI and TUI share the typed `board_core::client::BoardClient`; only boardd touches SQLite.
-Design and protocol: [`docs/design.md`](docs/design.md) and [`docs/protocol.md`](docs/protocol.md);
-index: [`docs/README.md`](docs/README.md). `schema.sql` is the SQLite migration source of truth;
-`scripts/` holds build/install helpers; `e2e/` holds scenarios 01–32 against disposable Herdr
-sessions and workspaces.
-
 ## Gates that must pass
 
 Keep this tier green before opening a PR. The gate list has one maintained copy:

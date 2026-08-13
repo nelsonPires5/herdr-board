@@ -225,52 +225,6 @@ impl Db {
         Ok((self.require_card(card_id)?, self.get_run(run_id)?))
     }
 
-    /// Duplicate `id` into a fresh idle card inserted immediately below it.
-    ///
-    /// The copy inherits the full run configuration (title with a ` (copy)`
-    /// suffix, description, harness, model, effort, permission mode, session,
-    /// and space settings) but none of the execution state: status `idle`,
-    /// no `session_id`, no runs, comments, or archive flag, and fresh
-    /// timestamps. Duplication never enqueues a run — the caller owns whether
-    /// anything is dispatched — and the whole insert + renumber happens in one
-    /// transaction, so a failure leaves the column untouched.
-    pub fn duplicate_card(&self, id: i64) -> Result<Card> {
-        let card = self.require_card(id)?;
-        let tx = self.conn.unchecked_transaction()?;
-        let end: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(position)+1, 0) FROM cards WHERE column_id=?1",
-            params![card.column_id],
-            |r| r.get(0),
-        )?;
-        tx.execute(
-            "INSERT INTO cards
-             (board_id,column_id,position,title,description,harness,model,effort,permission_mode,
-              session,space_kind,space_ref,space_cwd,status,session_id)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'idle',NULL)",
-            params![
-                card.board_id,
-                card.column_id,
-                end,
-                format!("{} (copy)", card.title),
-                card.description,
-                card.harness,
-                card.model,
-                card.effort.map(|e| e.as_str()),
-                card.permission_mode,
-                card.session,
-                card.space_kind.as_str(),
-                card.space_ref,
-                card.space_cwd,
-            ],
-        )?;
-        let copy_id = tx.last_insert_rowid();
-        // Compacts the whole column: every card from `card.position + 1` on
-        // (including the fresh row at the end) shifts one slot down.
-        Self::place_card_in_column_tx(&tx, copy_id, card.column_id, Some(card.position + 1))?;
-        tx.commit()?;
-        self.require_card(copy_id)
-    }
-
     pub fn update_card(&self, p: &CardUpdateParams) -> Result<Card> {
         let mut c = self.require_card(p.id)?;
         if let Some(v) = &p.title {

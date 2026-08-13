@@ -11,16 +11,10 @@ pub(super) fn form_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
     }
 
     // `f`: toggle a card/column form between the centered sheet and fullscreen
-    // (mirrors the card-detail toggle). Bound only while focus sits on a picker
-    // (non-text) field: `f` is a literal character everywhere text is accepted,
-    // so the toggle must never steal it mid-typing.
+    // (mirrors the card-detail toggle).
     if k.code == KeyCode::Char('f')
         && k.modifiers.is_empty()
         && matches!(app.screen, Screen::CardForm | Screen::ColumnForm)
-        && app
-            .form
-            .as_ref()
-            .is_some_and(|form| form.focused_is_choice())
     {
         app.form_fullscreen = !app.form_fullscreen;
         return vec![];

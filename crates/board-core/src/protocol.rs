@@ -626,22 +626,6 @@ pub struct CardDetail {
     pub runs: Vec<Run>,
 }
 
-/// Display labels for a card's optionals, stamped daemon-side. The wire fields
-/// keep their `None`-means-default semantics; these are the resolved display
-/// values: the session's real name (or the `default session` marker when
-/// unset and unresolvable), and the effort / permission / model value or its
-/// `default …` marker.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CardLabels {
-    /// Resolved herdr session name, or `default session` when unset and
-    /// nothing resolves.
-    pub session: String,
-    pub effort: String,
-    pub permission: String,
-    /// `default model` when unset (harness default).
-    pub model: String,
-}
-
 // ---------------------------------------------------------------------------
 // comment / run methods
 // ---------------------------------------------------------------------------
@@ -851,10 +835,6 @@ pub struct SessionInfo {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionListResult {
     pub sessions: Vec<SessionInfo>,
-    /// The `default session` marker, daemon-sent so clients never format it
-    /// themselves. Missing on older serialized payloads, so default to empty.
-    #[serde(default)]
-    pub default_label: String,
 }
 
 // ---------------------------------------------------------------------------

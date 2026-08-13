@@ -311,11 +311,6 @@ pub(super) fn detail_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
                 Err(err) => app.set_toast(err.to_string(), true),
             }
         }
-        KeyCode::Char('C') => {
-            if let Some(id) = card_id {
-                return vec![Effect::CardDuplicate(id)];
-            }
-        }
         KeyCode::Char('c') => {
             if let Some(id) = card_id {
                 app.form = Some(Form::comment(id).returning_to(Screen::CardDetail));

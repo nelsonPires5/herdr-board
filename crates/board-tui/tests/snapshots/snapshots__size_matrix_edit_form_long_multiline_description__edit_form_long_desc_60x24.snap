@@ -4,7 +4,7 @@ expression: output
 ---
 " ◈ herdr-board ● 1 running [ Global ▾ ]  [ A ] [ All ] [ R ]"
 "────────────────────────────────────────────────────────────"
-"┌ Edit card  ·  Tab: field · Enter: save · Esc: cancel ────┐"
+"┌ Edit card  ·  f: fullscreen  ·  Tab: field · Enter: save ┐"
 "│┌ Task ─────────────────────────────────────────────────┐▲│"
 "││  title                                                │█│"
 "││Long description demo                                  │█│"

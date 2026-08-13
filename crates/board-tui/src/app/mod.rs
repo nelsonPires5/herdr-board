@@ -42,7 +42,6 @@ mod mouse;
 mod move_column;
 mod nav;
 mod picker;
-mod reorder_card;
 mod state;
 mod switcher;
 
@@ -50,8 +49,7 @@ pub use effect::Effect;
 pub use nav::clamp_selection;
 pub use state::{
     CardFilter, CommentHistoryView, Confirm, ConfirmPurpose, DetailScrollTarget, DragKind,
-    DragState, MoveColumnState, Picker, PickerPurpose, ReorderCardState, SwitcherLevel,
-    SwitcherState, Toast,
+    DragState, MoveColumnState, Picker, PickerPurpose, SwitcherLevel, SwitcherState, Toast,
 };
 pub use switcher::enter_boards_level;
 
@@ -91,8 +89,6 @@ pub enum Screen {
     Picker,
     /// `M` mini-mode: ←/→ reorder the focused column, Enter commits, Esc cancels.
     MoveColumn,
-    /// `O` mini-mode: j/k reorder the selected card within its column, Enter commits, Esc cancels.
-    ReorderCard,
     Confirm,
     Help,
     /// Compact-only column/board switcher sheet.
@@ -160,7 +156,6 @@ pub struct App {
     pub picker: Option<Picker>,
     pub confirm: Option<Confirm>,
     pub move_column: Option<MoveColumnState>,
-    pub reorder_card: Option<ReorderCardState>,
     pub drag: Option<DragState>,
     pub toast: Option<Toast>,
     pub should_quit: bool,
@@ -215,7 +210,6 @@ impl App {
             picker: None,
             confirm: None,
             move_column: None,
-            reorder_card: None,
             drag: None,
             toast: None,
             should_quit: false,
@@ -248,7 +242,6 @@ impl App {
         self.picker = None;
         self.confirm = None;
         self.move_column = None;
-        self.reorder_card = None;
         self.drag = None;
         self.switcher = None;
         self.help_return_to = Screen::Board;
@@ -321,15 +314,8 @@ impl App {
     }
 
     /// Cards of a column, in board order.
-    ///
-    /// With the `O` reorder mode active on this column, the staged position is
-    /// applied as a pure permutation at read time — `app.board` stays the
-    /// daemon's read-only snapshot, so every index-based read (selection,
-    /// rendering, hit-testing) sees the staged order and a mid-mode refresh
-    /// cannot silently discard it.
     pub fn cards_of(&self, col_id: i64) -> Vec<&board_core::model::Card> {
-        let mut cards: Vec<&board_core::model::Card> = self
-            .board
+        self.board
             .cards
             .iter()
             .filter(|c| c.column_id == col_id)
@@ -338,17 +324,7 @@ impl App {
                 CardFilter::All => true,
                 CardFilter::Archived => c.archived_at.is_some(),
             })
-            .collect();
-        if let Some(state) = &self.reorder_card {
-            if state.column_id == col_id {
-                if let Some(from) = cards.iter().position(|c| c.id == state.card_id) {
-                    let card = cards.remove(from);
-                    let to = state.staged_index.min(cards.len());
-                    cards.insert(to, card);
-                }
-            }
-        }
-        cards
+            .collect()
     }
 
     pub fn selected_card_id(&self) -> Option<i64> {
@@ -429,7 +405,6 @@ fn on_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
         Screen::CardForm | Screen::ColumnForm => forms::form_key(app, k),
         Screen::Picker => picker::picker_key(app, k),
         Screen::MoveColumn => move_column::move_column_key(app, k),
-        Screen::ReorderCard => reorder_card::reorder_card_key(app, k),
         Screen::Confirm => confirm::confirm_key(app, k),
         Screen::Help => help::help_key(app, k),
         Screen::Switcher => switcher::switcher_key(app, k),

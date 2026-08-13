@@ -56,7 +56,7 @@ impl Form {
         caps: Option<HarnessCapabilities>,
         harnesses: Option<Vec<String>>,
         spaces: Option<Vec<SpaceInfo>>,
-        sessions: Option<(Vec<SessionInfo>, String)>,
+        sessions: Option<Vec<SessionInfo>>,
     ) {
         self.caps = caps;
         if let Some(h) = harnesses {
@@ -66,9 +66,8 @@ impl Form {
             if let Some(sp) = spaces {
                 self.spaces = sp;
             }
-            if let Some((se, default_label)) = sessions {
+            if let Some(se) = sessions {
                 self.sessions = se;
-                self.session_default_label = Some(default_label);
             }
         }
         self.rebuild_fields();
@@ -118,7 +117,6 @@ impl Form {
             &self.harnesses,
             &self.spaces,
             &self.sessions,
-            self.session_default_label.as_deref(),
         );
         if self.focus >= self.fields.len() {
             self.focus = 0;

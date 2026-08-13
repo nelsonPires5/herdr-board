@@ -146,7 +146,7 @@ fn column_override_permission_menu_never_offers_a_value_the_validator_rejects() 
         "catalog modes are still offered: {modes:?}"
     );
     for mode in &modes {
-        if mode == "default permission" {
+        if mode == "(default)" {
             continue;
         }
         assert!(
@@ -173,7 +173,7 @@ fn card_selectors_fall_back_to_default_capabilities_per_harness() {
     assert_eq!(
         choice_labels(&pi, FieldId::Effort),
         vec![
-            "default effort",
+            "(default)",
             "off",
             "minimal",
             "low",
@@ -200,7 +200,7 @@ fn card_selectors_fall_back_to_default_capabilities_per_harness() {
     claude.apply_options(None, None, None, None);
     assert_eq!(
         choice_labels(&claude, FieldId::Effort),
-        vec!["default effort", "low", "medium", "high", "xhigh", "max"]
+        vec!["(default)", "low", "medium", "high", "xhigh", "max"]
     );
     assert!(claude.field_visible(idx_of(&claude, FieldId::Permission)));
     assert_eq!(
@@ -209,7 +209,7 @@ fn card_selectors_fall_back_to_default_capabilities_per_harness() {
             .permission_modes
             .iter()
             .map(String::as_str)
-            .fold(vec!["default permission"], |mut acc, m| {
+            .fold(vec!["(default)"], |mut acc, m| {
                 acc.push(m);
                 acc
             })
@@ -227,7 +227,7 @@ fn card_selectors_fall_back_to_default_capabilities_per_harness() {
     assert_eq!(
         choice_labels(&unknown, FieldId::Effort),
         vec![
-            "default effort",
+            "(default)",
             "off",
             "minimal",
             "low",
@@ -249,9 +249,6 @@ fn card_selectors_fall_back_to_default_capabilities_per_harness() {
             default_efforts: vec![Effort::Low],
             permission_modes: vec!["ask".into()],
             resume: Default::default(),
-            default_effort_label: board_core::labels::default_effort_label().to_string(),
-            default_permission_label: board_core::labels::default_permission_label().to_string(),
-            default_model_label: board_core::labels::default_model_label().to_string(),
         }),
         None,
         None,
@@ -260,7 +257,7 @@ fn card_selectors_fall_back_to_default_capabilities_per_harness() {
     assert!(unknown.field_visible(idx_of(&unknown, FieldId::Permission)));
     assert_eq!(
         choice_labels(&unknown, FieldId::Permission),
-        vec!["default permission", "ask"]
+        vec!["(default)", "ask"]
     );
 }
 
@@ -276,7 +273,7 @@ fn card_codex_selectors_show_full_ladder_and_approval_modes() {
     assert_eq!(
         choice_labels(&form, FieldId::Effort),
         vec![
-            "default effort".to_string(),
+            "(default)".to_string(),
             "off".to_string(),
             "minimal".to_string(),
             "low".to_string(),
@@ -294,7 +291,7 @@ fn card_codex_selectors_show_full_ladder_and_approval_modes() {
     assert_eq!(
         choice_labels(&form, FieldId::Permission),
         vec![
-            "default permission".to_string(),
+            "(default)".to_string(),
             "Ask for approval".to_string(),
             "Approve for me".to_string(),
             "Full access".to_string(),
@@ -331,7 +328,7 @@ fn card_codex_default_capabilities_before_fetch() {
     assert_eq!(
         choice_labels(&form, FieldId::Effort),
         vec![
-            "default effort".to_string(),
+            "(default)".to_string(),
             "off".to_string(),
             "minimal".to_string(),
             "low".to_string(),
@@ -345,7 +342,7 @@ fn card_codex_default_capabilities_before_fetch() {
     assert_eq!(
         choice_labels(&form, FieldId::Permission),
         vec![
-            "default permission".to_string(),
+            "(default)".to_string(),
             "Ask for approval".to_string(),
             "Approve for me".to_string(),
             "Full access".to_string(),
@@ -366,7 +363,7 @@ fn card_opencode_selectors_show_ladder_and_permission_modes() {
     assert_eq!(
         choice_labels(&form, FieldId::Effort),
         vec![
-            "default effort".to_string(),
+            "(default)".to_string(),
             "off".to_string(),
             "minimal".to_string(),
             "low".to_string(),
@@ -384,7 +381,7 @@ fn card_opencode_selectors_show_ladder_and_permission_modes() {
     assert_eq!(
         choice_labels(&form, FieldId::Permission),
         vec![
-            "default permission".to_string(),
+            "(default)".to_string(),
             "default".to_string(),
             "auto-approve".to_string(),
         ]
@@ -422,7 +419,7 @@ fn card_opencode_known_model_efforts_follow_the_selected_model() {
     form.on_model_changed();
     assert_eq!(
         choice_labels(&form, FieldId::Effort),
-        vec!["default effort".to_string()],
+        vec!["(default)".to_string()],
         "selecting variant-less nemotron offers no effort, only the harness default"
     );
 
@@ -431,7 +428,7 @@ fn card_opencode_known_model_efforts_follow_the_selected_model() {
     assert_eq!(
         choice_labels(&form, FieldId::Effort),
         vec![
-            "default effort".to_string(),
+            "(default)".to_string(),
             "low".to_string(),
             "high".to_string(),
             "max".to_string(),
@@ -444,7 +441,7 @@ fn card_opencode_known_model_efforts_follow_the_selected_model() {
     assert_eq!(
         choice_labels(&form, FieldId::Effort),
         vec![
-            "default effort".to_string(),
+            "(default)".to_string(),
             "off".to_string(),
             "minimal".to_string(),
             "low".to_string(),
@@ -469,7 +466,7 @@ fn card_opencode_default_capabilities_before_fetch() {
     assert_eq!(
         choice_labels(&form, FieldId::Effort),
         vec![
-            "default effort".to_string(),
+            "(default)".to_string(),
             "off".to_string(),
             "minimal".to_string(),
             "low".to_string(),
@@ -483,7 +480,7 @@ fn card_opencode_default_capabilities_before_fetch() {
     assert_eq!(
         choice_labels(&form, FieldId::Permission),
         vec![
-            "default permission".to_string(),
+            "(default)".to_string(),
             "default".to_string(),
             "auto-approve".to_string(),
         ]
@@ -502,7 +499,7 @@ fn column_opencode_override_selectors_show_ladder_and_permission_modes() {
     assert_eq!(
         choice_labels(&form, FieldId::EffortOverride),
         vec![
-            "default effort".to_string(),
+            "(default)".to_string(),
             "off".to_string(),
             "minimal".to_string(),
             "low".to_string(),
@@ -519,7 +516,7 @@ fn column_opencode_override_selectors_show_ladder_and_permission_modes() {
     assert_eq!(
         choice_labels(&form, FieldId::PermissionOverride),
         vec![
-            "default permission".to_string(),
+            "(default)".to_string(),
             "default".to_string(),
             "auto-approve".to_string(),
         ]
@@ -554,7 +551,7 @@ fn column_codex_override_selectors_show_ladder_and_approval() {
     assert_eq!(
         choice_labels(&form, FieldId::EffortOverride),
         vec![
-            "default effort".to_string(),
+            "(default)".to_string(),
             "off".to_string(),
             "minimal".to_string(),
             "low".to_string(),
@@ -571,7 +568,7 @@ fn column_codex_override_selectors_show_ladder_and_approval() {
     assert_eq!(
         choice_labels(&form, FieldId::PermissionOverride),
         vec![
-            "default permission".to_string(),
+            "(default)".to_string(),
             "Ask for approval".to_string(),
             "Approve for me".to_string(),
             "Full access".to_string(),
@@ -652,18 +649,12 @@ fn column_effort_override_follows_catalog() {
         default_efforts: vec![Effort::Low],
         permission_modes: vec![],
         resume: Default::default(),
-        default_effort_label: board_core::labels::default_effort_label().to_string(),
-        default_permission_label: board_core::labels::default_permission_label().to_string(),
-        default_model_label: board_core::labels::default_model_label().to_string(),
     };
     let mut form = Form::column_create(&[]);
     form.apply_options(Some(caps), None, None, None);
     let labels = choice_labels(&form, FieldId::EffortOverride);
-    // `default effort` plus the single declared effort.
-    assert_eq!(
-        labels,
-        vec!["default effort".to_string(), "low".to_string()]
-    );
+    // `(default)` plus the single declared effort.
+    assert_eq!(labels, vec!["(default)".to_string(), "low".to_string()]);
 }
 
 #[test]
@@ -687,9 +678,6 @@ fn column_cascading_resets_invalid_effort_on_harness_change() {
         default_efforts: vec![Effort::Low],
         permission_modes: vec!["auto".into()],
         resume: Default::default(),
-        default_effort_label: board_core::labels::default_effort_label().to_string(),
-        default_permission_label: board_core::labels::default_permission_label().to_string(),
-        default_model_label: board_core::labels::default_model_label().to_string(),
     };
     form.apply_options(Some(caps), None, None, None);
     let after = choice_labels(&form, FieldId::EffortOverride);

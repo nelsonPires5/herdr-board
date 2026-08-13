@@ -21,7 +21,6 @@ pub mod config;
 pub mod db;
 pub mod engine;
 pub mod harness;
-pub mod labels;
 pub mod launch;
 pub mod model;
 pub mod opencode_catalog;

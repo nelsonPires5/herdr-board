@@ -169,34 +169,11 @@ pub struct MoveColumnState {
     pub staged_index: usize,
 }
 
-/// In-progress "reorder card" mini-mode state (entered with `O`).
-///
-/// Like [`MoveColumnState`], the staged position lives **here**, never in
-/// `App::board`: `App::cards_of` applies it as a read-time permutation, so a
-/// refresh tick landing mid-mode cannot silently discard the staged order.
-pub struct ReorderCardState {
-    pub card_id: i64,
-    pub column_id: i64,
-    /// Where the card sat when `O` was pressed — where `Esc` puts it back.
-    pub original_index: usize,
-    /// Where `j`/`k` have currently staged it. `Enter` commits exactly this as
-    /// the `card.move` position within the same column.
-    pub staged_index: usize,
-}
-
 /// Mouse drag in progress.
 pub struct DragState {
     pub kind: DragKind,
     pub from_col: usize,
     pub hover_col: usize,
-    /// For a card drag: the card's index within `from_col` when the drag
-    /// began, so a drop back at the origin is a no-op. `None` when the card
-    /// is no longer in that column (or for a column drag).
-    pub from_card: Option<usize>,
-    /// For a card drag: the card index currently hovered in the drag's
-    /// column — the position a same-column drop would land at. `None` while
-    /// hovering empty space or another column.
-    pub hover_card: Option<usize>,
 }
 
 #[derive(Clone, Copy)]

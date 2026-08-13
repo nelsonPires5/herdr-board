@@ -2,9 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::{
-    AwaitingReason, CardLabels, CardStatus, Effort, RunOutcome, SpaceKind, Trigger,
-};
+use crate::protocol::{AwaitingReason, CardStatus, Effort, RunOutcome, SpaceKind, Trigger};
 
 /// One independent board pipeline. `scope_path=None` is the preserved Global board.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,11 +80,6 @@ pub struct Card {
     pub updated_at: String,
     /// When the card was archived; `None` means it is active on the board.
     pub archived_at: Option<String>,
-    /// Read-only display labels stamped by the daemon (ready strings; the
-    /// clients render them verbatim). Populated on read; never round-tripped.
-    /// Missing on older serialized payloads, so default to empty.
-    #[serde(default)]
-    pub labels: CardLabels,
 }
 
 /// A timestamped note; author is `user`, `agent:<run_id>`, or `system`.
