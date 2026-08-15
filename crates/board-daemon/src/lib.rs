@@ -264,6 +264,15 @@ fn spawn_signal_handler(d: Arc<Daemon>) {
 /// fails, remove the half-created file so a later start is not blocked by a
 /// stale socket, then surface the security error. `secure` is injectable so
 /// tests can force a permission-change failure deterministically.
+///
+/// The bind→chmod window is deliberately left un-temporarized: (1) the span is
+/// fully synchronous with no await points, so no other task can observe or
+/// connect through the socket mid-window; (2) an AF_UNIX `connect` requires
+/// write permission on the socket file, and under the default directory umask
+/// (0755) group/other lack it; (3) any chmod failure is fail-closed — the
+/// half-created file is removed and startup errors. Do NOT "harden" this by
+/// binding a temp name and renaming it into place: that would reopen a window
+/// where the well-known path does not yet point at the secured file.
 fn bind_secured_socket(
     socket_path: &Path,
     secure: impl FnOnce(&Path) -> std::io::Result<()>,
