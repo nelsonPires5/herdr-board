@@ -209,15 +209,9 @@ async fn async_main(db_path: PathBuf, socket_path: PathBuf) -> anyhow::Result<()
         std::fs::create_dir_all(parent)
             .with_context(|| format!("cannot create the boardd socket directory {parent:?}"))?;
     }
-    let listener = tokio::net::UnixListener::bind(&socket_path)
-        .with_context(|| format!("cannot bind the boardd socket {socket_path:?}"))?;
-    if let Err(error) =
-        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
-    {
-        let _ = std::fs::remove_file(&socket_path);
-        return Err(error)
-            .with_context(|| format!("cannot secure the boardd socket {socket_path:?}"));
-    }
+    let listener = bind_secured_socket(&socket_path, |path| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+    })?;
     tracing::info!("boardd listening");
 
     server::serve(daemon.clone(), listener).await;
@@ -264,4 +258,52 @@ fn spawn_signal_handler(d: Arc<Daemon>) {
         }
         d.trigger_shutdown();
     });
+}
+
+/// Bind the daemon socket and make it owner-only. When securing the socket
+/// fails, remove the half-created file so a later start is not blocked by a
+/// stale socket, then surface the security error. `secure` is injectable so
+/// tests can force a permission-change failure deterministically.
+fn bind_secured_socket(
+    socket_path: &Path,
+    secure: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> anyhow::Result<tokio::net::UnixListener> {
+    let listener = tokio::net::UnixListener::bind(socket_path)
+        .with_context(|| format!("cannot bind the boardd socket {socket_path:?}"))?;
+    if let Err(error) = secure(socket_path) {
+        let _ = std::fs::remove_file(socket_path);
+        return Err(error)
+            .with_context(|| format!("cannot secure the boardd socket {socket_path:?}"));
+    }
+    Ok(listener)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn failed_socket_securing_removes_the_partial_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("boardd.sock");
+
+        let error = bind_secured_socket(&socket_path, |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected chmod failure",
+            ))
+        })
+        .expect_err("a failed security step must fail startup");
+
+        assert!(
+            error
+                .to_string()
+                .contains("cannot secure the boardd socket"),
+            "error must name the security step: {error}"
+        );
+        assert!(
+            !socket_path.exists(),
+            "the half-created socket must be removed after a security failure"
+        );
+    }
 }
