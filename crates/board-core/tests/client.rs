@@ -1,7 +1,10 @@
 use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixListener;
+use std::sync::mpsc;
 
-use board_core::client::BoardClient;
-use board_core::protocol::Event;
+use board_core::client::{BoardClient, UnixClient};
+use board_core::protocol::{BoardChangedReason, Event};
 use serde_json::{json, Value};
 
 struct RecordingClient {
@@ -99,6 +102,79 @@ fn typed_catalog_and_run_methods_preserve_wire_v1_params_and_results() {
             ("run.retry".into(), json!({ "card_id": 42 })),
         ]
     );
+}
+
+#[test]
+fn subscribe_waits_for_the_daemon_acknowledgement_before_returning() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("boardd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+
+    let (ack_release_tx, ack_release_rx) = mpsc::channel::<()>();
+    let (returned_tx, returned_rx) =
+        mpsc::channel::<anyhow::Result<Box<dyn Iterator<Item = Event> + Send>>>();
+
+    // Daemon side: accept the client's handshake connection first, then the
+    // dedicated subscription socket, hold the acknowledgement until the test
+    // releases it, and stream one event afterwards.
+    let daemon = std::thread::spawn(move || {
+        let (_handshake, _) = listener.accept().unwrap();
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        assert!(
+            line.contains("events.subscribe"),
+            "expected the subscribe request, got: {line}"
+        );
+        ack_release_rx.recv().unwrap();
+        writeln!(stream, r#"{{"id":"sub","result":{{"subscribed":true}}}}"#).unwrap();
+        writeln!(
+            stream,
+            "{}",
+            serde_json::to_string(&Event::BoardChanged {
+                reason: BoardChangedReason::CardUpdated,
+                board_id: Some(2),
+                card_id: Some(7),
+                column_id: Some(3),
+            })
+            .unwrap()
+        )
+        .unwrap();
+    });
+
+    let client = UnixClient::connect(&socket).unwrap();
+    let subscriber = std::thread::spawn(move || {
+        let mut client = client;
+        returned_tx.send(client.subscribe()).unwrap();
+    });
+
+    // The subscription must not be observable before the daemon acknowledges
+    // it: the reconnect path refetches the snapshot as soon as subscribe
+    // returns, so an early return would open a missed-mutation window.
+    assert!(
+        returned_rx.try_recv().is_err(),
+        "subscribe returned before the daemon acknowledged the subscription"
+    );
+
+    ack_release_tx.send(()).unwrap();
+    let mut events = returned_rx
+        .recv()
+        .expect("subscribe must return after the ack")
+        .expect("subscribe must succeed after the ack");
+    assert_eq!(
+        events.next(),
+        Some(Event::BoardChanged {
+            reason: BoardChangedReason::CardUpdated,
+            board_id: Some(2),
+            card_id: Some(7),
+            column_id: Some(3),
+        }),
+        "events written after the ack must be delivered"
+    );
+
+    daemon.join().unwrap();
+    subscriber.join().unwrap();
 }
 
 fn action_result() -> Value {

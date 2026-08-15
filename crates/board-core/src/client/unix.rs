@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::protocol::{Event, Request};
+use crate::protocol::{Event, Request, Response};
 
 use super::BoardClient;
 
@@ -153,7 +153,7 @@ impl BoardClient for UnixClient {
     fn subscribe(&mut self) -> anyhow::Result<Box<dyn Iterator<Item = Event> + Send>> {
         let stream = UnixStream::connect(&self.path)?;
         let mut writer = stream.try_clone()?;
-        let reader = BufReader::new(stream);
+        let mut reader = BufReader::new(stream);
         let req = Request {
             id: "sub".to_string(),
             method: "events.subscribe".to_string(),
@@ -163,6 +163,26 @@ impl BoardClient for UnixClient {
         line.push('\n');
         writer.write_all(line.as_bytes())?;
         writer.flush()?;
+        // Wait for the daemon's subscription acknowledgement before returning.
+        // The TUI refetches the full snapshot as soon as a reconnected
+        // subscription is ready; returning before the daemon confirms the
+        // event receiver is active could miss a mutation between that snapshot
+        // fetch and the first delivered event.
+        let mut ack_line = String::new();
+        if reader.read_line(&mut ack_line)? == 0 {
+            anyhow::bail!("subscription closed before the acknowledgement");
+        }
+        let ack: Response = serde_json::from_str(ack_line.trim_end())
+            .map_err(|e| anyhow::anyhow!("invalid subscription acknowledgement: {e}"))?;
+        let subscribed = ack
+            .result
+            .as_ref()
+            .and_then(|result| result.get("subscribed"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if ack.error.is_some() || !subscribed {
+            anyhow::bail!("daemon did not acknowledge the subscription (subscribed={subscribed})");
+        }
         Ok(Box::new(EventStream { reader }))
     }
 
