@@ -42,7 +42,7 @@ protocol version.
 ## Herdr compatibility gate
 
 boardd supports **exactly Herdr 0.8.0 / protocol 19**. The board protocol remains v1 and the
-SQLite schema remains v13; neither version is the upstream Herdr socket contract. Because the
+SQLite schema remains v14; neither version is the upstream Herdr socket contract. Because the
 daemon opens a fresh Herdr request connection per operation, the compatibility probe is repeated
 at each operation boundary rather than treated as a one-time startup check:
 
@@ -116,14 +116,56 @@ to diagnostics.
 - `daemon.status` → `{version, db_path, herdr_connected: bool, active_runs: int, queued_runs: int}`
 - `daemon.stop` → `{stopping:true}` (graceful: cancels nothing; running panes keep running, runs are re-adopted on next start via herdr pane liveness check). The CLI stop command treats this as an acknowledgement, not completion: it returns success only after the listener disappears. RPC errors, a listener that remains live past the bounded wait, and socket-path replacement are errors and preserve the socket. If the initial connect fails, a stale socket is removed only after a fresh failed connect and matching device/inode/socket-type identity checks; a replacement path is preserved. `board daemon stop --json` reports that outcome as `{"stopped": bool, "was_running": bool}` — `was_running:false` is the "nothing to stop" success, distinguishable from a real stop without parsing text. The human line is unchanged (`boardd stopped` / `boardd not running`).
 
-### board / columns
+### projects / boards
 
-Boards are independent pipelines keyed by canonical path. `Global` is board `id=1` with
-`scope_path:null`; old requests that omit `board_id` continue to target it.
+Boards live inside **projects**: a project is a named collection of boards identified by a
+canonical filesystem path (a Git root or a plain existing directory). `Global` is the special
+project `id=1` with `scope_path:null`; it preserves the pre-v14 flat boards. Every project's
+first board is named `main` (the v13→v14 migration renamed each existing scoped board to `main`
+inside its new project). Board ids remain **global stable selectors**: a board is identified by
+its id across every project, while its name is unique per project (case-insensitive). `Board`
+carries `{id, project_id, name, scope_path}` — `scope_path` is the owning project's canonical
+path, denormalized for wire compatibility; `None` means the Global project.
 
-- `board.open {scope_path}` → `BoardSnapshot`; idempotently gets/creates the path board, seeding a
-  new board with exactly one manual `Todo` column.
-- `board.list {}` → `{boards:[Board…]}`; `Global` first, then scoped boards ordered by full path.
+Selection and recency are persisted context, touched **only** by the explicit open/create/select
+methods below — queries, card moves, and `board.open` never change them. The selected project
+prevails over the current directory; when no selection exists yet (right after migration), the
+first board-aware command bootstraps it from the current directory.
+
+- `project.list {}` → `{projects:[ProjectInfo…], selected_project_id?, recent_project_ids:[…]}` —
+  everything the project/board pickers need in one call. `ProjectInfo` =
+  `{project:{id,name,scope_path}, boards:[Board…], selected_board_id?, recent_board_ids:[…]}`.
+  Projects are ordered by folder name with `Global` last; `recent_project_ids` /
+  `recent_board_ids` are most-recent-first, capped at 3, excluding the selected project/board.
+- `project.get {scope_path}` → `{project, boards:[Board…], selected_board?}` — show one project
+  without side effects.
+- `project.open {scope_path}` → `ProjectOpenResult` = `{project, board: BoardSnapshot}`;
+  idempotently gets/creates the path project (seeding its first board `main` with exactly one
+  manual `Todo` column), selects project + board, and updates recency. The scope path must be an
+  existing directory.
+- `project.create {scope_path}` → `ProjectOpenResult`; creates the project for an **existing**
+  directory (never creates directories; a missing path is refused), seeds `main`, selects it, and
+  updates recency. Creating an already-known project is refused — the error points at
+  `board project select`.
+- `project.select {scope_path, board_id?}` → `ProjectOpenResult`; selects the project and updates
+  recency, optionally choosing one of its boards by id (omitted = the project's selected board, or
+  its first board `main`). An unknown project fails with the `board project create` hint; a
+  `board_id` from another project is error 3.
+- `project.selected {}` → `{project?, board?: BoardSnapshot}` — the persisted context, or both
+  `null` when no selection exists yet.
+- `board.create {project_id, name}` → `BoardSnapshot`; creates a named board inside one project
+  (name unique case-insensitively within the project), seeds it with the `Todo` column,
+  auto-selects it (its project becomes the selected project), and updates recency.
+- `board.select {board_id}` → `BoardSnapshot`; persists this board — and its project — as the
+  context and updates recency.
+- `board.list {project_id?}` → `{boards:[Board…]}`; omitted `project_id` preserves the legacy
+  listing of **every** board across all projects (Global's `main` first, then ordered by full
+  path); with it, only that project's boards.
+- `board.open {scope_path}` → `BoardSnapshot`; keeps open-or-create semantics and its
+  `BoardSnapshot` output contract, but now resolves the path project's **selected-or-main**
+  board — with **no** selection/recency side effects (`board.project open`/`create`/`select` are
+  the explicit selection methods).
+- `board.rename {board_id, name}` → `Board`; renames a board (the id stays stable).
 - `board.get {board_id?}` → `{board:{id,name,scope_path}, columns:[Column…ordered], cards:[Card…], active_runs:[{card_id,started_at}…]}`.
   Omitted `board_id` means `Global`. `board.open` returns the same snapshot shape. Both `board.get`
   and `board.open` include **all active and archived cards** in `cards`, so the TUI can filter
@@ -191,7 +233,7 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
       canonical form is ever stored.
   - creating directly into an `auto` column dispatches immediately (same as move)
   - In the legacy v1→v2 migration, `cwd`/`worktree` kinds and `worktree_base` were removed;
-    current schema v13 treats worktree isolation as the agent's job via prompt instructions, not a
+    current schema v14 treats worktree isolation as the agent's job via prompt instructions, not a
     board concept. Existing databases migrate those cards to `workspace` (best effort,
     `space_ref` kept).
 - `card.update {id, …subset}` → `Card`; nullable update fields use the tri-state encoding below. Harness/model/effort/permission/session/space fields are refused while the card has an open run (`queued|running|blocked|awaiting`). Title/description remain editable; `done` is not open.
@@ -206,7 +248,9 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
   `board_id`/`column_id` are moved atomically (both columns recompacted) after a blocking sanity
   check (merged effective capabilities + session resolve) — incompatible settings/sessions abort
   the move with an explicit error. Omitted (or equal to the card's board) keeps the historical
-  intra-board move. **Same-column reorder:** when `column_id` equals the card's current column,
+  intra-board move. A cross-board transfer may target a board of **another project** (the CLI
+  exposes this as `card move --to-project PATH --to-board NAME|ID`); the destination column is
+  resolved in the destination board and the transfer never touches selection or recency. **Same-column reorder:** when `column_id` equals the card's current column,
   the move is a pure reorder — `position` (zero-based, clamped, appended when omitted) places the
   card inside its column and every card's position is recompacted contiguously. A same-column
   reorder never enqueues, never changes status (open runs included), and never triggers the
@@ -516,7 +560,7 @@ Coarse by design — the TUI refetches only its selected `board.get {board_id}` 
     - harness session: resume `card.session_id` unless `column.fresh_session` or none. Pi mint/resume use exact `--session-id`; Pi retry forks old → a newly minted target id. Claude retains mint/`--resume`/`--fork-session`. Codex Mint takes **no session flag** (it mints its own thread id and the enqueued run persists `session_id=NULL` — the board never invents a uuid); codex resume/fork are `resume <id>` / `fork <id>` subcommands appended last to the startup argv. OpenCode Mint also takes **no session flag** (the TUI mints its own `ses_…` id and the enqueued run persists `session_id=NULL`); opencode resume/fork are trailing session flags `-s <id>` / `-s <id> --fork`. Existing cards keep their stored harness/session.
    - **preflight before workspace mutation:** `ping` the selected socket and require exact Herdr 0.8.0 / protocol 19. Only then resolve `workspace` by id/case-insensitive label, or resolve `new_workspace` by label and, if absent, call `workspace.create {label,cwd,focus:false}`. Read the workspace cwd from its pane snapshot; snapshot failure or missing live cwd fails dispatch, never falling back to process cwd or a stale snapshot. When this dispatch itself created the workspace, its exact initial tab/root pane ids travel as a one-shot bootstrap hint: the first card-tab allocation verifies them (tab exists in that workspace, root is the tab's sole pane, root carries no agent), renames the tab to `card-<id>` and the root to `card-<id>-anchor`, and splits the run child from that root — so a daemon-created workspace has no unused initial tab. Any verification mismatch falls back to a fresh `tab.create` and never touches that root; reused/existing/user workspaces never carry a hint.
    - **preflight again at the spawner boundary:** this is the spawner's first protocol call, before placement, managed launch, or the configured runner.
-   - build the run-child env `{BOARD_CARD_ID,BOARD_RUN_ID,BOARD_SOCKET,BOARD_BIN}` plus configured-harness prompt env. Current schema v13 runs place each card in a stable short `card-<id>` tab whose root is a shell anchor labeled `card-<id>-anchor`. The anchor receives only stable card identity; every run child is created by `pane.split` from it with the complete run cwd/env. Promotion persists the exact anchor id with the run **except** for managed launches, whose anchor is closed after a successful launch (see below), leaving the tab with exactly the harness pane and a NULL persisted anchor. The daemon reuses only exact tab/anchor identities reconstructed from the newest matching durable panes in the same session/workspace; labels are display metadata, never ownership. A renamed anchor remains selected by identity; a closed anchor is recreated only by splitting a currently live durable board child, otherwise a fresh tab is created. Same-conversation reuse eligibility is checked **before** anchor selection, so an anchorless managed tab still reuses its exact prior harness pane on the next hop. The initial split targets ratio `0.40` and clamps it on narrow terminals so the anchor remains reusable; later splits use layout geometry. Both fresh and recovered placement fail closed unless the live layout can provide a 24x6 anchor and a 12x8 child. Concurrent first allocations for one `(session,workspace,card)` key are serialized; if multiple historical panes are live, newest run id wins. Legacy rows retain the historical `kanban` lookup. Thus cwd/env/placement exist **before** launch; pane-first `agent.start` receives none of them and never receives the anchor pane id.
+   - build the run-child env `{BOARD_CARD_ID,BOARD_RUN_ID,BOARD_SOCKET,BOARD_BIN}` plus configured-harness prompt env. Current schema v14 runs place each card in a stable short `card-<id>` tab whose root is a shell anchor labeled `card-<id>-anchor`. The anchor receives only stable card identity; every run child is created by `pane.split` from it with the complete run cwd/env. Promotion persists the exact anchor id with the run **except** for managed launches, whose anchor is closed after a successful launch (see below), leaving the tab with exactly the harness pane and a NULL persisted anchor. The daemon reuses only exact tab/anchor identities reconstructed from the newest matching durable panes in the same session/workspace; labels are display metadata, never ownership. A renamed anchor remains selected by identity; a closed anchor is recreated only by splitting a currently live durable board child, otherwise a fresh tab is created. Same-conversation reuse eligibility is checked **before** anchor selection, so an anchorless managed tab still reuses its exact prior harness pane on the next hop. The initial split targets ratio `0.40` and clamps it on narrow terminals so the anchor remains reusable; later splits use layout geometry. Both fresh and recovered placement fail closed unless the live layout can provide a 24x6 anchor and a 12x8 child. Concurrent first allocations for one `(session,workspace,card)` key are serialized; if multiple historical panes are live, newest run id wins. Legacy rows retain the historical `kanban` lookup. Thus cwd/env/placement exist **before** launch; pane-first `agent.start` receives none of them and never receives the anchor pane id.
    - managed Pi/Claude: create a mode-`0600` file containing the snapshotted system prompt; call `agent.start {name,kind,pane_id,args,timeout_ms:30000}` on the newly split child with prompt-free startup args and the harness-specific file flag. A typed `agent_pane_busy` response is treated as a bounded transient on that same child: retry the exact same request on the same pane at most five times, with 100ms backoff doubling per retry (100/200/400/800/1600ms — long enough for a slow login shell to reach its prompt); do not split or allocate another pane. Persistent busy is terminal and follows child-only cleanup, leaving the anchor. This is distinct from `pane_not_found`, which is a placement race: close the child when present, rediscover from `tab.list`, and retry complete placement once. Poll `agent.get {target:pane_id}` for at most 30s until `interactive_ready && !launch_pending`; then call `agent.prompt {target:pane_id,text:prompt_snapshot}`. Remove the prompt file before returning, including error paths.
     - managed self-minting harnesses (codex and opencode): the same `agent.start` readiness contract **without any prompt file** — neither harness has a system-prompt-file equivalent, so startup argv carries neither system nor task text and there is no `--` delimiter. After readiness the daemon runs a **bounded post-launch capture** on the same gated connection: it polls `agent.get` (at most 5 probes, 10s wall-clock cap) for `AgentInfo.agent_session`, and accepts only an `id`-kind reference owned by the expected agent with a non-empty `value` — for codex the source is deliberately unconstrained, while opencode pins the exact source the current Herdr opencode integration reports. The capture is ordered per harness: for **codex** it runs before the prompt (the integration reports its thread id as soon as the CLI is interactive); for **opencode** it runs **after** the prompt — real OpenCode mints its `ses_…` id and reports `agent_session` only once the first `agent.prompt` lands, so a pre-prompt capture would lose the id, while a prompt-less opencode rescue reduces to capture-after-readiness. A missing, wrong-agent, wrong-source, `path`-kind, or blank report degrades to `None` with a warning and the launch **continues**: basic execution works, but the run keeps its enqueue-time `NULL` id, so same-conversation reuse hops and `run.focus` rescue fail closed (no recorded id). A captured id is persisted atomically **with** the run promotion (run + card in one transaction), so a cancel-during-spawn that ends the run discards the capture together with the handle; a capture racing promotion writes through the same single-row UoW and fails closed if the run is no longer open. Then `agent.prompt` delivers the prompt (before the capture for codex, after it for opencode): a Mint receives one delimited block (`## herdr-board system instructions` + `## herdr-board card task`), a resume/fork fresh pane receives the task alone, same-pane reuse the task alone, and a rescue sends nothing. **After a successful managed launch** (fresh or reuse), the daemon closes the tab anchor with `pane.close` — closing a split parent is live-verified safe, and the harness pane keeps its process/env — so the tab converges to exactly one harness pane; the promoted run persists a NULL anchor. If that close fails, the anchor is kept (and persisted) rather than failing the already-successful launch. A failed launch never closes the anchor: it remains for the next allocation, per the child-only cleanup rule.
    - managed pane name is `card-<id>-<column-slug>` (e.g. `card-14-execute`); `agent_name_taken` retries once on the same pane with `card-<id>-<column-slug>-r<run>`.

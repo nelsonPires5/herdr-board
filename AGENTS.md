@@ -19,8 +19,8 @@ Feature PRs target the long-lived `dev` branch; `main` is production (branch mod
 Ownership is strict: edit your crate(s) + append to root `[workspace.dependencies]`. Semantics
 source of truth: `docs/protocol.md` + `docs/design.md`. Docs live in `docs/` (index: `docs/README.md`);
 `schema.sql` is the fresh-schema source of truth and `board-core::db` owns upgrades. Final compatibility
-is board protocol v1, SQLite schema v13, and exactly Herdr 0.8.0 / socket protocol 19. The complete
-live catalog is `e2e/README.md` (scenarios 01–35); `e2e/test-harness.sh` is the provider-free static
+is board protocol v1, SQLite schema v14, and exactly Herdr 0.8.0 / socket protocol 19. The complete
+live catalog is `e2e/README.md` (scenarios 01–36); `e2e/test-harness.sh` is the provider-free static
 safety gate.
 
 ## Build / test gates (keep green)
@@ -29,13 +29,13 @@ The gate list has one maintained copy: **[`docs/README.md` → Test gates](docs/
 (mirrored by `.github/workflows/ci.yml`; `scripts/tests/test_docs.py` fails if the two drift).
 
 - The Python tier is a CI gate too (`ci.yml`'s `Python tests` step) and is easy to forget:
-  `scripts/tests/test_docs.py` pins the version matrix (schema v13, protocol 19, Herdr 0.8.0)
+  `scripts/tests/test_docs.py` pins the version matrix (schema v14, protocol 19, Herdr 0.8.0)
   and the exact `e2e/NN-*.sh` catalog, so adding a scenario or bumping the schema fails here
   until the docs and that test are updated together.
 
 - `#[ignore]`'d tests hit a live herdr (run only when `HERDR_SOCK`/`HERDR_SOCKET_PATH` exists).
 - End-to-end: `e2e/run-all.sh` (compat: `scripts/e2e.sh`) drives a REAL Herdr; checked-in fake
-  Pi/Claude/Codex/OpenCode executables keep the standard suite (scenarios 01–35) provider-free and zero-cost.
+  Pi/Claude/Codex/OpenCode executables keep the standard suite (scenarios 01–36) provider-free and zero-cost.
   **Hard rules an agent must never violate:** run only against the scenario's own **ephemeral**
   `hb-e2e-<slug>-<pid>-<random64>` session and **disposable** workspaces it created — never a user
   session, workspace, or tab — and prefix every Herdr mutation with `HERDR MUTATION:`.

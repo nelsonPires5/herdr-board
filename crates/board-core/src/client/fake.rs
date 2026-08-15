@@ -12,7 +12,7 @@ use crate::protocol::{
     ColumnDeleteParams, ColumnReorderParams, ColumnUpdateParams, CommentAddParams,
     CommentDeleteParams, CommentGetParams, CommentHistoryParams, CommentUpdateParams,
     DeletedResult, Event, PaneSetTitleParams, PaneSetTitleResult, ProjectCreateParams,
-    ProjectDetail, ProjectGetParams, ProjectListResult, ProjectOpenParams, ProjectOpenResult,
+    ProjectGetParams, ProjectOpenParams, ProjectOpenResult,
     ProjectSelectParams, ProjectSelectedResult, RunActionResult, RunDoneParams, RunFocusParams,
     RunFocusResult, TemplateApplyParams, Trigger,
 };

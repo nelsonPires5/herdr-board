@@ -83,15 +83,27 @@ e2e_herdr_mutate -- pane send-keys "$PANE_ID" b
 sleep 0.5
 screen="$("$HERDR_BIN" pane read "$PANE_ID" --source recent-unwrapped --lines 200 || true)"
 grep -Fq 'Switch board' <<<"$screen" || fail "board picker did not open"
-grep -Fq 'Global' <<<"$screen" || fail "Global missing from board picker"
-# The picker wraps long board rows (label + repo path split across lines at
+grep -Fq 'Other projects' <<<"$screen" || fail "Other projects entry missing from board picker"
+grep -Fq 'main' <<<"$screen" \
+  || fail "the project's first board (main) missing from board picker"
+ok "TUI uses focused pane Git root; board picker offers the main board and other projects"
+
+# Drill to the project picker: the row below the current board is
+# 'Other projects…'. Global lives there as the special project, last.
+e2e_herdr_mutate -- pane send-keys "$PANE_ID" down
+e2e_herdr_mutate -- pane send-keys "$PANE_ID" enter
+sleep 0.5
+screen="$("$HERDR_BIN" pane read "$PANE_ID" --source recent-unwrapped --lines 200 || true)"
+grep -Fq 'Switch project' <<<"$screen" || fail "project picker did not open after Other projects…"
+grep -Fq 'Global' <<<"$screen" || fail "Global missing from project picker"
+# The picker wraps long project rows (label + repo path split across lines at
 # narrow widths), so the label and the canonical repo path are asserted
 # separately rather than as one contiguous prefix.
 grep -Fq 'project-one —' <<<"$screen" \
-  || fail "board label missing from narrow board picker"
+  || fail "project label missing from narrow project picker"
 VISIBLE_REPO_PREFIX="$(dirname "$REPO")/project"
 grep -Fq "$VISIBLE_REPO_PREFIX" <<<"$screen" \
-  || fail "canonical repo path prefix missing from narrow board picker -- got: $screen"
-ok "TUI uses focused pane Git root and picker includes Global"
+  || fail "canonical repo path prefix missing from narrow project picker -- got: $screen"
+ok "project picker lists the current project and Global last"
 
 step "12-cwd-boards: ALL CHECKS PASSED"

@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- [#90](https://github.com/nelsonPires5/herdr-board/pull/90) feat: projects group boards by folder, with separate project/board selectors in the TUI and CLI.
+- [#90](https://github.com/nelsonPires5/herdr-board/pull/90) feat: move cards across projects with `card move --to-project/--to-board` without changing your selection.
+- [#90](https://github.com/nelsonPires5/herdr-board/pull/90) feat: create projects and boards from the TUI with forms that select what you create.
+
+### Changed
+
+- [#90](https://github.com/nelsonPires5/herdr-board/pull/90) feat: each project's first board is `main`; existing boards migrate into their project as `main` (schema v14).
+- [#90](https://github.com/nelsonPires5/herdr-board/pull/90) feat: the selected project and per-project board persist, and only opening, creating, or selecting updates recency.
+
 ### Fixed
 
 - [#89](https://github.com/nelsonPires5/herdr-board/pull/89) fix: the promotion PR is now merged by a maintainer so the Release workflow can tag the green main commit.
