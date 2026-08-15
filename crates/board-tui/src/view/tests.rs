@@ -1,7 +1,7 @@
 use super::detail::detail_section_title;
-use super::{board_picker_label, pane_title, HELP_GUTTER_WIDTH, HELP_KEYS};
+use super::{pane_title, project_label, HELP_GUTTER_WIDTH, HELP_KEYS};
 use crate::app::CardFilter;
-use board_core::model::Board;
+use board_core::model::{Board, Project};
 
 /// Full width of a help key row's key column: the 11-char padded key plus
 /// the separating space (`{:<11} `). The layout-invariant tests below prove
@@ -14,6 +14,7 @@ const HELP_KEY_TEXT: usize = 11;
 fn pane_titles_include_scope_filter_and_sanitize_long_labels() {
     let global = Board {
         id: 1,
+        project_id: 1,
         name: "Global".into(),
         scope_path: None,
     };
@@ -24,6 +25,7 @@ fn pane_titles_include_scope_filter_and_sanitize_long_labels() {
 
     let scoped = Board {
         id: 2,
+        project_id: 2,
         name: "/tmp/repo".into(),
         scope_path: Some("/tmp/a[unsafe]/abcdefghijklmnopqrstuvwxyz0123456789".into()),
     };
@@ -31,8 +33,26 @@ fn pane_titles_include_scope_filter_and_sanitize_long_labels() {
     assert!(title.starts_with("Board [abcdefghijklmnopqrstuvwxyz01234"));
     assert!(title.ends_with("… · ARCHIVED]"));
     assert!(!title.contains('[') || title.starts_with("Board ["));
+}
+
+#[test]
+fn project_labels_name_global_and_scope_with_full_path() {
+    let global = Project {
+        id: 1,
+        name: "Global".into(),
+        scope_path: None,
+    };
+    assert_eq!(project_label(&global), "Global");
+
+    let scoped = Project {
+        id: 2,
+        name: "abcdefghijklmnopqrstuvwxyz0123456789".into(),
+        scope_path: Some("/tmp/a[unsafe]/abcdefghijklmnopqrstuvwxyz0123456789".into()),
+    };
+    // The folder-name title truncates like the legacy scope label; the path
+    // stays whole and sanitized so picker rows remain distinct.
     assert_eq!(
-        board_picker_label(&scoped),
+        project_label(&scoped),
         "abcdefghijklmnopqrstuvwxyz01234… — /tmp/a(unsafe)/abcdefghijklmnopqrstuvwxyz0123456789"
     );
 }
