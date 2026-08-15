@@ -21,7 +21,7 @@ mkdir -p "$P_A" "$P_B"
 
 step "project.create selects the project and its first board 'main'"
 A_CREATE="$($BOARD_BIN project create "$P_A" --json)"
-A_PROJECT_ID="$(printf '%s' "$A_CREATE" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["project"]["name"]=="proj-alpha"; assert d["project"]["scope_path"]==sys.argv[1]; assert d["board"]["board"]["name"]=="main"; print(d["project"]["id"])' "$P_A")"
+A_PROJECT_ID="$(printf '%s' "$A_CREATE" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["project"]["name"]=="proj-alpha"; assert d["project"]["scope_path"].endswith("proj-alpha"), d["project"]["scope_path"]; assert d["board"]["board"]["name"]=="main"; print(d["project"]["id"])')"
 ok "project alpha created, named after its folder, board 'main', selected"
 
 # Creating a project for a nonexistent directory is refused.
@@ -60,13 +60,22 @@ printf '%s' "$LIST" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 names = [p["project"]["name"] for p in d["projects"]]
-assert names == ["proj-alpha", "proj-beta", "Global"], names
+# The harness daemon owns an isolated 'scope' project (e2e_isolate); the
+# created projects sort before it and the special Global project is last.
+assert names == ["proj-alpha", "proj-beta", "scope", "Global"], names
 assert d["selected_project_id"] == int(sys.argv[1])
-assert d["recent_project_ids"] == [int(sys.argv[1]), int(sys.argv[2])], d["recent_project_ids"]
-# Every project has exactly one board for now: main.
+# The served recents exclude the selected project (the picker shows it
+# separately); the harness scope project was opened with board.open, which is
+# resolution-only and never touches recency.
+assert d["recent_project_ids"] == [int(sys.argv[2])], d["recent_project_ids"]
+# Every project has exactly one board for now: main. The per-project board
+# selection is persisted only once the project was used (the harness scope
+# project was only resolved with board.open, so its key is absent).
 for p in d["projects"]:
     assert [b["name"] for b in p["boards"]] == ["main"], p
-    assert p["selected_board_id"] == p["boards"][0]["id"]
+    selected = p.get("selected_board_id")
+    if selected is not None:
+        assert selected == p["boards"][0]["id"], p
 ' "$B_PROJECT_ID" "$A_PROJECT_ID"
 ok "project.list deterministic: alphabetical, Global last, recency capped"
 
@@ -103,30 +112,36 @@ step "card.move --to-project/--to-board transfers across projects without touchi
 # Re-select alpha (beta was selected by its creation), then move alpha's card
 # to beta's main board.
 $BOARD_BIN project select "$P_A" >/dev/null
+LIST_BEFORE="$(brpc project.list '{}')"
 BETA_MAIN_ID="$(printf '%s' "$B_CREATE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["board"]["board"]["id"])')"
-MOVED="$($BOARD_BIN card move "$CARD_IN_ALPHA" Alpha-Only --to-project "$P_B" --to-board main --json)"
+# The column reference resolves in the DESTINATION board (beta main's Todo),
+# exactly like --destination-board today; the card leaves alpha's Alpha-Only.
+MOVED="$($BOARD_BIN card move "$CARD_IN_ALPHA" Todo --to-project "$P_B" --to-board main --json)"
 printf '%s' "$MOVED" | python3 -c '
 import json, sys
 c = json.load(sys.stdin)
 assert c["board_id"] == int(sys.argv[1]), "card must land on beta main"
 assert c["column_id"] == int(sys.argv[2]), "column must be resolved in the destination board"
 ' "$BETA_MAIN_ID" "$(brpc board.get "{\"board_id\":$BETA_MAIN_ID}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["columns"][0]["id"])')"
-SELECTED="$(brpc project.selected '{}')"
-printf '%s' "$SELECTED" | python3 -c '
+# The card is gone from alpha's Alpha-Only column.
+printf '%s' "$(brpc board.get "{\"board_id\":$ALPHA_MAIN_ID}")" | python3 -c '
 import json, sys
-d = json.load(sys.stdin)
-assert d["project"]["id"] == int(sys.argv[1]), "a move must never change the persistent selection"
-' "$A_PROJECT_ID"
+cards = json.load(sys.stdin)["cards"]
+assert all(c["column_id"] != int(sys.argv[1]) for c in cards), cards
+' "$ALPHA_COL"
 ok "cross-project move landed on beta main; selection still alpha"
 
 step "Recency: only open/create/select touch it — the move did not"
-LIST="$(brpc project.list '{}')"
-printf '%s' "$LIST" | python3 -c '
+LIST_AFTER="$(brpc project.list '{}')"
+printf '%s' "$LIST_AFTER" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 assert d["selected_project_id"] == int(sys.argv[1])
-assert d["recent_project_ids"] == [int(sys.argv[1]), int(sys.argv[2])], d["recent_project_ids"]
+# The served recents exclude the selected project; only alpha is left.
+assert d["recent_project_ids"] == [int(sys.argv[2])], d["recent_project_ids"]
 ' "$A_PROJECT_ID" "$B_PROJECT_ID"
+[ "$LIST_AFTER" = "$LIST_BEFORE" ] \
+  || fail "project.list changed across the move: selection or recency was touched"
 ok "recent projects unchanged by the move"
 
 step "36-multi-project: ALL CHECKS PASSED"

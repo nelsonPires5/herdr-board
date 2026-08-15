@@ -26,6 +26,10 @@ root_card="$(board_at "$REPO" card new --title root-card --json)"
 ROOT_CARD_ID="$(printf '%s' "$root_card" | jget id)"
 sub_cards="$(board_at "$SUB" card list --json)"
 printf '%s' "$sub_cards" | grep -q 'root-card' || fail "Git subdir did not resolve root board"
+# The selected project prevails over the current directory, so reaching the
+# plain cwd's project is an explicit open (creates it and selects it; the
+# same rule the CLI tests pin).
+board_at "$PLAIN" board open "$PLAIN" >/dev/null
 plain_card="$(board_at "$PLAIN" card new --title plain-card --json)"
 PLAIN_CARD_ID="$(printf '%s' "$plain_card" | jget id)"
 plain_cards="$(board_at "$PLAIN" card list --json)"
@@ -41,8 +45,10 @@ REPO_BOARD_ID="$(printf '%s' "$repo_open" | python3 -c 'import json,sys; print(j
 PLAIN_BOARD_ID="$(printf '%s' "$plain_open" | python3 -c 'import json,sys; print(json.load(sys.stdin)["board"]["id"])')"
 brpc column.create "{\"board_id\":$REPO_BOARD_ID,\"name\":\"Repo Only\"}" >/dev/null
 brpc column.create "{\"board_id\":$PLAIN_BOARD_ID,\"name\":\"Plain Only\"}" >/dev/null
-repo_columns="$(board_at "$SUB" column list --json)"
-plain_columns="$(board_at "$PLAIN" column list --json)"
+# The selected project prevails over the cwd, so each listing names its
+# project explicitly (also the selection update rule --board <path> follows).
+repo_columns="$(board_at "$SUB" column list --board "$REPO" --json)"
+plain_columns="$(board_at "$PLAIN" column list --board "$PLAIN" --json)"
 printf '%s' "$repo_columns" | grep -q 'Repo Only' || fail "repo column missing from Git subdir"
 printf '%s' "$repo_columns" | grep -q 'Plain Only' && fail "plain column leaked into repo board"
 printf '%s' "$plain_columns" | grep -q 'Plain Only' || fail "plain column missing"
@@ -50,10 +56,19 @@ ok "pipeline columns stay board-scoped"
 
 step "Global remains available through the protocol"
 global="$(brpc board.get '{}')"
-[ "$(printf '%s' "$global" | python3 -c 'import json,sys; print(json.load(sys.stdin)["board"]["name"])')" = "Global" ] \
-  || fail "legacy Global board unavailable"
+printf '%s' "$global" | python3 -c '
+import json, sys
+board = json.load(sys.stdin)["board"]
+assert board["name"] == "main", "Global project first board must be main"
+assert board["project_id"] == 1, "Global is project 1"
+assert board["scope_path"] is None
+' || fail "legacy Global board unavailable"
 
 step "HERDR MUTATION: open scoped TUI from explicit plugin context"
+# Re-select the repo project explicitly: after the plain-cwd card above, the
+# selection is plain-notes, and the selected project prevails over the plugin
+# context until another explicit selection.
+board_at "$REPO" project select "$REPO" >/dev/null
 ws_json="$(e2e_herdr_mutate -- workspace create --cwd "$SUB" --label cwd-boards --no-focus \
   --env "BOARD_BIN=$BOARD_BIN" --env "BOARD_SOCKET=$BOARD_SOCKET")"
 WS_ID="$(printf '%s' "$ws_json" | jget workspace_id)"
