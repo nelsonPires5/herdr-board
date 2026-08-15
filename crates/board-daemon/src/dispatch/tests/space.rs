@@ -147,6 +147,45 @@ fn workspace_resolution_rejects_heterogeneous_live_cwds_without_override() {
 }
 
 #[test]
+fn new_workspace_reuse_rejects_heterogeneous_live_cwds_with_reuse_specific_advice() {
+    // A reused `new_workspace` card deliberately ignores its `space_cwd`, so
+    // the generic "set an explicit space_cwd" advice would be unusable here;
+    // the error must point at the real remedy instead.
+    let snapshot = serde_json::json!({
+        "panes": [
+            {
+                "pane_id": "w1:p2", "workspace_id": "w1", "tab_id": "w1:t2",
+                "cwd": "/repo/claude", "focused": false, "revision": 1
+            },
+            {
+                "pane_id": "w1:p1", "workspace_id": "w1", "tab_id": "w1:t1",
+                "cwd": "/repo", "focused": true, "revision": 1
+            }
+        ]
+    });
+    let herdr = workspace_resolution_server(Some(snapshot));
+    let mut client = HerdrClient::connect(&herdr.socket).unwrap();
+    let err = resolve_space(
+        &mut client,
+        SpaceKind::NewWorkspace,
+        Some("Feature"),
+        Some("/fallback"),
+    )
+    .expect_err("heterogeneous live cwds must fail on a reused new_workspace too");
+    let message = err.to_string();
+
+    assert!(message.contains("new_workspace"), "{message}");
+    assert!(
+        message.contains("make the live pane cwds consistent"),
+        "{message}"
+    );
+    assert!(
+        message.contains("space_cwd is deliberately not applied"),
+        "{message}"
+    );
+}
+
+#[test]
 fn workspace_resolution_accepts_multiple_panes_with_the_same_cwd() {
     let snapshot = serde_json::json!({
         "panes": [
