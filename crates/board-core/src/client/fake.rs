@@ -12,9 +12,9 @@ use crate::protocol::{
     ColumnDeleteParams, ColumnReorderParams, ColumnUpdateParams, CommentAddParams,
     CommentDeleteParams, CommentGetParams, CommentHistoryParams, CommentUpdateParams,
     DeletedResult, Event, PaneSetTitleParams, PaneSetTitleResult, ProjectCreateParams,
-    ProjectGetParams, ProjectOpenParams, ProjectOpenResult,
-    ProjectSelectParams, ProjectSelectedResult, RunActionResult, RunDoneParams, RunFocusParams,
-    RunFocusResult, TemplateApplyParams, Trigger,
+    ProjectGetParams, ProjectOpenParams, ProjectOpenResult, ProjectSelectParams,
+    ProjectSelectedResult, RunActionResult, RunDoneParams, RunFocusParams, RunFocusResult,
+    TemplateApplyParams, Trigger,
 };
 
 use super::BoardClient;
