@@ -3,13 +3,22 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::protocol::{Event, Request, Response};
 
 use super::BoardClient;
+
+/// Bound on how long `subscribe` waits for the daemon's acknowledgement. The
+/// TUI calls `subscribe` synchronously before its first redraw, so a daemon
+/// that accepts the connection but never acknowledges must fail the
+/// subscription (the reconnect supervisor backs off and retries) instead of
+/// freezing the caller forever.
+const SUBSCRIBE_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Structured error returned by boardd over the Unix RPC transport.
 ///
@@ -161,15 +170,42 @@ impl BoardClient for UnixClient {
         };
         let mut line = serde_json::to_string(&req)?;
         line.push('\n');
-        writer.write_all(line.as_bytes())?;
-        writer.flush()?;
+        writer
+            .write_all(line.as_bytes())
+            .context("writing the subscribe request")?;
+        writer.flush().context("flushing the subscribe request")?;
         // Wait for the daemon's subscription acknowledgement before returning.
         // The TUI refetches the full snapshot as soon as a reconnected
         // subscription is ready; returning before the daemon confirms the
         // event receiver is active could miss a mutation between that snapshot
         // fetch and the first delivered event.
         let mut ack_line = String::new();
-        if reader.read_line(&mut ack_line)? == 0 {
+        reader
+            .get_mut()
+            .set_read_timeout(Some(SUBSCRIBE_ACK_TIMEOUT))
+            .context("arming the subscription ack timeout")?;
+        let ack_read = reader.read_line(&mut ack_line);
+        // Best-effort disarm: macOS fails with EINVAL when the peer already
+        // closed (a rejecting daemon that wrote a line and dropped the
+        // connection, or a test fixture that exits right after writing).
+        // Every error path below discards this stream, and on the success
+        // path a failed disarm equally implies the peer closed — the event
+        // stream then hits EOF and the reconnect supervisor replaces it — so
+        // a leftover timeout is harmless and the failure is ignored.
+        let disarmed = reader.get_mut().set_read_timeout(None);
+        let ack_bytes = ack_read.map_err(|error| {
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) {
+                anyhow::anyhow!(
+                    "subscription acknowledgement timed out after {SUBSCRIBE_ACK_TIMEOUT:?}"
+                )
+            } else {
+                anyhow::Error::new(error).context("reading the subscription acknowledgement failed")
+            }
+        })?;
+        if ack_bytes == 0 {
             anyhow::bail!("subscription closed before the acknowledgement");
         }
         let ack: Response = serde_json::from_str(ack_line.trim_end())
@@ -183,6 +219,11 @@ impl BoardClient for UnixClient {
         if ack.error.is_some() || !subscribed {
             anyhow::bail!("daemon did not acknowledge the subscription (subscribed={subscribed})");
         }
+        // A failed disarm only happens after the peer has closed (macOS
+        // EINVAL); that stream is about to hit EOF and the reconnect
+        // supervisor replaces it, so a leftover timeout is harmless and the
+        // failure is intentionally ignored here.
+        let _ = disarmed;
         Ok(Box::new(EventStream { reader }))
     }
 
