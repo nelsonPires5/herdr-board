@@ -70,7 +70,17 @@ pub(crate) fn resolve_space(
                 // workspace cwd, so the card's original create cwd is not a
                 // safe fallback here.
                 Some(id) => {
-                    let live = workspace_cwd(client, &id)?;
+                    let live = workspace_cwd(client, &id).map_err(|error| {
+                        // A reused `new_workspace` card deliberately does NOT
+                        // apply its `space_cwd` to the live workspace, so the
+                        // generic "set an explicit space_cwd" advice would be
+                        // unusable here — point at the real remedy instead.
+                        anyhow::anyhow!(
+                            "reused new_workspace workspace '{id}' has no usable cwd from its live \
+                             panes ({error:#}); make the live pane cwds consistent — a reused \
+                             new_workspace card's space_cwd is deliberately not applied"
+                        )
+                    })?;
                     Ok(ResolvedSpace {
                         workspace_id: id,
                         cwd: live,
