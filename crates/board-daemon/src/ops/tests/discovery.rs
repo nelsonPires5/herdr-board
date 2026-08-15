@@ -1353,7 +1353,7 @@ fn harness_capabilities_antigravity_overlays_live_catalog_from_cli() {
         .iter()
         .map(|p| p.as_str().unwrap())
         .collect();
-    assert_eq!(modes, vec!["current", "sandbox", "always-proceed"]);
+    assert_eq!(modes, vec!["sandbox", "always-proceed"]);
 }
 
 #[test]
@@ -1375,7 +1375,7 @@ fn harness_capabilities_antigravity_down_without_bin() {
         .iter()
         .map(|p| p.as_str().unwrap())
         .collect();
-    assert_eq!(modes, vec!["current", "sandbox", "always-proceed"]);
+    assert_eq!(modes, vec!["sandbox", "always-proceed"]);
 }
 
 #[test]

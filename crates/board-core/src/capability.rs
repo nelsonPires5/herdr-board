@@ -401,12 +401,13 @@ const ANTIGRAVITY_DEFAULT_EFFORTS: [Effort; 3] = [Effort::Low, Effort::Medium, E
 
 /// The antigravity permission modes (board-facing ids). Each maps to an
 /// exact agy CLI spelling while building argv (see [`crate::harness::agy`]):
-/// `current` (no flag — preserve the user's configured `toolPermission`),
 /// `sandbox` (`--sandbox`), `always-proceed`
-/// (`--dangerously-skip-permissions`). There is deliberately no fourth mode:
+/// (`--dangerously-skip-permissions`). There is deliberately no third mode:
 /// the CLI exposes no per-run spelling for the internal `toolPermission`
-/// values, and the board never edits `settings.json`.
-const ANTIGRAVITY_PERMISSION_MODES: [&str; 3] = ["current", "sandbox", "always-proceed"];
+/// values, and the board never edits `settings.json` — a card with no
+/// permission (the harness default) launches with no flag and keeps the
+/// user's configured `toolPermission`.
+const ANTIGRAVITY_PERMISSION_MODES: [&str; 2] = ["sandbox", "always-proceed"];
 
 /// Built-in `antigravity` harness adapter. The public harness name is
 /// `antigravity`; the Herdr managed-agent kind and executable are `agy`.
@@ -424,7 +425,7 @@ const ANTIGRAVITY_PERMISSION_MODES: [&str; 3] = ["current", "sandbox", "always-p
 ///   the agy default; only new selection is constrained because the UIs have
 ///   nothing to offer.
 ///
-/// Permissions are the three verified modes; resume/retry are
+/// Permissions are the two verified modes; resume/retry are
 /// `--conversation <id>` (no fork — retry re-attaches to the same
 /// conversation).
 #[derive(Clone, Default)]

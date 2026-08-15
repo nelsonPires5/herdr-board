@@ -875,7 +875,7 @@ fn card_antigravity_selectors_show_catalog_models_and_three_permission_modes() {
             ],
             model_freeform: false,
             default_efforts: vec![Effort::Low, Effort::Medium, Effort::High],
-            permission_modes: vec!["current".into(), "sandbox".into(), "always-proceed".into()],
+            permission_modes: vec!["sandbox".into(), "always-proceed".into()],
             resume: Default::default(),
             default_effort_label: board_core::labels::default_effort_label().to_string(),
             default_permission_label: board_core::labels::default_permission_label().to_string(),
@@ -918,13 +918,12 @@ fn card_antigravity_selectors_show_catalog_models_and_three_permission_modes() {
         "a fixed-effort model offers no effort selector"
     );
 
-    // The permission selector is exactly the three modes with their labels.
+    // The permission selector is exactly the two modes with their labels.
     assert!(form.field_visible(idx_of(&form, FieldId::Permission)));
     assert_eq!(
         choice_labels(&form, FieldId::Permission),
         vec![
             "default permission".to_string(),
-            "Current permission".to_string(),
             "Sandbox".to_string(),
             "Always proceed".to_string(),
         ]
@@ -955,7 +954,7 @@ fn card_antigravity_selectors_show_catalog_models_and_three_permission_modes() {
 fn card_antigravity_default_capabilities_before_fetch() {
     // Before any catalog fetch, selecting antigravity answers from
     // board-core's built-in down-state snapshot: no models (free-form), the
-    // agy effort ladder, and the three permission modes.
+    // agy effort ladder, and the two permission modes.
     let mut form = Form::card_create(1);
     set_choice(&mut form, FieldId::Harness, "antigravity");
     form.apply_options(None, None, None, None);
@@ -974,7 +973,6 @@ fn card_antigravity_default_capabilities_before_fetch() {
         choice_labels(&form, FieldId::Permission),
         vec![
             "default permission".to_string(),
-            "Current permission".to_string(),
             "Sandbox".to_string(),
             "Always proceed".to_string(),
         ]

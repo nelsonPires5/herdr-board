@@ -150,7 +150,7 @@ if [ "${BOARD_RESCUE:-0}" = "1" ]; then
   suffix="-rescue"
 fi
 record="$(dirname "$BOARD_SOCKET")/fake-agy-run-$RUN_LABEL$suffix.json"
-permission="current"
+permission="default"
 [ -z "$sandbox" ] || permission="sandbox"
 [ -z "$skip_permissions" ] || permission="always-proceed"
 python3 - "$record" "$RUN_LABEL" "$PWD" "$BOARD_CARD_ID" "$BOARD_SOCKET" \

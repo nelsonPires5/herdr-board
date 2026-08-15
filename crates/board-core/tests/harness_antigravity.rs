@@ -51,7 +51,7 @@ fn agy_settings() -> EffectiveSettings {
         harness: "antigravity".into(),
         model: Some("gemini-3.7-flash".into()),
         effort: Some(Effort::High),
-        permission_mode: Some("current".into()),
+        permission_mode: None,
         system_prompt: Some("PLAN stage".into()),
         fresh_session: false,
         timeout_minutes: None,
@@ -204,7 +204,7 @@ fn antigravity_mint_argv_exact_spelling() {
             "--effort".into(),
             "high".into(),
         ],
-        "agy mint argv: --model <base> --effort <level>; current permission is no flag"
+        "agy mint argv: --model <base> --effort <level>; default permission is no flag"
     );
     // Managed prompt transport: both channels ride outside argv.
     assert_eq!(inv.initial_prompt.as_deref(), Some("implement the widget"));
@@ -318,7 +318,7 @@ fn antigravity_maps_permission_modes_to_exact_argv() {
         .contains(&"--dangerously-skip-permissions".to_string()));
     assert!(!inv.argv.contains(&"--sandbox".to_string()));
 
-    s.permission_mode = Some("current".into());
+    s.permission_mode = None;
     let inv = build_invocation(
         "antigravity",
         &Config::default(),
@@ -332,7 +332,7 @@ fn antigravity_maps_permission_modes_to_exact_argv() {
         !inv.argv
             .iter()
             .any(|a| a == "--sandbox" || a == "--dangerously-skip-permissions"),
-        "current permission is the absence of every permission flag: {:?}",
+        "the default (no flag) is the absence of every permission flag: {:?}",
         inv.argv
     );
 
@@ -469,8 +469,8 @@ fn antigravity_capability_catalog_default_is_the_down_state() {
     );
     assert_eq!(
         caps.permission_modes,
-        vec!["current", "sandbox", "always-proceed"],
-        "the three verified permission modes; nothing else is board-facing"
+        vec!["sandbox", "always-proceed"],
+        "the two verified permission modes; nothing else is board-facing"
     );
     assert_eq!(caps.resume, ResumeSupport::ByConversationId);
     // Another CLI's permission vocabulary never leaks in.
@@ -660,9 +660,9 @@ fn antigravity_rejects_out_of_ladder_efforts_even_catalog_down() {
 }
 
 #[test]
-fn antigravity_accepts_only_the_three_permission_modes() {
+fn antigravity_accepts_only_the_two_permission_modes() {
     let config = Config::default();
-    for mode in ["current", "sandbox", "always-proceed"] {
+    for mode in ["sandbox", "always-proceed"] {
         let card = card_with("antigravity", None, None, Some(mode));
         validate_effective_settings(&card, &plain_column(), &config)
             .unwrap_or_else(|e| panic!("{mode} must validate: {e:?}"));
@@ -683,11 +683,7 @@ fn antigravity_resolves_through_meta_and_resume_support() {
     assert!(meta.model_freeform());
     assert_eq!(
         meta.permissions(),
-        vec![
-            "current".to_string(),
-            "sandbox".to_string(),
-            "always-proceed".to_string()
-        ]
+        vec!["sandbox".to_string(), "always-proceed".to_string()]
     );
     assert_eq!(meta.resume(), ResumeSupport::ByConversationId);
     assert_eq!(

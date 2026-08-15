@@ -115,8 +115,9 @@ while the catalog is unavailable (`agy` missing/failing) model selection is free
 models keep running; once the catalog is back, removed models are rejected at enqueue/edit. The
 binary is resolved from `$AGY_BIN`, else `agy` on `PATH`.
 
-The three permission modes map to exact verified spellings: `current` (no flag), `sandbox`
-(`--sandbox`), `always-proceed` (`--dangerously-skip-permissions`). The TUI mints its own
+The two permission modes map to exact verified spellings: `sandbox` (`--sandbox`),
+`always-proceed` (`--dangerously-skip-permissions`); no flag (the harness default) keeps the
+user's configured `toolPermission`. The TUI mints its own
 conversation id, which the daemon captures from the `herdr:antigravity_cli` integration after the
 first prompt; `board retry` re-attaches to the same conversation (`--conversation <id>`) in a fresh
 pane (agy has no fork, and every `--conversation` hop launches a fresh pane by design). When the

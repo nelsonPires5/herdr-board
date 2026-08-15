@@ -601,10 +601,10 @@ Their persisted startup argv contains neither system nor card prompt:
     catalog is unavailable (`agy` missing or failing) capability selection is free-form and
     stored models keep running (only new selection is blocked); once the catalog is back, a
     removed model is rejected at enqueue/edit with an actionable `InvalidModel` error;
-  - permission modes are board-facing with exact verified CLI spellings: `current` emits no flag,
-    `sandbox` emits `--sandbox`, `always-proceed` emits `--dangerously-skip-permissions`; the
-    engine's capability validation rejects any other value before launch, and the board never
-    edits `settings.json`;
+  - permission modes are board-facing with exact verified CLI spellings: `sandbox` emits
+    `--sandbox`, `always-proceed` emits `--dangerously-skip-permissions`; a missing flag (the
+    harness default) keeps the user's configured `toolPermission` — the engine's capability
+    validation rejects any other value before launch, and the board never edits `settings.json`;
   - `--conversation <id>` is a trailing session pair closing the startup argv (a Mint carries no
     conversation flag at all and no board-invented uuid — the agy TUI mints its own id); agy has
     **no fork**, so a `board retry` re-attaches to the SAME conversation in a new pane; because

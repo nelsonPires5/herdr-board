@@ -12,13 +12,13 @@
 //!   `--sandbox` (restricted execution), and
 //!   `--dangerously-skip-permissions` (auto-approve). There is no
 //!   `--permission-mode` flag: the user's `toolPermission` setting lives in
-//!   the CLI's own config and the board never edits it — `current` means
-//!   "no flag, keep whatever the user configured";
-//! - permission modes are board-facing presets — `current` (no flag),
-//!   `sandbox` (`--sandbox`), `always-proceed`
-//!   (`--dangerously-skip-permissions`) — the only three spellings derived
-//!   from verified CLI behavior; any other value is rejected up front by
-//!   the engine's capability validation, so only these reach argv;
+//!   the CLI's own config and the board never edits it — a missing flag
+//!   (the harness default) keeps whatever the user configured;
+//! - permission modes are board-facing presets — `sandbox` (`--sandbox`),
+//!   `always-proceed` (`--dangerously-skip-permissions`) — the only two
+//!   spellings derived from verified CLI behavior; any other value is
+//!   rejected up front by the engine's capability validation, so only these
+//!   reach argv (no flag means the harness default);
 //! - a fresh TUI session mints its own conversation id (a UUID printed at
 //!   startup: "Resume with -c (or command below): agy --conversation=<id>");
 //!   there is **no way to pre-allocate one**, so an antigravity Mint carries
@@ -65,16 +65,16 @@ pub(super) fn effort_value(effort: Effort) -> Option<&'static str> {
 
 /// The exact startup flags each board-facing permission mode maps to.
 /// Verified against the installed CLI:
-/// - `current` → nothing (no flag: the CLI keeps the user's configured
-///   `toolPermission` — the board never edits `settings.json`);
 /// - `sandbox` → `--sandbox` ("Run in a sandbox with terminal restrictions
 ///   enabled"; approval rules stay the user's);
 /// - `always-proceed` → `--dangerously-skip-permissions` ("Auto-approve all
 ///   tool permission requests without prompting").
 ///
-/// Unknown values map to no flag for forward compatibility; the engine's
-/// capability validation gates card/column permission values to the catalog
-/// before any launch, so only the three modes reach argv in practice.
+/// A missing flag (the harness default) keeps the user's configured
+/// `toolPermission` — the board never edits `settings.json`. Unknown values
+/// map to no flag for forward compatibility; the engine's capability
+/// validation gates card/column permission values to the catalog before any
+/// launch, so only the two modes reach argv in practice.
 pub(super) fn permission_argv(permission: &str) -> Vec<String> {
     match permission {
         "sandbox" => vec!["--sandbox".to_string()],

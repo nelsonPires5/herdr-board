@@ -1015,10 +1015,7 @@ fn harness_antigravity_models_lists_efforts_and_permissions() {
         vec!["low", "medium", "high"],
         "the agy effort ladder is exactly low|medium|high"
     );
-    assert_eq!(
-        caps.permission_modes,
-        vec!["current", "sandbox", "always-proceed"]
-    );
+    assert_eq!(caps.permission_modes, vec!["sandbox", "always-proceed"]);
 
     // Human output mirrors the free-form down state.
     let out = td.board(&["harness", "models", "antigravity"]);
@@ -1034,8 +1031,8 @@ fn harness_antigravity_models_lists_efforts_and_permissions() {
     assert!(out.status.success());
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
-        text.contains("current") && text.contains("sandbox") && text.contains("always-proceed"),
-        "permissions output lists the three modes: {text}"
+        text.contains("sandbox") && text.contains("always-proceed"),
+        "permissions output lists the two modes: {text}"
     );
 }
 

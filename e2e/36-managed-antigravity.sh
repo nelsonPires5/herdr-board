@@ -31,8 +31,9 @@
 #      a `system` warning explains the missing integration, rescue is refused
 #      with an actionable diagnostic, and a non-fresh hop cannot reuse the
 #      conversation (it mints fresh instead);
-#   7. Permission modes are pinned: `current` carries no flag, `sandbox`
-#      carries `--sandbox`, `always-proceed` carries
+#   7. Permission modes are pinned: no flag (the harness default) keeps
+#      the user's configured permission, `sandbox` carries `--sandbox`,
+#      `always-proceed` carries
 #      `--dangerously-skip-permissions`; a fixed-effort model
 #      (claude-sonnet-4-6) never receives `--effort`;
 #   8. Managed tabs stay anchorless: every launch converges the `card-<id>`
@@ -264,7 +265,6 @@ SETUP_ID="$(col_create "{\"name\":\"Agy Setup\",\"trigger\":\"auto\",\"on_succes
   || fail "could not create the chain columns"
 chain_json="$("$BOARD_BIN" card new --title 'Antigravity Chain' -d 'traverse the agy chain' \
   --harness antigravity --model gemini-3.7-flash --effort medium \
-  --permission current \
   --space-kind workspace --space-ref "$CHAIN_WS" --json)"
 CHAIN_ID="$(printf '%s' "$chain_json" | jget id)" || fail "could not parse chain card id"
 mut "board move $CHAIN_ID 'Agy Setup' -> agy mint; non-fresh hop must still launch a fresh pane"
@@ -298,7 +298,7 @@ assert runs[0]["herdr_pane_id"] != runs[1]["herdr_pane_id"], \
 argv0 = json.loads(runs[0]["argv_json"])
 argv1 = json.loads(runs[1]["argv_json"])
 assert argv0 == ["agy", "--model", "gemini-3.7-flash", "--effort", "medium"], \
-    f"mint argv {argv0} != pinned medium/current argv (current must carry no flag)"
+    f"mint argv {argv0} != pinned medium argv (the default carries no flag)"
 assert argv1 == ["agy", "--model", "gemini-3.7-flash", "--effort", "medium",
                  "--conversation", session], f"hop argv {argv1} != --conversation argv"
 panes = json.loads(panes_json).get("panes", [])
@@ -325,7 +325,7 @@ r2 = json.load(open(record2, encoding="utf-8"))
 show = json.load(open(show_path, encoding="utf-8"))
 # Stage 1 minted and delivered the delimited block; stage 2 resumed the same
 # conversation and delivered the task alone — two SEPARATE processes.
-assert r1["mode"] == "mint" and r1["permission_mode"] == "current"
+assert r1["mode"] == "mint" and r1["permission_mode"] == "default"
 assert r1["prompt_matches_mint_block"] is True, "stage 1 must have delivered the delimited mint block"
 assert r2["mode"] == "resume" and r2["resume_id"] == r1["session_id"]
 assert r2["prompt_matches_run_snapshot"] is True, "stage 2 must have delivered the task alone"
@@ -482,7 +482,7 @@ step "Fallback: agy starts a NEW conversation; the daemon persists it + warns"
 e2e_ws_create agy-fallback; FB_WS="$E2E_WS"
 FB_EXEC="$(col_create '{"name":"Fallback Execute","trigger":"auto"}')"
 fb_json="$("$BOARD_BIN" card new --title 'Antigravity Fallback' --description 'recorded conversation disappears' \
-  --harness antigravity --model new-conversation --permission current \
+  --harness antigravity --model new-conversation \
   --space-kind workspace --space-ref "$FB_WS" --json)"
 FB_ID="$(printf '%s' "$fb_json" | jget id)" || fail "could not parse fallback card id"
 mut "board move $FB_ID 'Fallback Execute' -> managed agy mint (fallback target)"
