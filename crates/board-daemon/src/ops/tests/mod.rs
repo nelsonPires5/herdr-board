@@ -286,6 +286,10 @@ struct RescueFakeFaults {
     /// supply a replacement. `workspace.create` mints fresh workspaces (`w2`,
     /// `w3`, …) with an initial tab/root, exactly like a real created workspace.
     workspace_gone: bool,
+    /// The recorded workspace's live panes disagree on their cwd (a
+    /// heterogeneous workspace): the strict cwd probe fails, but an explicit
+    /// `space_cwd` on the card can still address the SAME workspace.
+    multi_cwd: bool,
 }
 
 /// Observable, pokeable state of the rescue fake.
@@ -423,11 +427,16 @@ fn fake_rescue_herdr(faults: RescueFakeFaults) -> RescueFake {
         .handler(move |request, _index| {
             let ws_of = |id: &str| id.split(':').next().unwrap_or("w1").to_string();
             let pane_json = |pane: &FakePane| {
+                let cwd = if faults.multi_cwd && pane.0.contains("foreign") {
+                    "/tmp/other-cwd"
+                } else {
+                    "/tmp/rescue-cwd"
+                };
                 json!({
                     "pane_id": pane.0, "terminal_id": format!("term-{}", pane.0),
                     "workspace_id": ws_of(&pane.0), "tab_id": pane.1,
                     "label": pane.2, "agent": pane.3,
-                    "cwd": "/tmp/rescue-cwd",
+                    "cwd": cwd,
                     "focused": false, "agent_status": "idle", "revision": 1
                 })
             };

@@ -336,16 +336,22 @@ fn rescue_run(
                         run.id, run.card_id
                     ))
                 })?;
-                // `resolve_space` may have created the workspace (a card with a
-                // `new_workspace` space, whose label no longer matches any open
-                // workspace): the bootstrap hint is exactly that one-shot
-                // creation evidence, and it travels into the placement so the
-                // card tab adopts the workspace's initial tab.
+                // The card's space config may resolve back to the recorded
+                // workspace even though the strict cwd probe failed (e.g. a
+                // heterogeneous workspace with an explicit `space_cwd`). That
+                // is NOT a replacement: keep the recorded workspace and its
+                // durable pane-ownership evidence, or the rescue would discard
+                // prior panes and allocate a duplicate card tab.
+                let same_workspace = space.workspace_id == workspace_id;
                 (
-                    false,
+                    same_workspace,
                     space.workspace_id,
                     std::path::PathBuf::from(space.cwd),
-                    space.bootstrap,
+                    if same_workspace {
+                        None
+                    } else {
+                        space.bootstrap
+                    },
                 )
             }
         };

@@ -109,6 +109,73 @@ fn run_focus_rescues_into_a_new_workspace_when_the_recorded_workspace_is_gone() 
 }
 
 #[test]
+fn run_focus_rescue_keeps_ownership_when_an_ambiguous_cwd_resolves_back_to_the_recorded_workspace()
+{
+    // The recorded workspace is heterogeneous: its live panes report different
+    // cwds, so the strict cwd probe fails. The card carries an explicit
+    // `space_cwd` that resolves back to the SAME recorded workspace — the
+    // rescue must keep the recorded workspace and its durable pane ownership,
+    // not demote it to a replacement (which would discard ownership evidence
+    // and create a duplicate card tab).
+    let fake = fake_rescue_herdr(RescueFakeFaults {
+        multi_cwd: true,
+        ..Default::default()
+    });
+    let d = test_daemon_with_herdr_spawner(Config::default(), fake.socket.clone());
+    let (card_id, run_id) = add_rescuable_run_with_space(
+        &d,
+        "pi",
+        Some("pi"),
+        Some("conv-1"),
+        true,
+        Some((
+            SpaceKind::Workspace,
+            "ws".to_string(),
+            "/tmp/card-cwd".to_string(),
+        )),
+    );
+    let before = runs_fingerprint(&d, card_id);
+
+    let result = handle_request(
+        &d,
+        "run.focus",
+        json!({"card_id":card_id,"run_id":run_id,"origin_socket":fake.socket}),
+    )
+    .unwrap();
+
+    assert_eq!(result["action"], "rescued");
+    assert_eq!(result["recorded_pane_id"], "w1:p9");
+    let pane_id = result["pane_id"].as_str().unwrap();
+    assert!(
+        pane_id.starts_with("w1:"),
+        "rescue must stay in the recorded workspace, got: {pane_id}"
+    );
+    assert!(
+        fake.workspace_creates().is_empty(),
+        "no replacement workspace may be created"
+    );
+    assert_eq!(fake.workspace_ids(), vec!["w1".to_string()]);
+
+    // A second focus reuses the rescued pane: no duplicate card tab and no
+    // second rescue, exactly like an in-workspace rescue.
+    let again = handle_request(
+        &d,
+        "run.focus",
+        json!({"card_id":card_id,"run_id":run_id,"origin_socket":fake.socket}),
+    )
+    .unwrap();
+    assert_eq!(again["action"], "focused_rescued_pane");
+    assert_eq!(again["pane_id"], pane_id);
+    assert_eq!(
+        fake.count("pane.split"),
+        1,
+        "a second rescue pane was created"
+    );
+    assert_eq!(fake.count("agent.start"), 1, "the harness was restarted");
+    assert_eq!(runs_fingerprint(&d, card_id), before);
+}
+
+#[test]
 fn run_focus_rescue_failure_closes_the_workspace_it_created() {
     // The workspace was created by this very rescue and the harness then
     // refused to start. A failed rescue must leave NO partial resources: the
