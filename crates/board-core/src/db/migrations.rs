@@ -526,7 +526,8 @@ impl Db {
                     self.conn.execute_batch(V14_MIGRATION_SQL)?;
                 }
             }
-            self.conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            self.conn
+                .pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         Ok(())
     }

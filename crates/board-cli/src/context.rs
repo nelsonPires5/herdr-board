@@ -12,19 +12,21 @@ use board_core::model::Column;
 use board_core::protocol::BoardSnapshot;
 
 use crate::daemon::connect_or_start;
-use crate::scope::{open_selected_board, resolve_column_in};
+use crate::scope::{context_board, resolve_column_in};
 
 pub(crate) struct Ctx<'a> {
     selector: Option<&'a str>,
+    project_selector: Option<&'a str>,
     json: bool,
     client: Option<UnixClient>,
     board: Option<BoardSnapshot>,
 }
 
 impl<'a> Ctx<'a> {
-    pub(crate) fn new(selector: Option<&'a str>, json: bool) -> Self {
+    pub(crate) fn new(project: Option<&'a str>, selector: Option<&'a str>, json: bool) -> Self {
         Self {
             selector,
+            project_selector: project,
             json,
             client: None,
             board: None,
@@ -34,6 +36,11 @@ impl<'a> Ctx<'a> {
     /// The global `--board` selector, if any.
     pub(crate) fn selector(&self) -> Option<&'a str> {
         self.selector
+    }
+
+    /// The global `--project` selector, if any.
+    pub(crate) fn project_selector(&self) -> Option<&'a str> {
+        self.project_selector
     }
 
     /// Whether this invocation asked for JSON output.
@@ -54,8 +61,9 @@ impl<'a> Ctx<'a> {
     /// The selected board snapshot, fetched once per invocation.
     pub(crate) fn board(&mut self) -> Result<&BoardSnapshot> {
         if self.board.is_none() {
+            let project = self.project_selector;
             let selector = self.selector;
-            let board = open_selected_board(self.client()?, selector)?;
+            let board = context_board(self.client()?, project, selector)?;
             self.board = Some(board);
         }
         self.board

@@ -24,6 +24,8 @@ mod harness;
 mod lifecycle;
 #[path = "integration/meta.rs"]
 mod meta;
+#[path = "integration/projects.rs"]
+mod projects;
 #[path = "integration/runs.rs"]
 mod runs;
 #[path = "integration/scope.rs"]

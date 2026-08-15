@@ -180,7 +180,10 @@ fn snapshot_of(db: &Db, board_id: i64) -> anyhow::Result<BoardSnapshot> {
 
 /// Assemble a `project.open`-style result from a context pair. The board
 /// snapshot carries daemon-style labels even though the DB has no herdr.
-fn project_open_result(db: &Db, pair: (crate::model::Project, crate::model::Board)) -> anyhow::Result<Value> {
+fn project_open_result(
+    db: &Db,
+    pair: (crate::model::Project, crate::model::Board),
+) -> anyhow::Result<Value> {
     let (project, board) = pair;
     Ok(serde_json::to_value(ProjectOpenResult {
         project,

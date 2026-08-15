@@ -11,11 +11,11 @@ use crate::protocol::{
     ColumnCreateParams, ColumnDeleteParams, ColumnReorderParams, ColumnUpdateParams,
     CommentAddParams, CommentDeleteParams, CommentGetParams, CommentHistoryParams,
     CommentUpdateParams, DaemonStatus, DeletedResult, Event, HarnessCapabilitiesParams,
-    HarnessListResult, PaneSetTitleParams, PaneSetTitleResult, ProjectCreateParams,
-    ProjectDetail, ProjectGetParams, ProjectListResult, ProjectOpenParams, ProjectOpenResult,
-    ProjectSelectParams, ProjectSelectedResult, RunActionResult, RunCardParams, RunDoneParams,
-    RunFocusParams, RunFocusResult, RunOutcome, RunPaneExitedParams, SessionListResult,
-    SpaceListParams, SpaceListResult, StopResult, TemplateApplyParams,
+    HarnessListResult, PaneSetTitleParams, PaneSetTitleResult, ProjectCreateParams, ProjectDetail,
+    ProjectGetParams, ProjectListResult, ProjectOpenParams, ProjectOpenResult, ProjectSelectParams,
+    ProjectSelectedResult, RunActionResult, RunCardParams, RunDoneParams, RunFocusParams,
+    RunFocusResult, RunOutcome, RunPaneExitedParams, SessionListResult, SpaceListParams,
+    SpaceListResult, StopResult, TemplateApplyParams,
 };
 
 /// Blocking client to boardd. Object-safe so the TUI can hold `Box<dyn BoardClient>`.
@@ -98,7 +98,9 @@ pub trait BoardClient {
     }
 
     fn project_list(&mut self) -> anyhow::Result<ProjectListResult> {
-        Ok(serde_json::from_value(self.call("project.list", json!({}))?)?)
+        Ok(serde_json::from_value(
+            self.call("project.list", json!({}))?,
+        )?)
     }
     fn project_selected(&mut self) -> anyhow::Result<ProjectSelectedResult> {
         Ok(serde_json::from_value(

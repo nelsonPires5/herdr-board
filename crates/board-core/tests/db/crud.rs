@@ -1077,7 +1077,7 @@ fn renaming_a_column_onto_a_sibling_name_is_a_bad_request() {
 fn renaming_a_board_onto_an_existing_name_is_a_bad_request() {
     let db = mem();
     let one = db.open_board("/one").unwrap();
-    let sibling = db.create_board(one.project_id, "Backlog").unwrap();
+    db.create_board(one.project_id, "Backlog").unwrap();
 
     // Same project, case-insensitively: refused as a duplicate.
     let clash = db.rename_board(one.id, "BACKLOG").unwrap_err();

@@ -68,7 +68,8 @@ impl Db {
             .query_map([], rows::row_to_project)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         projects.sort_by(|a, b| {
-            (a.scope_path.is_none(), a.name.to_lowercase()).cmp(&(b.scope_path.is_none(), b.name.to_lowercase()))
+            (a.scope_path.is_none(), a.name.to_lowercase())
+                .cmp(&(b.scope_path.is_none(), b.name.to_lowercase()))
         });
         Ok(projects)
     }
@@ -282,11 +283,12 @@ impl Db {
     // -- selection & recency ---------------------------------------------------
 
     fn selection_project_id(&self) -> Result<Option<i64>> {
-        rows::opt(self.conn.query_row(
-            "SELECT project_id FROM selection WHERE id=1",
-            [],
-            |r| r.get(0),
-        ))
+        rows::opt(
+            self.conn
+                .query_row("SELECT project_id FROM selection WHERE id=1", [], |r| {
+                    r.get(0)
+                }),
+        )
     }
 
     pub fn selected_project_id(&self) -> Result<Option<i64>> {
@@ -324,10 +326,7 @@ impl Db {
         let ids = stmt
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<Vec<i64>>>()?;
-        Ok(ids
-            .into_iter()
-            .filter(|id| Some(*id) != exclude)
-            .collect())
+        Ok(ids.into_iter().filter(|id| Some(*id) != exclude).collect())
     }
 
     /// One project's recent board ids, most recent first, capped at 3,
@@ -343,10 +342,7 @@ impl Db {
         let ids = stmt
             .query_map(params![project_id], |r| r.get(0))?
             .collect::<rusqlite::Result<Vec<i64>>>()?;
-        Ok(ids
-            .into_iter()
-            .filter(|id| Some(*id) != exclude)
-            .collect())
+        Ok(ids.into_iter().filter(|id| Some(*id) != exclude).collect())
     }
 
     fn write_selection_tx(tx: &Transaction, project_id: i64, board_id: i64) -> Result<()> {
@@ -415,9 +411,10 @@ impl Db {
         let mut infos = Vec::with_capacity(projects.len());
         for project in projects {
             let mut boards = self.list_boards_for_project(project.id)?;
-            boards.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            boards.sort_by_key(|a| a.name.to_lowercase());
             let selected_board_id = self.selected_board_id_for(project.id)?;
-            let recent_board_ids = self.recent_board_ids_excluding(project.id, selected_board_id)?;
+            let recent_board_ids =
+                self.recent_board_ids_excluding(project.id, selected_board_id)?;
             infos.push(ProjectInfo {
                 project,
                 boards,
@@ -436,7 +433,7 @@ impl Db {
     pub fn project_detail(&self, scope_path: &str) -> Result<ProjectDetail> {
         let project = self.require_project_by_scope(scope_path)?;
         let mut boards = self.list_boards_for_project(project.id)?;
-        boards.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        boards.sort_by_key(|a| a.name.to_lowercase());
         let selected_board = self.selected_board_for(project.id)?;
         Ok(ProjectDetail {
             project,
