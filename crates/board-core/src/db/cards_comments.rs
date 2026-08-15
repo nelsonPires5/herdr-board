@@ -68,9 +68,10 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT c.* FROM cards c
              JOIN boards b ON b.id=c.board_id
+             JOIN projects p ON p.id=b.project_id
              JOIN columns col ON col.id=c.column_id
-             ORDER BY CASE WHEN b.scope_path IS NULL THEN 0 ELSE 1 END,
-                      b.scope_path, col.position, c.position, c.id",
+             ORDER BY CASE WHEN p.scope_path IS NULL THEN 0 ELSE 1 END,
+                      p.scope_path, col.position, c.position, c.id",
         )?;
         let rows = stmt
             .query_map([], rows::row_to_card)?

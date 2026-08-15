@@ -6,13 +6,15 @@ use crate::engine;
 use crate::labels::card_labels;
 
 use crate::protocol::{
-    BoardGetParams, BoardListResult, BoardOpenParams, BoardRenameParams, BoardSnapshot,
-    CardArchiveParams, CardCreateParams, CardDetail, CardListParams, CardMoveParams,
-    CardUpdateParams, ColumnCreateParams, ColumnDeleteParams, ColumnReorderParams,
-    ColumnUpdateParams, CommentAddParams, CommentDeleteParams, CommentGetParams,
-    CommentHistoryParams, CommentUpdateParams, DeletedResult, Event, PaneSetTitleParams,
-    PaneSetTitleResult, RunActionResult, RunDoneParams, RunFocusParams, RunFocusResult,
-    TemplateApplyParams, Trigger,
+    BoardCreateParams, BoardGetParams, BoardListParams, BoardListResult, BoardOpenParams,
+    BoardRenameParams, BoardSelectParams, BoardSnapshot, CardArchiveParams, CardCreateParams,
+    CardDetail, CardListParams, CardMoveParams, CardUpdateParams, ColumnCreateParams,
+    ColumnDeleteParams, ColumnReorderParams, ColumnUpdateParams, CommentAddParams,
+    CommentDeleteParams, CommentGetParams, CommentHistoryParams, CommentUpdateParams,
+    DeletedResult, Event, PaneSetTitleParams, PaneSetTitleResult, ProjectCreateParams,
+    ProjectDetail, ProjectGetParams, ProjectListResult, ProjectOpenParams, ProjectOpenResult,
+    ProjectSelectParams, ProjectSelectedResult, RunActionResult, RunDoneParams, RunFocusParams,
+    RunFocusResult, TemplateApplyParams, Trigger,
 };
 
 use super::BoardClient;
@@ -167,34 +169,92 @@ fn stamp_all(cards: Vec<crate::model::Card>) -> Vec<crate::model::Card> {
     cards.into_iter().map(stamp).collect()
 }
 
+fn snapshot_of(db: &Db, board_id: i64) -> anyhow::Result<BoardSnapshot> {
+    Ok(BoardSnapshot {
+        board: db.get_board(board_id)?,
+        columns: db.list_columns(board_id)?,
+        cards: stamp_all(db.list_cards(board_id)?),
+        active_runs: db.active_run_summaries(board_id)?,
+    })
+}
+
+/// Assemble a `project.open`-style result from a context pair. The board
+/// snapshot carries daemon-style labels even though the DB has no herdr.
+fn project_open_result(db: &Db, pair: (crate::model::Project, crate::model::Board)) -> anyhow::Result<Value> {
+    let (project, board) = pair;
+    Ok(serde_json::to_value(ProjectOpenResult {
+        project,
+        board: snapshot_of(db, board.id)?,
+    })?)
+}
+
 fake_methods!(db, config, params, {
     "board.get" => {
         let p: BoardGetParams = serde_json::from_value(params)?;
         let board_id = p.board_id.unwrap_or(BOARD_ID);
-        let snap = BoardSnapshot {
-            board: db.get_board(board_id)?,
-            columns: db.list_columns(board_id)?,
-            cards: stamp_all(db.list_cards(board_id)?),
-            active_runs: db.active_run_summaries(board_id)?,
-        };
-        serde_json::to_value(snap)?
+        serde_json::to_value(snapshot_of(db, board_id)?)?
     },
     "board.open" => {
         let p: BoardOpenParams = serde_json::from_value(params)?;
         let board = db.open_board(&p.scope_path)?;
-        serde_json::to_value(BoardSnapshot {
-            columns: db.list_columns(board.id)?,
-            cards: stamp_all(db.list_cards(board.id)?),
-            active_runs: db.active_run_summaries(board.id)?,
-            board,
-        })?
+        serde_json::to_value(snapshot_of(db, board.id)?)?
     },
-    "board.list" => serde_json::to_value(BoardListResult {
-        boards: db.list_boards()?,
-    })?,
+    "board.list" => {
+        let p: BoardListParams = if params.is_null() {
+            BoardListParams::default()
+        } else {
+            serde_json::from_value(params)?
+        };
+        let boards = match p.project_id {
+            Some(project_id) => db.list_boards_for_project(project_id)?,
+            None => db.list_boards()?,
+        };
+        serde_json::to_value(BoardListResult { boards })?
+    },
     "board.rename" => {
         let p: BoardRenameParams = serde_json::from_value(params)?;
         serde_json::to_value(db.rename_board(p.board_id, &p.name)?)?
+    },
+    "board.create" => {
+        let p: BoardCreateParams = serde_json::from_value(params)?;
+        let board = db.create_board(p.project_id, &p.name)?;
+        serde_json::to_value(snapshot_of(db, board.id)?)?
+    },
+    "board.select" => {
+        let p: BoardSelectParams = serde_json::from_value(params)?;
+        let (_, board) = db.select_board(p.board_id)?;
+        serde_json::to_value(snapshot_of(db, board.id)?)?
+    },
+    "project.list" => serde_json::to_value(db.project_list_result()?)?,
+    "project.get" => {
+        let p: ProjectGetParams = serde_json::from_value(params)?;
+        serde_json::to_value(db.project_detail(&p.scope_path)?)?
+    },
+    "project.open" => {
+        let p: ProjectOpenParams = serde_json::from_value(params)?;
+        project_open_result(db, db.open_project_context(&p.scope_path)?)?
+    },
+    "project.create" => {
+        let p: ProjectCreateParams = serde_json::from_value(params)?;
+        crate::scope::validate_existing_directory(&p.scope_path)?;
+        project_open_result(db, db.create_project_context(&p.scope_path)?)?
+    },
+    "project.select" => {
+        let p: ProjectSelectParams = serde_json::from_value(params)?;
+        project_open_result(db, db.select_project_by_scope(&p.scope_path, p.board_id)?)?
+    },
+    "project.selected" => {
+        let result = match db.selected_project()? {
+            Some(project) => {
+                let board = db.project_context_board(project.id)?;
+                ProjectSelectedResult {
+                    project: Some(project),
+                    board: Some(snapshot_of(db, board.id)?),
+                }
+            }
+            None => ProjectSelectedResult::default(),
+        };
+        serde_json::to_value(result)?
     },
     "column.create" => {
         let p: ColumnCreateParams = serde_json::from_value(params)?;

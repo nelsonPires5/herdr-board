@@ -8,7 +8,7 @@ use crate::{Error, Result};
 const SCHEMA_SQL: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../schema.sql"));
 
 /// The latest schema version embedded in [`SCHEMA_SQL`].
-const SCHEMA_VERSION: i64 = 13;
+const SCHEMA_VERSION: i64 = 14;
 
 /// v1 → v2 migration. SQLite cannot alter a CHECK constraint or drop a column
 /// in place, so `cards` is rebuilt. Legacy `space_kind` values `cwd`/`worktree`
@@ -208,6 +208,68 @@ const V11_MIGRATION_SQL: &str = "ALTER TABLE runs ADD COLUMN launch_spec_json TE
 /// Existing runs remain NULL because their launch never recorded an anchor.
 const V12_MIGRATION_SQL: &str = "ALTER TABLE runs ADD COLUMN herdr_anchor_pane_id TEXT";
 
+/// v13 → v14 migration: introduce Projects (canonical-path identity, Global as
+/// the special project), move every existing board into its project as the
+/// first board `main`, and persist the selected project / per-project selected
+/// board / recency (capped at three). Board ids, columns, cards, runs, and
+/// comment history are all preserved.
+///
+/// `boards` is the parent of `columns`/`cards`, so it cannot be dropped while
+/// foreign keys are enabled — SQLite applies the `ON DELETE CASCADE` of the
+/// child rows at DROP time even with deferred constraints. The migration
+/// therefore runs outside the v7+ transaction with foreign keys disabled (the
+/// same pattern as the v2 cards rebuild), with its own BEGIN/COMMIT so a crash
+/// rolls the whole upgrade back and `user_version` stays 13.
+const V14_MIGRATION_SQL: &str = "
+PRAGMA foreign_keys = OFF;
+BEGIN;
+CREATE TABLE projects (
+  id         INTEGER PRIMARY KEY,
+  scope_path TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX idx_projects_scope_path ON projects(scope_path) WHERE scope_path IS NOT NULL;
+INSERT INTO projects (id, scope_path) VALUES (1, NULL);
+INSERT INTO projects (scope_path)
+  SELECT DISTINCT scope_path FROM boards WHERE scope_path IS NOT NULL ORDER BY scope_path;
+CREATE TABLE boards_v14 (
+  id         INTEGER PRIMARY KEY,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name       TEXT NOT NULL COLLATE NOCASE,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (project_id, name)
+);
+INSERT INTO boards_v14 (id, project_id, name, created_at)
+  SELECT b.id, COALESCE(p.id, 1), 'main', b.created_at
+  FROM boards b LEFT JOIN projects p ON p.scope_path = b.scope_path;
+DROP TABLE boards;
+ALTER TABLE boards_v14 RENAME TO boards;
+CREATE TABLE selection (
+  id         INTEGER PRIMARY KEY CHECK (id = 1),
+  project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE board_selection (
+  project_id INTEGER PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+  board_id   INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE project_recents (
+  project_id INTEGER PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+  rank       INTEGER NOT NULL,
+  used_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE board_recents (
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  board_id   INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+  rank       INTEGER NOT NULL,
+  used_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (project_id, board_id)
+);
+COMMIT;
+PRAGMA foreign_keys = ON;
+";
+
 /// v12 → v13: retain current comment identity while adding soft deletion and
 /// immutable audit snapshots. Existing rows seed the initial snapshot before
 /// the insert trigger is installed for future comment writers.
@@ -237,8 +299,9 @@ impl Db {
     /// Apply migrations gated on `PRAGMA user_version`. Idempotent.
     ///
     /// - A fresh DB (`version 0`) is built straight from [`SCHEMA_SQL`] (the
-    ///   current shape) plus the seed (`board id=1 'Global'`, column `Todo` manual
-    ///   position 0) and stamped [`SCHEMA_VERSION`] — no per-version replay.
+    ///   current shape) plus the seed (Global project id=1, its first board
+    ///   `main` id=1, column `Todo` manual position 0) and stamped
+    ///   [`SCHEMA_VERSION`] — no per-version replay.
     /// - Existing DBs replay the required migrations in order.
     pub(super) fn migrate(&self) -> Result<()> {
         let version: i64 = self
@@ -248,7 +311,11 @@ impl Db {
             // Fresh DB: schema.sql already reflects the latest shape.
             self.conn.execute_batch(SCHEMA_SQL)?;
             self.conn.execute(
-                "INSERT INTO boards (id, name, scope_path) VALUES (?1, 'Global', NULL)",
+                "INSERT INTO projects (id, scope_path) VALUES (?1, NULL)",
+                params![BOARD_ID],
+            )?;
+            self.conn.execute(
+                "INSERT INTO boards (id, project_id, name) VALUES (?1, ?1, 'main')",
                 params![BOARD_ID],
             )?;
             self.conn.execute(
@@ -443,8 +510,23 @@ impl Db {
                     }
                 }
             }
-            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            // Commit the v7+ shape changes without stamping the version yet:
+            // v14 rebuilds the parent `boards` table, so it runs outside any
+            // transaction with foreign keys disabled (SQLite cascades child
+            // rows at DROP time otherwise; see V14_MIGRATION_SQL), and only a
+            // fully applied upgrade may advance `user_version`.
             tx.commit()?;
+            if version < 14 {
+                let has_projects: bool = self.conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='projects')",
+                    [],
+                    |r| r.get(0),
+                )?;
+                if !has_projects {
+                    self.conn.execute_batch(V14_MIGRATION_SQL)?;
+                }
+            }
+            self.conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         Ok(())
     }
