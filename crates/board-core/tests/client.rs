@@ -177,6 +177,85 @@ fn subscribe_waits_for_the_daemon_acknowledgement_before_returning() {
     subscriber.join().unwrap();
 }
 
+#[test]
+fn subscribe_rejects_an_event_streamed_before_the_ack() {
+    // A daemon that streams an event before acknowledging must not satisfy the
+    // "wait for the ack" contract: a naive implementation that returns on ANY
+    // first line would accept this fixture, so this case pins the difference
+    // between "waits for an ack" and "waits for any line".
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("boardd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+
+    let daemon = std::thread::spawn(move || {
+        let (_handshake, _) = listener.accept().unwrap();
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        writeln!(
+            stream,
+            "{}",
+            serde_json::to_string(&Event::BoardChanged {
+                reason: BoardChangedReason::CardUpdated,
+                board_id: Some(2),
+                card_id: Some(7),
+                column_id: Some(3),
+            })
+            .unwrap()
+        )
+        .unwrap();
+        writeln!(stream, r#"{{"id":"sub","result":{{"subscribed":true}}}}"#).unwrap();
+    });
+
+    let mut client = UnixClient::connect(&socket).unwrap();
+    let error = client
+        .subscribe()
+        .err()
+        .expect("an event before the ack must reject the subscription");
+    assert!(
+        error
+            .to_string()
+            .contains("invalid subscription acknowledgement"),
+        "an event before the ack must be rejected as a non-ack, got: {error}"
+    );
+    daemon.join().unwrap();
+}
+
+#[test]
+fn subscribe_rejects_a_negative_or_error_ack() {
+    for ack_line in [
+        r#"{"id":"sub","result":{"subscribed":false}}"#,
+        r#"{"id":"sub","error":{"code":1,"message":"subscription refused"}}"#,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("boardd.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+
+        let daemon = std::thread::spawn(move || {
+            let (_handshake, _) = listener.accept().unwrap();
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            writeln!(stream, "{ack_line}").unwrap();
+        });
+
+        let mut client = UnixClient::connect(&socket).unwrap();
+        let error = client
+            .subscribe()
+            .err()
+            .expect("a negative/error ack must reject the subscription");
+        assert!(
+            error
+                .to_string()
+                .contains("did not acknowledge the subscription"),
+            "a negative/error ack must reject the subscription, got: {error}"
+        );
+        daemon.join().unwrap();
+    }
+}
+
 fn action_result() -> Value {
     json!({
         "run": {
