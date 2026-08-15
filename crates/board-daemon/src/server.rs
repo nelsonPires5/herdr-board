@@ -243,12 +243,18 @@ async fn handle_conn(d: Arc<Daemon>, stream: UnixStream, conn_id: u64) {
                 };
                 if req.method == "events.subscribe" {
                     tracing::info!(target: "board_rpc", operation_family = "board_rpc", conn = conn_id, req_id = request_correlation, method = "events.subscribe", outcome = "ok", duration_ms = 0_u64, "board RPC completed");
+                    // Activate the event receiver BEFORE acknowledging: the
+                    // client treats the acknowledgement as "events will be
+                    // delivered for any mutation from now on" and refetches
+                    // the snapshot right after it. Acknowledging first would
+                    // leave a window where a mutation between that refetch and
+                    // receiver registration is missed.
+                    if event_forwarder.is_none() {
+                        event_forwarder = Some(spawn_event_forwarder(&d, outbox.clone()));
+                    }
                     let ack = Response::ok(req.id, json!(SubscribeResult { subscribed: true }));
                     if !outbox.response(to_line(&ack)).await {
                         break;
-                    }
-                    if event_forwarder.is_none() {
-                        event_forwarder = Some(spawn_event_forwarder(&d, outbox.clone()));
                     }
                     continue;
                 }
