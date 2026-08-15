@@ -75,8 +75,9 @@ fn card_harness_select_consumes_harness_list() {
             "claude".to_string(),
             "codex".to_string(),
             "opencode".to_string(),
+            "antigravity".to_string(),
         ],
-        "the built-in catalog includes opencode after codex"
+        "the built-in catalog includes opencode after codex and antigravity last"
     );
     form.apply_options(
         None,
@@ -849,4 +850,133 @@ fn column_submit_clears_system_prompt_only_when_emptied_under_auto() {
         Submit::ColumnCreate(p) => assert_eq!(p.system_prompt, None),
         _ => panic!("expected ColumnCreate"),
     }
+}
+
+#[test]
+fn card_antigravity_selectors_show_catalog_models_and_three_permission_modes() {
+    // The antigravity catalog drives the guided selectors: normalized base
+    // models with per-model effort ladders (catalog up → model_freeform
+    // false), a fixed-effort model offering no effort at all, and exactly the
+    // three verified permission modes with their board-facing labels.
+    let mut form = Form::card_create(1);
+    set_choice(&mut form, FieldId::Harness, "antigravity");
+    form.apply_options(
+        Some(HarnessCapabilities {
+            harness: "antigravity".into(),
+            models: vec![
+                ModelInfo {
+                    id: "gemini-3.7-flash".into(),
+                    efforts: vec![Effort::Low, Effort::Medium, Effort::High],
+                },
+                ModelInfo {
+                    id: "claude-sonnet-4-6".into(),
+                    efforts: vec![],
+                },
+            ],
+            model_freeform: false,
+            default_efforts: vec![Effort::Low, Effort::Medium, Effort::High],
+            permission_modes: vec!["current".into(), "sandbox".into(), "always-proceed".into()],
+            resume: Default::default(),
+            default_effort_label: board_core::labels::default_effort_label().to_string(),
+            default_permission_label: board_core::labels::default_permission_label().to_string(),
+            default_model_label: board_core::labels::default_model_label().to_string(),
+        }),
+        None,
+        None,
+        None,
+    );
+
+    // Catalog up → model is a guided selector, not free text.
+    let model_labels = choice_labels(&form, FieldId::Model);
+    assert!(
+        model_labels.contains(&"gemini-3.7-flash".to_string())
+            && model_labels.contains(&"claude-sonnet-4-6".to_string()),
+        "the normalized base models are offered: {model_labels:?}"
+    );
+
+    // Selecting the variant model narrows the effort ladder to its three
+    // agy levels.
+    set_choice(&mut form, FieldId::Model, "gemini-3.7-flash");
+    form.on_model_changed();
+    assert_eq!(
+        choice_labels(&form, FieldId::Effort),
+        vec![
+            "default effort".to_string(),
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+        ],
+        "the merged variant ladder low|medium|high"
+    );
+
+    // Selecting the fixed-effort model offers no effort at all.
+    set_choice(&mut form, FieldId::Model, "claude-sonnet-4-6");
+    form.on_model_changed();
+    assert_eq!(
+        choice_labels(&form, FieldId::Effort),
+        vec!["default effort".to_string()],
+        "a fixed-effort model offers no effort selector"
+    );
+
+    // The permission selector is exactly the three modes with their labels.
+    assert!(form.field_visible(idx_of(&form, FieldId::Permission)));
+    assert_eq!(
+        choice_labels(&form, FieldId::Permission),
+        vec![
+            "default permission".to_string(),
+            "Current permission".to_string(),
+            "Sandbox".to_string(),
+            "Always proceed".to_string(),
+        ]
+    );
+
+    // Submit carries the exact overrides.
+    set_choice(&mut form, FieldId::Model, "gemini-3.7-flash");
+    form.on_model_changed();
+    set_choice(&mut form, FieldId::Effort, "high");
+    set_choice(&mut form, FieldId::Permission, "Sandbox");
+    form.fields
+        .iter_mut()
+        .find(|f| f.id == FieldId::Title)
+        .unwrap()
+        .set_text("antigravity task");
+    match form.submit().unwrap() {
+        Submit::CardCreate(p) => {
+            assert_eq!(p.harness.as_deref(), Some("antigravity"));
+            assert_eq!(p.model.as_deref(), Some("gemini-3.7-flash"));
+            assert_eq!(p.effort, Some(Effort::High));
+            assert_eq!(p.permission_mode.as_deref(), Some("sandbox"));
+        }
+        _ => panic!("expected CardCreate"),
+    }
+}
+
+#[test]
+fn card_antigravity_default_capabilities_before_fetch() {
+    // Before any catalog fetch, selecting antigravity answers from
+    // board-core's built-in down-state snapshot: no models (free-form), the
+    // agy effort ladder, and the three permission modes.
+    let mut form = Form::card_create(1);
+    set_choice(&mut form, FieldId::Harness, "antigravity");
+    form.apply_options(None, None, None, None);
+    assert_eq!(form.current_harness(), "antigravity");
+    assert_eq!(
+        choice_labels(&form, FieldId::Effort),
+        vec![
+            "default effort".to_string(),
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+        ],
+        "the free-form agy ladder is exactly low|medium|high — never the full board ladder"
+    );
+    assert_eq!(
+        choice_labels(&form, FieldId::Permission),
+        vec![
+            "default permission".to_string(),
+            "Current permission".to_string(),
+            "Sandbox".to_string(),
+            "Always proceed".to_string(),
+        ]
+    );
 }

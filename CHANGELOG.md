@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- [#90](https://github.com/nelsonPires5/herdr-board/pull/90) feat: add the Antigravity CLI (agy) as a native harness with a live model catalog, conversation resume/retry and safe permission modes.
+
 ### Fixed
 
 - [#89](https://github.com/nelsonPires5/herdr-board/pull/89) fix: the promotion PR is now merged by a maintainer so the Release workflow can tag the green main commit.

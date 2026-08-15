@@ -262,7 +262,7 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
   `fail`→on_fail; no target → card stays, status `done`/`failed`). It is also the confirm channel for
   an `awaiting` card (TUI `Enter` and `card run confirm` send the same request). The only queued
   exception is a configured harness: its `board done` must provide the exact queued run id and may
-  arrive before runner registration. A queued built-in (pi/claude/codex/opencode) run is rejected because
+  arrive before runner registration. A queued built-in (pi/claude/codex/opencode/antigravity) run is rejected because
   managed completion requires a registered pane. A mismatched id/pane, missing id for the queued
   exception, or otherwise ineligible run returns an error.
 - `run.cancel {card_id}` → `{run, card}` — kills the pane (herdr `pane.close`), outcome `cancelled`, card status `failed`, no transition.
@@ -399,7 +399,7 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
 wrapper. It accepts the exact matching open queued or started **configured** run (including a callback
 that arrives before spawn registration), then records `fail` with summary "configured harness exited
 without calling board done", adds "pane exited without board done", leaves the card in its current
-column, and does **not** apply `on_fail`. Stale/replaced/already-completed and built-in (pi/claude/codex/opencode)
+column, and does **not** apply `on_fail`. Stale/replaced/already-completed and built-in (pi/claude/codex/opencode/antigravity)
 runs are rejected. This is protected by the local board Unix socket trust boundary, not an unforgeable
 token; the wrapper ignores an expected rejection when `run.done` won the race. The generated
 script removes itself when it starts; if `pane run` accepts scheduling but the pane never opens
@@ -451,7 +451,7 @@ and promoted atomically onto run+card. See [Dispatch semantics](#dispatch-semant
 | Status | Meaning |
 |---|---|
 | `idle` | At rest in a column; no active run. |
-| `queued` | Enqueued for dispatch into an auto column. A configured harness may complete this exact run immediately before runner registration; queued built-in (pi/claude/codex/opencode) runs cannot be completed until their managed pane is registered. |
+| `queued` | Enqueued for dispatch into an auto column. A configured harness may complete this exact run immediately before runner registration; queued built-in (pi/claude/codex/opencode/antigravity) runs cannot be completed until their managed pane is registered. |
 | `running` | A run is active and the agent is working. |
 | `blocked` | The agent/integration reported blocked; the run stays active. |
 | `awaiting` | The agent appears finished (or went idle) **without** `board done`. The run stays OPEN, the column timeout is paused, and the card never fails on its own — it waits for human review. |
@@ -591,6 +591,39 @@ Their persisted startup argv contains neither system nor card prompt:
     first prompt** — real OpenCode mints `agent_session` only once a prompt lands; a prompt-less
     rescue reduces to capture-after-readiness — and persisted atomically with the run promotion
     (`NULL` at enqueue for a Mint); a fork's newly captured id supersedes the recorded source id.
+- Built-in `antigravity` (CLI `agy`):
+  `agy [--model M] [--effort low|medium|high] [--sandbox | --dangerously-skip-permissions] [--conversation <id>]`
+  - the model catalog is **live-only**: `agy --output-format json models` (root flag, verified
+    against agy 1.1.13) is probed per validation; there is **no static fallback**. Variant model
+    ids (`gemini-3.7-flash-high|medium|low`) normalize to one base model plus efforts
+    (`--model gemini-3.7-flash --effort high`); fixed-effort models (`claude-sonnet-4-6`,
+    `claude-opus-4-6-thinking`) declare empty efforts and never receive `--effort`. While the
+    catalog is unavailable (`agy` missing or failing) capability selection is free-form and
+    stored models keep running (only new selection is blocked); once the catalog is back, a
+    removed model is rejected at enqueue/edit with an actionable `InvalidModel` error;
+  - permission modes are board-facing with exact verified CLI spellings: `current` emits no flag,
+    `sandbox` emits `--sandbox`, `always-proceed` emits `--dangerously-skip-permissions`; the
+    engine's capability validation rejects any other value before launch, and the board never
+    edits `settings.json`;
+  - `--conversation <id>` is a trailing session pair closing the startup argv (a Mint carries no
+    conversation flag at all and no board-invented uuid — the agy TUI mints its own id); agy has
+    **no fork**, so a `board retry` re-attaches to the SAME conversation in a new pane; because
+    resume and retry argv are byte-identical, the daemon treats every `--conversation` hop as a
+    fresh launch and **never reuses a pane** for antigravity (even a non-fresh auto hop) — this
+    is deliberate and differs from opencode/codex reuse;
+  - no system-prompt file and no prompt text in argv: the managed `agent.prompt` channels are the
+    only prompt transport (Mint: delimited `system + task` block; resume/retry fresh pane: task
+    only; rescue: nothing);
+  - the conversation id reported by the antigravity integration (`AgentInfo.agent_session`,
+    `kind:"id"`, source pinned to `herdr:antigravity_cli`) is captured **after the first prompt**
+    (like opencode; a prompt-less rescue reduces to capture-after-readiness) and persisted
+    atomically with the run promotion (`NULL` at enqueue for a Mint). Fallback detection: when a
+    resume/retry asked for a conversation that no longer exists, agy silently starts a new one and
+    the integration reports the NEW id — the daemon compares the captured id against the
+    requested pre-promotion id, the promotion already persists the new id, and a `system` card
+    comment makes the fallback visible (naming both conversations). When no id is captured at
+    all (integration missing), the run still executes, a `system` warning explains that
+    focus/retry may be unavailable, and rescue/reuse fail closed with an actionable refusal.
 - Config-defined harnesses (`~/.config/herdr-board/config.toml`) remain unmanaged even if their
   executable is named `pi`, `claude`, or `opencode` — the built-in names are matched first, so a
   config section under a built-in name (e.g. `[harness.opencode]`) is unreachable and must be
@@ -626,4 +659,7 @@ unavailable and the idle→`awaiting` watchdog does not arm while status remains
 thread id that enables resume/reuse/rescue; without it the run still executes and completes, but the
 conversation cannot be reopened by id. The opencode integration reports the `ses_…` session id the
 same way, and its absence fails closed exactly as for codex: basic execution continues with
-`session_id = NULL`, while reuse/rescue are refused.
+`session_id = NULL`, while reuse/rescue are refused. The antigravity integration
+(`herdr:antigravity_cli`) reports the agy conversation id the same way; its absence fails closed
+identically, with the added fallback guard that an unreported conversation cannot prove it did not
+fall back to a new one.

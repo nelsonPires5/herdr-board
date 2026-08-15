@@ -36,14 +36,18 @@ pub fn default_model_label() -> &'static str {
 }
 
 /// Human label for a permission-mode wire id. Codex's stable wire ids get the
-/// same labels as its `/permissions` picker; config-defined modes stay
-/// verbatim. Shared by the daemon (label stamping) and the TUI (form option
-/// labels) so the two can never drift.
+/// same labels as its `/permissions` picker; antigravity's three modes get
+/// their board-facing labels; config-defined modes stay verbatim. Shared by
+/// the daemon (label stamping) and the TUI (form option labels) so the two
+/// can never drift.
 pub fn permission_label(mode: &str) -> String {
     match mode {
         "ask-for-approval" => "Ask for approval".to_string(),
         "approve-for-me" => "Approve for me".to_string(),
         "full-access" => "Full access".to_string(),
+        "current" => "Current permission".to_string(),
+        "sandbox" => "Sandbox".to_string(),
+        "always-proceed" => "Always proceed".to_string(),
         other => other.to_string(),
     }
 }

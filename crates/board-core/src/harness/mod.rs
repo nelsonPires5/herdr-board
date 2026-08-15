@@ -1,12 +1,13 @@
 //! Harness adapters: turn resolved settings + a prompt into `(argv, env)`.
 //!
 //! Three kinds:
-//! - built-ins `pi`, `claude`, `codex` and `opencode` — flags exactly per
-//!   `docs/protocol.md` (the codex adapter lives in [`codex`], the opencode
-//!   adapter in [`opencode`]);
+//! - built-ins `pi`, `claude`, `codex`, `opencode` and `antigravity` — flags
+//!   exactly per `docs/protocol.md` (the codex adapter lives in [`codex`], the
+//!   opencode adapter in [`opencode`], the antigravity adapter in [`agy`]);
 //! - config-defined harnesses — an argv template with `{model}`/`{effort}`/
 //!   `{permission_mode}` placeholders; prompt via `BOARD_PROMPT` env.
 
+pub mod agy;
 pub mod codex;
 pub mod opencode;
 
@@ -18,7 +19,7 @@ use crate::prompt::EffectiveSettings;
 /// Harness stored on newly-created cards when the caller omits one.
 pub const DEFAULT_HARNESS: &str = "pi";
 /// Built-ins routed without config-defined argv/env reconstruction.
-pub const BUILTIN_HARNESSES: [&str; 4] = ["pi", "claude", "codex", "opencode"];
+pub const BUILTIN_HARNESSES: [&str; 5] = ["pi", "claude", "codex", "opencode", "antigravity"];
 
 pub fn is_builtin_harness(name: &str) -> bool {
     BUILTIN_HARNESSES.contains(&name)
@@ -174,6 +175,7 @@ pub fn session_argv(
         },
         "codex" => codex::session_argv(session, target_uuid),
         "opencode" => opencode::session_argv(session, target_uuid),
+        "antigravity" => agy::session_argv(session, target_uuid),
         other => Err(HarnessError::UnknownHarness(other.to_string())),
     }
 }
@@ -192,6 +194,7 @@ fn session_flags(harness_name: &str) -> &'static [(&'static str, bool)] {
         ],
         "codex" => codex::SESSION_FLAGS,
         "opencode" => opencode::SESSION_FLAGS,
+        "antigravity" => agy::SESSION_FLAGS,
         _ => &[],
     }
 }
@@ -442,6 +445,9 @@ pub fn build_invocation(
     }
     if harness_name == "opencode" {
         return opencode::managed_opencode_invocation(settings, session, minted_uuid, prompt);
+    }
+    if harness_name == "antigravity" {
+        return agy::managed_antigravity_invocation(settings, session, minted_uuid, prompt);
     }
 
     let def = config

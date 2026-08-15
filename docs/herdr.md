@@ -129,8 +129,16 @@ The delta is additive and outside the board client surface:
   data includes `workspace_ids`, `workspaces`, and an optional
   `before_workspace_id`.
 - `antigravity_cli` (CLI spelling `antigravity-cli`) and `grok` are new
-  integration targets with session reporting/native restore. They do not add
-  board built-in harnesses.
+  integration targets with session reporting/native restore. `antigravity_cli`
+  DOES add a board built-in harness: `antigravity` (Herdr kind/executable
+  `agy`) is a self-minting managed harness whose conversation id is reported
+  by this integration (`{agent: agy, kind: id, source: herdr:antigravity_cli,
+  value}`) and captured by the daemon after the first `agent.prompt`. On the
+  host inspected for this update the integration is NOT installed (its hook
+  would live at `~/.gemini/config/hooks/herdr-agent-state.sh`); the board
+  never installs it — without it an antigravity run still executes, but no
+  conversation id is captured, a `system` card warning explains that
+  focus/retry may be unavailable, and reuse/rescue fail closed.
 - `AgentInfo.agent_session` carries an `AgentSessionInfo | null` reference —
   `{agent, kind, source, value}` with `kind` ∈ {`id`, `path`} — for panes whose
   integration reported a session. It is absent on panes without one. `board-herdr`
@@ -138,12 +146,16 @@ The delta is additive and outside the board client surface:
   harnesses need the reported id: a codex/opencode Mint persists `session_id =
   NULL` at enqueue, and the daemon's bounded post-launch `agent.get` capture
   accepts only an `id`-kind reference owned by the expected agent with a
-  non-empty value — codex leaves `source` unconstrained, while opencode pins the
-  exact source the current Herdr opencode integration reports — promoting it
+  non-empty value — codex leaves `source` unconstrained, while opencode and
+  antigravity pin the exact source the current Herdr integration reports
+  (`herdr:opencode` / `herdr:antigravity_cli`) — promoting it
   atomically onto the run and card. A wrong-agent, wrong-source, `path`-kind,
   blank, or never-reported session degrades the capture to `None` (run still
   executes); the pane then keeps no recorded conversation id, so reuse/rescue
-  fail closed.
+  fail closed. For antigravity the comparison between the captured id and the
+  requested pre-promotion id is also the fallback detector: when agy started a
+  new conversation because the recorded one no longer exists, the new id is
+  persisted and a `system` card comment names both.
 
 The client does not call the new workspace method. It preserves unknown additive
 events rather than treating them as a change to the used transport. The current
