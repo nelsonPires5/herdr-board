@@ -61,13 +61,17 @@ impl Driver {
     pub(super) fn dispatch(&mut self, eff: Effect) {
         match eff {
             Effect::Refetch => self.refetch(),
-            Effect::LoadBoards => self.load_boards(),
-            Effect::LoadBoardsForSwitcher => self.load_boards_for_switcher(),
-            Effect::SwitchBoard(id) => self.switch_board(id),
-            Effect::LoadBoardsForMove { card_id } => self.load_boards_for_move(card_id),
-            Effect::LoadColumnsForMove { card_id, board_id } => {
-                self.load_columns_for_move(card_id, board_id)
-            }
+            Effect::LoadProjects => self.refresh_projects(),
+            Effect::LoadProjectPicker => self.load_project_picker(),
+            Effect::LoadBoardPicker { project_id } => self.load_board_picker(project_id),
+            Effect::SelectProject {
+                project_id,
+                board_id,
+            } => self.select_project(project_id, board_id),
+            Effect::SelectBoard(id) => self.select_board(id),
+            Effect::ProjectCreate(p) => self.create_project(p),
+            Effect::BoardCreate(p) => self.create_board(p),
+            Effect::LoadMoveColumns { board_id } => self.load_move_columns(board_id),
             Effect::LoadDetail(id) => self.load_detail(id),
             Effect::CardCreate(p) => {
                 let r = self.client.card_create(&p);

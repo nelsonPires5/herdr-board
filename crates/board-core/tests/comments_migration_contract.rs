@@ -1,4 +1,5 @@
-//! RED migration contract for the v12 -> v13 comment audit schema.
+//! RED migration contract for the v12 -> v14 upgrade (comment audit schema
+//! plus the projects/selection schema).
 
 use board_core::db::Db;
 use rusqlite::Connection;
@@ -142,9 +143,16 @@ fn v12_to_v13_preserves_board_card_comment_and_run_bytes() {
             .expect("v12 marker");
     }
 
-    let db = Db::open(&path).expect("v12 -> v13 migration");
-    assert_eq!(db.user_version().expect("schema version"), 13);
-    assert_eq!(db.get_board(1).expect("board").name, "Global");
+    let db = Db::open(&path).expect("v12 -> v14 migration");
+    assert_eq!(db.user_version().expect("schema version"), 14);
+    // The legacy Global board becomes the Global project's first board `main`.
+    let board = db.get_board(1).expect("board");
+    assert_eq!(board.name, "main");
+    assert_eq!(board.project_id, 1);
+    assert_eq!(board.scope_path, None);
+    let global = db.get_project(1).expect("global project");
+    assert_eq!(global.name, "Global");
+    assert_eq!(global.scope_path, None);
     assert_eq!(
         db.get_card(7)
             .expect("card")

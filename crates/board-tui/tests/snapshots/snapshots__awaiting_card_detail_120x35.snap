@@ -2,7 +2,7 @@
 source: crates/board-tui/tests/snapshots.rs
 expression: output
 ---
-" ◈ herdr-board ● 1 running                         [ Global ▾ ]                          [ Active ] [ All ] [ Archived ]"
+" ◈ herdr-board ● 1 running          [ Global ▾ ]                   [ main ▾ ]            [ Active ] [ All ] [ Archived ]"
 "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────"
 "┌ TODO · MANUAL · 1 ─────────┐┌ PLAN · AUTO · 1 ───────────┐┌ EXECUTE · AUTO · 2 ────────┐┌ REVIEW · AUTO · 2 ─────────┐"
 "┌ Card #6: Tune retry backoff                                                                               [ X ] [ □ ]┐"

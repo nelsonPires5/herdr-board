@@ -17,6 +17,7 @@ use crossterm::event::KeyCode;
 const EXPECTED: &[(Screen, &str, &str)] = &[
     (Screen::Board, "←/→ h/l", "focus column"),
     (Screen::Board, "↑/↓ k/j", "focus card"),
+    (Screen::Board, "p", "switch project"),
     (Screen::Board, "b", "switch board"),
     (Screen::Board, "n", "new card"),
     (Screen::Board, "N", "new column"),
@@ -27,7 +28,7 @@ const EXPECTED: &[(Screen, &str, &str)] = &[
     (Screen::Board, "v", "cycle active/all/archived"),
     (Screen::Board, "d", "delete card"),
     (Screen::Board, "D", "delete/move column cards"),
-    (Screen::Board, "m", "move card (board→column)"),
+    (Screen::Board, "m", "move card (project→board)"),
     (Screen::Board, "M", "move focused column"),
     (Screen::Board, "O", "reorder card in column"),
     (Screen::Board, "H / L", "shove card left / right"),
@@ -64,7 +65,6 @@ const EXPECTED: &[(Screen, &str, &str)] = &[
     (Screen::Picker, "--", "-- picker / confirm --"),
     (Screen::Picker, "↑/↓ k/j", "move selection"),
     (Screen::Picker, "Enter", "choose"),
-    (Screen::Picker, "b", "other board (moving)"),
     (Screen::Confirm, "y / n", "confirm / decline"),
     (Screen::Picker, "q / Esc", "cancel"),
     (Screen::MoveColumn, "--", "-- move column (M) --"),
@@ -147,8 +147,15 @@ fn board_shortcuts_stay_case_sensitive() {
     d.handle(key(KeyCode::Char('m')));
     assert_eq!(
         d.app.screen,
-        Screen::Picker,
-        "lowercase m opens the move picker"
+        Screen::CardForm,
+        "lowercase m opens the move-card form"
+    );
+    assert!(
+        d.app
+            .form
+            .as_ref()
+            .is_some_and(|form| matches!(form.kind, FormKind::MoveCard { .. })),
+        "lowercase m must open the move-card form"
     );
     let mut d = demo_driver("x");
     d.handle(key(KeyCode::Char('M')));

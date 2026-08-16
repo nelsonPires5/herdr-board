@@ -2,7 +2,7 @@
 source: crates/board-tui/tests/snapshots.rs
 expression: "render(&mut d, 120, 35)"
 ---
-" ◈ herdr-board ● 1 running                         [ Global ▾ ]                          [ Active ] [ All ] [ Archived ]"
+" ◈ herdr-board ● 1 running          [ Global ▾ ]                   [ main ▾ ]            [ Active ] [ All ] [ Archived ]"
 "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────"
 "┌ EXECUTE · AUTO · 2 ────────┐┌ REVIEW · AUTO · 2 ─────────┐┌ HUMAN REVIEW · MANUAL · 0 ─┐┌ DONE · MANUAL · 2 ─────────┐"
 "│┌──────────────────────────┐││┌──────────────────────────┐││                            ││┌──────────────────────────┐│"

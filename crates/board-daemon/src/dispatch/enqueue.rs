@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use board_core::config::Config;
 use board_core::db::Db;
 use board_core::engine::{decide_resumability, validate_effective_settings, ResumabilityDecision};
 use board_core::harness::{build_invocation, is_builtin_harness, plan_session, SessionPlan};
@@ -11,6 +12,21 @@ use uuid::Uuid;
 
 use crate::dispatch::{map_harness_err, PreparedEnqueue};
 use crate::state::Daemon;
+
+/// A validation [`Config`] for `harness`: the daemon config plus a FRESH live
+/// antigravity catalog probe (only when the harness is antigravity).
+///
+/// The probe is bounded (`agy_catalog::CLI_TIMEOUT`) and runs only on the
+/// antigravity validation paths; a failed probe stamps `None`, which the
+/// antigravity adapter reads as free-form — stored models keep running,
+/// only new selection is constrained (the UIs have nothing to offer).
+pub(crate) fn antigravity_validation_config(d: &Daemon, harness: &str) -> Config {
+    let mut config = d.config.clone();
+    if harness == "antigravity" {
+        config.agy_models = board_core::agy_catalog::live_models(config.agy_bin.as_deref());
+    }
+    config
+}
 
 /// Create a queued run row for `card` in `column`, minting/resuming/forking the
 /// session per policy. Sets the card to `queued`. Does not spawn.
@@ -69,7 +85,18 @@ pub(crate) fn prepare_enqueue_values(
         ),
         ResumabilityDecision::Resumable
     );
-    validate_effective_settings(card, &column, &d.config)?;
+    // Validate against the CURRENT live catalog when the effective harness is
+    // antigravity: a stored model that the catalog no longer lists must fail
+    // the enqueue with an actionable error (fail-closed when the catalog is
+    // reachable); a catalog that cannot be probed degrades to free-form, so
+    // stored values keep running. The probe is bounded and happens only for
+    // antigravity cards.
+    let effective_harness = column
+        .harness_override
+        .as_deref()
+        .unwrap_or(card.harness.as_str());
+    let validation_config = antigravity_validation_config(d, effective_harness);
+    validate_effective_settings(card, &column, &validation_config)?;
     let settings = effective_settings(card, &column)?;
     let prompt = assemble_prompt(&card.description, &comments);
     let existing_session = card.session_id.as_deref().filter(|_| session_used);

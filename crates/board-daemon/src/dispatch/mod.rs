@@ -11,7 +11,7 @@ mod space;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use enqueue::{enqueue_run, prepare_enqueue_values};
+pub(crate) use enqueue::{antigravity_validation_config, enqueue_run, prepare_enqueue_values};
 pub(crate) use finalize::{finalize_run, finalize_run_timeout};
 pub(crate) use launch_plan::board_env;
 pub(crate) use ownership::{owned_pane_ids, reconstruct_owned_tab_id, OwnedPanes};

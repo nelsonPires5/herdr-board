@@ -50,10 +50,9 @@ pub use effect::Effect;
 pub use nav::clamp_selection;
 pub use state::{
     CardFilter, CommentHistoryView, Confirm, ConfirmPurpose, DetailScrollTarget, DragKind,
-    DragState, MoveColumnState, Picker, PickerPurpose, ReorderCardState, SwitcherLevel,
+    DragState, MoveColumnState, Picker, PickerAction, PickerPurpose, PickerRow, ReorderCardState,
     SwitcherState, Toast,
 };
-pub use switcher::enter_boards_level;
 
 pub(crate) use state::column_options;
 
@@ -95,8 +94,12 @@ pub enum Screen {
     ReorderCard,
     Confirm,
     Help,
-    /// Compact-only column/board switcher sheet.
+    /// Compact-only column switcher sheet.
     Switcher,
+    /// The project picker (`p`): switch project / create one.
+    ProjectPicker,
+    /// The board picker (`b` / a project picker choice): switch board / create one.
+    BoardPicker,
     /// A focused comment's audit trail (`comment.history`), reached via `h`
     /// from `CardDetail`.
     CommentHistory,
@@ -130,6 +133,16 @@ pub enum Msg {
 /// The whole TUI state.
 pub struct App {
     pub board: BoardSnapshot,
+    /// The project the current board belongs to. Kept in sync from
+    /// `project.list` (see `Driver::refresh_projects`) and used by the
+    /// project picker and the header's project chip.
+    pub project: board_core::model::Project,
+    /// Project cache from `project.list`: per-project boards plus the
+    /// selection/recency data the pickers need. `projects_loaded` records
+    /// whether a fetch has ever landed (a failed first fetch keeps the picker
+    /// from showing an empty list as if it were authoritative).
+    pub projects: Vec<board_core::protocol::ProjectInfo>,
+    pub projects_loaded: bool,
     pub screen: Screen,
     pub sel_col: usize,
     pub sel_card: usize,
@@ -196,8 +209,16 @@ impl App {
     }
 
     pub fn with_origin_context(board: BoardSnapshot, origin_context: OriginContext) -> App {
+        let project = board_core::model::Project {
+            id: board.board.project_id,
+            name: board_core::model::Project::display_name(board.board.scope_path.as_deref()),
+            scope_path: board.board.scope_path.clone(),
+        };
         App {
             board,
+            project,
+            projects: Vec::new(),
+            projects_loaded: false,
             screen: Screen::Board,
             sel_col: 0,
             sel_card: 0,
@@ -233,6 +254,25 @@ impl App {
     }
 
     pub fn replace_board(&mut self, board: BoardSnapshot) {
+        // Re-derive the project from the cache when the board's project is
+        // known there; otherwise fall back to deriving it from the board's
+        // own scope path (the pre-cache bootstrap).
+        match self
+            .projects
+            .iter()
+            .find(|pi| pi.project.id == board.board.project_id)
+        {
+            Some(pi) => self.project = pi.project.clone(),
+            None => {
+                self.project = board_core::model::Project {
+                    id: board.board.project_id,
+                    name: board_core::model::Project::display_name(
+                        board.board.scope_path.as_deref(),
+                    ),
+                    scope_path: board.board.scope_path.clone(),
+                };
+            }
+        }
         self.board = board;
         self.screen = Screen::Board;
         self.sel_col = 0;
@@ -427,7 +467,7 @@ fn on_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
         Screen::Board => board::board_key(app, k),
         Screen::CardDetail => detail::detail_key(app, k),
         Screen::CardForm | Screen::ColumnForm => forms::form_key(app, k),
-        Screen::Picker => picker::picker_key(app, k),
+        Screen::Picker | Screen::ProjectPicker | Screen::BoardPicker => picker::picker_key(app, k),
         Screen::MoveColumn => move_column::move_column_key(app, k),
         Screen::ReorderCard => reorder_card::reorder_card_key(app, k),
         Screen::Confirm => confirm::confirm_key(app, k),

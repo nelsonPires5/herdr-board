@@ -41,9 +41,12 @@ fn scheduler_index_sql(conn: &Connection, name: &str) -> Option<String> {
 #[test]
 fn migration_seeds_board_and_todo_column() {
     let db = mem();
-    assert_eq!(db.user_version().unwrap(), 13);
+    assert_eq!(db.user_version().unwrap(), 14);
     let board = db.get_board(BOARD_ID).unwrap();
-    assert_eq!(board.name, "Global");
+    // The Global project keeps the legacy board id 1, renamed `main` by v14;
+    // the Global identity now lives on the project itself.
+    assert_eq!(db.get_project(1).unwrap().name, "Global");
+    assert_eq!(board.name, "main");
     assert_eq!(board.scope_path, None);
     let cols = db.list_columns(BOARD_ID).unwrap();
     assert_eq!(cols.len(), 1);
@@ -120,7 +123,7 @@ fn v11_rows_gain_nullable_anchor_column_without_backfill() {
         .unwrap();
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 13);
+    assert_eq!(db.user_version().unwrap(), 14);
     assert_eq!(db.list_runs(1).unwrap()[0].herdr_anchor_pane_id, None);
 }
 
@@ -135,9 +138,9 @@ fn migration_idempotent_on_reopen() {
     // Reopen: must not re-seed (still exactly one board, one column).
     {
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.user_version().unwrap(), 13);
+        assert_eq!(db.user_version().unwrap(), 14);
         assert_eq!(db.list_columns(BOARD_ID).unwrap().len(), 1);
-        assert_eq!(db.get_board(BOARD_ID).unwrap().name, "Global");
+        assert_eq!(db.get_board(BOARD_ID).unwrap().name, "main");
     }
 }
 
@@ -223,9 +226,9 @@ fn migration_v2_upgrades_v1_database() {
         .unwrap();
         conn.execute_batch("PRAGMA user_version = 1;").unwrap();
     }
-    // Open via Db → runs the v2 through v7 migrations.
+    // Open via Db → runs the v2 through v14 migrations.
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 13);
+    assert_eq!(db.user_version().unwrap(), 14);
     let cards = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(cards.len(), 2);
     for c in &cards {
@@ -358,16 +361,17 @@ fn migration_v4_preserves_claude_cards_and_accepts_pi_efforts() {
     {
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
-            "DROP INDEX idx_boards_scope_path;
-             ALTER TABLE boards DROP COLUMN scope_path;
-             UPDATE boards SET name='main' WHERE id=1;
+            // A v3-era boards table had no scope_path column (added in v5);
+            // the v14 boards shape already has none (it lives on projects),
+            // so only the pre-Global name and the version stamp need rewinding.
+            "UPDATE boards SET name='main' WHERE id=1;
              PRAGMA user_version = 3;",
         )
         .unwrap();
     }
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 13);
+    assert_eq!(db.user_version().unwrap(), 14);
     let existing = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(existing[0].harness, "claude");
     assert_eq!(db.list_comments(existing[0].id).unwrap().len(), 1);
@@ -395,7 +399,7 @@ fn migration_does_not_downgrade_future_schema_version() {
     let path = tmp.path().to_path_buf();
     let card_id = {
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.user_version().unwrap(), 13);
+        assert_eq!(db.user_version().unwrap(), 14);
         db.create_card(&CardCreateParams {
             title: "written by a newer board".into(),
             ..Default::default()
@@ -446,7 +450,7 @@ fn migration_does_not_downgrade_future_schema_version() {
 }
 
 /// Re-stamping a *past* version onto an otherwise current file replays
-/// migrations 8→13 over the shape they already produced. Every step must be
+/// migrations 8→14 over the shape they already produced. Every step must be
 /// guarded, so the replay is a no-op that lands back on the current version.
 /// (This is the behaviour `migration_does_not_downgrade_future_schema_version`
 /// used to exercise before it was rewritten into a genuine future-version test;
@@ -458,16 +462,16 @@ fn migration_replay_from_a_past_version_stamp_is_a_no_op() {
     let path = tmp.path().to_path_buf();
     {
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.user_version().unwrap(), 13);
+        assert_eq!(db.user_version().unwrap(), 14);
     }
     {
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch("PRAGMA user_version = 8;").unwrap();
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 13);
+    assert_eq!(db.user_version().unwrap(), 14);
     assert_eq!(db.list_columns(BOARD_ID).unwrap().len(), 1);
-    assert_eq!(db.get_board(BOARD_ID).unwrap().name, "Global");
+    assert_eq!(db.get_board(BOARD_ID).unwrap().name, "main");
 }
 
 #[test]
@@ -483,16 +487,17 @@ fn migration_v3_adds_archived_at_to_v2_database() {
         .unwrap();
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
+            // A v2-era boards table had no scope_path column (added in v5);
+            // the v14 boards shape already has none (it lives on projects),
+            // so only the pre-Global name and the version stamp need rewinding.
             "ALTER TABLE cards DROP COLUMN archived_at;
-             DROP INDEX idx_boards_scope_path;
-             ALTER TABLE boards DROP COLUMN scope_path;
              UPDATE boards SET name='main' WHERE id=1;
              PRAGMA user_version = 2;",
         )
         .unwrap();
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 13);
+    assert_eq!(db.user_version().unwrap(), 14);
     let cards = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(cards.len(), 1);
     assert!(cards[0].archived_at.is_none());
@@ -592,7 +597,7 @@ fn v6_to_v7_migration_preserves_legacy_queued_run_byte_for_byte() {
         .unwrap();
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 13);
+    assert_eq!(db.user_version().unwrap(), 14);
     let run = &db.list_runs(1).unwrap()[0];
     assert_eq!(run.argv_json, argv);
     assert_eq!(run.prompt_snapshot, prompt);
@@ -645,8 +650,11 @@ fn migration_v5_preserves_global_data_and_renames_it() {
 
     let db = Db::open(&path).unwrap();
     let global = db.get_board(BOARD_ID).unwrap();
-    assert_eq!(db.user_version().unwrap(), 13);
-    assert_eq!(global.name, "Global");
+    assert_eq!(db.user_version().unwrap(), 14);
+    // v5 still renames the legacy board to Global; v14 moves that identity
+    // onto the Global project and renames the board itself back to `main`.
+    assert_eq!(db.get_project(1).unwrap().name, "Global");
+    assert_eq!(global.name, "main");
     assert!(global.scope_path.is_none());
     let cards = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(cards[0].title, "kept");
@@ -739,7 +747,7 @@ fn migration_v6_rebuilds_cards_check_and_preserves_data() {
     }
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 13);
+    assert_eq!(db.user_version().unwrap(), 14);
     let cards = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(cards.len(), 2);
     let kept = &cards[0];
@@ -934,7 +942,7 @@ fn v8_to_v9_derives_timeout_state_once_from_durable_history() {
 }
 
 // ---------------------------------------------------------------------------
-// Schema-v13 index shape and the migration paths that must not touch bytes.
+// Schema-v14 index shape and the migration paths that must not touch bytes.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -942,7 +950,7 @@ fn fresh_v12_has_exact_partial_scheduler_indexes_and_query_plans() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("board.db");
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 13);
+    assert_eq!(db.user_version().unwrap(), 14);
     drop(db);
     let conn = Connection::open(path).unwrap();
     for (name, expected) in [
@@ -974,7 +982,7 @@ fn fresh_v12_has_exact_partial_scheduler_indexes_and_query_plans() {
 }
 
 #[test]
-fn v9_file_fixture_upgrades_through_v12_without_changing_existing_bytes() {
+fn v9_file_fixture_upgrades_through_v14_without_changing_existing_bytes() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("v9.db");
     let (card_id, run_id) = {
@@ -986,9 +994,9 @@ fn v9_file_fixture_upgrades_through_v12_without_changing_existing_bytes() {
                 ..Default::default()
             })
             .unwrap();
-        // Historical v9→v12 migration fixture: enqueue_run_uow writes a v12
-        // row; after manual downgrade to user_version=9 the migration path
-        // still re-adds indexes and must preserve every byte.
+        // Historical v9→v14 migration fixture: enqueue_run_uow writes a
+        // current-shape row; after manual downgrade to user_version=9 the
+        // migration path still re-adds indexes and must preserve every byte.
         let run = db
             .enqueue_run_uow(&EnqueueRun {
                 card_id: card.id,
@@ -1016,7 +1024,11 @@ fn v9_file_fixture_upgrades_through_v12_without_changing_existing_bytes() {
     drop(conn);
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 13);
+    assert_eq!(db.user_version().unwrap(), 14);
+    // v14 rebuilds `boards` (id preserved, name becomes `main`); cards and
+    // runs keep every byte.
+    assert_eq!(db.get_board(BOARD_ID).unwrap().id, BOARD_ID);
+    assert_eq!(db.get_board(BOARD_ID).unwrap().name, "main");
     assert_eq!(db.get_card(card_id).unwrap().unwrap().id, card_id);
     assert_eq!(db.get_run(run_id).unwrap().id, run_id);
     drop(db);
@@ -1028,7 +1040,7 @@ fn v9_file_fixture_upgrades_through_v12_without_changing_existing_bytes() {
         assert_eq!(
             conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            13
+            14
         );
         assert_eq!(
             scheduler_index_sql(&conn, "idx_runs_queued_fifo").as_deref(),
@@ -1191,7 +1203,7 @@ fn v8_upgrade_retains_a_single_open_run_byte_for_byte() {
         .unwrap();
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 13);
+    assert_eq!(db.user_version().unwrap(), 14);
     assert_eq!(db.get_run(before.id).unwrap(), before);
 }
 
@@ -1209,7 +1221,7 @@ fn fresh_and_v7_upgrade_install_exact_partial_unique_index_sql() {
                 .unwrap();
         }
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.user_version().unwrap(), 13);
+        assert_eq!(db.user_version().unwrap(), 14);
         drop(db);
         let sql: String = Connection::open(&path)
             .unwrap()

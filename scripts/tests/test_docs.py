@@ -144,7 +144,7 @@ class DocumentationContractTests(unittest.TestCase):
         last_number = scenario_paths()[-1].name[:2]
         for surface, expected in (
             ("Board socket", "v1;"),
-            ("SQLite", "schema v13"),
+            ("SQLite", "schema v14"),
             ("Herdr client", "0.8.0 / socket protocol 19"),
             ("Herdr integrations", "Pi v8; Claude v7"),
             ("Runtime launch", "daemon-owned"),
@@ -456,11 +456,14 @@ class DocumentationContractTests(unittest.TestCase):
 
     def test_promote_workflow_merges_dev_but_never_tags(self) -> None:
         """The action-owned promotion: green dev CI with a pending bump opens
-        and merges `dev -> main`; tagging stays exclusively in Release.
+        (or updates) the `dev -> main` PR; a maintainer merges it, because
+        GitHub never creates workflow runs for pushes made with GITHUB_TOKEN —
+        an automated merge would silently skip CI and Release could never tag
+        it. Tagging stays exclusively in Release.
 
-        The promote workflow must be bound to `dev` CI completions, merge
-        through a PR (so the merge commit is GitHub-verified and satisfies the
-        main ruleset), and contain no tag- or release-creation step.
+        The promote workflow must be bound to `dev` CI completions, open the
+        PR through `gh pr create`/`gh pr edit`, never merge it, and contain no
+        tag- or release-creation step.
         """
         workflow = (ROOT / ".github/workflows/promote.yml").read_text(encoding="utf-8")
         self.assertIn(
@@ -473,10 +476,12 @@ class DocumentationContractTests(unittest.TestCase):
             workflow,
             "promote job must stay gated to dev CI runs",
         )
-        self.assertIn(
+        self.assertIn("gh pr create", workflow, "promotion PR must be opened here")
+        self.assertIn("gh pr edit", workflow, "promotion PR must be updated on reruns")
+        self.assertNotIn(
             "gh pr merge",
             workflow,
-            "promotion must land via a merged PR",
+            "a maintainer merges the promotion PR (GITHUB_TOKEN pushes cannot trigger CI)",
         )
         self.assertNotIn("git tag", workflow, "promote must never create tags")
         self.assertNotIn("gh release", workflow, "promote must never publish")

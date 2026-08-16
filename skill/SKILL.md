@@ -19,7 +19,8 @@ A **card** is a title/description plus harness/model/effort, optional harness pe
 Herdr session and workspace. New cards default to Pi; the built-in catalog is `pi`, `claude`, `codex`
 (in that order), then any config-defined `[harness.NAME]`. **Columns** are pipeline stages: `manual` waits
 for a person and `auto` dispatches a visible agent run on entry. Each canonical Git root (or exact
-non-Git CWD) has an independent board; the preserved `Global` board remains available. Agents report
+non-Git CWD) is a **project** holding named boards (every project's first board is `main`); the
+preserved `Global` project remains available. Agents report
 through `board`; never edit the database. The daemon owns state and column transitions.
 
 ## Inside a run
@@ -48,42 +49,59 @@ board done --outcome fail --summary "2 integration tests still fail; needs schem
 ## TUI
 
 Run `board tui` or invoke the `open-board` Herdr plugin action. Use arrows or `h/j/k/l` to navigate,
-`n` for a card, `N` for a column, `m` to move a card, `M` to reorder the focused column, `O` to
+`n` for a card, `N` for a column, `m` to move a card (form fields: Project → Board → Column →
+Position; the move never changes the selection), `M` to reorder the focused column, `O` to
 reorder the selected card within its column (`j`/`k` stage, `Enter` commits, `Esc` cancels),
 `Enter` for detail, `e`/`E` to edit a card/column, `a` to archive/restore, `v` for
-active/all/archived visibility, and `?` for help.
+active/all/archived visibility, `p` to switch project, `b` to switch board, and `?` for help.
 Moving into an `auto` column dispatches a run. `o` focuses the newest same-session run pane; `Enter`
 on an `awaiting` card confirms it through the same completion channel as `board done --outcome ok`.
 Below 60 columns the TUI switches to a single-column Compact layout with a tappable
-`‹ [ ⇄ <column> n/N] ›` header and a board/column switcher sheet (open it with `b`); every layout
-mode scrolls the focused column's cards independently, with a scrollbar shown whenever a column
-overflows.
+`‹ [ ⇄ <column> n/N] ›` header; the project and board selectors appear as separate `Project:` /
+`Board:` header rows at every breakpoint (`b` opens the board picker directly; `⇄ Other projects…`
+drills to the project picker).
 
 ## CLI taxonomy
 
-The nested forms are canonical. `--board` (a stable id or canonical scope path) and `--json` are both
+The nested forms are canonical. `--board` (a stable id or canonical scope path), `--project` (a
+canonical scope path), and `--json` are all
 **global** flags: either position parses identically, before or after the subcommand path.
 
 ```bash
 board --board <ID|PATH> card list --json
 board card list --board <ID|PATH> --json     # identical
+board --project /path/to/repo board list
 ```
 
-Without `--board`, board-aware commands use the focused Git root, or the canonical CWD outside Git;
-`BOARD_SCOPE_PATH` is a deterministic automation override. `card create/list`, `column list`, and
-board commands use the selected board. Card-id operations infer the card's own board.
+Without `--board`/`--project`, board-aware commands use the **selected project** (and its selected
+board); `BOARD_SCOPE_PATH` is a deterministic automation override that bootstraps the selection at
+startup when none exists yet. `card create/list`, `column list`, and
+board commands use the selected project/board. Card-id operations infer the card's own board.
 
-### Boards and templates
+### Projects and boards
 
 ```bash
-board board list [--json]
-board board show [ID|PATH] [--json]
+board project list [--json]
+board project show [PATH] [--json]
+board project create PATH [--json]
+board project select PATH [--board ID|NAME] [--json]
+board board list [--all|--project PATH] [--json]
+board board show [ID|PATH|NAME] [--json]
 board board open <PATH> [--json]
-board board rename [ID|PATH] <NAME> [--json]
+board board create NAME [--project PATH] [--json]
+board board select ID|NAME [--project PATH] [--json]
+board board rename [SELECTOR] NAME [--json]
 board template apply pipeline [--json]
 ```
 
-`board show` and `board open` return a snapshot with `board`, `columns`, `cards`, and `active_runs`.
+A project is a canonical scope path (Git root or existing directory). `project create` requires the
+directory to already exist and never creates one; it auto-selects the project and its first board
+`main`. `project select` optionally picks one of the project's boards by id or name. `board list`
+defaults to the selected project's boards (`--all` lists every project's, `--project PATH` picks
+another project); `board create` names a board in a project (case-insensitively unique there) and
+auto-selects it; `board select` persists a board — and its project — as the context; `board open`
+keeps its open-or-create semantics and `BoardSnapshot` output but resolves the project's
+selected-or-main board without changing the selection. `board show` and `board open` return a snapshot with `board`, `columns`, `cards`, and `active_runs`.
 The `pipeline` template is atomic and only applies to an empty board containing exactly the seed
 `Todo` column; it returns the resulting column array.
 
@@ -100,7 +118,7 @@ board card edit ID [--title TITLE] [-d DESCRIPTION] [--clear-description] \
   [--space-ref REF|--clear-space-ref] [--space-cwd DIR|--clear-space-cwd] [--json]
 board card show ID [--json]
 board card list [--column COLUMN] [--visibility active|all|archived] [--json]
-board card move ID COLUMN [--position ZERO_BASED_POSITION] [--destination-board ID|PATH] [--json]
+board card move ID COLUMN [--position ZERO_BASED_POSITION] [--destination-board ID|PATH] [--to-project PATH --to-board NAME|ID] [--json]
 board card duplicate ID [--json]
 board card archive ID [--json]
 board card restore ID [--json]
@@ -128,7 +146,9 @@ Creating directly in an `auto` column dispatches immediately. `card list` defaul
 `all` includes archived cards and `archived` returns only archived cards. `card show` includes current
 comments and run history; soft-deleted comments are omitted.
 
-A cross-board move goes on `--destination-board`. The old fallback — a global `--board` naming a
+A cross-board move goes on `--destination-board` (an id or path); a cross-**project** move uses
+`--to-project PATH --to-board NAME|ID`, and neither ever changes the persistent selection or
+recency. The old fallback — a global `--board` naming a
 *different* board than the card's — still works but prints a deprecation warning to stderr; do not
 write new automation against it.
 

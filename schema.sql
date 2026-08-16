@@ -1,20 +1,64 @@
 -- herdr-board SQLite schema (WAL mode; boardd is the only writer).
--- This file is the CURRENT (schema v13) shape: a fresh DB is created directly
--- from it and stamped `PRAGMA user_version = 13`. Existing databases are upgraded
+-- This file is the CURRENT (schema v14) shape: a fresh DB is created directly
+-- from it and stamped `PRAGMA user_version = 14`. Existing databases are upgraded
 -- by migrations in board-core/src/db/migrations.rs (kept in sync with this file).
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 
-CREATE TABLE boards (
+-- A Project is a named collection of boards, identified by a canonical
+-- filesystem path (a Git root or a plain existing directory). The special
+-- Global project (id=1, scope_path NULL) preserves the pre-v14 flat boards.
+CREATE TABLE projects (
   id         INTEGER PRIMARY KEY,
-  name       TEXT NOT NULL UNIQUE,
   scope_path TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- NULL scope identifies the preserved Global board. Canonical path identity is
--- unique for scoped boards while allowing exactly one legacy/global NULL row.
-CREATE UNIQUE INDEX idx_boards_scope_path ON boards(scope_path) WHERE scope_path IS NOT NULL;
+-- Canonical path identity is unique for scoped projects while allowing exactly
+-- one special Global row (NULL).
+CREATE UNIQUE INDEX idx_projects_scope_path ON projects(scope_path) WHERE scope_path IS NOT NULL;
+
+-- Boards belong to exactly one project. Names are unique case-insensitively
+-- within the same project (COLLATE NOCASE on the UNIQUE index); the same name
+-- on a different project is legal. Every project's first board is named 'main'.
+CREATE TABLE boards (
+  id         INTEGER PRIMARY KEY,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name       TEXT NOT NULL COLLATE NOCASE,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (project_id, name)
+);
+
+-- Persistent context: the selected project (singleton row; absent = no
+-- selection yet, e.g. right after migration).
+CREATE TABLE selection (
+  id         INTEGER PRIMARY KEY CHECK (id = 1),
+  project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- The selected board per project (a project always has a selected board once
+-- it has been used; otherwise its first board 'main' is the context board).
+CREATE TABLE board_selection (
+  project_id INTEGER PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+  board_id   INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Recency (most recent first, capped at 3 per project / 3 projects).
+CREATE TABLE project_recents (
+  project_id INTEGER PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+  rank       INTEGER NOT NULL,
+  used_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE board_recents (
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  board_id   INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+  rank       INTEGER NOT NULL,
+  used_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (project_id, board_id)
+);
 
 -- A fresh board gets exactly one seeded column: 'Todo' (trigger=manual).
 -- Everything else (names, count, order, config) is user-created.
