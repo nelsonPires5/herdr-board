@@ -1,16 +1,15 @@
-use anyhow::{anyhow, bail, Result};
+use anyhow::{bail, Result};
 use board_core::client::BoardClient;
 use board_core::protocol::{
     BoardSnapshot, CardCreateParams, CardMoveParams, CardUpdateParams, Patch,
 };
 
 use crate::args::CardCmd;
-use crate::commands::board::resolve_board_in_list;
 use crate::commands::run::{cmd_card_comment, cmd_card_run};
 use crate::context::Ctx;
 use crate::helpers::{confirm_action, parse_effort, parse_space_kind, parse_visibility};
 use crate::render::{emit, emit_line};
-use crate::scope::{resolve_column_in, resolved_scope_path};
+use crate::scope::{open_selected_board, resolve_column_in};
 
 pub(crate) fn cmd_card(sub: CardCmd, ctx: &mut Ctx) -> Result<()> {
     // Do not even auto-start boardd for a refused non-interactive deletion.
@@ -140,15 +139,7 @@ pub(crate) fn cmd_card(sub: CardCmd, ctx: &mut Ctx) -> Result<()> {
             column,
             position,
             destination_board,
-            to_project,
-        } => cmd_move(
-            ctx,
-            id,
-            &column,
-            to_project.as_deref(),
-            destination_board.as_deref(),
-            position,
-        ),
+        } => cmd_move(ctx, id, &column, destination_board.as_deref(), position),
         CardCmd::Comment { sub } => cmd_card_comment(sub, ctx),
         CardCmd::Run { sub } => cmd_card_run(sub, ctx),
     }
@@ -164,61 +155,40 @@ fn card_archive(ctx: &mut Ctx, id: i64, archived: bool) -> Result<()> {
 /// Move a card, resolving the destination column against the board the card is
 /// landing on.
 ///
-/// Destination precedence: `--to-project` (with an optional `--to-board`
-/// id-or-name within it), else an explicit `--destination-board`, else the
-/// global `--board` selector (deprecated — it warns), else the global
-/// `--project` (deprecated — it warns), else the card's own board. Every arm
-/// is non-selecting: card moves never touch the daemon's selection or recency.
-/// A named destination costs two RPCs (`project.get`/`board.open`/`board.get`
-/// plus `card.move`); the "stay on the card's board" case needs three, because
-/// protocol v1 has no way to learn a card's board without `card.get` and no
-/// way to move a card by column *name*. A `card.move` that accepted a column
-/// name would collapse every case to one round-trip.
+/// Destination precedence, unchanged: an explicit `--destination-board`, else
+/// the global `--board` selector (deprecated — it warns), else the card's own
+/// board. A named destination costs two RPCs (`board.open`/`board.get` plus
+/// `card.move`); the "stay on the card's board" case still needs three, because
+/// protocol v1 has no way to learn a card's board without `card.get` and no way
+/// to move a card by column *name*. A `card.move` that accepted a column name
+/// would collapse every case to one round-trip.
 pub(crate) fn cmd_move(
     ctx: &mut Ctx,
     card_id: i64,
     column: &str,
-    to_project: Option<&str>,
-    destination: Option<&str>,
+    explicit_destination: Option<&str>,
     position: Option<i64>,
 ) -> Result<()> {
     let json = ctx.json();
     if position.is_some_and(|p| p < 0) {
         bail!("--position must be zero-based (0 = first card)")
     }
-    let board = match to_project {
-        Some(path) => {
-            let scope = resolved_scope_path(path)?;
-            destination_board_in_project(ctx.client()?, &scope, destination)?
-        }
-        None => match destination {
-            Some(selector) => destination_board_legacy(ctx.client()?, selector)?,
-            None => match ctx.selector() {
-                Some(selector) => {
-                    eprintln!(
-                        "board: warning: `move` is using the global --board {selector} as the move \
-                         destination; this fallback is deprecated, pass --destination-board \
-                         {selector} to cross boards"
-                    );
-                    destination_board_legacy(ctx.client()?, selector)?
-                }
-                None => match ctx.project_selector() {
-                    Some(path) => {
-                        eprintln!(
-                            "board: warning: `move` is using the global --project as the move \
-                             destination; pass --to-project to cross projects"
-                        );
-                        let scope = resolved_scope_path(path)?;
-                        destination_board_in_project(ctx.client()?, &scope, None)?
-                    }
-                    None => {
-                        let board_id = ctx.client()?.card_get(card_id)?.card.board_id;
-                        ctx.client()?.board_get_by_id(board_id)?
-                    }
-                },
-            },
+    let destination = match explicit_destination {
+        Some(destination) => Some(destination),
+        None => match ctx.selector() {
+            Some(selector) => {
+                eprintln!(
+                    "board: warning: `move` is using the global --board {selector} as the move \
+                     destination; this fallback is deprecated, pass --destination-board \
+                     {selector} to cross boards"
+                );
+                Some(selector)
+            }
+            None => None,
         },
     };
+
+    let board = destination_board(ctx, card_id, destination)?;
     let column_id = resolve_column_in(&board, column)?;
     let card = ctx.client()?.card_move(&CardMoveParams {
         id: card_id,
@@ -236,44 +206,16 @@ pub(crate) fn cmd_move(
     )
 }
 
-/// Resolve a move destination inside a project: an explicit `--to-board`
-/// reference as id-or-name within the project, else the project's selected
-/// board, else its first board (`main`). Never touches selection or recency.
-fn destination_board_in_project(
-    c: &mut board_core::client::UnixClient,
-    scope: &str,
+fn destination_board(
+    ctx: &mut Ctx,
+    card_id: i64,
     destination: Option<&str>,
 ) -> Result<BoardSnapshot> {
-    let detail = c.project_get(scope)?;
-    let board = match destination {
-        Some(reference) => {
-            resolve_board_in_list(&detail.boards, reference, &format!("project {scope:?}"))?
+    match destination {
+        Some(selector) => open_selected_board(ctx.client()?, Some(selector)),
+        None => {
+            let board_id = ctx.client()?.card_get(card_id)?.card.board_id;
+            ctx.client()?.board_get_by_id(board_id)
         }
-        None => detail
-            .selected_board
-            .clone()
-            .or_else(|| {
-                detail
-                    .boards
-                    .iter()
-                    .find(|board| board.name.eq_ignore_ascii_case("main"))
-                    .cloned()
-            })
-            .or_else(|| detail.boards.first().cloned())
-            .ok_or_else(|| anyhow!("project {scope:?} has no boards"))?,
-    };
-    c.board_get_by_id(board.id)
-}
-
-/// Resolve the legacy `<ID|PATH>` move destination: an id in any project,
-/// else `board.open` for a canonical scope path. Non-selecting.
-fn destination_board_legacy(
-    c: &mut board_core::client::UnixClient,
-    selector: &str,
-) -> Result<BoardSnapshot> {
-    if let Ok(id) = selector.parse::<i64>() {
-        return c.board_get_by_id(id);
     }
-    let scope = resolved_scope_path(selector)?;
-    c.board_open(&scope)
 }

@@ -6,14 +6,14 @@ named Herdr sessions.
 
 Requires exactly **Herdr 0.8.0 (socket protocol 19)**, Git, and a Rust toolchain with `cargo`; Linux
 and macOS are supported. The board-side compatibility contract remains board protocol v1 and
-SQLite schema v14. See the README for the one-line install command itself.
+SQLite schema v13. See the README for the one-line install command itself.
 
 | Component | Required support level | How to verify |
 |---|---|---|
 | Herdr binary | 0.8.0 | `herdr --version` → `herdr 0.8.0` |
 | Herdr socket | protocol 19 | `herdr api schema --json` → top-level `protocol: 19`; a running session's `herdr api snapshot` also reports `version` and `protocol` |
 | Board socket | v1 | `docs/protocol.md` and `board-core::protocol` |
-| SQLite | schema v14 | `schema.sql` and `board-core::db` migrations |
+| SQLite | schema v13 | `schema.sql` and `board-core::db` migrations |
 | Pi integration | v8 for precise Pi lifecycle/session signals | `herdr integration status` |
 | Claude integration | v7 for precise Claude lifecycle/session signals | `herdr integration status` |
 
@@ -47,7 +47,7 @@ binary, registers the plugin, and copies the CLI to `~/.local/bin/board` as a re
 After reviewing the manifest and scripts, a noninteractive install is available:
 
 ```bash
-herdr plugin install nelsonPires5/herdr-board --ref v0.15.0 --yes
+herdr plugin install nelsonPires5/herdr-board --ref v0.14.0 --yes
 ```
 
 Set `HERDR_BOARD_CLI_INSTALL_DIR` to an absolute user bin directory before installing to override

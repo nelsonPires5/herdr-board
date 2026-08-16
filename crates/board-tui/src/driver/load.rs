@@ -1,18 +1,15 @@
-//! Every read path the driver performs: refetching the board, refreshing the
-//! project cache, building the project/board pickers, loading a card's detail,
-//! and fetching the catalog metadata (`harness.*`, `session.list`, `space.list`)
+//! Every read path the driver performs: refetching the board, building the
+//! board/column option lists the pickers show, loading a card's detail, and
+//! fetching the catalog metadata (`harness.*`, `session.list`, `space.list`)
 //! the card/column forms need.
 
 use anyhow::Result;
 use board_core::capability::HarnessCapabilities;
 use board_core::client::BoardClient;
-use board_core::protocol::{
-    ProjectCreateParams, ProjectInfo, ProjectListResult, SessionInfo, SpaceInfo,
-};
+use board_core::protocol::{SessionInfo, SpaceInfo};
 
-use crate::app::{clamp_selection, Picker, PickerAction, PickerPurpose, PickerRow, Screen};
-use crate::forms::FormKind;
-use crate::view::{board_label, project_label};
+use crate::app::{clamp_selection, column_options, Picker, PickerPurpose, Screen};
+use crate::view::board_picker_label;
 use crate::Driver;
 
 impl Driver {
@@ -24,253 +21,98 @@ impl Driver {
         }
     }
 
-    /// `project.list` → refresh the `app.projects` cache and re-derive
-    /// `app.project` from the current board's project when the cache knows it.
-    /// Errors are toasted; a failed refresh keeps the previous cache.
-    pub(super) fn refresh_projects(&mut self) {
-        let r = self.client.project_list();
-        if let Some(result) = self.guard(r) {
-            self.install_projects(result);
-        }
-    }
-
-    fn install_projects(&mut self, result: ProjectListResult) {
-        self.app.projects = result.projects;
-        self.app.projects_loaded = true;
-        if let Some(pi) = self
-            .app
-            .projects
-            .iter()
-            .find(|pi| pi.project.id == self.app.board.board.project_id)
-        {
-            self.app.project = pi.project.clone();
-        }
-        // An open move form built its Project/Board selectors before the
-        // cache loaded; seed them now (and on every later refresh).
-        if let Some(form) = self.app.form.as_mut() {
-            if matches!(form.kind, FormKind::MoveCard { .. }) {
-                form.apply_projects(&self.app.projects, &self.app.project, &self.app.board.board);
-            }
-        }
-    }
-
-    /// Fetch `project.list` and open the project picker. Rows: current project
-    /// first, then recent projects in order, then the remaining projects
-    /// alphabetically (Global last), then the "＋ New project" action. The
-    /// picker's `return_to` is whatever screen is active right now — the board
-    /// when opened via `p`, the board picker when drilled into via "⇄ Other
-    /// projects…".
-    pub(super) fn load_project_picker(&mut self) {
-        let r = self.client.project_list();
-        let Some(result) = self.guard(r) else {
-            return;
-        };
-        self.install_projects(result.clone());
-        let current = self.app.project.clone();
-
-        let mut rows: Vec<PickerRow> = Vec::new();
-        rows.push(PickerRow::Item(project_label(&current), current.id));
-        let mut seen: Vec<i64> = vec![current.id];
-        for id in result.recent_project_ids {
-            if seen.contains(&id) {
-                continue;
-            }
-            if let Some(pi) = result.projects.iter().find(|pi| pi.project.id == id) {
-                rows.push(PickerRow::Item(project_label(&pi.project), id));
-                seen.push(id);
-            }
-        }
-        let mut rest: Vec<&ProjectInfo> = result
-            .projects
-            .iter()
-            .filter(|pi| !seen.contains(&pi.project.id))
-            .collect();
-        rest.sort_by(|a, b| {
-            (
-                a.project.scope_path.is_none(),
-                a.project.name.to_lowercase(),
-            )
-                .cmp(&(
-                    b.project.scope_path.is_none(),
-                    b.project.name.to_lowercase(),
-                ))
-        });
-        rows.extend(
-            rest.into_iter()
-                .map(|pi| PickerRow::Item(project_label(&pi.project), pi.project.id)),
-        );
-        rows.push(PickerRow::Action(
-            "＋ New project".into(),
-            PickerAction::NewProject,
-        ));
-
-        let return_to = self.app.screen;
-        self.app.picker = Some(Picker {
-            title: "Switch project".into(),
-            rows,
-            sel: 0,
-            purpose: PickerPurpose::SwitchProject,
-            return_to,
-            project_id: current.id,
-        });
-        self.app.screen = Screen::ProjectPicker;
-    }
-
-    /// Fetch `project.list` and open the board picker for `project_id` (`None`
-    /// = the current project). Rows: the project's selected board first (its
-    /// first board when none is selected), then recent boards in order, then
-    /// the remaining boards alphabetically, then the "⇄ Other projects…" and
-    /// "＋ New board" actions. The picker's `return_to` is whatever screen is
-    /// active right now — the board when opened via `b`, the switcher when
-    /// drilled from its "switch board" row, the project picker when drilled
-    /// from a project choice.
-    pub(super) fn load_board_picker(&mut self, project_id: Option<i64>) {
-        self.refresh_projects();
-        let target_id = project_id.unwrap_or(self.app.board.board.project_id);
-        let Some(info) = self
-            .app
-            .projects
-            .iter()
-            .find(|pi| pi.project.id == target_id)
-            .cloned()
-        else {
-            self.app.set_toast("project not found", true);
-            return;
-        };
-
-        let mut rows: Vec<PickerRow> = Vec::new();
-        let mut seen: Vec<i64> = Vec::new();
-        let first_id = info
-            .selected_board_id
-            .or_else(|| info.boards.first().map(|b| b.id));
-        if let Some(id) = first_id {
-            if let Some(board) = info.boards.iter().find(|b| b.id == id) {
-                rows.push(PickerRow::Item(board_label(board), id));
-                seen.push(id);
-            }
-        }
-        for id in &info.recent_board_ids {
-            if seen.contains(id) {
-                continue;
-            }
-            if let Some(board) = info.boards.iter().find(|b| b.id == *id) {
-                rows.push(PickerRow::Item(board_label(board), *id));
-                seen.push(*id);
-            }
-        }
-        let mut rest: Vec<board_core::model::Board> = info
+    /// `board.list` as picker options plus the index of the active board — the
+    /// shared first half of every "choose a board" flow (`b`, the Compact
+    /// switcher's second level, and stage 1 of a cross-board move). `None` when
+    /// the fetch failed (already toasted).
+    fn board_options(&mut self) -> Option<(Vec<(String, i64)>, usize)> {
+        let r = self.client.board_list();
+        let result = self.guard(r)?;
+        let options = result
             .boards
             .iter()
-            .filter(|b| !seen.contains(&b.id))
-            .cloned()
+            .map(|board| (board_picker_label(board), board.id))
             .collect();
-        rest.sort_by_key(|b| b.name.to_lowercase());
-        rows.extend(
-            rest.into_iter()
-                .map(|b| PickerRow::Item(board_label(&b), b.id)),
-        );
-        rows.push(PickerRow::Action(
-            "⇄ Other projects…".into(),
-            PickerAction::OtherProjects,
-        ));
-        rows.push(PickerRow::Action(
-            "＋ New board".into(),
-            PickerAction::NewBoard,
-        ));
-
-        let return_to = self.app.screen;
-        self.app.picker = Some(Picker {
-            title: format!("Switch board · {}", info.project.name),
-            rows,
-            sel: 0,
-            purpose: PickerPurpose::SwitchBoard,
-            return_to,
-            project_id: target_id,
-        });
-        self.app.screen = Screen::BoardPicker;
-    }
-
-    /// `board.select`: persist the board (and its project) as the context, then
-    /// replace the TUI's context and refresh the project cache.
-    pub(super) fn select_board(&mut self, board_id: i64) {
-        let r = self.client.board_select(board_id);
-        if let Some(snap) = self.guard(r) {
-            self.app.replace_board(snap);
-            self.refresh_projects();
-            self.set_pane_title(self.app.card_filter);
-        }
-    }
-
-    /// `project.select`: persist the project + explicit board choice as the
-    /// context, then replace the TUI's context and refresh the project cache.
-    /// The Global project has no scope path, so selecting one of its boards
-    /// goes through `board.select` — the same persisted selection side effect.
-    pub(super) fn select_project(&mut self, project_id: i64, board_id: i64) {
-        let Some(project) = self
-            .app
-            .projects
+        let sel = result
+            .boards
             .iter()
-            .find(|pi| pi.project.id == project_id)
-            .map(|pi| pi.project.clone())
-        else {
-            self.app.set_toast("project not found", true);
+            .position(|board| board.id == self.app.board.board.id)
+            .unwrap_or(0);
+        Some((options, sel))
+    }
+
+    pub(super) fn load_boards(&mut self) {
+        let Some((options, sel)) = self.board_options() else {
             return;
         };
-        let Some(scope_path) = project.scope_path.clone() else {
-            self.select_board(board_id);
+        self.app.picker = Some(Picker {
+            title: "Switch board".into(),
+            options,
+            sel,
+            purpose: PickerPurpose::SwitchBoard,
+            return_to: Screen::Board,
+        });
+        self.app.screen = Screen::Picker;
+    }
+
+    /// Compact switcher level 2: fetch boards into `app.switcher` in place
+    /// (does not touch the Regular/Wide `Picker`).
+    pub(super) fn load_boards_for_switcher(&mut self) {
+        let Some((boards, sel)) = self.board_options() else {
             return;
         };
-        let r = self.client.project_select(&scope_path, Some(board_id));
-        if let Some(result) = self.guard(r) {
-            self.app.project = result.project;
-            self.app.replace_board(result.board);
-            self.refresh_projects();
+        if let Some(state) = self.app.switcher.as_mut() {
+            crate::app::enter_boards_level(state, boards, sel);
+        }
+    }
+
+    pub(super) fn switch_board(&mut self, board_id: i64) {
+        let r = self.client.board_get_by_id(board_id);
+        if let Some(board) = self.guard(r) {
+            self.app.replace_board(board);
             self.set_pane_title(self.app.card_filter);
         }
     }
 
-    /// `project.create`: create the project (with its `main` board), land on
-    /// it, refresh the cache, and confirm with a toast.
-    pub(super) fn create_project(&mut self, p: ProjectCreateParams) {
-        let r = self.client.project_create(&p.scope_path);
-        let Some(result) = self.guard(r) else {
+    /// Cross-board move, stage 1: open the destination-board picker. Reuses the
+    /// same board list as `b`, but with a move purpose so `Enter` advances to
+    /// stage 2 instead of switching the active board.
+    pub(super) fn load_boards_for_move(&mut self, card_id: i64) {
+        let Some((options, sel)) = self.board_options() else {
             return;
         };
-        self.app.project = result.project.clone();
-        self.app.replace_board(result.board);
-        self.refresh_projects();
-        self.set_pane_title(self.app.card_filter);
-        self.app
-            .set_toast(format!("Created project {}", result.project.name), false);
+        self.app.picker = Some(Picker {
+            title: "Move card to which board?".into(),
+            options,
+            sel,
+            purpose: PickerPurpose::MoveCardPickBoard { card_id },
+            return_to: Screen::Board,
+        });
+        self.app.screen = Screen::Picker;
     }
 
-    /// `board.create`: create a named board in a project (auto-selected by the
-    /// daemon), land on it, refresh the cache, and confirm with a toast.
-    pub(super) fn create_board(&mut self, p: board_core::protocol::BoardCreateParams) {
-        let r = self.client.board_create(p.project_id, &p.name);
-        let Some(snap) = self.guard(r) else {
-            return;
-        };
-        // The board's project may be new to the cache (created in this same
-        // session), so refresh before `replace_board` re-derives `app.project`.
-        self.refresh_projects();
-        self.app.replace_board(snap);
-        self.set_pane_title(self.app.card_filter);
-        self.app
-            .set_toast(format!("Created board {}", p.name), false);
-    }
-
-    /// Fetch `board.get` for the move form's chosen destination board and
-    /// populate its Column selector. No selection side effect.
-    pub(super) fn load_move_columns(&mut self, board_id: i64) {
+    /// Cross-board move, stage 2: load the selected destination board's columns
+    /// into the picker. Does not change the active board.
+    pub(super) fn load_columns_for_move(&mut self, card_id: i64, board_id: i64) {
         let r = self.client.board_get_by_id(board_id);
-        let Some(snap) = self.guard(r) else {
-            return;
-        };
-        if let Some(form) = self.app.form.as_mut() {
-            if matches!(form.kind, FormKind::MoveCard { .. }) {
-                form.apply_move_columns(snap.columns);
+        if let Some(snap) = self.guard(r) {
+            let options = column_options(&snap.columns, None);
+            // A board with no columns has no destination to offer; opening an
+            // empty picker would be a dead end (and its Enter would have
+            // nothing to index).
+            if options.is_empty() {
+                self.app
+                    .set_toast(format!("{} has no columns", snap.board.name), true);
+                return;
             }
+            self.app.picker = Some(Picker {
+                title: format!("Move card to which column? ({})", snap.board.name),
+                options,
+                sel: 0,
+                purpose: PickerPurpose::MoveCardPickColumn { card_id, board_id },
+                return_to: Screen::Board,
+            });
+            self.app.screen = Screen::Picker;
         }
     }
 

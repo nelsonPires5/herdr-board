@@ -3,8 +3,8 @@
 use board_core::capability::HarnessCapabilities;
 use board_core::model::Column;
 use board_core::protocol::{
-    BoardCreateParams, CardCreateParams, CardMoveParams, CardUpdateParams, ColumnCreateParams,
-    ColumnUpdateParams, ProjectCreateParams, SessionInfo, SpaceInfo,
+    CardCreateParams, CardUpdateParams, ColumnCreateParams, ColumnUpdateParams, SessionInfo,
+    SpaceInfo,
 };
 use tui_textarea::TextArea;
 
@@ -43,15 +43,6 @@ pub enum FieldId {
     Timeout,
     // comment
     CommentBody,
-    // move-card form (project → board → column → position)
-    MoveProject,
-    MoveBoard,
-    MoveColumn,
-    MovePosition,
-    // project-create form
-    ProjectPath,
-    // board-create form (its Project selector reuses `MoveProject`)
-    BoardName,
 }
 
 /// A concrete value carried by a [`Choice`] option.
@@ -61,8 +52,7 @@ pub enum ChoiceVal {
     None,
     /// A literal wire string (effort/permission/harness/trigger/space kind).
     Str(String),
-    /// A row id: column ids on on_success/on_fail, project/board ids in the
-    /// move and board-create forms.
+    /// A column id (on_success / on_fail transitions).
     Col(i64),
     /// A boolean toggle (fresh_session).
     Bool(bool),
@@ -208,29 +198,12 @@ fn new_textarea(initial: &str) -> TextArea<'static> {
 /// What a form submits into.
 #[derive(Clone, Copy, Debug)]
 pub enum FormKind {
-    CardCreate {
-        column_id: i64,
-    },
-    CardEdit {
-        card_id: i64,
-    },
+    CardCreate { column_id: i64 },
+    CardEdit { card_id: i64 },
     ColumnCreate,
-    ColumnEdit {
-        column_id: i64,
-    },
-    Comment {
-        card_id: i64,
-    },
-    CommentEdit {
-        comment_id: i64,
-    },
-    /// Cross-board move: destination project/board/column (+ optional
-    /// position), submitted as one plain `card.move` (no selection change).
-    MoveCard {
-        card_id: i64,
-    },
-    ProjectCreate,
-    BoardCreate,
+    ColumnEdit { column_id: i64 },
+    Comment { card_id: i64 },
+    CommentEdit { comment_id: i64 },
 }
 
 /// A modal form.
@@ -276,7 +249,4 @@ pub enum Submit {
     ColumnUpdate(ColumnUpdateParams),
     Comment { card_id: i64, body: String },
     CommentEdit { comment_id: i64, body: String },
-    CardMove(CardMoveParams),
-    ProjectCreate(ProjectCreateParams),
-    BoardCreate(BoardCreateParams),
 }

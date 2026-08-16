@@ -100,11 +100,6 @@ async fn async_main(db_path: PathBuf, socket_path: PathBuf) -> anyhow::Result<()
     if config.opencode_bin.is_none() {
         config.opencode_bin = board_core::opencode_catalog::default_opencode_bin();
     }
-    // Same for the antigravity binary: `$AGY_BIN` else `agy` on PATH.
-    // Tests leave `agy_bin` None and get the free-form catalog (no probe).
-    if config.agy_bin.is_none() {
-        config.agy_bin = board_core::agy_catalog::default_agy_bin();
-    }
     tracing::info!(
         "spawner={:?} max_concurrent={}",
         settings.spawner,

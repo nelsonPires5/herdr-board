@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, CardFilter, Screen};
+use crate::app::{App, CardFilter, Screen, SwitcherLevel};
 use crate::widgets::{
     button_text, render_button_chip_at, render_button_chip_at_with_modifier, render_sheet_frame,
     windowed_rows, ActionButton, ActionStrip, ActionTone, UiAction, Zone,
@@ -15,8 +15,7 @@ use crate::widgets::{
 
 use super::{
     board_action_area, board_action_columns, board_body_area_for, board_header_area, board_layout,
-    centered_rect_abs, compact_filter_options, project_label, status_glyph, truncate,
-    CompactHeader, LayoutMode,
+    centered_rect_abs, compact_filter_options, status_glyph, truncate, CompactHeader, LayoutMode,
 };
 
 // -- board -------------------------------------------------------------------
@@ -144,9 +143,8 @@ fn draw_board_header(app: &App, f: &mut Frame, area: Rect, compact_header: Optio
 
     let identity = Rect::new(header_area.x, header_area.y, header_area.width, 1);
     if compact_header.is_some() {
-        // Compact is deliberately three rows: project chip + filters, board
-        // chip, then the column navigator. The divider is the fourth header
-        // row.
+        // Compact is deliberately three rows: brand/count, board + filters,
+        // then the column navigator. The divider is the fourth header row.
         draw_compact_identity(app, f, identity);
         let controls = Rect::new(
             header_area.x,
@@ -163,9 +161,8 @@ fn draw_board_header(app: &App, f: &mut Frame, area: Rect, compact_header: Optio
 
     // Regular/Wide keep every header control on one balanced line. The left
     // group owns the product identity and the *global* running count; the
-    // centered project/board chips and right-aligned filters each receive a
-    // disjoint hit area, so long names can only ellipsize inside their own
-    // slot.
+    // centered board chip and right-aligned filters each receive a disjoint
+    // hit area, so long board names can only ellipsize inside their own slot.
     draw_desktop_header(app, f, identity);
 }
 
@@ -177,23 +174,30 @@ fn draw_compact_identity(app: &App, f: &mut Frame, area: Rect) {
     if area.is_empty() {
         return;
     }
-    // Row 1: the project chip (switch project) with the visibility filters
-    // right-aligned on the same row.
-    let chips = compact_filter_options(area.width);
-    let filters_w = filter_chips_width(&chips).min(area.width);
-    let filters_x = area.right().saturating_sub(filters_w);
-    let project_w = filters_x.saturating_sub(area.x).saturating_sub(1);
-    if project_w > 0 {
-        let label = format!("Project: {}", project_label(&app.project));
-        render_button_chip_at(
-            f,
-            Rect::new(area.x, area.y, project_w, 1),
-            &label,
-            &mut app.hit_map.borrow_mut(),
-            Zone::Action(UiAction::SwitchProject),
+    let brand = " ◈ herdr-board";
+    let brand_w = (brand.chars().count() as u16).min(area.width);
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            truncate(brand, brand_w as usize),
+            Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Rect::new(area.x, area.y, brand_w, 1),
+    );
+    let running = running_label(app);
+    let running_x = area.x.saturating_add(brand_w).saturating_add(1);
+    if running_x < area.right() {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                truncate(&running, area.right().saturating_sub(running_x) as usize),
+                Style::default()
+                    .fg(Color::LightGreen)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Rect::new(running_x, area.y, area.right().saturating_sub(running_x), 1),
         );
     }
-    draw_filter_chips(app, f, Rect::new(filters_x, area.y, filters_w, 1), &chips);
 }
 
 fn desktop_filter_options(width: u16) -> [(&'static str, CardFilter); 3] {
@@ -293,25 +297,11 @@ fn draw_desktop_header(app: &App, f: &mut Frame, area: Rect) {
     let center_x = area.x.saturating_add(left_w).saturating_add(1);
     let center_right = filters_x.saturating_sub(1).max(center_x);
     let center = Rect::new(center_x, area.y, center_right.saturating_sub(center_x), 1);
-    // Two centered chips: the project (switch project) and the board (switch
-    // board), each owning half the center slot so neither can starve the
-    // other. Long names ellipsize inside their own half.
-    let half = center.width / 2;
-    let project_rect = Rect::new(center.x, center.y, half, 1);
-    let board_rect = Rect::new(center.x + half, center.y, center.width - half, 1);
-    let project_chip = board_dropdown_label(&project_label(&app.project), project_rect.width);
+    let board_label = board_dropdown_label(&app.board.board.name, center.width);
     render_button_chip_at(
         f,
-        project_rect,
-        &project_chip,
-        &mut app.hit_map.borrow_mut(),
-        Zone::Action(UiAction::SwitchProject),
-    );
-    let board_chip = board_dropdown_label(&app.board.board.name, board_rect.width);
-    render_button_chip_at(
-        f,
-        board_rect,
-        &board_chip,
+        center,
+        &board_label,
         &mut app.hit_map.borrow_mut(),
         Zone::Action(UiAction::SwitchBoard),
     );
@@ -322,16 +312,21 @@ fn draw_compact_controls(app: &App, f: &mut Frame, area: Rect) {
     if area.is_empty() {
         return;
     }
-    // Row 2: the board chip (switch board). The filters moved up to row 1
-    // next to the project chip; this row is a single full-width control.
-    let label = format!("Board: {}", app.board.board.name);
-    render_button_chip_at(
-        f,
-        area,
-        &label,
-        &mut app.hit_map.borrow_mut(),
-        Zone::Action(UiAction::SwitchBoard),
-    );
+    let chips = compact_filter_options(area.width);
+    let filters_w = filter_chips_width(&chips).min(area.width);
+    let filters_x = area.right().saturating_sub(filters_w);
+    let board_w = filters_x.saturating_sub(area.x).saturating_sub(1);
+    if board_w > 0 {
+        let label = board_dropdown_label(&app.board.board.name, board_w);
+        render_button_chip_at(
+            f,
+            Rect::new(area.x, area.y, board_w, 1),
+            &label,
+            &mut app.hit_map.borrow_mut(),
+            Zone::Action(UiAction::SwitchBoard),
+        );
+    }
+    draw_filter_chips(app, f, Rect::new(filters_x, area.y, filters_w, 1), &chips);
 }
 
 fn draw_filter_chips(app: &App, f: &mut Frame, area: Rect, chips: &[(&str, CardFilter)]) {
@@ -718,7 +713,13 @@ pub(super) fn draw_switcher(app: &App, f: &mut Frame, area: Rect) {
     let sheet = super::sheet_area_for_app(app, mode, 44, 14, area);
     f.render_widget(Clear, sheet);
 
-    let (full_title, compact_title) = ("Columns (j/k move · Enter open · Esc close)", "Columns");
+    let (full_title, compact_title) = match state.level {
+        SwitcherLevel::Columns => ("Columns (j/k move · Enter open · Esc close)", "Columns"),
+        SwitcherLevel::Boards if state.entered_at_boards => {
+            ("Boards (Enter switch · Esc close)", "Boards")
+        }
+        SwitcherLevel::Boards => ("Boards (Enter switch · Esc back)", "Boards"),
+    };
     let mut hit_map = app.hit_map.borrow_mut();
     hit_map.push(sheet, Zone::Shield);
     let inner = render_sheet_frame(
@@ -731,49 +732,73 @@ pub(super) fn draw_switcher(app: &App, f: &mut Frame, area: Rect) {
         &mut hit_map,
     );
     if mode != LayoutMode::Compact {
-        let close_label = "X";
+        let close_label = if state.level == SwitcherLevel::Boards && !state.entered_at_boards {
+            "Back"
+        } else {
+            "X"
+        };
         let width = button_text(close_label).chars().count() as u16;
         let rect = Rect::new(sheet.right().saturating_sub(width + 2), sheet.y, width, 1);
         render_button_chip_at(f, rect, close_label, &mut hit_map, Zone::SheetClose);
     }
-    let mut rows: Vec<(String, Style)> = app
-        .board
-        .columns
-        .iter()
-        .enumerate()
-        .map(|(i, c)| {
-            let count = app.cards_of(c.id).len();
-            let style = if i == state.sel {
+    let rows: Vec<(String, Style)> = match state.level {
+        SwitcherLevel::Columns => {
+            let mut rows: Vec<(String, Style)> = app
+                .board
+                .columns
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    let count = app.cards_of(c.id).len();
+                    let style = if i == state.sel {
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                    } else {
+                        Style::default().fg(Color::White)
+                    };
+                    (format!(" {}  {} ", c.name, count), style)
+                })
+                .collect();
+            let trailing_idx = app.board.columns.len();
+            let trailing_style = if state.sel == trailing_idx {
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
             } else {
                 Style::default().fg(Color::White)
             };
-            (format!(" {}  {} ", c.name, count), style)
-        })
-        .collect();
-    let trailing_idx = app.board.columns.len();
-    let trailing_style = if state.sel == trailing_idx {
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
-    } else {
-        Style::default().fg(Color::White)
+            rows.push((" ⇄  Switch board  → ".into(), trailing_style));
+            let template_idx = trailing_idx + 1;
+            let template_enabled = app.is_empty_board();
+            let template_style = if state.sel == template_idx {
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            } else if template_enabled {
+                Style::default().fg(Color::White)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            rows.push((" ⊞  Apply template  ".into(), template_style));
+            rows
+        }
+        SwitcherLevel::Boards => state
+            .boards
+            .iter()
+            .enumerate()
+            .map(|(i, (label, _))| {
+                let style = if i == state.sel {
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                (format!(" {} ", label), style)
+            })
+            .collect(),
     };
-    rows.push((" ⇄  Switch board  → ".into(), trailing_style));
-    let template_idx = trailing_idx + 1;
-    let template_enabled = app.is_empty_board();
-    let template_style = if state.sel == template_idx {
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
-    } else if template_enabled {
-        Style::default().fg(Color::White)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    rows.push((" ⊞  Apply template  ".into(), template_style));
     let total = rows.len();
     let heights = vec![1u16; total];
     let selected = state.sel.min(total.saturating_sub(1));
@@ -806,9 +831,13 @@ pub(super) fn draw_switcher(app: &App, f: &mut Frame, area: Rect) {
             rows_area.width,
             1,
         );
-        let zone = match absolute {
-            a if a == app.board.columns.len() => Zone::SwitcherSwitchBoard,
-            a if a == app.board.columns.len() + 1 => Zone::SwitcherApplyTemplate,
+        let zone = match state.level {
+            SwitcherLevel::Columns if absolute == app.board.columns.len() => {
+                Zone::SwitcherSwitchBoard
+            }
+            SwitcherLevel::Columns if absolute == app.board.columns.len() + 1 => {
+                Zone::SwitcherApplyTemplate
+            }
             _ => Zone::SwitcherRow(absolute),
         };
         hit_map.push(rect, zone);

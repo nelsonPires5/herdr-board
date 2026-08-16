@@ -503,13 +503,8 @@ fn board_open_is_idempotent_and_scopes_are_independent() {
 
     assert_eq!(one, same);
     assert_ne!(one.id, other.id);
-    // Every project's first board is named `main`; the project is named after
-    // its folder and keeps the canonical path.
-    assert_eq!(one.name, "main");
+    assert_eq!(one.name, "/repos/team/project");
     assert_eq!(one.scope_path.as_deref(), Some("/repos/team/project"));
-    assert_ne!(one.project_id, other.project_id, "distinct projects");
-    assert_ne!(one.project_id, 1, "scoped project vs Global");
-    assert_eq!(db.get_project(one.project_id).unwrap().name, "project");
     assert_eq!(db.list_columns(one.id).unwrap().len(), 1);
     assert_eq!(db.list_columns(other.id).unwrap().len(), 1);
     assert_eq!(db.list_columns(one.id).unwrap()[0].name, "Todo");
@@ -1077,27 +1072,25 @@ fn renaming_a_column_onto_a_sibling_name_is_a_bad_request() {
 fn renaming_a_board_onto_an_existing_name_is_a_bad_request() {
     let db = mem();
     let one = db.open_board("/one").unwrap();
-    db.create_board(one.project_id, "Backlog").unwrap();
+    let two = db.open_board("/two").unwrap();
 
-    // Same project, case-insensitively: refused as a duplicate.
-    let clash = db.rename_board(one.id, "BACKLOG").unwrap_err();
-    assert_actionable_duplicate(&clash, r#"board "BACKLOG" already exists in this project"#);
+    let clash = db.rename_board(one.id, &two.name).unwrap_err();
+
+    assert_actionable_duplicate(&clash, r#"board "/two" already exists"#);
     assert_eq!(db.get_board(one.id).unwrap().name, one.name);
-    // A different project may reuse the name.
-    let other = db.open_board("/two").unwrap();
-    assert!(db.rename_board(other.id, "Backlog").is_ok());
 }
 
 #[test]
-fn creating_an_existing_project_is_a_bad_request() {
+fn opening_a_scope_whose_board_name_is_taken_is_a_bad_request() {
     let db = mem();
-    db.open_board("/repo/project").unwrap();
+    // A board renamed onto a path-shaped name collides with the board that
+    // opening that scope would have to create.
+    db.rename_board(BOARD_ID, "/repo/project").unwrap();
 
-    let clash = db.create_project_context("/repo/project").unwrap_err();
-    assert_actionable_duplicate(&clash, "already exists");
-    // Selecting a missing project points at the create command.
-    let missing = db.require_project_by_scope("/nope").unwrap_err();
-    assert!(missing.to_string().contains("board project create"));
+    let clash = db.open_board("/repo/project").unwrap_err();
+
+    assert_actionable_duplicate(&clash, r#"board "/repo/project" already exists"#);
+    assert_eq!(db.list_boards().unwrap().len(), 1);
 }
 
 #[test]

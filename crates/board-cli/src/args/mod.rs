@@ -13,7 +13,6 @@ mod card;
 mod column;
 mod common;
 mod discovery;
-mod project;
 mod run;
 
 pub(crate) use board::{BoardCmd, TemplateCmd};
@@ -21,7 +20,6 @@ pub(crate) use card::{CardCmd, CommentCmd};
 pub(crate) use column::ColumnCmd;
 pub(crate) use common::ConfirmArgs;
 pub(crate) use discovery::{HarnessCmd, SessionCmd, SpaceCmd};
-pub(crate) use project::ProjectCmd;
 pub(crate) use run::RunCmd;
 
 use clap::{Parser, Subcommand};
@@ -32,9 +30,6 @@ pub(crate) struct Cli {
     /// Select a board by stable id or canonical scope path.
     #[arg(long, global = true, value_name = "ID|PATH")]
     pub(crate) board: Option<String>,
-    /// Select a project by canonical scope path (updates the persistent selection).
-    #[arg(long, global = true, value_name = "PATH")]
-    pub(crate) project: Option<String>,
     /// Emit JSON on stdout, and JSON errors on stderr.
     #[arg(long, global = true)]
     pub(crate) json: bool,
@@ -66,11 +61,6 @@ pub(crate) enum Cmd {
     Board {
         #[command(subcommand)]
         sub: BoardCmd,
-    },
-    /// Project operations.
-    Project {
-        #[command(subcommand)]
-        sub: ProjectCmd,
     },
     /// Apply a board template.
     Template {
@@ -117,9 +107,6 @@ pub(crate) enum Cmd {
         /// accepted, but that fallback is deprecated.
         #[arg(long, alias = "to-board", value_name = "ID|PATH")]
         destination_board: Option<String>,
-        /// Destination project for a cross-project move (canonical scope path).
-        #[arg(long, value_name = "PATH")]
-        to_project: Option<String>,
     },
     /// Cancel a card's run.
     Cancel { card_id: i64 },

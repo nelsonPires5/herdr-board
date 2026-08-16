@@ -11,8 +11,7 @@ use anyhow::Result;
 use board_core::capability::HarnessCapabilities;
 use board_core::model::{Board, Card, Column, Comment, CommentHistory, CommentRecord};
 use board_core::protocol::{
-    BoardSnapshot, CardDetail, DaemonStatus, ProjectDetail, ProjectListResult, ProjectOpenResult,
-    SessionListResult, SpaceListResult,
+    BoardSnapshot, CardDetail, DaemonStatus, SessionListResult, SpaceListResult,
 };
 use serde::{Serialize, Serializer};
 
@@ -156,62 +155,6 @@ impl Render for BoardSnapshot {
             self.columns.len(),
             self.cards.len()
         )
-    }
-}
-
-impl Render for ProjectListResult {
-    fn render(&self, out: &mut dyn Write) -> io::Result<()> {
-        let rows: Vec<Vec<String>> = self
-            .projects
-            .iter()
-            .map(|info| {
-                vec![
-                    format!("#{}", info.project.id),
-                    info.project.name.clone(),
-                    info.project.scope_path.clone().unwrap_or_default(),
-                    format!("boards:{}", info.boards.len()),
-                ]
-            })
-            .collect();
-        table(out, &rows)
-    }
-}
-
-impl Render for ProjectDetail {
-    fn render(&self, out: &mut dyn Write) -> io::Result<()> {
-        writeln!(
-            out,
-            "#{}  {}  {}",
-            self.project.id,
-            self.project.name,
-            self.project.scope_path.as_deref().unwrap_or_default()
-        )?;
-        match &self.selected_board {
-            Some(board) => writeln!(
-                out,
-                "boards: {} (selected: {})",
-                self.boards.len(),
-                board.name
-            )?,
-            None => writeln!(out, "boards: {}", self.boards.len())?,
-        }
-        for board in &self.boards {
-            writeln!(out, "#{}  {}", board.id, board.name)?;
-        }
-        Ok(())
-    }
-}
-
-impl Render for ProjectOpenResult {
-    fn render(&self, out: &mut dyn Write) -> io::Result<()> {
-        writeln!(
-            out,
-            "#{}  {}  {}",
-            self.project.id,
-            self.project.name,
-            self.project.scope_path.as_deref().unwrap_or_default()
-        )?;
-        self.board.render(out)
     }
 }
 

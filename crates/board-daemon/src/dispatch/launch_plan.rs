@@ -335,13 +335,6 @@ pub(super) async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result
         }
     };
 
-    // The harness-captured conversation id (self-minting harnesses report it
-    // only once the agent is up). For antigravity this is ALSO the fallback
-    // detector: when a resume/retry asked for a conversation that no longer
-    // exists, agy silently starts another one and the integration reports the
-    // NEW id here — the comparison against the requested `run.session_id`
-    // (pre-promotion) below becomes the visible card warning.
-    let agy_captured = handle.captured_session_id.clone();
     let started = Instant::now();
     let timeout_ms = column.timeout_minutes.map(|m| {
         m.max(0)
@@ -352,45 +345,6 @@ pub(super) async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result
     let deadline_at_ms = timeout_ms.map(|ms| d.wall_now_ms().saturating_add(ms));
     if !register_spawned_run(d, run.id, handle, started, deadline, deadline_at_ms)? {
         return Ok(false);
-    }
-
-    // Visible antigravity warnings, authored as card comments (they appear in
-    // the card/run history like every system note). The promotion above
-    // already persisted the captured id atomically, so the fallback case is
-    // fully recovered — the comment is the only remaining duty.
-    if run.harness == "antigravity" {
-        let requested = run.session_id.clone();
-        let body = match (&requested, &agy_captured) {
-            // A resume/retry asked for `old`, agy started `new` instead: the
-            // recorded conversation no longer exists (agy's "conversation not
-            // found" fallback). The run continues with the new id, which is
-            // already persisted; focus/retry now target it.
-            (Some(old), Some(new)) if new != old => Some(format!(
-                "Antigravity conversation {old} no longer exists; agy started conversation {new} instead, which is now recorded — run focus and retry target {new}."
-            )),
-            // No capture at all: the herdr antigravity_cli integration is not
-            // reporting. The run still proceeds, but a Mint cannot be resumed
-            // and a resume/retry cannot prove it did not fall back.
-            (Some(old), None) => Some(format!(
-                "No Antigravity conversation id was captured for this run (is the herdr antigravity_cli integration installed?); if agy started a new conversation because {old} no longer exists it cannot be detected, and the run keeps the recorded id {old}."
-            )),
-            (None, None) => Some(
-                "No Antigravity conversation id was captured (is the herdr antigravity_cli integration installed?); run focus and retry of this run may be unavailable.".to_string(),
-            ),
-            // Captured == requested (resume/retry healthy) or a normal Mint
-            // with a capture: nothing to warn about.
-            _ => None,
-        };
-        if let Some(body) = body {
-            if let Err(e) = d.store.lock().add_comment(card.id, "system", &body) {
-                tracing::warn!(
-                    run_id = run.id,
-                    card_id = card.id,
-                    error_category = "db",
-                    "record antigravity capture warning failed: {e:#}"
-                );
-            }
-        }
     }
 
     d.refresh_watch();
@@ -502,12 +456,7 @@ pub(crate) fn register_spawned_run(
 ///   in place);
 /// - codex fork/resume are trailing subcommands: `fork <id>` vs `resume <id>`;
 /// - opencode fork/resume are trailing session flags: `-s <id> --fork` vs
-///   `-s <id>` (a Mint carries no `-s` at all);
-/// - antigravity fork/resume are the same trailing conversation flag — agy
-///   has no fork, so a retry re-attaches to the SAME conversation
-///   (`--conversation <id>`, mint carries no flag) — and every hop carrying
-///   `--conversation` is treated as a fork: it must launch a fresh pane, never
-///   re-prompt the prior live same-session pane (the retry needs a new pane).
+///   `-s <id>` (a Mint carries no `-s` at all).
 ///
 /// A Fork records the SOURCE conversation id on the run — the fork's new
 /// thread id replaces it only at promotion — so `run.session_id` cannot tell
@@ -528,12 +477,6 @@ pub(super) fn argv_is_fork(harness: &str, argv: &[String]) -> bool {
         "opencode" => {
             argv.len() >= 3 && argv[argv.len() - 3] == "-s" && argv[argv.len() - 1] == "--fork"
         }
-        // agy's conversation flag is its only session shape: `--conversation
-        // <id>` closes the argv for BOTH resume and retry-fork (agy cannot
-        // fork — a retry re-attaches to the same conversation in a fresh
-        // pane), so any argv carrying it is a fork: it must never re-prompt
-        // the prior live pane.
-        "antigravity" => argv.iter().any(|arg| arg == "--conversation"),
         _ => false,
     }
 }

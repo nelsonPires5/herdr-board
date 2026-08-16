@@ -94,23 +94,6 @@ pub struct Config {
     /// stay hermetic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opencode_bin: Option<String>,
-    /// Antigravity binary to probe for the live model catalog (`agy
-    /// --output-format json models`). `None` disables live antigravity
-    /// discovery → the `antigravity` harness reports the free-form catalog
-    /// (models `[]`, `model_freeform` true). The daemon fills this in at
-    /// startup (`$AGY_BIN` else `agy`); tests leave it `None` to stay
-    /// hermetic.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agy_bin: Option<String>,
-    /// The last-known live antigravity model catalog ([`crate::agy_catalog`]).
-    /// **Daemon-filled, never user config**: the daemon probes `agy
-    /// --output-format json models` and stamps the result here before
-    /// serving `harness.capabilities` or validating an antigravity
-    /// run/edit. `None` = catalog unavailable → the harness is free-form
-    /// (stored models still run; the UIs have no models to offer). Tests set
-    /// this directly to exercise catalog-up behavior hermetically.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agy_models: Option<Vec<crate::capability::ModelInfo>>,
 }
 
 /// A config-defined harness: an argv template plus an optional capability
@@ -153,8 +136,6 @@ impl Default for Config {
             pi_agent_dir: None,
             codex_home: None,
             opencode_bin: None,
-            agy_bin: None,
-            agy_models: None,
         }
     }
 }

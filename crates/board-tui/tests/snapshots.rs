@@ -9,7 +9,7 @@ use board_core::protocol::parse_timestamp;
 use board_core::protocol::{
     AwaitingReason, CardCreateParams, CardStatus, Effort, RunOutcome, SpaceKind,
 };
-use board_tui::app::{App, CardFilter, Msg, Screen, SwitcherState, Toast};
+use board_tui::app::{App, CardFilter, Msg, Screen, SwitcherLevel, SwitcherState, Toast};
 use board_tui::forms::{FieldId, FieldKind};
 use board_tui::testkit::{demo_client, driver_with_origin, hostile_origin, DemoClient};
 use board_tui::widgets::Zone;
@@ -153,21 +153,14 @@ fn responsive_header_and_minimal_footer_in_every_layout() {
         let mut d = driver(demo_client().unwrap());
         let out = render(&mut d, w, h);
         let header: Vec<&str> = out.lines().take(if w < 60 { 3 } else { 1 }).collect();
-        if w < 60 {
-            assert!(
-                header.iter().any(|line| line.contains("Project:")),
-                "{w}x{h}: project chip missing from compact header: {header:?}"
-            );
-        } else {
-            assert!(
-                header.iter().any(|line| line.contains("herdr-board")),
-                "{w}x{h}: product identity missing from header: {header:?}"
-            );
-            assert!(
-                !header.iter().any(|line| line.contains("Board:")),
-                "{w}x{h}: redundant Board label remains: {header:?}"
-            );
-        }
+        assert!(
+            header.iter().any(|line| line.contains("herdr-board")),
+            "{w}x{h}: product identity missing from header: {header:?}"
+        );
+        assert!(
+            !header.iter().any(|line| line.contains("Board:")),
+            "{w}x{h}: redundant Board label remains: {header:?}"
+        );
         assert!(
             !header.iter().any(|line| line.contains("Visible:")),
             "{w}x{h}: redundant Visible label remains: {header:?}"
@@ -665,11 +658,7 @@ fn overlays_preserve_board_chrome_and_use_icon_run_controls() {
     );
     assert!(
         top.iter().any(|line| line.contains("[ Global ▾ ]")),
-        "project chip missing from desktop header: {output}"
-    );
-    assert!(
-        top.iter().any(|line| line.contains("[ main ▾ ]")),
-        "board chip missing from desktop header: {output}"
+        "{output}"
     );
     assert!(!top.iter().any(|line| line.contains("Board:")), "{output}");
     assert!(
@@ -847,23 +836,40 @@ fn board_picker_wide_and_narrow() {
 }
 
 #[test]
-fn long_scoped_project_row_survives_in_the_picker_and_desktop_chevron_survives() {
+fn compact_switcher_long_scoped_row_ellipsizes_before_border_and_desktop_chevron_survives() {
     let long_scope = "/private/tmp/hb-visual.HWoEPU/scope";
     let mut client = demo_client().unwrap();
     client.board_open(long_scope).unwrap();
 
-    // The project picker shows the long-scoped project as a full (wrapped)
-    // row: `name — /full/path`, never truncated away.
     let mut compact = driver(client);
-    key(&mut compact, KeyCode::Char('p'));
-    assert_eq!(compact.app.screen, Screen::ProjectPicker);
+    compact.app.last_area = Rect::new(0, 0, 40, 20);
+    key(&mut compact, KeyCode::Char('b'));
+    let selected = compact
+        .app
+        .switcher
+        .as_ref()
+        .and_then(|state| {
+            state
+                .boards
+                .iter()
+                .position(|(label, _)| label.contains(long_scope))
+        })
+        .expect("long scoped board in compact switcher");
+    compact.app.switcher.as_mut().unwrap().sel = selected;
     let output = render_sized(&mut compact, 40, 20);
-    // The row wraps across lines (never truncates): both fragments render.
+    let row = output
+        .lines()
+        .find(|line| line.contains("scope —"))
+        .expect("long scoped board row");
     assert!(
-        output.contains("scope —") && output.contains("/private/tmp/hb-visual.HWoEPU/scope"),
-        "long-scoped project row must be readable in the project picker:\n{output}"
+        row.contains('…'),
+        "long scoped board row must visibly ellipsize before the border:\n{output}"
     );
-    insta::assert_snapshot!("project_picker_long_scoped_row", output);
+    assert!(
+        row.contains("… │"),
+        "long scoped board row must place its ellipsis before the sheet border:\n{output}"
+    );
+    insta::assert_snapshot!("compact_switcher_long_scoped_row", output);
 
     let mut desktop = driver(demo_client().unwrap());
     desktop.app.board.board.name = long_scope.into();
@@ -881,19 +887,12 @@ fn help_overlay() {
     key(&mut d, KeyCode::Char('?'));
     let output = render(&mut d, 80, 24);
     assert!(!output.contains("archiv forms"));
+    assert!(!output.contains('…'));
     assert!(!output.contains("boar  Esc"));
     assert!(!output.contains("column│"));
     assert!(output
         .lines()
         .all(|line| !line.contains("j/k scroll · Esc close")));
-    // The sheet itself never ellipsizes; the header above it may (its chips
-    // truncate long names with an explicit ellipsis).
-    let sheet_rows: Vec<&str> = output.lines().skip(2).collect();
-    assert!(
-        !sheet_rows.iter().any(|line| line.contains('…')),
-        "help sheet must not ellipsize:\n{}",
-        sheet_rows.join("\n")
-    );
     insta::assert_snapshot!("help_overlay", output);
 }
 
@@ -928,30 +927,21 @@ fn move_card_flow() {
     let mut d = driver(demo_client().unwrap());
     // "before": Todo's card is selected.
     insta::assert_snapshot!("move_before", render(&mut d, 80, 24));
-    // `m` opens the move form with the current board's columns preloaded.
+    // `m` opens the active board's column picker directly (same-board fast path).
     key(&mut d, KeyCode::Char('m'));
-    insta::assert_snapshot!("move_form", render(&mut d, 80, 24));
-    // The Column field is focused: cycle Todo -> Plan and submit.
-    key(&mut d, KeyCode::Right);
+    insta::assert_snapshot!("move_pick_column", render(&mut d, 80, 24));
+    // Move the card to Plan (Down once from Todo).
+    key(&mut d, KeyCode::Down);
     key(&mut d, KeyCode::Enter);
     insta::assert_snapshot!("move_after", render(&mut d, 80, 24));
 }
 
-/// Drive the move form to a destination board in another project and render
-/// it there — the cross-board move, all through the form (no selection side
-/// effect: the board picker never opens).
 #[test]
-fn move_card_cross_board_via_the_form() {
+fn move_card_cross_board_via_b_toggle() {
     let mut d = driver(demo_client().unwrap());
-    key(&mut d, KeyCode::Char('m')); // move form
-                                     // Focus is on Column; Tab back to Project and pick the alpha project.
-    key(&mut d, KeyCode::Tab); // Position
-    key(&mut d, KeyCode::Tab); // Project
-    key(&mut d, KeyCode::Right); // Global -> alpha (rebuilds Board options)
-                                 // Focus moved to Board; pick Backlog (Archive is the selected first).
-    key(&mut d, KeyCode::Right);
-    key(&mut d, KeyCode::Tab); // Column (Backlog's Todo column loaded)
-    insta::assert_snapshot!("move_form_cross_board", render(&mut d, 80, 24));
+    key(&mut d, KeyCode::Char('m')); // active board (Global) column picker
+    key(&mut d, KeyCode::Char('b')); // -> destination-board picker
+    insta::assert_snapshot!("move_pick_board", render(&mut d, 80, 24));
 }
 
 /// A client wrapper that simulates the daemon's blocking sanity check
@@ -982,9 +972,9 @@ impl BoardClient for FailingMoveClient {
 #[test]
 fn move_blocked_shows_error_toast() {
     let mut d = driver(FailingMoveClient(demo_client().unwrap()));
-    key(&mut d, KeyCode::Char('m')); // move form, columns preloaded
-    key(&mut d, KeyCode::Right); // Todo -> Plan
-    key(&mut d, KeyCode::Enter); // submit -> daemon rejects -> toast
+    key(&mut d, KeyCode::Char('m')); // active board column picker
+    key(&mut d, KeyCode::Down); // Plan
+    key(&mut d, KeyCode::Enter); // commit -> daemon rejects -> toast
     assert!(d.app.toast.as_ref().is_some_and(|t| t.is_error));
     assert_eq!(d.app.screen, Screen::Board);
     insta::assert_snapshot!("move_blocked_toast", render(&mut d, 80, 24));
@@ -1039,7 +1029,7 @@ fn toast_does_not_overwrite_chrome_when_no_toast_row_fits() {
 
     let output = render(&mut d, 40, 5);
     assert!(
-        output.contains("Project:"),
+        output.contains("herdr-board"),
         "header was overwritten:\n{output}"
     );
     assert!(
@@ -1432,7 +1422,7 @@ sheet_size_matrix_test!(size_matrix_help, |w, h| {
 
 sheet_size_matrix_test!(size_matrix_picker, |w, h| {
     let mut d = driver(demo_client().unwrap());
-    key(&mut d, KeyCode::Char('b'));
+    key(&mut d, KeyCode::Char('m'));
     insta::assert_snapshot!(format!("picker_{w}x{h}"), render_sized(&mut d, w, h));
 });
 
@@ -1442,22 +1432,39 @@ sheet_size_matrix_test!(size_matrix_confirm, |w, h| {
     insta::assert_snapshot!(format!("confirm_{w}x{h}"), render_sized(&mut d, w, h));
 });
 
-sheet_size_matrix_test!(size_matrix_switcher_columns, |w, h| {
+sheet_size_matrix_test!(size_matrix_switcher_columns_and_boards, |w, h| {
     let mut d = driver(demo_client().unwrap());
     // Force Compact just long enough to open the switcher sheet at the
-    // Columns level (Regular/Wide keep the `b` -> board `Picker` path too).
+    // Columns level (Regular/Wide keep the classic `b` -> board `Picker`).
     // This mirrors the header's center-button tap (`Zone::HeaderSwitch`),
-    // which is the only way into the sheet. The actual matrix size is applied
-    // by `render_sized` right before each draw.
+    // NOT `b` — `b` now opens directly at the Boards level (it means
+    // "switch board"), so it can no longer reach Columns. The actual matrix
+    // size is applied by `render_sized` right before each draw.
     d.app.last_area = Rect::new(0, 0, 40, 20);
     d.app.switcher = Some(SwitcherState {
+        level: SwitcherLevel::Columns,
         sel: d.app.sel_col,
+        columns_sel: d.app.sel_col,
+        boards: Vec::new(),
+        entered_at_boards: false,
         return_to: Screen::Board,
     });
     d.app.screen = Screen::Switcher;
     assert_eq!(d.app.screen, Screen::Switcher);
     insta::assert_snapshot!(
         format!("switcher_columns_{w}x{h}"),
+        render_sized(&mut d, w, h)
+    );
+
+    let n = d.app.board.columns.len();
+    d.app.switcher.as_mut().unwrap().sel = n; // trailing "switch board" row
+    key(&mut d, KeyCode::Enter);
+    assert_eq!(
+        d.app.switcher.as_ref().unwrap().level,
+        SwitcherLevel::Boards
+    );
+    insta::assert_snapshot!(
+        format!("switcher_boards_{w}x{h}"),
         render_sized(&mut d, w, h)
     );
 });

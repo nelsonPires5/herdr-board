@@ -52,14 +52,19 @@ pub(super) fn reject_duplicate<T>(
     })
 }
 
-/// `boards(project_id, name)` is unique (COLLATE NOCASE), so the message says
-/// *in this project*: the same name on another project is legal and must not
-/// read as a conflict.
+/// `columns(board_id, name)` is unique, so the message says *on this board*:
+/// the same name on another board is legal and must not read as a conflict.
 pub(super) fn duplicate_column(name: &str) -> String {
     format!("column {name:?} already exists on this board; pick another name")
 }
 
-/// `boards(project_id, name)` is unique (COLLATE NOCASE) within a project.
+/// `boards.name` is unique across every board, scoped or not.
 pub(super) fn duplicate_board(name: &str) -> String {
-    format!("board {name:?} already exists in this project; pick another name")
+    format!("board {name:?} already exists; pick another name")
+}
+
+/// A new scoped board is named after its path, so the clash is with a board
+/// that was *renamed* onto that path — renaming it is the only way forward.
+pub(super) fn duplicate_board_for_scope(scope_path: &str) -> String {
+    format!("board {scope_path:?} already exists; rename it before opening this scope")
 }

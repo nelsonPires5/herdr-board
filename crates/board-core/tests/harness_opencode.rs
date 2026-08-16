@@ -203,18 +203,13 @@ fn opencode_is_registered_builtin_after_codex() {
     assert!(is_builtin_harness("opencode"));
     assert_eq!(
         BUILTIN_HARNESSES.to_vec(),
-        vec!["pi", "claude", "codex", "opencode", "antigravity"]
+        vec!["pi", "claude", "codex", "opencode"]
     );
     let list = available_harnesses(&Config::default());
     assert_eq!(
         list.iter().position(|h| h.as_str() == "opencode"),
         Some(3),
         "opencode slots into the built-in list right after codex"
-    );
-    assert_eq!(
-        list.iter().position(|h| h.as_str() == "antigravity"),
-        Some(4),
-        "antigravity slots in right after opencode"
     );
 }
 

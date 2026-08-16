@@ -2,7 +2,7 @@
 source: crates/board-tui/tests/snapshots.rs
 expression: "render(&mut d, 80, 24)"
 ---
-" ◈ herdr-board ● 1 running [ Glo… ▾ ][ main ▾ ]  [ Active ] [ All ] [ Archived ]"
+" ◈ herdr-board ● 1 running     [ Global ▾ ]      [ Active ] [ All ] [ Archived ]"
 "────────────────────────────────────────────────────────────────────────────────"
 "┌ New card  ·  f: fullscreen  ·  Tab: field · Enter: save · Esc: cancel ───────┐"
 "│┌ Agent ────────────────────────────────────────────────────────────────────┐▲│"

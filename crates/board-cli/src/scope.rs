@@ -18,46 +18,25 @@ pub(crate) fn current_scope_path() -> Result<String> {
     })
 }
 
-/// Canonicalize a path argument to the daemon's canonical scope form.
-pub(crate) fn resolved_scope_path(path: &str) -> Result<String> {
-    let resolved = resolve_scope_path(std::path::Path::new(path))?;
-    resolved
-        .to_str()
-        .map(str::to_string)
-        .ok_or_else(|| anyhow!("scope path is not valid UTF-8: {}", resolved.display()))
-}
-
-/// The CLI/TUI context board: explicit flags select (persisted); otherwise the
-/// daemon's persisted selection prevails; when no selection exists yet
-/// (post-migration), the current directory's project is opened (bootstrap).
-pub(crate) fn context_board(
+/// Resolve an ID-or-path board selector. Paths are normalized in the same way
+/// as the daemon's current-scope fallback, so all board-aware commands share
+/// one selection rule.
+pub(crate) fn open_selected_board(
     c: &mut UnixClient,
-    project: Option<&str>,
     selector: Option<&str>,
 ) -> Result<BoardSnapshot> {
-    let resolved_path = |s: &str| -> Result<String> {
-        let p = resolve_scope_path(std::path::Path::new(s))?;
-        p.to_str()
-            .map(str::to_string)
-            .ok_or_else(|| anyhow!("board path is not valid UTF-8: {}", p.display()))
-    };
-    if let Some(path) = project {
-        return Ok(c.project_select(&resolved_path(path)?, None)?.board);
-    }
     match selector {
         Some(value) => {
             if let Ok(id) = value.parse::<i64>() {
-                return c.board_select(id);
+                return c.board_get_by_id(id);
             }
-            Ok(c.project_open(&resolved_path(value)?)?.board)
+            let path = resolve_scope_path(std::path::Path::new(value))?;
+            let path = path
+                .to_str()
+                .ok_or_else(|| anyhow!("board path is not valid UTF-8: {}", path.display()))?;
+            c.board_open(path)
         }
-        None => {
-            let sel = c.project_selected()?;
-            match (sel.project, sel.board) {
-                (Some(_), Some(board)) => Ok(board),
-                _ => Ok(c.project_open(&current_scope_path()?)?.board),
-            }
-        }
+        None => c.board_open(&current_scope_path()?),
     }
 }
 

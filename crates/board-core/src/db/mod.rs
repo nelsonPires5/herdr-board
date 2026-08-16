@@ -6,7 +6,6 @@ mod boards_columns;
 mod cards_comments;
 mod constraints;
 mod migrations;
-mod projects;
 mod rows;
 mod runs;
 

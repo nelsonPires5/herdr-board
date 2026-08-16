@@ -154,7 +154,7 @@ jobs:
             "" \
             "- release files synced by scripts/prepare-release.py" \
             "- CI is dispatched explicitly from this workflow" \
-            "- base dev: a maintainer merges the Promote workflow's dev -> main PR, then Release tags the green commit" \
+            "- base dev: the Promote workflow merges dev -> main, then Release tags the green commit" \
             "- base main (hotfix): Release tags the green main commit directly")"
 
           pr_json="$(gh pr list --head "$BRANCH" --state open --json number,url)"

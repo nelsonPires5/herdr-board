@@ -1,7 +1,7 @@
 use rusqlite::{types::Type, Error as SqliteError, Result as SqliteResult, Row};
 
 use super::conv_err;
-use crate::model::{Board, Card, Column, Comment, CommentHistory, CommentRecord, Project, Run};
+use crate::model::{Board, Card, Column, Comment, CommentHistory, CommentRecord, Run};
 use crate::protocol::{
     AwaitingReason, CardLabels, CardStatus, Effort, RunOutcome, SpaceKind, Trigger,
 };
@@ -15,24 +15,9 @@ pub(super) fn opt<T>(r: SqliteResult<T>) -> Result<Option<T>> {
     }
 }
 
-/// Board rows are always read joined onto their project so the denormalized
-/// `scope_path` cannot drift from `projects.scope_path`.
-pub(super) const BOARD_SELECT: &str =
-    "SELECT b.id, b.project_id, b.name, p.scope_path FROM boards b JOIN projects p ON p.id = b.project_id";
-
-pub(super) fn row_to_project(row: &Row) -> SqliteResult<Project> {
-    let scope_path: Option<String> = row.get("scope_path")?;
-    Ok(Project {
-        id: row.get("id")?,
-        name: Project::display_name(scope_path.as_deref()),
-        scope_path,
-    })
-}
-
 pub(super) fn row_to_board(row: &Row) -> SqliteResult<Board> {
     Ok(Board {
         id: row.get("id")?,
-        project_id: row.get("project_id")?,
         name: row.get("name")?,
         scope_path: row.get("scope_path")?,
     })

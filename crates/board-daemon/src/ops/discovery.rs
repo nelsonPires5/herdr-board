@@ -1,6 +1,6 @@
 use super::*;
 use board_core::capability::{available_harnesses, capabilities_for};
-use board_core::{agy_catalog, codex_catalog, opencode_catalog, pi_catalog};
+use board_core::{codex_catalog, opencode_catalog, pi_catalog};
 pub(super) fn harness_capabilities(d: &Arc<Daemon>, p: HarnessCapabilitiesParams) -> Result<Value> {
     match capabilities_for(&p.harness, &d.config) {
         Some(mut caps) => {
@@ -32,17 +32,6 @@ pub(super) fn harness_capabilities(d: &Arc<Daemon>, p: HarnessCapabilitiesParams
                 if !models.is_empty() {
                     caps.models = models;
                 }
-            }
-            // Antigravity is catalog-only (no static fallback by contract):
-            // the live CLI catalog (`agy --output-format json models`,
-            // normalized onto base models + efforts) is the whole model list.
-            // A failed probe makes the harness free-form (`model_freeform`
-            // true) so stored models keep running; only new selection is
-            // constrained because the list is empty.
-            if p.harness == "antigravity" {
-                let models = agy_catalog::live_models(d.config.agy_bin.as_deref());
-                caps.models = models.clone().unwrap_or_default();
-                caps.model_freeform = models.is_none();
             }
             Ok(json!(caps))
         }

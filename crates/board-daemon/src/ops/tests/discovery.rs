@@ -821,7 +821,6 @@ fn harness_list_builtin_only() {
             "claude".to_string(),
             "codex".to_string(),
             "opencode".to_string(),
-            "antigravity".to_string(),
         ]
     );
 }
@@ -839,10 +838,7 @@ fn harness_list_includes_config_defined() {
     let d = test_daemon(config);
     let v = handle_request(&d, "harness.list", json!({})).unwrap();
     let names: Vec<String> = serde_json::from_value(v["harnesses"].clone()).unwrap();
-    assert_eq!(
-        names,
-        vec!["pi", "claude", "codex", "opencode", "antigravity", "fake"]
-    );
+    assert_eq!(names, vec!["pi", "claude", "codex", "opencode", "fake"]);
 }
 
 #[test]
@@ -1260,140 +1256,4 @@ fn run_focus_rejects_a_socket_with_the_wrong_protocol() {
     // The liveness probe for the recorded pane must not reach an incompatible
     // socket, so the whole focus stops at the gate.
     assert_eq!(herdr.methods(), vec!["ping"]);
-}
-
-// Antigravity (A7 catalog): the harness is catalog-ONLY — there is
-// deliberately no static fallback. The daemon overlays the live
-// `agy --output-format json models` catalog (normalized onto base models +
-// per-model efforts) when `agy_bin` resolves; a missing/failing CLI yields
-// the free-form down state (no models, model_freeform true) so stored
-// models keep running.
-
-/// A mirror of the real `agy --output-format json models` envelope: variant
-/// ids normalize onto base models, fixed-effort ids stay whole.
-const AGY_JSON_FIXTURE: &str = r#"{
-  "conversation_id": "",
-  "status": "SUCCESS",
-  "response": "",
-  "command": {
-    "name": "models",
-    "data": {
-      "models": [
-        {"id": "gemini-3.7-flash-high", "label": "Gemini 3.7 Flash (High)"},
-        {"id": "gemini-3.7-flash-medium", "label": "Gemini 3.7 Flash (Medium)"},
-        {"id": "gemini-3.7-flash-low", "label": "Gemini 3.7 Flash (Low)"},
-        {"id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6 (Thinking)"}
-      ]
-    }
-  }
-}
-"#;
-
-fn fixture_agy_bin(dir: &tempfile::TempDir, stdout: &str) -> std::path::PathBuf {
-    let script = format!("#!/bin/sh\ncat <<'HBEOF'\n{stdout}\nHBEOF\n");
-    let bin = dir.path().join("agy-fixture");
-    std::fs::write(&bin, script).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-    bin
-}
-
-#[test]
-fn harness_capabilities_antigravity_overlays_live_catalog_from_cli() {
-    // An `agy_bin` resolving to a working CLI → the daemon overlays the live
-    // normalized catalog and the harness stops being free-form: variant ids
-    // merge onto base models, fixed-effort models carry no efforts.
-    let dir = tempfile::tempdir().unwrap();
-    let bin = fixture_agy_bin(&dir, AGY_JSON_FIXTURE);
-    let config = Config {
-        agy_bin: Some(bin.to_str().unwrap().to_string()),
-        ..Config::default()
-    };
-    let d = test_daemon(config);
-
-    let v = handle_request(
-        &d,
-        "harness.capabilities",
-        json!({ "harness": "antigravity" }),
-    )
-    .unwrap();
-    assert_eq!(v["harness"], "antigravity");
-    let models = v["models"].as_array().unwrap();
-    let ids: Vec<&str> = models.iter().map(|m| m["id"].as_str().unwrap()).collect();
-    assert_eq!(
-        ids,
-        vec!["claude-sonnet-4-6", "gemini-3.7-flash"],
-        "variants normalize onto base models, sorted"
-    );
-    let gemini = models
-        .iter()
-        .find(|m| m["id"] == "gemini-3.7-flash")
-        .unwrap();
-    let efforts: Vec<&str> = gemini["efforts"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|e| e.as_str().unwrap())
-        .collect();
-    assert_eq!(efforts, vec!["low", "medium", "high"]);
-    let sonnet = models
-        .iter()
-        .find(|m| m["id"] == "claude-sonnet-4-6")
-        .unwrap();
-    assert_eq!(
-        sonnet["efforts"].as_array().unwrap().len(),
-        0,
-        "fixed-effort model → no board efforts"
-    );
-    // Catalog up → authoritative model list.
-    assert_eq!(v["model_freeform"], false);
-    let modes: Vec<&str> = v["permission_modes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|p| p.as_str().unwrap())
-        .collect();
-    assert_eq!(modes, vec!["sandbox", "always-proceed"]);
-}
-
-#[test]
-fn harness_capabilities_antigravity_down_without_bin() {
-    // No agy_bin (tests) → the free-form down state: no models to offer,
-    // model_freeform true (stored models still run), permission ladder intact.
-    let d = test_daemon(Config::default());
-    let v = handle_request(
-        &d,
-        "harness.capabilities",
-        json!({ "harness": "antigravity" }),
-    )
-    .unwrap();
-    assert_eq!(v["models"].as_array().unwrap().len(), 0);
-    assert_eq!(v["model_freeform"], true);
-    let modes: Vec<&str> = v["permission_modes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|p| p.as_str().unwrap())
-        .collect();
-    assert_eq!(modes, vec!["sandbox", "always-proceed"]);
-}
-
-#[test]
-fn harness_capabilities_antigravity_down_on_failing_cli() {
-    // A configured bin that fails (missing executable) must not break
-    // antigravity capabilities: the harness degrades to the free-form down
-    // state, never a stale static list.
-    let config = Config {
-        agy_bin: Some("/nonexistent/agy-binary".to_string()),
-        ..Config::default()
-    };
-    let d = test_daemon(config);
-    let v = handle_request(
-        &d,
-        "harness.capabilities",
-        json!({ "harness": "antigravity" }),
-    )
-    .unwrap();
-    assert_eq!(v["models"].as_array().unwrap().len(), 0);
-    assert_eq!(v["model_freeform"], true);
 }

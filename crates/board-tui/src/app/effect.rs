@@ -5,36 +5,26 @@
 //! in its own module makes that contract greppable: anything that constructs
 //! an `Effect` is pure, anything that matches one is the driver.
 
-use board_core::protocol::{BoardCreateParams, CardMoveParams, ProjectCreateParams, RunOutcome};
+use board_core::protocol::{CardMoveParams, RunOutcome};
 
 use super::CardFilter;
 
 /// A side effect for the driver to perform (client I/O, editor, quit).
 pub enum Effect {
     Refetch,
-    /// Refresh the `app.projects` cache and `app.project` from `project.list`.
-    LoadProjects,
-    /// Fetch `project.list` and open `Screen::ProjectPicker`.
-    LoadProjectPicker,
-    /// Fetch `project.list` and open `Screen::BoardPicker` for the given
-    /// project (`None` = the current project).
-    LoadBoardPicker {
-        project_id: Option<i64>,
+    LoadBoards,
+    /// Compact-only switcher, level 2: fetch the board list into `app.switcher`
+    /// instead of the Regular/Wide `Picker`.
+    LoadBoardsForSwitcher,
+    SwitchBoard(i64),
+    /// Cross-board move, stage 1: open the destination-board picker.
+    LoadBoardsForMove {
+        card_id: i64,
     },
-    /// `project.select`: switch the context to `project_id`'s `board_id`.
-    SelectProject {
-        project_id: i64,
-        board_id: i64,
-    },
-    /// `board.select`: switch the context to `board_id`.
-    SelectBoard(i64),
-    /// `project.create`: create the project and land on its `main` board.
-    ProjectCreate(ProjectCreateParams),
-    /// `board.create`: create a named board in a project and land on it.
-    BoardCreate(BoardCreateParams),
-    /// Fetch `board.get` for the move form's destination board and populate
-    /// its Column field.
-    LoadMoveColumns {
+    /// Cross-board move, stage 2: load the selected destination board's columns
+    /// into the picker.
+    LoadColumnsForMove {
+        card_id: i64,
         board_id: i64,
     },
     LoadDetail(i64),

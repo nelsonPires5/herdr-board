@@ -2,8 +2,8 @@
 source: crates/board-tui/tests/snapshots.rs
 expression: output
 ---
-"[ Project: Gl… ] [ Act ] [ All ] [ Arc ]"
-"            [ Board: main ]             "
+" ◈ herdr-board ● 1 running              "
+"  [ Global ▾ ]   [ Act ] [ All ] [ Arc ]"
 "[ ‹ ] [ Todo (M) · 1/6 · 2 cards ] [ › ]"
 "────────────────────────────────────────"
 "┌ Edit card ─────────────────────[ X ]─┐"

@@ -3,7 +3,7 @@ use ratatui::layout::Rect;
 
 use crate::widgets::{UiAction, Zone};
 
-use super::{App, DetailScrollTarget, Effect, Screen};
+use super::{App, DetailScrollTarget, Effect, Screen, SwitcherLevel};
 
 pub(super) fn on_mouse(app: &mut App, m: MouseEvent) -> Vec<Effect> {
     // New Compact-mode widgets (header buttons, switcher rows, button bars,
@@ -241,11 +241,16 @@ fn handle_zone(app: &mut App, zone: Zone) -> Option<Vec<Effect>> {
             Some(vec![])
         }
         Zone::HeaderSwitch if app.screen == Screen::Board => {
-            // Tapping the header's center button opens the Compact-only
-            // column switcher. `b` (the board picker) stays a separate
-            // entry point.
+            // Tapping the header's center button opens at Columns (unlike
+            // `b`, which opens directly at Boards); `entered_at_boards:
+            // false` makes `Esc` from a Boards level reached by drilling
+            // down step back to Columns instead of closing outright.
             app.switcher = Some(super::SwitcherState {
+                level: SwitcherLevel::Columns,
                 sel: app.sel_col,
+                columns_sel: app.sel_col,
+                boards: Vec::new(),
+                entered_at_boards: false,
                 return_to: Screen::Board,
             });
             app.screen = Screen::Switcher;
@@ -321,16 +326,11 @@ fn handle_zone(app: &mut App, zone: Zone) -> Option<Vec<Effect>> {
                 Some(vec![])
             }
         }
-        Zone::PickerRow(idx)
-            if matches!(
-                app.screen,
-                Screen::Picker | Screen::ProjectPicker | Screen::BoardPicker
-            ) =>
-        {
+        Zone::PickerRow(idx) if app.screen == Screen::Picker => {
             let valid = app
                 .picker
                 .as_ref()
-                .is_some_and(|picker| idx < picker.rows.len());
+                .is_some_and(|picker| idx < picker.options.len());
             if valid {
                 app.picker.as_mut().expect("validated picker").sel = idx;
                 Some(super::on_key(app, key(KeyCode::Enter)))
@@ -388,7 +388,6 @@ fn action_event(screen: Screen, action: UiAction) -> Option<KeyEvent> {
     let (code, modifiers) = match (screen, action) {
         (Screen::Board, A::Help) => (KeyCode::Char('?'), KeyModifiers::NONE),
         (Screen::Board, A::Quit) => (KeyCode::Char('q'), KeyModifiers::NONE),
-        (Screen::Board, A::SwitchProject) => (KeyCode::Char('p'), KeyModifiers::NONE),
         (Screen::Board, A::SwitchBoard) => (KeyCode::Char('b'), KeyModifiers::NONE),
         (Screen::Board, A::NewCard) => (KeyCode::Char('n'), KeyModifiers::NONE),
         (Screen::Board, A::NewColumn) => (KeyCode::Char('N'), KeyModifiers::SHIFT),
@@ -411,8 +410,6 @@ fn action_event(screen: Screen, action: UiAction) -> Option<KeyEvent> {
         (Screen::CardDetail, A::Help) => (KeyCode::Char('?'), KeyModifiers::NONE),
         (
             Screen::Picker
-            | Screen::ProjectPicker
-            | Screen::BoardPicker
             | Screen::MoveColumn
             | Screen::ReorderCard
             | Screen::Confirm
@@ -444,6 +441,7 @@ fn action_event(screen: Screen, action: UiAction) -> Option<KeyEvent> {
         }
 
         (Screen::Picker, A::ChoosePickerRow) => (KeyCode::Enter, KeyModifiers::NONE),
+        (Screen::Picker, A::PickerOtherBoard) => (KeyCode::Char('b'), KeyModifiers::NONE),
         (Screen::Picker, A::CancelPicker) => (KeyCode::Esc, KeyModifiers::NONE),
         (Screen::Confirm, A::ConfirmYes) => (KeyCode::Char('y'), KeyModifiers::NONE),
         (Screen::Confirm, A::ConfirmNo) => (KeyCode::Char('n'), KeyModifiers::NONE),
