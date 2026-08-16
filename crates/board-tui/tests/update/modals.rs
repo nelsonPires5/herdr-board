@@ -23,7 +23,10 @@ fn deleting_a_column_with_cards_confirms_after_the_destination_picker() {
     update(&mut app, key(KeyCode::Char('D')));
     assert_eq!(app.screen, Screen::Picker);
     let column_id = app.col_id_at(0).unwrap();
-    let (target_label, target_id) = app.picker.as_ref().unwrap().options[0].clone();
+    let (target_label, target_id) = match &app.picker.as_ref().unwrap().rows[0] {
+        board_tui::app::PickerRow::Item(label, id) => (label.clone(), *id),
+        other => panic!("expected an item row, got {other:?}"),
+    };
     let moved = app
         .board
         .cards
@@ -151,9 +154,10 @@ fn a_confirmation_raised_from_card_detail_returns_there_on_both_answers() {
 
 #[test]
 fn help_is_reachable_from_every_non_form_screen() {
-    // Picker.
+    // Picker (`D` on a column with cards opens the relocation picker
+    // locally, unlike `b`/`p`, which need the driver to fetch the lists).
     let mut app = demo_app();
-    update(&mut app, key(KeyCode::Char('m')));
+    update(&mut app, key(KeyCode::Char('D')));
     assert_eq!(app.screen, Screen::Picker);
     update(&mut app, key(KeyCode::Char('?')));
     assert_eq!(app.screen, Screen::Help);
@@ -237,25 +241,11 @@ fn cancel_is_refused_when_no_run_is_open() {
 // -- B7: `q` closes the switcher --------------------------------------------
 
 #[test]
-fn q_closes_the_switcher_sheet_from_either_level() {
+fn q_closes_the_switcher_sheet() {
     let mut d = driver_of(demo_client().unwrap());
     d.app.last_area = ratatui::layout::Rect::new(0, 0, 40, 20); // Compact
-    d.handle(key(KeyCode::Char('b'))); // opens straight at Boards
-    assert_eq!(d.app.screen, Screen::Switcher);
-    d.handle(key(KeyCode::Char('q')));
-    assert_eq!(d.app.screen, Screen::Board);
-    assert!(d.app.switcher.is_none());
-
-    // Columns level (reached via the header tap in `mouse.rs`; constructed
-    // here directly for the same effect).
-    let mut d = driver_of(demo_client().unwrap());
-    d.app.last_area = ratatui::layout::Rect::new(0, 0, 40, 20);
     d.app.switcher = Some(board_tui::app::SwitcherState {
-        level: board_tui::app::SwitcherLevel::Columns,
         sel: 0,
-        columns_sel: 0,
-        boards: Vec::new(),
-        entered_at_boards: false,
         return_to: Screen::Board,
     });
     d.app.screen = Screen::Switcher;
@@ -271,10 +261,11 @@ fn enter_on_an_empty_picker_does_not_panic() {
     let mut app = demo_app();
     app.picker = Some(board_tui::app::Picker {
         title: "nothing to pick".into(),
-        options: Vec::new(),
+        rows: Vec::new(),
         sel: 0,
         purpose: PickerPurpose::SwitchBoard,
         return_to: Screen::Board,
+        project_id: app.project.id,
     });
     app.screen = Screen::Picker;
     let effects = update(&mut app, key(KeyCode::Enter));

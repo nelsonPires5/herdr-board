@@ -3,12 +3,11 @@ use board_core::protocol::CardMoveParams;
 use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::forms::Form;
-use crate::view::LayoutMode;
 
 use super::nav::nav_delta;
 use super::{
     column_options, App, CardFilter, Confirm, ConfirmPurpose, Effect, MoveColumnState, Picker,
-    PickerPurpose, ReorderCardState, Screen, SwitcherLevel, SwitcherState,
+    PickerPurpose, PickerRow, ReorderCardState, Screen,
 };
 
 pub(super) fn board_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
@@ -19,29 +18,8 @@ pub(super) fn board_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
     match k.code {
         KeyCode::Left | KeyCode::Char('h') => app.move_col(-1),
         KeyCode::Right | KeyCode::Char('l') => app.move_col(1),
-        KeyCode::Char('b') => {
-            if app.layout_mode() == LayoutMode::Compact {
-                // `b` means "switch board": open the sheet straight at the
-                // Boards level (board names only exist there), unlike the
-                // header's center-button tap, which opens at Columns. The
-                // board list loads via `Effect::LoadBoardsForSwitcher`,
-                // which (synchronously) flips `level` to `Boards` once it
-                // resolves; `entered_at_boards` records the entry point so
-                // `Esc` from `Boards` closes the sheet instead of stepping
-                // back to a Columns view the user never asked for.
-                app.switcher = Some(SwitcherState {
-                    level: SwitcherLevel::Columns,
-                    sel: app.sel_col,
-                    columns_sel: app.sel_col,
-                    boards: Vec::new(),
-                    entered_at_boards: true,
-                    return_to: Screen::Board,
-                });
-                app.screen = Screen::Switcher;
-                return vec![Effect::LoadBoardsForSwitcher];
-            }
-            return vec![Effect::LoadBoards];
-        }
+        KeyCode::Char('b') => return vec![Effect::LoadBoardPicker { project_id: None }],
+        KeyCode::Char('p') => return vec![Effect::LoadProjectPicker],
         KeyCode::Char('n') => {
             if let Some(col_id) = app.col_id_at(app.sel_col) {
                 app.form = Some(Form::card_create_with_session(
@@ -89,7 +67,7 @@ pub(super) fn board_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
             }
         }
         KeyCode::Char('D') => return delete_column(app),
-        KeyCode::Char('m') => return open_move_picker(app),
+        KeyCode::Char('m') => return open_move_form(app),
         KeyCode::Char('M') => return open_move_column_mode(app),
         KeyCode::Char('O') => return open_reorder_card_mode(app),
         KeyCode::Char('H') => return shove_card(app, -1),
@@ -169,10 +147,14 @@ fn delete_column(app: &mut App) -> Vec<Effect> {
         }
         app.picker = Some(Picker {
             title: "Move cards to which column?".into(),
-            options,
+            rows: options
+                .into_iter()
+                .map(|(label, id)| PickerRow::Item(label, id))
+                .collect(),
             sel: 0,
             purpose: PickerPurpose::DeleteColumnMoveTo { column_id: col_id },
             return_to: Screen::Board,
+            project_id: app.board.board.project_id,
         });
         app.screen = Screen::Picker;
     } else {
@@ -189,38 +171,35 @@ fn delete_column(app: &mut App) -> Vec<Effect> {
     vec![]
 }
 
-fn open_move_picker(app: &mut App) -> Vec<Effect> {
+fn open_move_form(app: &mut App) -> Vec<Effect> {
     if app.reject_archived_move() {
         return vec![];
     }
     let Some(card) = app.selected_card() else {
         return vec![];
     };
-    // Fast path: open the active board's column picker directly (one step for
-    // the common same-board move). Press `b` inside it to switch to the
-    // destination-board picker for a cross-board move.
-    let board_id = app.board.board.id;
-    let cur = card.column_id;
-    let options = column_options(&app.board.columns, Some(cur));
-    if options.is_empty() {
-        app.set_toast("no other column to move cards to", true);
-        return vec![];
-    }
-    app.picker = Some(Picker {
-        title: format!(
-            "Move card to which column? ({})  · b = other board",
-            app.board.board.name
-        ),
-        options,
-        sel: 0,
-        purpose: PickerPurpose::MoveCardPickColumn {
-            card_id: card.id,
-            board_id,
+    // The move form lets the user pick the destination project, board, and
+    // column (and an optional position) before submitting a single plain
+    // `card.move` — selecting/creating destinations goes through the pickers
+    // and forms, never through the move itself.
+    app.form = Some(Form::move_card(
+        card.id,
+        &app.projects,
+        &app.project,
+        &app.board.board,
+    ));
+    app.screen = Screen::CardForm;
+    // Preload the current board's columns so the common same-board move is
+    // immediately submittable; changing the Board field reloads them. The
+    // project cache may not have loaded yet (the form opens straight from the
+    // board), so refresh it first — `install_projects` re-seeds the form's
+    // Project/Board selectors once it lands.
+    vec![
+        Effect::LoadProjects,
+        Effect::LoadMoveColumns {
+            board_id: app.board.board.id,
         },
-        return_to: Screen::Board,
-    });
-    app.screen = Screen::Picker;
-    vec![]
+    ]
 }
 
 fn open_move_column_mode(app: &mut App) -> Vec<Effect> {

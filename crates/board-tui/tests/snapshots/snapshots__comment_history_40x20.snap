@@ -2,8 +2,8 @@
 source: crates/board-tui/tests/snapshots.rs
 expression: "render_sized(&mut d, 40, 20)"
 ---
-" ◈ herdr-board ● 1 running              "
-"  [ Global ▾ ]   [ Act ] [ All ] [ Arc ]"
+"[ Project: Gl… ] [ Act ] [ All ] [ Arc ]"
+"            [ Board: main ]             "
 "[ ‹ ][ Review (A) · 4/6 · 2 cards ][ › ]"
 "────────────────────────────────────────"
 "┌ History ───────────────────────[ X ]─┐"

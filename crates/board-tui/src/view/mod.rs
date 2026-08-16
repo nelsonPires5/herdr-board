@@ -2,7 +2,7 @@
 //! both drawing and mouse hit-testing. No clocks are read here — timers use the
 //! injected `app.now` so snapshots are deterministic.
 
-use board_core::model::{Board, Card};
+use board_core::model::{Board, Card, Project};
 use board_core::protocol::{AwaitingReason, CardStatus};
 use ratatui::layout::Rect;
 use ratatui::style::Color;
@@ -107,10 +107,22 @@ pub fn board_scope_label(board: &Board) -> String {
     truncate(&sanitize(raw), MAX_SCOPE_LABEL)
 }
 
-pub fn board_picker_label(board: &Board) -> String {
-    match board.scope_path.as_deref() {
+/// The board picker / move-form label for one board: its name.
+pub fn board_label(board: &Board) -> String {
+    board.name.clone()
+}
+
+/// The project picker / header label for one project: `Global` for the
+/// special project, otherwise `name — /full/path` (name truncated like the
+/// legacy scope label; the path stays whole so picker rows remain distinct).
+pub fn project_label(project: &Project) -> String {
+    match project.scope_path.as_deref() {
         None => "Global".into(),
-        Some(path) => format!("{} — {}", board_scope_label(board), sanitize(path)),
+        Some(path) => format!(
+            "{} — {}",
+            truncate(&sanitize(&project.name), MAX_SCOPE_LABEL),
+            sanitize(path)
+        ),
     }
 }
 
@@ -189,6 +201,7 @@ mod form;
 pub const HELP_KEYS: &[(Screen, &str, &str)] = &[
     (Screen::Board, "←/→ h/l", "focus column"),
     (Screen::Board, "↑/↓ k/j", "focus card"),
+    (Screen::Board, "p", "switch project"),
     (Screen::Board, "b", "switch board"),
     (Screen::Board, "n", "new card"),
     (Screen::Board, "N", "new column"),
@@ -199,7 +212,7 @@ pub const HELP_KEYS: &[(Screen, &str, &str)] = &[
     (Screen::Board, "v", "cycle active/all/archived"),
     (Screen::Board, "d", "delete card"),
     (Screen::Board, "D", "delete/move column cards"),
-    (Screen::Board, "m", "move card (board→column)"),
+    (Screen::Board, "m", "move card (project→board)"),
     (Screen::Board, "M", "move focused column"),
     (Screen::Board, "O", "reorder card in column"),
     (Screen::Board, "H / L", "shove card left / right"),
@@ -236,7 +249,6 @@ pub const HELP_KEYS: &[(Screen, &str, &str)] = &[
     (Screen::Picker, "--", "-- picker / confirm --"),
     (Screen::Picker, "↑/↓ k/j", "move selection"),
     (Screen::Picker, "Enter", "choose"),
-    (Screen::Picker, "b", "other board (moving)"),
     (Screen::Confirm, "y / n", "confirm / decline"),
     (Screen::Picker, "q / Esc", "cancel"),
     (Screen::MoveColumn, "--", "-- move column (M) --"),
@@ -318,7 +330,9 @@ pub fn view(app: &App, f: &mut Frame) {
                 form::draw_form(app, form, f, area);
             }
         }
-        Screen::Picker => overlays::draw_picker(app, f, area),
+        Screen::Picker | Screen::ProjectPicker | Screen::BoardPicker => {
+            overlays::draw_picker(app, f, area)
+        }
         Screen::MoveColumn => overlays::draw_move_column(app, f, area),
         Screen::ReorderCard => overlays::draw_reorder_card(app, f, area),
         Screen::Confirm => overlays::draw_confirm(app, f, area),

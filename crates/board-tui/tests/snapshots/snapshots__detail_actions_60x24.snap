@@ -2,7 +2,7 @@
 source: crates/board-tui/tests/snapshots.rs
 expression: "render_sized(&mut d, w, h)"
 ---
-" ◈ herdr-board ● 1 running [ Global ▾ ]  [ A ] [ All ] [ R ]"
+" ◈ herdr-board ● 1 running [  ▾ ][ … ▾ ] [ A ] [ All ] [ R ]"
 "────────────────────────────────────────────────────────────"
 "┌ Card #1: Update docs                          [ X ] [ □ ]┐"
 "│┌Status──────────────────────────────────────────────────┐│"

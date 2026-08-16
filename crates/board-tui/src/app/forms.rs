@@ -75,7 +75,9 @@ pub(super) fn form_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
                     // A changed harness needs fresh capabilities; a changed
                     // session needs its own workspace list; a changed column
                     // harness-override needs its own capabilities; model/space-
-                    // kind changes reshape the dependent selectors in place.
+                    // kind changes reshape the dependent selectors in place;
+                    // a changed move-project re-scopes the board/column
+                    // selectors, and a changed move-board reloads the columns.
                     match fid {
                         FieldId::Harness | FieldId::Session | FieldId::HarnessOverride => {
                             return vec![Effect::LoadFormOptions]
@@ -83,6 +85,16 @@ pub(super) fn form_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
                         FieldId::Model => form.on_model_changed(),
                         FieldId::SpaceKind => form.on_space_kind_changed(),
                         FieldId::Trigger => form.on_trigger_changed(),
+                        FieldId::MoveProject => {
+                            if let Some(project_id) = form.opt_col(FieldId::MoveProject) {
+                                form.apply_move_project(&app.projects, project_id);
+                            }
+                        }
+                        FieldId::MoveBoard => {
+                            if let Some(board_id) = form.opt_col(FieldId::MoveBoard) {
+                                return vec![Effect::LoadMoveColumns { board_id }];
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -120,6 +132,9 @@ fn submit_form(app: &mut App) -> Vec<Effect> {
                         body,
                     }]
                 }
+                Submit::CardMove(p) => vec![Effect::CardMove(p)],
+                Submit::ProjectCreate(p) => vec![Effect::ProjectCreate(p)],
+                Submit::BoardCreate(p) => vec![Effect::BoardCreate(p)],
             };
             close_form(app, true);
             effects

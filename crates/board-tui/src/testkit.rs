@@ -512,9 +512,16 @@ pub fn demo_client() -> anyhow::Result<DemoClient> {
         .id;
     c.db().set_card_status(confirmed, CardStatus::Done)?;
 
-    // Additional independent boards feed the board picker while Global remains
-    // the selected demo board.
-    c.board_open("/work/alpha/project")?;
+    // Additional independent boards feed the board pickers while Global
+    // remains the current demo board. `board.open` creates the projects; the
+    // named boards make the pickers' rows non-trivial. (The daemon-side
+    // selection these seeding calls leave behind is irrelevant: the pickers
+    // order by the *current* project/board first, never by the persisted
+    // selection.)
+    let alpha = c.board_open("/work/alpha/project")?;
+    let alpha_project = alpha.board.project_id;
+    c.board_create(alpha_project, "Backlog")?;
+    c.board_create(alpha_project, "Archive")?;
     c.board_open("/Volumes/archive/project")?;
 
     Ok(DemoClient::new(c))

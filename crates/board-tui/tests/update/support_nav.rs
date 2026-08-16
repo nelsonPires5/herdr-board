@@ -35,16 +35,34 @@ fn board_layout_always_fills_available_width() {
 fn board_picker_loads_and_switch_preserves_filter() {
     let mut app = demo_app();
     let effects = update(&mut app, key(KeyCode::Char('b')));
-    assert!(matches!(effects.as_slice(), [Effect::LoadBoards]));
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::LoadBoardPicker { project_id: None }]
+    ));
 
     let mut driver = driver_of(super::helpers::demo_client().unwrap());
     driver.handle(key(KeyCode::Char('v')));
     assert_eq!(driver.app.card_filter, CardFilter::All);
+    // `b` opens the current (Global) project's board picker.
     driver.handle(key(KeyCode::Char('b')));
-    assert_eq!(driver.app.screen, Screen::Picker);
-    assert!(driver.app.picker.as_ref().unwrap().options.len() >= 3);
-    driver.handle(key(KeyCode::Down));
+    assert_eq!(driver.app.screen, Screen::BoardPicker);
+    let picker = driver.app.picker.as_ref().unwrap();
+    assert!(picker.rows.len() >= 2, "board rows + actions");
+    // Drill into another project via `p`, then pick the archive project's
+    // board — the switch must preserve the filter and reset the selection.
+    driver.handle(key(KeyCode::Esc));
+    driver.handle(key(KeyCode::Char('p')));
+    assert_eq!(driver.app.screen, Screen::ProjectPicker);
+    let picker = driver.app.picker.as_ref().unwrap();
+    let archive_row = picker
+        .rows
+        .iter()
+        .position(|row| matches!(row, board_tui::app::PickerRow::Item(label, _) if label.contains("archive")))
+        .expect("archive project row");
+    driver.app.picker.as_mut().unwrap().sel = archive_row;
     driver.handle(key(KeyCode::Enter));
+    assert_eq!(driver.app.screen, Screen::BoardPicker);
+    driver.handle(key(KeyCode::Enter)); // its first board (selected/main)
     assert_eq!(driver.app.screen, Screen::Board);
     assert_eq!(driver.app.card_filter, CardFilter::All);
     assert_eq!(driver.app.sel_col, 0);

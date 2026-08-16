@@ -2,7 +2,7 @@
 source: crates/board-tui/tests/snapshots.rs
 expression: output
 ---
-" ◈ herdr-board ● 1 running [ Global ▾ ]  [ A ] [ All ] [ R ]"
+" ◈ herdr-board ● 1 running [  ▾ ][ … ▾ ] [ A ] [ All ] [ R ]"
 "────────────────────────────────────────────────────────────"
 "┌ Edit card  ·  Tab: field · Enter: save · Esc: cancel ────┐"
 "│┌ Task ─────────────────────────────────────────────────┐▲│"

@@ -95,9 +95,9 @@ pub(crate) enum CardCmd {
         #[arg(long, value_parser = ["active", "all", "archived"])]
         visibility: Option<String>,
     },
-    /// Move a card, optionally across boards. With `--position`, the card is
-    /// reordered within its current column (same-column move, never triggers
-    /// an automatic column).
+    /// Move a card, optionally across boards or projects. With `--position`,
+    /// the card is reordered within its current column (same-column move,
+    /// never triggers an automatic column).
     Move {
         id: i64,
         column: String,
@@ -106,6 +106,9 @@ pub(crate) enum CardCmd {
         position: Option<i64>,
         #[arg(long, alias = "to-board", value_name = "ID|PATH")]
         destination_board: Option<String>,
+        /// Destination project for a cross-project move (canonical scope path).
+        #[arg(long, value_name = "PATH")]
+        to_project: Option<String>,
     },
     /// Nested comment operations.
     Comment {

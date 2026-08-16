@@ -103,6 +103,40 @@ argv = ["opencode", "run", "--model", "{model}", "--variant", "{effort}"]
 like every other config-defined harness: prompt via `$BOARD_PROMPT`, `resume` only
 if you declare it, and the configured runner bridge — never the managed `agent.start` path.
 
+### The built-in `antigravity` (agy) vs. a headless `agy run`
+
+`antigravity` is a **built-in harness** dispatched as a Herdr-managed interactive agent (kind
+`"agy"`), starting the Antigravity CLI **TUI** (`agy`). Models come from a **live catalog only**: the
+daemon runs `agy --output-format json models` (a root flag — `agy models --output-format json`
+fails) per validation and normalizes variant ids (`gemini-3.7-flash-high|medium|low`) onto one base
+model with efforts `low|medium|high` (`--model <base> --effort <effort>`); fixed-effort models
+(`claude-sonnet-4-6`, `claude-opus-4-6-thinking`) carry no effort. There is **no static fallback**:
+while the catalog is unavailable (`agy` missing/failing) model selection is free-form and stored
+models keep running; once the catalog is back, removed models are rejected at enqueue/edit. The
+binary is resolved from `$AGY_BIN`, else `agy` on `PATH`.
+
+The two permission modes map to exact verified spellings: `sandbox` (`--sandbox`),
+`always-proceed` (`--dangerously-skip-permissions`); no flag (the harness default) keeps the
+user's configured `toolPermission`. The TUI mints its own
+conversation id, which the daemon captures from the `herdr:antigravity_cli` integration after the
+first prompt; `board retry` re-attaches to the same conversation (`--conversation <id>`) in a fresh
+pane (agy has no fork, and every `--conversation` hop launches a fresh pane by design). When the
+recorded conversation no longer exists agy starts a new one: the daemon persists the new id and a
+`system` card comment names both. Without the integration the run still executes, a `system`
+warning explains that focus/retry may be unavailable, and reuse/rescue fail closed.
+
+**The `antigravity` name is shadowed by the built-in**, so a `[harness.antigravity]` section in
+`config.toml` is unreachable. A headless `agy run` wrapper must be configured under a
+**different name**, e.g.:
+
+```toml
+[harness.agy-run]
+argv = ["agy", "run", "--model", "{model}", "--conversation", "{session}"]
+```
+
+It then behaves like every other config-defined harness: prompt via `$BOARD_PROMPT`, `resume` only
+if you declare it, and the configured runner bridge — never the managed `agent.start` path.
+
 The daemon parses the complete document once, including `[daemon]`, into typed settings. A missing
 file or omitted section uses the defaults shown above. An existing file with malformed TOML or an
 invalid typed value (including an unknown `spawner`) is an error: the daemon does not silently fall
@@ -117,10 +151,11 @@ override values also prevent daemon startup.
 | `BOARD_SOCKET` | Daemon socket. Default: `~/.local/share/herdr-board/boardd.sock`. |
 | `BOARD_LOG_DIR` | Structured diagnostic log directory. Default: `~/.local/share/herdr-board/logs`. |
 | `HERDR_BOARD_CONFIG` | Configuration path override. |
-| `BOARD_SCOPE_PATH` | Canonicalizable scope override for CLI/TUI automation. |
+| `BOARD_SCOPE_PATH` | Canonicalizable scope override for CLI/TUI automation; when no selection exists yet it selects the project at CLI/TUI startup (the selected project otherwise prevails over the current directory). |
 | `BOARD_SPAWNER` | `herdr` or `local`; overrides `[daemon] spawner`. |
 | `BOARD_CARD_ID` / `BOARD_RUN_ID` | Injected into runs; `comment`/`done` use them by default. |
 | `BOARD_PROMPT` / `BOARD_SYSTEM_PROMPT` | Prompt delivery for custom harnesses. |
 | `BOARD_RESCUE` / `BOARD_RESUME_SESSION_ID` / `BOARD_RESCUED_RUN_ID` | Set on a *reopened* run pane only: marks it as an ephemeral rescue (not a tracked run), names the conversation to resume, and labels which run it continues. A reopened pane gets `BOARD_CARD_ID`/`BOARD_SOCKET`/`BOARD_BIN` but explicitly clears `BOARD_RUN_ID` to empty (treated as unset) — that is the actor credential for `comment`/`done`, and a rescued pane must not be able to write to the finished run. |
 | `OPENCODE_BIN` | OpenCode binary used for live `opencode models --verbose` model discovery; default `opencode` on `PATH`. An unset/invalid binary keeps the static fallback catalog. |
+| `AGY_BIN` | Antigravity binary used for the live `agy --output-format json models` model catalog; default `agy` on `PATH`. An unset/invalid binary means the catalog is unavailable: model selection becomes free-form (stored models keep running) and the picker is empty. |
 | `BOARD_TIMEOUT_UNIT_SECS` / `BOARD_LOCAL_POLL_MS` / `BOARD_TICK_MS` | Test-tuning knobs. |

@@ -9,7 +9,7 @@ use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
 };
 
-use crate::model::{Board, Card, Column, Comment, CommentHistory, CommentRecord, Run};
+use crate::model::{Board, Card, Column, Comment, CommentHistory, CommentRecord, Project, Run};
 
 /// A nullable field in a partial update.
 ///
@@ -399,6 +399,110 @@ pub struct BoardGetParams {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoardListResult {
     pub boards: Vec<Board>,
+}
+
+/// `board.list` params. An omitted `project_id` preserves the legacy listing
+/// of every board across all projects; with it, only that project's boards.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardListParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<i64>,
+}
+
+/// `board.create` params: a named board inside one project.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardCreateParams {
+    pub project_id: i64,
+    pub name: String,
+}
+
+/// `board.select` params: persist this board (and its project) as the context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardSelectParams {
+    pub board_id: i64,
+}
+
+/// `project.get` params: show one project without side effects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectGetParams {
+    pub scope_path: String,
+}
+
+/// `project.open` / `project.create` params (identical shapes).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectScopeParams {
+    pub scope_path: String,
+}
+
+pub type ProjectOpenParams = ProjectScopeParams;
+pub type ProjectCreateParams = ProjectScopeParams;
+
+/// `project.select` params. `board_id` is an explicit board choice; omitted,
+/// the project's persisted selected board (else its first board `main`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectSelectParams {
+    pub scope_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board_id: Option<i64>,
+}
+
+/// `project.get` result: the project plus its boards.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectDetail {
+    pub project: Project,
+    pub boards: Vec<Board>,
+    /// The project's persisted selected board, when one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_board: Option<Board>,
+}
+
+/// One project as served by `project.list`: its boards plus the selection and
+/// recency data the pickers need, all in one call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectInfo {
+    pub project: Project,
+    pub boards: Vec<Board>,
+    /// The project's persisted selected board id, when one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_board_id: Option<i64>,
+    /// This project's recent board ids, most recent first, capped at 3,
+    /// excluding its selected board.
+    #[serde(default)]
+    pub recent_board_ids: Vec<i64>,
+}
+
+/// `project.list` result: everything the project/board pickers need.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectListResult {
+    /// Projects ordered by folder name; the special Global project last.
+    pub projects: Vec<ProjectInfo>,
+    /// The persisted selected project, when one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_project_id: Option<i64>,
+    /// Recent project ids, most recent first, capped at 3, excluding the
+    /// selected project.
+    #[serde(default)]
+    pub recent_project_ids: Vec<i64>,
+}
+
+/// `project.open` / `project.create` / `project.select` result: the project
+/// plus the board snapshot the caller lands on (the chosen board, the
+/// project's selected board, or its first board `main`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectOpenResult {
+    pub project: Project,
+    pub board: BoardSnapshot,
+}
+
+/// `project.selected` result: the persisted context, or both `None` when no
+/// selection exists yet (e.g. right after migration, before the first
+/// board-aware command bootstraps it from the current directory).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProjectSelectedResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<Project>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board: Option<BoardSnapshot>,
 }
 
 /// A compact view of a run that is currently started and open on a board.
