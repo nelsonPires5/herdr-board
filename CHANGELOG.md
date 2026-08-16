@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-08-16
+
 ### Added
 
 - [#91](https://github.com/nelsonPires5/herdr-board/pull/91) feat: projects group boards by folder, with separate project/board selectors in the TUI and CLI.
@@ -394,7 +396,8 @@ a visible herdr pane. Ships as a single `board` binary (TUI + daemon + CLI) and 
 - **Packaging.** `herdr-plugin.toml` manifest, and `scripts/` for build, install (guarded behind
   `--yes`), the open-or-focus launcher, a raw protocol client, and a live-herdr e2e smoke test.
 
-[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.15.0
 [0.14.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.14.0
 [0.13.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.13.0
 [0.12.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.12.0
