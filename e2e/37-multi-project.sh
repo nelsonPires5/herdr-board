@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 36-multi-project.sh — projects: creation, selection persistence, recency,
+# 37-multi-project.sh — projects: creation, selection persistence, recency,
 # per-project board isolation, and card movement across projects.
 #
 # A project is a named board collection identified by a canonical path; every
@@ -144,4 +144,4 @@ assert d["recent_project_ids"] == [int(sys.argv[2])], d["recent_project_ids"]
   || fail "project.list changed across the move: selection or recency was touched"
 ok "recent projects unchanged by the move"
 
-step "36-multi-project: ALL CHECKS PASSED"
+step "37-multi-project: ALL CHECKS PASSED"

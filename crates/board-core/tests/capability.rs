@@ -281,18 +281,26 @@ argv = ["a"]
 "#;
     let cfg = Config::from_toml(toml).unwrap();
     // Built-ins first in their default order (pi before claude, codex slotting
-    // in right after claude, opencode after codex), then config keys sorted
-    // and de-duplicated.
+    // in right after claude, opencode after codex, antigravity last), then
+    // config keys sorted and de-duplicated.
     assert_eq!(
         available_harnesses(&cfg),
-        vec!["pi", "claude", "codex", "opencode", "alpha", "zeta"]
+        vec![
+            "pi",
+            "claude",
+            "codex",
+            "opencode",
+            "antigravity",
+            "alpha",
+            "zeta"
+        ]
     );
 }
 
 #[test]
 fn capabilities_match_trait_snapshot() {
     // The wire snapshot and the trait agree for every built-in.
-    for h in ["pi", "claude", "codex", "opencode"] {
+    for h in ["pi", "claude", "codex", "opencode", "antigravity"] {
         let cfg = Config::default();
         let via_fn = capabilities_for(h, &cfg).unwrap();
         let via_trait = {

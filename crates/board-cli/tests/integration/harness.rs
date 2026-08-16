@@ -50,14 +50,17 @@ fn harness_list_builtins_and_config_defined() {
     let names: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
     assert_eq!(
         names,
-        vec!["pi", "claude", "codex", "opencode", "fake"],
+        vec!["pi", "claude", "codex", "opencode", "antigravity", "fake"],
         "got:\n{text}"
     );
 
     // --json: the same names, default-first, as a JSON array.
     let out = td.board(&["harness", "list", "--json"]);
     let names: Vec<String> = serde_json::from_value(json_output(&out)).unwrap();
-    assert_eq!(names, vec!["pi", "claude", "codex", "opencode", "fake"]);
+    assert_eq!(
+        names,
+        vec!["pi", "claude", "codex", "opencode", "antigravity", "fake"]
+    );
 }
 
 #[test]
@@ -86,7 +89,7 @@ fn harness_models_unknown_harness_errors() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(
         err.trim_end(),
-        "board: boardd error 2: not found: unknown harness 'ghost'; known: pi, claude, codex, opencode, fake",
+        "board: boardd error 2: not found: unknown harness 'ghost'; known: pi, claude, codex, opencode, antigravity, fake",
         "unknown harness names the harness and the known set"
     );
 
@@ -99,7 +102,7 @@ fn harness_models_unknown_harness_errors() {
     assert_eq!(error["error"]["code"], 2);
     assert_eq!(
         error["error"]["message"],
-        "not found: unknown harness 'ghost'; known: pi, claude, codex, opencode, fake"
+        "not found: unknown harness 'ghost'; known: pi, claude, codex, opencode, antigravity, fake"
     );
 }
 
@@ -987,5 +990,110 @@ fn template_refused_on_non_empty_board() {
     assert!(
         err.to_string().contains("error 3"),
         "expected invalid-state error, got: {err}"
+    );
+}
+
+#[test]
+fn harness_antigravity_models_lists_efforts_and_permissions() {
+    let td = TestDaemon::start(&[]);
+
+    // The daemon answers the antigravity down-state: no models (free-form —
+    // there is deliberately no static fallback), the agy effort ladder, and
+    // exactly the three permission modes.
+    let out = td.board(&["harness", "models", "antigravity", "--json"]);
+    let caps: board_core::capability::HarnessCapabilities =
+        serde_json::from_value(json_output(&out)).unwrap();
+    assert_eq!(caps.harness, "antigravity");
+    assert!(caps.models.is_empty(), "catalog down → no models to offer");
+    assert!(
+        caps.model_freeform,
+        "catalog down → free-form (stored models run)"
+    );
+    let efforts: Vec<&str> = caps.default_efforts.iter().map(|e| e.as_str()).collect();
+    assert_eq!(
+        efforts,
+        vec!["low", "medium", "high"],
+        "the agy effort ladder is exactly low|medium|high"
+    );
+    assert_eq!(caps.permission_modes, vec!["sandbox", "always-proceed"]);
+
+    // Human output mirrors the free-form down state.
+    let out = td.board(&["harness", "models", "antigravity"]);
+    assert!(out.status.success(), "human harness models should succeed");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("any model string accepted"),
+        "human output states the free-form catalog: {text}"
+    );
+
+    // The permission vocabulary is its own verb.
+    let out = td.board(&["harness", "permissions", "antigravity"]);
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("sandbox") && text.contains("always-proceed"),
+        "permissions output lists the two modes: {text}"
+    );
+}
+
+#[test]
+fn harness_antigravity_models_lists_live_catalog_when_agy_bin_resolves() {
+    // With AGY_BIN pointing at a fixture CLI, the daemon overlays the live
+    // normalized catalog: variant ids merge onto base models, fixed-effort
+    // models carry no efforts, and the harness stops being free-form.
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = r#"{
+  "conversation_id": "",
+  "status": "SUCCESS",
+  "response": "",
+  "command": {
+    "name": "models",
+    "data": {
+      "models": [
+        {"id": "gemini-3.7-flash-high", "label": "Gemini 3.7 Flash (High)"},
+        {"id": "gemini-3.7-flash-medium", "label": "Gemini 3.7 Flash (Medium)"},
+        {"id": "gemini-3.7-flash-low", "label": "Gemini 3.7 Flash (Low)"},
+        {"id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6 (Thinking)"}
+      ]
+    }
+  }
+}
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("agy-fixture");
+    std::fs::write(
+        &bin,
+        format!("#!/bin/sh\ncat <<'HBEOF'\n{fixture}\nHBEOF\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let td = TestDaemon::start(&[("AGY_BIN", bin.to_str().unwrap())]);
+
+    let out = td.board(&["harness", "models", "antigravity", "--json"]);
+    let caps: board_core::capability::HarnessCapabilities =
+        serde_json::from_value(json_output(&out)).unwrap();
+    let ids: Vec<&str> = caps.models.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["claude-sonnet-4-6", "gemini-3.7-flash"],
+        "normalized base models, sorted"
+    );
+    let gemini = caps
+        .models
+        .iter()
+        .find(|m| m.id == "gemini-3.7-flash")
+        .unwrap();
+    let efforts: Vec<&str> = gemini.efforts.iter().map(|e| e.as_str()).collect();
+    assert_eq!(efforts, vec!["low", "medium", "high"]);
+    let sonnet = caps
+        .models
+        .iter()
+        .find(|m| m.id == "claude-sonnet-4-6")
+        .unwrap();
+    assert!(sonnet.efforts.is_empty(), "fixed-effort model → no efforts");
+    assert!(
+        !caps.model_freeform,
+        "catalog up → authoritative model list"
     );
 }

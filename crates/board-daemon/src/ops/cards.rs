@@ -1,5 +1,5 @@
 use super::*;
-use crate::dispatch::prepare_enqueue_values;
+use crate::dispatch::{antigravity_validation_config, prepare_enqueue_values};
 use board_core::db::{Db, BOARD_ID};
 use board_core::engine::{
     decide_entry, merge_card_update, validate_card_archive, validate_card_edit,
@@ -67,15 +67,16 @@ fn pending_create_card(db: &Db, p: &CardCreateParams) -> Result<Card> {
 }
 
 pub(super) fn card_create(d: &Arc<Daemon>, p: CardCreateParams) -> Result<Value> {
+    let harness = p.harness.as_deref().unwrap_or(DEFAULT_HARNESS);
     validate_card_values(
-        p.harness.as_deref().unwrap_or(DEFAULT_HARNESS),
+        harness,
         p.model.as_deref(),
         p.effort,
         p.permission_mode.as_deref(),
         p.space_kind.unwrap_or(SpaceKind::Workspace),
         p.space_ref.as_deref(),
         p.space_cwd.as_deref(),
-        &d.config,
+        &antigravity_validation_config(d, harness),
     )?;
 
     let (mut card, enqueue) = {
@@ -153,7 +154,7 @@ pub(super) fn card_update(d: &Arc<Daemon>, p: CardUpdateParams) -> Result<Value>
             ));
         }
         let merged = merge_card_update(&card, &p);
-        validate_card_settings(&merged, &d.config)?;
+        validate_card_settings(&merged, &antigravity_validation_config(d, &merged.harness))?;
         db.update_card(&p)?
     };
     d.emit_changed(BoardChangedReason::CardUpdated, Some(card.id), None);
@@ -246,7 +247,15 @@ pub(super) fn card_move(d: &Arc<Daemon>, p: CardMoveParams) -> Result<Value> {
             // resolvable (read-only preflight). An incompatible setting or an
             // unresolvable session/workspace aborts the move; nothing is
             // written.
-            validate_effective_settings(&current, &target, &d.config)?;
+            let effective_harness = target
+                .harness_override
+                .as_deref()
+                .unwrap_or(current.harness.as_str());
+            validate_effective_settings(
+                &current,
+                &target,
+                &antigravity_validation_config(d, effective_harness),
+            )?;
             if let Some(reg) = &d.session_registry {
                 let socket = match reg.resolve(current.session.as_deref()) {
                     Ok(r) => r.socket,

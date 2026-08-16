@@ -1,0 +1,407 @@
+#!/usr/bin/env bash
+# Hermetic, no-provider Antigravity CLI stand-in for protocol-19 managed
+# launches. agy mints its own conversation id (a UUID printed at startup),
+# has no system-prompt file, and carries no prompt text in startup argv: the
+# card task (Mint: system_prompt + task delimited block; resume/retry: task
+# only) must arrive through the interactive terminal via Herdr's agent.prompt
+# AFTER the integration reported conversation identity + idle readiness. This
+# fixture pins that contract (mirror of crates/board-core/tests/harness_ag
+# gravity A3/A6 + the daemon's managed.rs agy launch):
+#   Mint   agy [--model M] [--effort E] [--sandbox | --dangerously-skip-permissions]
+#          (no conversation flag! agy mints its own id)
+#   Resume agy ... --conversation <id>   (pair, LAST tokens)
+#   Retry  agy ... --conversation <id>   (SAME spelling: agy has no fork; a
+#          board retry re-attaches to the same conversation in a new pane)
+# Model is the NORMALIZED BASE id from the live catalog (gemini-3.7-flash, not
+# gemini-3.7-flash-high): variants merge onto one base with efforts
+# low|medium|high and run as --model <base> --effort <effort>. A fixed-effort
+# model (claude-sonnet-4-6, claude-opus-4-6-thinking) must NEVER receive
+# --effort — the fixture rejects it, exactly like the real CLI ignores it.
+# Permission (board-facing ids, each with an exact CLI spelling):
+#   current         -> (no flag; the CLI keeps the user's toolPermission)
+#   sandbox         -> --sandbox
+#   always-proceed  -> --dangerously-skip-permissions
+# The codex-style presets ask-for-approval/approve-for-me/full-access and any
+# --permission-mode flag are rejected: they are not agy board vocabulary.
+# Legacy session spellings (--fork, -s, --session*, --resume, --fork-session)
+# and --append-system-prompt*/--prompt/-- are invalid: a refactor must not
+# drift back onto flags the plan re-verified against the real `agy --help`.
+# The minted conversation id is deterministic and stable so scenario 36 can
+# predict it: "${FAKE_AGY_CONVERSATION_ID:-conv-$BOARD_CARD_ID}-$RUN_LABEL"
+# (FAKE_AGY_CONVERSATION_ID is an optional base). Resume reuses the argv id
+# verbatim — UNLESS FAKE_AGY_NEW_CONVERSATION=1, which simulates agy's real
+# "conversation not found" fallback: the recorded conversation no longer
+# exists, so agy starts a new one and reports THAT id. The daemon detects the
+# mismatch (captured != requested), persists the new id, and writes a visible
+# system warning on the card.
+# The conversation id is reported to Herdr via pane.report_agent_session
+# (--agent-session-id) exactly like the real Antigravity integration reports
+# AgentInfo.agent_session ({agent: agy, kind: id, source:
+# herdr:antigravity_cli, value}); the daemon's post-launch agent.get capture
+# reads it back. `board comment`/`done` run only after the terminal shim
+# verified agent.prompt bytes equal the committed run's prompt_snapshot.
+set -euo pipefail
+
+: "${BOARD_CARD_ID:?BOARD_CARD_ID required}"
+: "${BOARD_SOCKET:?BOARD_SOCKET required}"
+: "${HERDR_SOCKET_PATH:?HERDR_SOCKET_PATH required}"
+
+# A *rescued* pane never receives BOARD_RUN_ID (the actor credential): it may
+# not write to the immutable historical run row. The inert BOARD_RESCUED_RUN_ID
+# label names its artifacts instead, and rescue must re-attach to the recorded
+# conversation (`--conversation <id>`) — minting a new conversation on rescue
+# would break the byte-for-byte runs-row guarantee.
+if [ "${BOARD_RESCUE:-0}" = "1" ]; then
+  [ -z "${BOARD_RUN_ID:-}" ] \
+    || { echo 'fake agy: a rescued pane must NOT receive BOARD_RUN_ID' >&2; exit 2; }
+  : "${BOARD_RESCUED_RUN_ID:?BOARD_RESCUED_RUN_ID required on a rescued pane}"
+  RUN_LABEL="$BOARD_RESCUED_RUN_ID"
+else
+  : "${BOARD_RUN_ID:?BOARD_RUN_ID required}"
+  RUN_LABEL="$BOARD_RUN_ID"
+fi
+
+argv=("$@")
+model=""; effort=""; sandbox=""; skip_permissions=""
+conversation=""; conversation_id=""
+while (($#)); do
+  case "$1" in
+    --model)
+      (($# >= 2)) || { echo 'fake agy: --model missing value' >&2; exit 2; }
+      [ -z "$model" ] || { echo 'fake agy: duplicate --model' >&2; exit 2; }
+      [ -n "$2" ] || { echo 'fake agy: --model needs a non-empty model id' >&2; exit 2; }
+      model="$2"; shift 2 ;;
+    --effort)
+      (($# >= 2)) || { echo 'fake agy: --effort missing value' >&2; exit 2; }
+      [ -z "$effort" ] || { echo 'fake agy: duplicate --effort' >&2; exit 2; }
+      case "$2" in
+        low|medium|high) ;;
+        *) echo "fake agy: --effort must be low|medium|high (got: $2)" >&2; exit 2 ;;
+      esac
+      effort="$2"; shift 2 ;;
+    --sandbox)
+      [ -z "$sandbox" ] || { echo 'fake agy: duplicate --sandbox' >&2; exit 2; }
+      sandbox="1"; shift 1 ;;
+    --dangerously-skip-permissions)
+      [ -z "$skip_permissions" ] || { echo 'fake agy: duplicate --dangerously-skip-permissions' >&2; exit 2; }
+      skip_permissions="1"; shift 1 ;;
+    --conversation)
+      (($# >= 2)) || { echo 'fake agy: --conversation missing value' >&2; exit 2; }
+      [ -z "$conversation" ] || { echo 'fake agy: duplicate --conversation' >&2; exit 2; }
+      case "$2" in
+        *[!A-Za-z0-9._:-]*) echo "fake agy: suspicious --conversation id (leaked prompt?): $2" >&2; exit 2 ;;
+      esac
+      [ -n "$2" ] || { echo 'fake agy: --conversation needs a non-empty id' >&2; exit 2; }
+      conversation="1"; conversation_id="$2"; shift 2 ;;
+    --fork|--permission-mode|-s|--session|--session-id|--resume|--fork-session|--append-system-prompt|--append-system-prompt-file|--prompt|--)
+      echo "fake agy: invalid protocol-19 startup option: $1" >&2; exit 2 ;;
+    -*) echo "fake agy: unexpected startup option: $1" >&2; exit 2 ;;
+    *) echo "fake agy: card prompt leaked into startup argv: $1" >&2; exit 2 ;;
+  esac
+done
+
+mode="mint"
+[ -z "$conversation" ] || mode="resume"
+
+# A fixed-effort model never receives --effort (the real CLI has no variant
+# for it; the board's catalog lists it with empty efforts). Pinned models:
+# claude-sonnet-4-6 and claude-opus-4-6-thinking (verified catalog ids).
+case "$model" in
+  claude-sonnet-4-6|claude-opus-4-6-thinking)
+    [ -z "$effort" ] || {
+      echo "fake agy: fixed-effort model '$model' must never receive --effort" >&2; exit 2
+    } ;;
+esac
+
+# A rescued pane must re-attach to the recorded conversation, and the daemon's
+# BOARD_RESUME_SESSION_ID must name exactly the id in `--conversation <id>`.
+if [ "${BOARD_RESCUE:-0}" = "1" ]; then
+  [ "$mode" = "resume" ] \
+    || { echo "fake agy: a rescued pane must resume, not $mode" >&2; exit 2; }
+  : "${BOARD_RESUME_SESSION_ID:?BOARD_RESUME_SESSION_ID required on a rescued pane}"
+  [ "$BOARD_RESUME_SESSION_ID" = "$conversation_id" ] \
+    || { echo "fake agy: resume id '$BOARD_RESUME_SESSION_ID' != argv '--conversation $conversation_id'" >&2; exit 2; }
+fi
+
+# Per-run sentinel mirroring `no-session` (a daemon split pane inherits the
+# SERVER's env, never the workspace env, so scenario exports cannot reach this
+# process): an effective model value of exactly `new-conversation` switches the
+# fixture into fallback mode for THIS card, like FAKE_AGY_NEW_CONVERSATION=1.
+if [ "${FAKE_AGY_NEW_CONVERSATION:-0}" != "1" ] && [ "$model" != "new-conversation" ]; then
+  FAKE_AGY_NEW_CONVERSATION=0
+else
+  FAKE_AGY_NEW_CONVERSATION=1
+fi
+
+# Resume re-attaches to the recorded conversation. Mint mints a NEW one (agy
+# TUI mints its own UUID; the board must never invent one). Deterministic +
+# stable: scenario 36 can predict the id from the card and run ids, or pin a
+# base with FAKE_AGY_CONVERSATION_ID. FAKE_AGY_NEW_CONVERSATION simulates the
+# real "conversation not found" fallback: agy starts a new conversation and
+# reports THAT id, which the daemon persists in place of the requested one.
+if [ "$mode" = "resume" ] && [ "$FAKE_AGY_NEW_CONVERSATION" != "1" ]; then
+  session_identity="$conversation_id"
+else
+  session_identity="${FAKE_AGY_CONVERSATION_ID:-conv-$BOARD_CARD_ID}-$RUN_LABEL"
+fi
+
+suffix=""
+if [ "${BOARD_RESCUE:-0}" = "1" ]; then
+  suffix="-rescue"
+fi
+record="$(dirname "$BOARD_SOCKET")/fake-agy-run-$RUN_LABEL$suffix.json"
+permission="default"
+[ -z "$sandbox" ] || permission="sandbox"
+[ -z "$skip_permissions" ] || permission="always-proceed"
+python3 - "$record" "$RUN_LABEL" "$PWD" "$BOARD_CARD_ID" "$BOARD_SOCKET" \
+  "$HERDR_SOCKET_PATH" "$mode" "$model" "$effort" "$permission" \
+  "$session_identity" "$conversation_id" "${BOARD_RESCUE:-0}" \
+  "${FAKE_AGY_NEW_CONVERSATION:-0}" "${argv[@]}" <<'PY'
+import json, sys
+(path, run_id, cwd, card_id, board_socket, herdr_socket, mode, model, effort,
+ permission, session_identity, resume_id, rescue, new_conversation,
+ *argv) = sys.argv[1:]
+with open(path, "w", encoding="utf-8") as target:
+    json.dump({
+        "run_id": int(run_id), "card_id": int(card_id), "cwd": cwd,
+        "board_socket": board_socket, "herdr_socket": herdr_socket,
+        "mode": mode, "model": model or None,
+        "effort": effort or None, "permission_mode": permission or None,
+        "session_id": session_identity,
+        "resume_id": resume_id or None,
+        "new_conversation_fallback": new_conversation == "1",
+        "argv": argv,
+        "system_prompt_file": None,
+        "startup_argv_has_no_prompt": True,
+        "rescue": rescue == "1",
+    }, target, ensure_ascii=False, indent=2)
+    target.write("\n")
+PY
+
+# Mirror the real Antigravity integration startup ordering: establish a unique
+# transcript path, emit the terminal identity surface, report the minted
+# conversation id (AgentInfo.agent_session) + idle lifecycle, and only then
+# let Herdr deliver agent.prompt. No fixture path calls board done early.
+#
+# Opt-in degraded-integration mode: report ONLY the idle lifecycle, never a
+# conversation identity, so Herdr's agent.get carries no agent_session and the
+# daemon's bounded capture degrades — the basic mint still completes, but the
+# run persists NULL and rescue must fail closed. Scenario 36 pins that
+# contract; the record's `reports` proves no session report ran.
+#
+# The managed pane's env is the daemon's launch env (a split pane does not
+# inherit the workspace env), so a scenario-level export cannot reach this
+# process. The fixture therefore also honors the documented per-run sentinel:
+# an effective model value of exactly `no-session` (free-form — it arrives as
+# `--model no-session`).
+if [ "${FAKE_AGY_NO_SESSION:-0}" != "1" ] && [ "$model" != "no-session" ]; then
+  FAKE_AGY_NO_SESSION=0
+else
+  FAKE_AGY_NO_SESSION=1
+fi
+session_dir="$(dirname "$BOARD_SOCKET")/fake-agy-sessions"
+mkdir -p "$session_dir"
+# Unique per process: a run can be reopened more than once (each reopen is a
+# fresh launch), and the exclusive-create below must keep catching a genuine
+# double-launch of the SAME process rather than failing a legitimate retry.
+session_path="$session_dir/${session_identity}-${RUN_LABEL}${suffix}-$$.jsonl"
+if [ "${FAKE_AGY_NO_SESSION:-0}" != "1" ]; then
+python3 - "$session_path" "$session_identity" "$RUN_LABEL" <<'PY'
+import json, os, sys
+path, session_id, run_id = sys.argv[1:]
+with open(path, "x", encoding="utf-8") as target:
+    json.dump({"type": "session", "session_id": session_id, "run_id": int(run_id)}, target)
+    target.write("\n")
+os.chmod(path, 0o600)
+PY
+fi
+printf '\033]0;Antigravity\007'
+printf '\n──────────────────────────────────────────────────────\n❯ \n──────────────────────────────────────────────────────\n'
+if [ "${FAKE_AGY_NO_SESSION:-0}" = "1" ]; then
+  # report ONLY the idle lifecycle (comment above explains the per-run
+  # sentinel: env cannot cross into the daemon's split-pane launch env).
+  python3 - "$record" "$session_identity" "$RUN_LABEL" <<'PY'
+import json, os, socket, sys, time
+record_path, session_id, run_id = sys.argv[1:]
+pane_id = os.environ.get("HERDR_PANE_ID", "")
+socket_path = os.environ.get("HERDR_SOCKET_PATH", "")
+envelope = {
+    "id": f"e2e:herdr:agy:{os.getpid()}:idle",
+    "method": "pane.report_agent",
+    "params": {
+        "pane_id": pane_id,
+        "source": "herdr:antigravity_cli",
+        "agent": "agy",
+        "seq": time.time_ns(),
+        "state": "idle",
+    },
+}
+result = {"phase": "idle_lifecycle", "request": envelope}
+try:
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(2.0)
+    client.connect(socket_path)
+    client.sendall((json.dumps(envelope, separators=(",", ":")) + "\n").encode())
+    chunks = bytearray()
+    while b"\n" not in chunks:
+        chunk = client.recv(65536)
+        if not chunk:
+            break
+        chunks.extend(chunk)
+    client.close()
+    reply = json.loads(bytes(chunks).splitlines()[0])
+    result["reply"] = reply
+    result["ok"] = "result" in reply and "error" not in reply
+except Exception as error:
+    result["ok"] = False
+    result["error"] = f"{type(error).__name__}: {error}"
+with open(record_path, encoding="utf-8") as source:
+    record = json.load(source)
+record.update({
+    "herdr_pane_id": pane_id,
+    "report_socket": socket_path,
+    "agent_session_id": None,
+    "agent_session_path": None,
+    "session_start_source": None,
+    "session_id": session_id,
+    "reports": [result],
+    "readiness_report": "ok" if result["ok"] else "failed:idle_lifecycle",
+    "no_session_report": True,
+})
+with open(record_path, "w", encoding="utf-8") as target:
+    json.dump(record, target, ensure_ascii=False, indent=2)
+    target.write("\n")
+if not result["ok"]:
+    print(f"fake agy: idle lifecycle report failed: {result}", file=sys.stderr)
+    raise SystemExit(2)
+PY
+else
+  # The real Antigravity integration reports conversation identity with the
+  # exact pinned source `herdr:antigravity_cli` (not `herdr:agy`) — the
+  # daemon's capture validates it. Report inline instead of using
+  # managed-agent-report.py (whose source would be herdr:agy).
+  python3 - "$record" "$session_identity" "$session_path" <<'PY'
+import json, os, socket, sys, time
+record_path, session_id, session_path = sys.argv[1:]
+pane_id = os.environ["HERDR_PANE_ID"]
+socket_path = os.environ["HERDR_SOCKET_PATH"]
+sequence = time.time_ns()
+common = {
+    "pane_id": pane_id,
+    "source": "herdr:antigravity_cli",
+    "agent": "agy",
+}
+session_ref = {"agent_session_path": session_path, "agent_session_id": session_id}
+requests = [
+    (
+        "session_identity",
+        "pane.report_agent_session",
+        {**common, **session_ref, "seq": sequence, "session_start_source": "startup"},
+    ),
+    (
+        "idle_lifecycle",
+        "pane.report_agent",
+        {**common, **session_ref, "seq": sequence + 1, "state": "idle"},
+    ),
+]
+reports = []
+def update(**fields):
+    with open(record_path, encoding="utf-8") as source:
+        record = json.load(source)
+    record.update(fields)
+    temporary = record_path + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as target:
+        json.dump(record, target, ensure_ascii=False, indent=2)
+        target.write("\n")
+    os.replace(temporary, record_path)
+update(
+    herdr_pane_id=pane_id,
+    report_socket=socket_path,
+    agent_session_id=session_id,
+    agent_session_path=session_path,
+    session_start_source="startup",
+    reports=reports,
+    readiness_report="reporting",
+)
+for index, (phase, method, params) in enumerate(requests):
+    envelope = {
+        "id": f"e2e:herdr:antigravity_cli:{os.getpid()}:{index}",
+        "method": method,
+        "params": params,
+    }
+    result = {"phase": phase, "request": envelope}
+    try:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(2.0)
+        client.connect(socket_path)
+        client.sendall((json.dumps(envelope, separators=(",", ":")) + "\n").encode())
+        chunks = bytearray()
+        while b"\n" not in chunks:
+            chunk = client.recv(65536)
+            if not chunk:
+                break
+            chunks.extend(chunk)
+        client.close()
+        line = bytes(chunks).splitlines()[0] if chunks else b""
+        if not line:
+            raise RuntimeError("Herdr closed the report socket without a reply")
+        reply = json.loads(line)
+        result["reply"] = reply
+        result["ok"] = "result" in reply and "error" not in reply
+    except Exception as error:
+        result["ok"] = False
+        result["error"] = f"{type(error).__name__}: {error}"
+    reports.append(result)
+    update(reports=reports)
+    if not result["ok"]:
+        update(readiness_report=f"failed:{phase}")
+        print(f"fake agy: {phase} failed: {result}", file=sys.stderr)
+        raise SystemExit(2)
+update(readiness_report="ok")
+PY
+fi
+
+# A rescued pane resumes an existing conversation, so the daemon deliberately
+# sends NO agent.prompt (re-sending the card task would re-run it). Skip the
+# prompt shim entirely and just stay interactive, which is what a resumed
+# session looks like.
+if [ "${BOARD_RESCUE:-0}" = "1" ]; then
+  sleep "${FAKE_MANAGED_HOLD:-60}"
+  exit 0
+fi
+
+# Spawn registration commits only after readiness polling + agent.prompt
+# return. antigravity never reuses a pane (every `--conversation` hop launches
+# fresh by design), so no looping fixture is needed: one stage per process.
+FAKE_MANAGED_KIND=agy FAKE_PI_LOOP=0 \
+  python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/managed-terminal-shim.py" "$record" || {
+    rc=$?
+    python3 - "$record" <<'PY' >&2 || true
+import hashlib, json, sys
+try:
+    x = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception as e:
+    print(f"record_error={type(e).__name__}")
+else:
+    for key in ("prompt_error", "prompt_received_via_stdin", "prompt_matches_run_snapshot"):
+        print(f"{key}={x.get(key)!r}")
+    for key in ("prompt", "expected_prompt"):
+        value = (x.get(key) or "").encode()
+        print(f"{key}_len={len(value)} {key}_sha256={hashlib.sha256(value).hexdigest()}")
+PY
+    exit "$rc"
+  }
+if [ "$model" = "no-session" ]; then
+  # The daemon deliberately spends its bounded 10s capture window proving
+  # that no session report exists before it registers the managed run. Keep
+  # this degraded fixture alive past that boundary so its explicit done is
+  # accepted and proves basic execution still continues without an id.
+  sleep "${FAKE_AGY_NO_SESSION_SLEEP:-11}"
+else
+  sleep "${FAKE_AGY_SLEEP:-${FAKE_PI_SLEEP:-1.5}}"
+fi
+"${BOARD_BIN:?BOARD_BIN required}" comment "fake agy: agent.prompt delivered the card task; no system-prompt file in argv" \
+  || { echo "fake agy: board comment failed" >&2; exit 1; }
+"$BOARD_BIN" done --outcome ok \
+  || { echo "fake agy: board done failed" >&2; exit 1; }
+sleep "${FAKE_MANAGED_HOLD:-60}"

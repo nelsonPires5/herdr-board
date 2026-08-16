@@ -708,7 +708,7 @@ the hidden `board __pane-exited --run-id "$BOARD_RUN_ID"` guard. That guard send
 `run.pane_exited {card_id,run_id}`; only the exact matching open queued or started configured run is failed, with no `on_fail`
 transition. A callback before registration is accepted. The same narrow race rule applies to an
 immediate configured-harness `board done`: the CLI forwards `BOARD_RUN_ID`, and only that exact
-queued run may finalize before runner registration; a queued built-in (pi/claude/codex/opencode) completion is
+queued run may finalize before runner registration; a queued built-in (pi/claude/codex/opencode/antigravity) completion is
 rejected because no managed pane exists yet. For an already-started run, `run_id` remains optional
 so manual/TUI callers remain compatible, but a supplied mismatched id is rejected. Stale,
 replaced, completed, and built-in callbacks are rejected, so a stale child cannot complete a
@@ -751,7 +751,7 @@ opens the script, the residual configured-script orphan is an accepted asynchron
 
 **Golden rule:** herdr status is a HINT; `board done` is the only terminal success truth. For a
 configured harness, that completion may arrive in the narrow queued-before-registration window;
-queued built-in (pi/claude/codex/opencode) runs are deliberately not eligible. Pane-idle scraping alone is the
+queued built-in (pi/claude/codex/opencode/antigravity) runs are deliberately not eligible. Pane-idle scraping alone is the
 documented weak point of every tmux-style orchestrator (claude-squad); the explicit `board done`
 channel is what makes auto-transition trustworthy, and silent finishes park
 the card in `awaiting` for review instead of guessing an outcome. Without the optional Pi

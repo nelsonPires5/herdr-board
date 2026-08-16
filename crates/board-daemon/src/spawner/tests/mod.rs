@@ -296,6 +296,41 @@ fn opencode_req(session_tail: &[&str], initial_prompt: Option<&str>) -> HerdrLau
     }
 }
 
+/// A board-built agy launch plan: startup-only argv (Mint) or with the
+/// `--conversation <id>` pair appended last (the exact shape
+/// `board_core::harness::agy::managed_antigravity_invocation` persists). The
+/// model is the normalized base id and the effort rides `--effort` (agy has
+/// no variant config env); prompts ride the managed channels only.
+fn agy_req(session_tail: &[&str], initial_prompt: Option<&str>) -> HerdrLaunchPlan {
+    let mut argv = vec![
+        "agy".into(),
+        "--model".into(),
+        "gemini-3.7-flash".into(),
+        "--effort".into(),
+        "high".into(),
+    ];
+    argv.extend(session_tail.iter().map(|s| s.to_string()));
+    HerdrLaunchPlan {
+        name: "card-42-execute".into(),
+        name_fallback: Some("card-42-execute-r7".into()),
+        agent_kind: Some("agy".into()),
+        initial_prompt: initial_prompt.map(str::to_string),
+        system_prompt: Some("antigravity system instructions".into()),
+        tab_label: Some("kanban".into()),
+        owned_tab_id: None,
+        durable_pane_ids: Vec::new(),
+        reclaimable_pane_ids: Vec::new(),
+        durable_anchor_pane_ids: Vec::new(),
+        reuse_pane_id: None,
+        cwd: Some(PathBuf::from("/tmp/card cwd")),
+        workspace_ref: Some("w1".into()),
+        herdr_socket: None,
+        bootstrap: None,
+        env: vec![("BOARD_CARD_ID".into(), "42".into())],
+        argv,
+    }
+}
+
 fn assert_startup_prompt_file(
     req: &Value,
     expected_base_args: &[&str],
