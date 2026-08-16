@@ -1,9 +1,23 @@
-//! Compact-only column switcher sheet: the header tap opens it at the
-//! Columns level (columns + "switch board" + "apply template" rows), and `b`
-//! opens the board picker directly at every layout mode.
+//! Compact-only switcher sheet: entry-point/level pairing and the two `Esc`
+//! paths that fall out of it.
+//!
+//! Two distinct entry points reach `Screen::Switcher`, and they must land on
+//! different levels:
+//!   - `b` means "switch board" and must open straight at `SwitcherLevel::
+//!     Boards` (board names only exist at that level — see the `12-cwd-
+//!     boards` e2e regression this fixes: it sent `b` and grepped for a
+//!     board name that only a Boards-level list, never a Columns-level one,
+//!     contains).
+//!   - the header's center-button tap (mouse-only, covered by
+//!     `tests/mouse.rs`) opens at `SwitcherLevel::Columns`.
+//!
+//! `SwitcherState::entered_at_boards` records which entry point happened, so
+//! `Esc` from the `Boards` level either closes the sheet outright (opened
+//! via `b`, nothing to back out to) or steps back to `Columns` (drilled down
+//! from the header tap).
 
 use board_core::client::{BoardClient, FakeBoardClient};
-use board_tui::app::{update, App, Effect, Screen, SwitcherState};
+use board_tui::app::{update, App, Effect, Screen, SwitcherLevel, SwitcherState};
 use crossterm::event::KeyCode;
 use ratatui::layout::Rect;
 
@@ -13,26 +27,101 @@ fn compact_area() -> Rect {
     Rect::new(0, 0, 40, 20)
 }
 
-/// `b` means "switch board": in Compact it must open the BOARD PICKER (not
-/// the switcher sheet — the switcher's second level is gone).
 #[test]
-fn b_in_compact_opens_the_board_picker() {
+fn b_in_compact_opens_switcher_directly_at_boards_level() {
     let mut d = driver_of(super::helpers::demo_client().unwrap());
     d.app.last_area = compact_area();
 
     d.handle(key(KeyCode::Char('b')));
 
-    assert_eq!(d.app.screen, Screen::BoardPicker);
-    let picker = d.app.picker.as_ref().expect("board picker must be open");
-    assert_eq!(picker.purpose, board_tui::app::PickerPurpose::SwitchBoard);
+    assert_eq!(d.app.screen, Screen::Switcher);
+    let state = d.app.switcher.as_ref().expect("switcher must be open");
+    assert_eq!(
+        state.level,
+        SwitcherLevel::Boards,
+        "`b` must land directly on the Boards level, not Columns"
+    );
     assert!(
-        !picker.rows.is_empty(),
+        !state.boards.is_empty(),
         "the board list must have loaded synchronously"
     );
-    assert!(d.app.switcher.is_none(), "`b` must not open the switcher");
+    assert!(
+        state.entered_at_boards,
+        "opening via `b` must be recorded as a direct Boards entry"
+    );
 }
 
-// -- the trailing "switch board" row (drills into the board picker) ----------
+#[test]
+fn esc_from_b_opened_boards_level_closes_the_sheet_entirely() {
+    let mut d = driver_of(super::helpers::demo_client().unwrap());
+    d.app.last_area = compact_area();
+    d.handle(key(KeyCode::Char('b')));
+    assert_eq!(
+        d.app.switcher.as_ref().unwrap().level,
+        SwitcherLevel::Boards
+    );
+
+    d.handle(key(KeyCode::Esc));
+
+    assert_eq!(
+        d.app.screen,
+        Screen::Board,
+        "Esc must close the sheet outright, not fall back to a Columns view \
+         the user never opened"
+    );
+    assert!(d.app.switcher.is_none());
+}
+
+/// The header tap (`Zone::HeaderSwitch`, mouse-only) opens at Columns with
+/// `entered_at_boards: false`; drilling from there into Boards via the
+/// trailing "switch board" row is exercised end-to-end in `tests/mouse.rs`.
+/// This test starts from that same state (constructed directly, since
+/// driving it here would require the mouse plumbing that file already
+/// covers) and checks only the `Esc`-from-Boards path this module owns.
+#[test]
+fn esc_from_header_tap_drilled_boards_level_returns_to_columns() {
+    let mut d = driver_of(super::helpers::demo_client().unwrap());
+    d.app.last_area = compact_area();
+    let sel_col = d.app.sel_col;
+    d.app.switcher = Some(SwitcherState {
+        level: SwitcherLevel::Columns,
+        sel: sel_col,
+        columns_sel: sel_col,
+        boards: Vec::new(),
+        entered_at_boards: false,
+        return_to: Screen::Board,
+    });
+    d.app.screen = Screen::Switcher;
+
+    // Drill into Boards via the trailing "switch board" row (index `n`,
+    // one past the last column) — activating it records `n` itself as the
+    // Columns-level selection to restore, since that's the row that was
+    // highlighted when the user drilled down.
+    let n = d.app.board.columns.len();
+    d.app.switcher.as_mut().unwrap().sel = n;
+    d.handle(key(KeyCode::Enter));
+    assert_eq!(
+        d.app.switcher.as_ref().unwrap().level,
+        SwitcherLevel::Boards
+    );
+
+    d.handle(key(KeyCode::Esc));
+
+    assert_eq!(
+        d.app.screen,
+        Screen::Switcher,
+        "Esc must step back to Columns, not close the sheet"
+    );
+    let state = d.app.switcher.as_ref().unwrap();
+    assert_eq!(state.level, SwitcherLevel::Columns);
+    assert_eq!(
+        state.sel, n,
+        "the Columns-level selection (the trailing row) active before \
+         drilling in must be restored, not reset to the top"
+    );
+}
+
+// -- the trailing "apply template" row (added after "switch board") ---------
 
 /// Build an `App` sitting on `Screen::Switcher` at the Columns level, as if
 /// the header's center button had just been tapped, without going through
@@ -41,7 +130,11 @@ fn app_at_switcher_columns(board: board_core::protocol::BoardSnapshot) -> App {
     let mut app = App::new(board);
     let sel_col = app.sel_col;
     app.switcher = Some(SwitcherState {
+        level: SwitcherLevel::Columns,
         sel: sel_col,
+        columns_sel: sel_col,
+        boards: Vec::new(),
+        entered_at_boards: false,
         return_to: Screen::Board,
     });
     app.screen = Screen::Switcher;
@@ -93,23 +186,19 @@ fn switcher_column_rows_and_switch_board_row_are_unaffected_by_the_new_row() {
         assert!(app.switcher.is_none());
     }
 
-    // The trailing "switch board" row now opens the board picker (the sheet
-    // stays open underneath so Esc from the picker returns to it).
     let mut app = app_at_switcher_columns(board);
-    app.switcher.as_mut().unwrap().sel = n;
+    app.switcher.as_mut().unwrap().sel = n; // switch-board row, unchanged index
     let effects = update(&mut app, key(KeyCode::Enter));
     assert!(matches!(
         effects.as_slice(),
-        [Effect::LoadBoardPicker { project_id: None }]
+        [Effect::LoadBoardsForSwitcher]
     ));
     assert_eq!(
-        app.screen,
-        Screen::Switcher,
-        "the sheet stays open under the picker"
-    );
-    assert!(
-        app.switcher.is_some(),
-        "the switcher state survives the drill-down"
+        app.switcher.as_ref().unwrap().level,
+        SwitcherLevel::Columns,
+        "LoadBoardsForSwitcher flips the level via `enter_boards_level`, which \
+         the driver calls; here we only assert the effect fired and the sheet \
+         is still open"
     );
 }
 

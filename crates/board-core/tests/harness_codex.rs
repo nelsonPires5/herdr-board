@@ -198,7 +198,7 @@ fn codex_is_registered_builtin_after_claude() {
     assert!(is_builtin_harness("codex"));
     assert_eq!(
         BUILTIN_HARNESSES.to_vec(),
-        vec!["pi", "claude", "codex", "opencode", "antigravity"]
+        vec!["pi", "claude", "codex", "opencode"]
     );
     let list = available_harnesses(&Config::default());
     assert_eq!(
@@ -210,11 +210,6 @@ fn codex_is_registered_builtin_after_claude() {
         list.iter().position(|h| h.as_str() == "opencode"),
         Some(3),
         "opencode slots in right after codex"
-    );
-    assert_eq!(
-        list.iter().position(|h| h.as_str() == "antigravity"),
-        Some(4),
-        "antigravity slots in right after opencode"
     );
 }
 

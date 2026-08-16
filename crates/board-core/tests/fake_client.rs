@@ -14,10 +14,7 @@ use board_core::protocol::{
 fn fake_seeds_board_and_supports_crud() {
     let mut c = FakeBoardClient::new().unwrap();
     let snap = c.board_get().unwrap();
-    assert_eq!(snap.board.name, "main");
-    assert_eq!(snap.board.project_id, 1);
-    assert_eq!(snap.board.scope_path, None);
-    assert_eq!(c.project_list().unwrap().projects[0].project.name, "Global");
+    assert_eq!(snap.board.name, "Global");
     assert_eq!(snap.columns.len(), 1);
     assert_eq!(snap.columns[0].name, "Todo");
     assert!(snap.cards.is_empty());
@@ -76,9 +73,7 @@ fn fake_supports_scoped_board_open_list_and_get() {
     assert_eq!(c.board_get_by_id(alpha.board.id).unwrap().cards.len(), 1);
     assert!(c.board_get_by_id(beta.board.id).unwrap().cards.is_empty());
     let boards = c.board_list().unwrap().boards;
-    assert_eq!(boards[0].name, "main");
-    assert_eq!(boards[0].project_id, 1);
-    assert_eq!(boards[0].scope_path, None);
+    assert_eq!(boards[0].name, "Global");
     assert_eq!(boards.len(), 3);
 }
 

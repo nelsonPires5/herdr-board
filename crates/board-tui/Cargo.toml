@@ -51,10 +51,3 @@ required-features = ["fake-client"]
 [[test]]
 name = "forms"
 required-features = ["fake-client"]
-
-# Freezes the interaction table against `view::HELP_KEYS`; drives the real
-# driver through `testkit`, so it needs the fake client like the other
-# integration suites.
-[[test]]
-name = "interaction_contract"
-required-features = ["fake-client"]

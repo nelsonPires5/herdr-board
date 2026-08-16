@@ -4,13 +4,11 @@ use std::borrow::Cow;
 
 use board_core::capability::{default_capabilities, HarnessCapabilities};
 use board_core::harness::DEFAULT_HARNESS;
-use board_core::model::Column;
-use board_core::protocol::{ProjectInfo, SessionInfo, SpaceInfo};
+use board_core::protocol::{SessionInfo, SpaceInfo};
 
-use super::builders::{board_choice_opts, project_choice_opts};
 use super::{
-    build_card_fields, column_fields_from_values, CardValues, ChoiceOpt, ChoiceVal, ColumnValues,
-    Field, FieldId, FieldKind, Form, FormKind,
+    build_card_fields, column_fields_from_values, CardValues, ChoiceVal, ColumnValues, Field,
+    FieldId, FieldKind, Form, FormKind,
 };
 
 impl Form {
@@ -98,106 +96,6 @@ impl Form {
     pub fn on_trigger_changed(&mut self) {
         if !self.field_visible(self.focus) {
             self.focus_step(1);
-        }
-    }
-
-    /// React to the move form's Project field changing: rebuild the Board
-    /// selector from `projects` for the newly chosen project (selected board
-    /// first, then alphabetically) and reset the Column selector — the loaded
-    /// columns belong to the previous board. Focus moves to the Board field so
-    /// the next choice is the natural one.
-    pub fn apply_move_project(&mut self, projects: &[ProjectInfo], project_id: i64) {
-        let Some(info) = projects.iter().find(|pi| pi.project.id == project_id) else {
-            return;
-        };
-        let (opts, idx) = board_choice_opts(Some(info), None);
-        if let Some(field) = self.fields.iter_mut().find(|f| f.id == FieldId::MoveBoard) {
-            field.kind = FieldKind::Choice { opts, idx };
-        }
-        if let Some(field) = self.fields.iter_mut().find(|f| f.id == FieldId::MoveColumn) {
-            field.kind = FieldKind::Choice {
-                opts: Vec::new(),
-                idx: 0,
-            };
-        }
-        if let Some(focus) = self.fields.iter().position(|f| f.id == FieldId::MoveBoard) {
-            self.focus = focus;
-        }
-    }
-
-    /// Seed (or re-seed) the move form's Project/Board selectors from a fresh
-    /// `project.list` cache, preserving the current project/board selections
-    /// wherever they still exist. Called when the cache first loads — the form
-    /// can open before any picker has fetched it — and on every later refresh.
-    pub fn apply_projects(
-        &mut self,
-        projects: &[ProjectInfo],
-        current: &board_core::model::Project,
-        current_board: &board_core::model::Board,
-    ) {
-        let (project_opts, _) = project_choice_opts(projects, current);
-        let project_idx = self
-            .opt_col(FieldId::MoveProject)
-            .and_then(|id| {
-                project_opts
-                    .iter()
-                    .position(|o| matches!(o.val, ChoiceVal::Col(x) if x == id))
-            })
-            .unwrap_or(0);
-        if let Some(field) = self
-            .fields
-            .iter_mut()
-            .find(|f| f.id == FieldId::MoveProject)
-        {
-            field.kind = FieldKind::Choice {
-                opts: project_opts,
-                idx: project_idx,
-            };
-        }
-        // Board options follow the selected project; the current board stands
-        // in as the fallback (and preselection) only for the current project.
-        let selected_project = self.opt_col(FieldId::MoveProject).unwrap_or(current.id);
-        let info = projects.iter().find(|pi| pi.project.id == selected_project);
-        let fallback = (selected_project == current.id).then_some(current_board);
-        let (board_opts, board_idx) = board_choice_opts(info, fallback);
-        let board_idx = self
-            .opt_col(FieldId::MoveBoard)
-            .and_then(|id| {
-                board_opts
-                    .iter()
-                    .position(|o| matches!(o.val, ChoiceVal::Col(x) if x == id))
-            })
-            .unwrap_or(board_idx);
-        if let Some(field) = self.fields.iter_mut().find(|f| f.id == FieldId::MoveBoard) {
-            field.kind = FieldKind::Choice {
-                opts: board_opts,
-                idx: board_idx,
-            };
-        }
-    }
-
-    /// Install freshly fetched destination-board columns into the move form's
-    /// Column selector, preserving the current selection when it is still one
-    /// of the columns (a reload of the same board).
-    pub fn apply_move_columns(&mut self, columns: Vec<Column>) {
-        self.columns = columns;
-        let current = self.opt_col(FieldId::MoveColumn);
-        let opts: Vec<ChoiceOpt> = self
-            .columns
-            .iter()
-            .map(|c| ChoiceOpt {
-                label: c.name.clone(),
-                val: ChoiceVal::Col(c.id),
-            })
-            .collect();
-        let idx = current
-            .and_then(|id| {
-                opts.iter()
-                    .position(|o| matches!(o.val, ChoiceVal::Col(x) if x == id))
-            })
-            .unwrap_or(0);
-        if let Some(field) = self.fields.iter_mut().find(|f| f.id == FieldId::MoveColumn) {
-            field.kind = FieldKind::Choice { opts, idx };
         }
     }
 
@@ -429,13 +327,7 @@ impl Form {
         self.fields[self.focus].multiline
     }
 
-    /// Read-only access to one field by id.
-    pub fn field(&self, id: FieldId) -> Option<&Field> {
+    pub(super) fn field(&self, id: FieldId) -> Option<&Field> {
         self.fields.iter().find(|f| f.id == id)
-    }
-
-    /// Mutable access to one field by id (tests and the editor path).
-    pub fn field_mut(&mut self, id: FieldId) -> Option<&mut Field> {
-        self.fields.iter_mut().find(|f| f.id == id)
     }
 }

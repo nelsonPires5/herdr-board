@@ -1,5 +1,4 @@
 use super::*;
-use crate::dispatch::antigravity_validation_config;
 use board_core::engine::{
     merge_column_update, validate_column_delete, validate_column_update, validate_column_values,
     PermissionContext,
@@ -10,7 +9,7 @@ pub(super) fn column_create(d: &Arc<Daemon>, p: ColumnCreateParams) -> Result<Va
         p.model_override.as_deref(),
         p.effort_override.as_deref(),
         p.permission_override.as_deref(),
-        &antigravity_validation_config(d, p.harness_override.as_deref().unwrap_or("")),
+        &d.config,
         PermissionContext::ColumnOverride,
     )?;
     let col = d.store.lock().create_column(&p)?;
@@ -24,12 +23,7 @@ pub(super) fn column_update(d: &Arc<Daemon>, p: ColumnUpdateParams) -> Result<Va
         let db = d.store.lock();
         let current = db.require_column(p.id)?;
         let merged = merge_column_update(&current, &p);
-        validate_column_update(
-            &current,
-            &merged,
-            &p,
-            &antigravity_validation_config(d, merged.harness_override.as_deref().unwrap_or("")),
-        )?;
+        validate_column_update(&current, &merged, &p, &d.config)?;
         db.update_column(&p)?
     };
     d.emit_changed(BoardChangedReason::ColumnChanged, None, Some(col.id));

@@ -47,7 +47,6 @@ pub fn vertical_scrollbar(
 pub enum UiAction {
     Help,
     Quit,
-    SwitchProject,
     SwitchBoard,
     NewCard,
     NewColumn,
@@ -79,6 +78,7 @@ pub enum UiAction {
     CancelForm,
     EditInExternalEditor,
     ChoosePickerRow,
+    PickerOtherBoard,
     CancelPicker,
     ConfirmYes,
     ConfirmNo,

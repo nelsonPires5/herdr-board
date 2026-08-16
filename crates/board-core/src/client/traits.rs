@@ -5,17 +5,15 @@ use crate::capability::HarnessCapabilities;
 use crate::model::{Card, Column, Comment, CommentHistory, CommentRecord};
 
 use crate::protocol::{
-    BoardCreateParams, BoardGetParams, BoardListParams, BoardListResult, BoardOpenParams,
-    BoardRenameParams, BoardSelectParams, BoardSnapshot, CardArchiveParams, CardCreateParams,
-    CardDetail, CardListParams, CardMoveParams, CardUpdateParams, CardVisibility,
-    ColumnCreateParams, ColumnDeleteParams, ColumnReorderParams, ColumnUpdateParams,
-    CommentAddParams, CommentDeleteParams, CommentGetParams, CommentHistoryParams,
-    CommentUpdateParams, DaemonStatus, DeletedResult, Event, HarnessCapabilitiesParams,
-    HarnessListResult, PaneSetTitleParams, PaneSetTitleResult, ProjectCreateParams, ProjectDetail,
-    ProjectGetParams, ProjectListResult, ProjectOpenParams, ProjectOpenResult, ProjectSelectParams,
-    ProjectSelectedResult, RunActionResult, RunCardParams, RunDoneParams, RunFocusParams,
-    RunFocusResult, RunOutcome, RunPaneExitedParams, SessionListResult, SpaceListParams,
-    SpaceListResult, StopResult, TemplateApplyParams,
+    BoardGetParams, BoardListResult, BoardOpenParams, BoardRenameParams, BoardSnapshot,
+    CardArchiveParams, CardCreateParams, CardDetail, CardListParams, CardMoveParams,
+    CardUpdateParams, CardVisibility, ColumnCreateParams, ColumnDeleteParams, ColumnReorderParams,
+    ColumnUpdateParams, CommentAddParams, CommentDeleteParams, CommentGetParams,
+    CommentHistoryParams, CommentUpdateParams, DaemonStatus, DeletedResult, Event,
+    HarnessCapabilitiesParams, HarnessListResult, PaneSetTitleParams, PaneSetTitleResult,
+    RunActionResult, RunCardParams, RunDoneParams, RunFocusParams, RunFocusResult, RunOutcome,
+    RunPaneExitedParams, SessionListResult, SpaceListParams, SpaceListResult, StopResult,
+    TemplateApplyParams,
 };
 
 /// Blocking client to boardd. Object-safe so the TUI can hold `Box<dyn BoardClient>`.
@@ -71,77 +69,6 @@ pub trait BoardClient {
         };
         Ok(serde_json::from_value(
             self.call("board.rename", serde_json::to_value(p)?)?,
-        )?)
-    }
-    fn board_create(&mut self, project_id: i64, name: &str) -> anyhow::Result<BoardSnapshot> {
-        let p = BoardCreateParams {
-            project_id,
-            name: name.to_string(),
-        };
-        Ok(serde_json::from_value(
-            self.call("board.create", serde_json::to_value(p)?)?,
-        )?)
-    }
-    fn board_select(&mut self, board_id: i64) -> anyhow::Result<BoardSnapshot> {
-        let p = BoardSelectParams { board_id };
-        Ok(serde_json::from_value(
-            self.call("board.select", serde_json::to_value(p)?)?,
-        )?)
-    }
-    fn board_list_for_project(&mut self, project_id: i64) -> anyhow::Result<BoardListResult> {
-        let p = BoardListParams {
-            project_id: Some(project_id),
-        };
-        Ok(serde_json::from_value(
-            self.call("board.list", serde_json::to_value(p)?)?,
-        )?)
-    }
-
-    fn project_list(&mut self) -> anyhow::Result<ProjectListResult> {
-        Ok(serde_json::from_value(
-            self.call("project.list", json!({}))?,
-        )?)
-    }
-    fn project_selected(&mut self) -> anyhow::Result<ProjectSelectedResult> {
-        Ok(serde_json::from_value(
-            self.call("project.selected", json!({}))?,
-        )?)
-    }
-    fn project_get(&mut self, scope_path: &str) -> anyhow::Result<ProjectDetail> {
-        let p = ProjectGetParams {
-            scope_path: scope_path.to_string(),
-        };
-        Ok(serde_json::from_value(
-            self.call("project.get", serde_json::to_value(p)?)?,
-        )?)
-    }
-    fn project_open(&mut self, scope_path: &str) -> anyhow::Result<ProjectOpenResult> {
-        let p = ProjectOpenParams {
-            scope_path: scope_path.to_string(),
-        };
-        Ok(serde_json::from_value(
-            self.call("project.open", serde_json::to_value(p)?)?,
-        )?)
-    }
-    fn project_create(&mut self, scope_path: &str) -> anyhow::Result<ProjectOpenResult> {
-        let p = ProjectCreateParams {
-            scope_path: scope_path.to_string(),
-        };
-        Ok(serde_json::from_value(
-            self.call("project.create", serde_json::to_value(p)?)?,
-        )?)
-    }
-    fn project_select(
-        &mut self,
-        scope_path: &str,
-        board_id: Option<i64>,
-    ) -> anyhow::Result<ProjectOpenResult> {
-        let p = ProjectSelectParams {
-            scope_path: scope_path.to_string(),
-            board_id,
-        };
-        Ok(serde_json::from_value(
-            self.call("project.select", serde_json::to_value(p)?)?,
         )?)
     }
 

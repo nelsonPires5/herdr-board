@@ -1,18 +1,19 @@
 ---
 source: crates/board-tui/tests/snapshots.rs
+assertion_line: 853
 expression: output
 ---
-"[ Project: Gl… ] [ Act ] [ All ] [ Arc ]"
-"            [ Board: main ]             "
+" ◈ herdr-board ● 1 running              "
+"  [ Global ▾ ]   [ Act ] [ All ] [ Arc ]"
 "[ ‹ ] [ Todo (M) · 1/6 · 1 cards ] [ › ]"
 "────────────────────────────────────────"
-"┌ Switch project ────────────────[ X ]─┐"
-"│›Global                               │"
-"│ project — /work/alpha/project        │"
+"┌ Boards ────────────────────────[ X ]─┐"
+"│ Global                               │"
 "│ project — /Volumes/archive/project   │"
-"│ scope —                              │"
-"│/private/tmp/hb-visual.HWoEPU/scope   │"
-"│ ＋ New project                       │" Hidden by multi-width symbols: [(3, " ")]
+"│ scope — /private/tmp/hb-visual.HWoE… │"
+"│ project — /work/alpha/project        │"
+"│                                      │"
+"│                                      │"
 "│                                      │"
 "│                                      │"
 "│                                      │"

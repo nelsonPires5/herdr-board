@@ -42,9 +42,6 @@ fn field_section(id: crate::forms::FieldId, is_column: bool) -> &'static str {
         match id {
             F::Title | F::Description => "Task",
             F::Harness | F::Model | F::ModelCustom | F::Effort | F::Permission => "Agent",
-            F::MoveProject | F::MoveBoard | F::MoveColumn | F::MovePosition => "Move",
-            F::ProjectPath => "Project",
-            F::BoardName => "Board",
             _ => "Execution Target",
         }
     }
@@ -459,7 +456,6 @@ mod tests {
             let app = crate::app::App::new(BoardSnapshot {
                 board: Board {
                     id: 1,
-                    project_id: 1,
                     name: "Global".into(),
                     scope_path: None,
                 },
@@ -539,7 +535,6 @@ mod tests {
             let app = crate::app::App::new(BoardSnapshot {
                 board: Board {
                     id: 1,
-                    project_id: 1,
                     name: "Global".into(),
                     scope_path: None,
                 },

@@ -104,13 +104,11 @@ fn board_open_list_get_and_legacy_default_are_scoped() {
             .is_empty()
     );
     let legacy = handle_request(&d, "board.get", json!({})).unwrap();
-    assert_eq!(legacy["board"]["name"], "main");
-    assert_eq!(legacy["board"]["project_id"], 1);
+    assert_eq!(legacy["board"]["name"], "Global");
     let omitted = handle_request(&d, "board.get", Value::Null).unwrap();
-    assert_eq!(omitted["board"]["name"], "main");
+    assert_eq!(omitted["board"]["name"], "Global");
     let list = handle_request(&d, "board.list", json!({})).unwrap();
-    assert_eq!(list["boards"][0]["name"], "main");
-    assert_eq!(list["boards"][0]["scope_path"], Value::Null);
+    assert_eq!(list["boards"][0]["name"], "Global");
 }
 
 #[test]

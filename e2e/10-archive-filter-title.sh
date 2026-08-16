@@ -61,13 +61,7 @@ screen="$("$HERDR_BIN" pane read "$PANE_ID" --source visible --lines 200 || true
 printf '%s\n' "$screen" | grep -q "? help" && fail "legacy '? help' footer label still visible"
 printf '%s\n' "$screen" | grep -Eq '\[ (Active|Act|A) \].*\[ All \].*\[ (Archived|Arc|R) \]' \
   || fail "direct visibility filter chips not rendered"
-# The multi-project header shows the Project and Board selectors as separate
-# rows in Compact mode ('Project:' on row one, 'Board:' on row two).
-printf '%s\n' "$screen" | grep -q 'Project:' \
-  || fail "Compact header did not show the Project selector -- got: $screen"
-printf '%s\n' "$screen" | grep -q 'Board:' \
-  || fail "Compact header did not show the Board selector -- got: $screen"
-printf '%s\n' "$screen" | grep -Eq 'Visible:' && fail "legacy Visible: header label still visible"
+printf '%s\n' "$screen" | grep -Eq 'Board:|Visible:' && fail "redundant Board:/Visible: header label still visible"
 printf '%s\n' "$screen" | grep -q "shown" && fail "legacy shown count still visible"
 printf '%s\n' "$screen" | grep -q "archived ·" && fail "legacy archived count still visible"
 printf '%s\n' "$screen" | grep -q "column [0-9]" && fail "legacy column counter still visible"

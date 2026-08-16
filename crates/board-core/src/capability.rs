@@ -5,10 +5,8 @@
 //! aliases are field-verified against Claude CLI 2.1.209; codex is free-form
 //! with the full effort ladder and a fixed approval-mode enum; opencode is
 //! free-form with a small static fallback catalog (`opencode_catalog`) and the
-//! two verified permission modes; antigravity is catalog-only — the LIVE
-//! `agy --output-format json models` list (`agy_catalog`), free-form when the
-//! catalog is unavailable. Config-defined harnesses declare capabilities in
-//! `[harness.NAME]`.
+//! two verified permission modes. Config-defined harnesses declare
+//! capabilities in `[harness.NAME]`.
 
 use serde::{Deserialize, Serialize};
 
@@ -392,85 +390,6 @@ impl HarnessMeta for OpenCode {
     }
 }
 
-/// Antigravity reasoning efforts for an omitted/unknown/free-form model: the
-/// three levels the agy CLI can express, ascending (verified against
-/// `agy --help`: "--effort Reasoning effort for the current CLI session
-/// (low|medium|high)"). Per-model efforts come from the normalized live
-/// catalog instead ([`crate::agy_catalog`]).
-const ANTIGRAVITY_DEFAULT_EFFORTS: [Effort; 3] = [Effort::Low, Effort::Medium, Effort::High];
-
-/// The antigravity permission modes (board-facing ids). Each maps to an
-/// exact agy CLI spelling while building argv (see [`crate::harness::agy`]):
-/// `sandbox` (`--sandbox`), `always-proceed`
-/// (`--dangerously-skip-permissions`). There is deliberately no third mode:
-/// the CLI exposes no per-run spelling for the internal `toolPermission`
-/// values, and the board never edits `settings.json` — a card with no
-/// permission (the harness default) launches with no flag and keeps the
-/// user's configured `toolPermission`.
-const ANTIGRAVITY_PERMISSION_MODES: [&str; 2] = ["sandbox", "always-proceed"];
-
-/// Built-in `antigravity` harness adapter. The public harness name is
-/// `antigravity`; the Herdr managed-agent kind and executable are `agy`.
-///
-/// The model catalog is the **live** `agy --output-format json models` list
-/// ([`crate::agy_catalog`]) — there is deliberately no static fallback. The
-/// daemon fills [`Config::agy_models`] with a fresh probe before serving
-/// capabilities or validating a run/edit; the adapter holds that snapshot:
-/// - catalog available (`Some`): models are authoritative (`model_freeform`
-///   false — a stored model that no longer exists is rejected at enqueue),
-///   and a known model's efforts narrow the selector per model — a
-///   fixed-effort model (e.g. `claude-sonnet-4-6`) offers no effort at all;
-/// - catalog unavailable (`None`): models are free-form (`model_freeform`
-///   true) — stored models still run and cards without an explicit model use
-///   the agy default; only new selection is constrained because the UIs have
-///   nothing to offer.
-///
-/// Permissions are the two verified modes; resume/retry are
-/// `--conversation <id>` (no fork — retry re-attaches to the same
-/// conversation).
-#[derive(Clone, Default)]
-pub struct Antigravity {
-    /// The live catalog snapshot (None = catalog unavailable → free-form).
-    pub catalog: Option<Vec<ModelInfo>>,
-}
-
-impl HarnessMeta for Antigravity {
-    fn id(&self) -> &str {
-        "antigravity"
-    }
-    fn models(&self) -> Vec<ModelInfo> {
-        self.catalog.clone().unwrap_or_default()
-    }
-    fn efforts(&self, model: Option<&str>) -> Vec<Effort> {
-        // A known catalog model carries its variant efforts (possibly
-        // empty — a fixed-effort model offers no effort); an
-        // omitted/unknown/free-form model gets the three agy levels.
-        if let Some(id) = model {
-            if let Some(known) = self.models().into_iter().find(|m| m.id == id) {
-                return known.efforts;
-            }
-        }
-        ANTIGRAVITY_DEFAULT_EFFORTS.to_vec()
-    }
-    fn permissions(&self) -> Vec<String> {
-        ANTIGRAVITY_PERMISSION_MODES
-            .iter()
-            .map(|s| s.to_string())
-            .collect()
-    }
-    fn model_freeform(&self) -> bool {
-        // Only a live catalog constrains models; without one, stored values
-        // must keep running (the catalog cannot prove them gone).
-        self.catalog.is_none()
-    }
-    fn resume(&self) -> ResumeSupport {
-        // `--conversation <id>` re-opens a recorded conversation (verified
-        // against agy 1.1.13: "--conversation  Resume a previous conversation
-        // by ID").
-        ResumeSupport::ByConversationId
-    }
-}
-
 /// Owning adapter for a config-defined harness (`[harness.NAME]`).
 pub struct ConfigHarness {
     name: String,
@@ -538,9 +457,6 @@ pub fn meta_for(harness: &str, config: &Config) -> Option<Box<dyn HarnessMeta>> 
         "claude" => Some(Box::new(Claude)),
         "codex" => Some(Box::new(Codex)),
         "opencode" => Some(Box::new(OpenCode)),
-        "antigravity" => Some(Box::new(Antigravity {
-            catalog: config.agy_models.clone(),
-        })),
         _ => config.harness.get(harness).map(|def| {
             Box::new(ConfigHarness {
                 name: harness.to_string(),
@@ -593,12 +509,6 @@ pub fn opencode_capabilities() -> HarnessCapabilities {
     HarnessCapabilities::from_meta(&OpenCode)
 }
 
-/// Built-in antigravity capabilities (no catalog — free-form until the
-/// daemon's live probe lands).
-pub fn antigravity_capabilities() -> HarnessCapabilities {
-    HarnessCapabilities::from_meta(&Antigravity::default())
-}
-
 /// Resolve capabilities for a built-in or config-defined harness via its
 /// [`HarnessMeta`] adapter. Unknown harness → `None`.
 pub fn capabilities_for(harness: &str, config: &Config) -> Option<HarnessCapabilities> {
@@ -625,7 +535,6 @@ pub fn default_capabilities(harness: &str) -> HarnessCapabilities {
         "claude" => claude_capabilities(),
         "codex" => codex_capabilities(),
         "opencode" => opencode_capabilities(),
-        "antigravity" => antigravity_capabilities(),
         _ => HarnessCapabilities {
             harness: harness.to_string(),
             models: Vec::new(),

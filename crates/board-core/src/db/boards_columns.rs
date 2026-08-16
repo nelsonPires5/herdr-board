@@ -12,7 +12,7 @@ impl Db {
     pub fn get_board(&self, id: i64) -> Result<Board> {
         self.conn
             .query_row(
-                &format!("{} WHERE b.id=?1", rows::BOARD_SELECT),
+                "SELECT id, name, scope_path FROM boards WHERE id=?1",
                 params![id],
                 rows::row_to_board,
             )
@@ -22,11 +22,10 @@ impl Db {
             })
     }
 
-    /// Rename a board without changing its id, project, columns, or cards.
-    /// The schema's per-project UNIQUE (project_id, name COLLATE NOCASE) index
-    /// remains the final guard against duplicate names;
-    /// [`constraints::reject_duplicate`] reports that refusal as a bad request
-    /// rather than as an internal storage failure.
+    /// Rename a board without changing its id, scope identity, columns, or
+    /// cards. SQLite's existing UNIQUE constraint remains the final guard
+    /// against duplicate names; [`constraints::reject_duplicate`] reports that
+    /// refusal as a bad request rather than as an internal storage failure.
     pub fn rename_board(&self, id: i64, name: &str) -> Result<Board> {
         if name.trim().is_empty() {
             return Err(Error::BadRequest("board name must not be empty".into()));
@@ -40,54 +39,63 @@ impl Db {
         self.get_board(id)
     }
 
-    /// Every board across every project (legacy flat listing); Global project
-    /// first, then projects by path and boards by name.
     pub fn list_boards(&self) -> Result<Vec<Board>> {
-        let mut stmt = self.conn.prepare(&format!(
-            "{} ORDER BY CASE WHEN p.scope_path IS NULL THEN 0 ELSE 1 END,
-             p.scope_path, b.name COLLATE NOCASE, b.id",
-            rows::BOARD_SELECT
-        ))?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, scope_path FROM boards
+             ORDER BY CASE WHEN scope_path IS NULL THEN 0 ELSE 1 END, scope_path, id",
+        )?;
         let rows = stmt
             .query_map([], rows::row_to_board)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
 
-    /// One project's boards, ordered by name (case-insensitive).
-    pub fn list_boards_for_project(&self, project_id: i64) -> Result<Vec<Board>> {
-        let mut stmt = self.conn.prepare(&format!(
-            "{} WHERE b.project_id=?1 ORDER BY b.name COLLATE NOCASE, b.id",
-            rows::BOARD_SELECT
-        ))?;
-        let rows = stmt
-            .query_map(params![project_id], rows::row_to_board)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows)
-    }
-
-    /// Resolve an id-or-name board reference within one project. A numeric
-    /// reference is an id and must belong to the project; anything else
-    /// matches the board name case-insensitively.
-    pub fn resolve_board(&self, project_id: i64, reference: &str) -> Result<Board> {
-        if let Ok(id) = reference.parse::<i64>() {
-            let board = self.get_board(id)?;
-            if board.project_id == project_id {
-                return Ok(board);
-            }
+    /// Get or create the independent board for an already-canonical scope path.
+    /// New boards contain exactly one manual `Todo` column.
+    ///
+    /// Opening a known scope is idempotent, so the lookup comes first and only
+    /// a genuinely new scope inserts. A new board is named after its path, and
+    /// `boards.name` is unique: an insert can therefore still be refused
+    /// because some *other* board was renamed onto that path, which is a bad
+    /// request rather than an internal failure. Doing the lookup and the insert
+    /// in one transaction keeps that decision atomic.
+    pub fn open_board(&self, scope_path: &str) -> Result<Board> {
+        if scope_path.trim().is_empty() {
+            return Err(Error::BadRequest("scope_path must not be empty".into()));
         }
-        let lower = reference.to_lowercase();
-        let mut stmt = self.conn.prepare(&format!(
-            "{} WHERE b.project_id=?1 AND lower(b.name)=?2 LIMIT 1",
-            rows::BOARD_SELECT
-        ))?;
-        stmt.query_row(params![project_id, lower], rows::row_to_board)
-            .map_err(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => {
-                    Error::NotFound(format!("no board {reference:?} in this project"))
-                }
-                other => Error::Sqlite(other),
-            })
+        let tx = self.conn.unchecked_transaction()?;
+        let existing = tx
+            .query_row(
+                "SELECT id,name,scope_path FROM boards WHERE scope_path=?1",
+                params![scope_path],
+                rows::row_to_board,
+            )
+            .optional()?;
+        let board = match existing {
+            Some(board) => board,
+            None => {
+                constraints::reject_duplicate(
+                    tx.execute(
+                        "INSERT INTO boards(name,scope_path) VALUES(?1,?1)",
+                        params![scope_path],
+                    ),
+                    || constraints::duplicate_board_for_scope(scope_path),
+                )?;
+                tx.query_row(
+                    "SELECT id,name,scope_path FROM boards WHERE scope_path=?1",
+                    params![scope_path],
+                    rows::row_to_board,
+                )?
+            }
+        };
+        tx.execute(
+            "INSERT INTO columns(board_id,name,position,trigger,fresh_session)
+             SELECT ?1,'Todo',0,'manual',0
+             WHERE NOT EXISTS(SELECT 1 FROM columns WHERE board_id=?1)",
+            params![board.id],
+        )?;
+        tx.commit()?;
+        Ok(board)
     }
 
     // -- columns -------------------------------------------------------------

@@ -5,7 +5,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, PickerPurpose, PickerRow, Screen};
+use crate::app::{App, PickerPurpose, Screen};
 use crate::widgets::{
     button_text, render_button_chip_at, render_sheet_frame, windowed_rows, ActionButton,
     ActionStrip, ActionTone, HitMap, UiAction, Zone,
@@ -70,23 +70,14 @@ fn render_overlay_frame(
 
 // -- picker / confirm / help / transient toast -----------------------------
 
-/// The display text of a picker row (item or action).
-fn row_label(row: &PickerRow) -> &str {
-    match row {
-        PickerRow::Item(name, _) => name.as_str(),
-        PickerRow::Action(name, _) => name.as_str(),
-    }
-}
-
 pub(super) fn draw_picker(app: &App, f: &mut Frame, area: Rect) {
     let Some(picker) = &app.picker else { return };
     let mode = app.layout_mode();
     let compact = mode == LayoutMode::Compact;
-    let label = row_label;
     let content_w = picker
-        .rows
+        .options
         .iter()
-        .map(|row| label(row).chars().count())
+        .map(|(name, _)| name.chars().count())
         .max()
         .unwrap_or(0)
         .max(picker.title.chars().count() + 12)
@@ -96,18 +87,26 @@ pub(super) fn draw_picker(app: &App, f: &mut Frame, area: Rect) {
     // to their content preference; `sheet_area` still clamps to the board
     // content region.
     let desired_rows: usize = picker
-        .rows
+        .options
         .iter()
-        .map(|row| wrapped_row_count(label(row), content_w.saturating_sub(3).max(1)))
+        .map(|(name, _)| wrapped_row_count(name, content_w.saturating_sub(3).max(1)))
         .sum();
     let content_h = (desired_rows as u16).saturating_add(2).max(5);
     let box_area = sheet_area_for_app(app, mode, content_w, content_h, area);
     f.render_widget(Clear, box_area);
 
-    let visual_title = picker.title.clone();
+    let visual_title = picker
+        .title
+        .replace("Move card to which column?", "Move card to column")
+        .replace(" · b = other board", " · b other board");
+    let compact_move_title = visual_title
+        .split(" ·")
+        .next()
+        .unwrap_or(visual_title.as_str());
     let compact_title = match picker.purpose {
         PickerPurpose::SwitchBoard => "Switch board",
-        PickerPurpose::SwitchProject => "Switch project",
+        PickerPurpose::MoveCardPickBoard { .. } => "Move to board",
+        PickerPurpose::MoveCardPickColumn { .. } => compact_move_title,
         PickerPurpose::DeleteColumnMoveTo { .. } => "Move column cards",
     };
     let mut hit_map = app.hit_map.borrow_mut();
@@ -120,9 +119,25 @@ pub(super) fn draw_picker(app: &App, f: &mut Frame, area: Rect) {
         "X",
         &mut hit_map,
     );
-    let picker_area = inner;
+    let other_board = matches!(picker.purpose, PickerPurpose::MoveCardPickColumn { .. });
+    let picker_area = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width,
+        inner.height.saturating_sub(u16::from(other_board)),
+    );
+    if other_board && inner.height > 0 {
+        let action_area = Rect::new(inner.x, inner.bottom() - 1, inner.width, 1);
+        let buttons = [ActionButton {
+            label: "Other board",
+            compact_label: "Other board",
+            action: UiAction::PickerOtherBoard,
+            tone: ActionTone::Normal,
+        }];
+        ActionStrip { buttons: &buttons }.render(f, action_area, &mut hit_map);
+    }
 
-    if picker.rows.is_empty() {
+    if picker.options.is_empty() {
         f.render_widget(
             Paragraph::new(Span::styled(
                 "(no choices available)",
@@ -136,10 +151,10 @@ pub(super) fn draw_picker(app: &App, f: &mut Frame, area: Rect) {
     // Always reserve a gutter when overflow is possible.  This makes wrapping
     // and row windows identical before/after selection or resize.
     let preliminary: Vec<u16> = picker
-        .rows
+        .options
         .iter()
-        .map(|row| {
-            wrapped_row_count(label(row), picker_area.width.saturating_sub(2).max(1)).max(1) as u16
+        .map(|(name, _)| {
+            wrapped_row_count(name, picker_area.width.saturating_sub(2).max(1)).max(1) as u16
         })
         .collect();
     let overflow =
@@ -149,11 +164,11 @@ pub(super) fn draw_picker(app: &App, f: &mut Frame, area: Rect) {
         .saturating_sub(if overflow { 1 } else { 0 })
         .max(1);
     let heights: Vec<u16> = picker
-        .rows
+        .options
         .iter()
-        .map(|row| {
+        .map(|(name, _)| {
             // One cell is the selection marker; text itself remains whole-row wrapped.
-            wrapped_row_count(label(row), text_w.saturating_sub(1).max(1)).max(1) as u16
+            wrapped_row_count(name, text_w.saturating_sub(1).max(1)).max(1) as u16
         })
         .collect();
     let (start, end) = windowed_rows(&heights, picker.sel, picker_area.height);
@@ -167,9 +182,9 @@ pub(super) fn draw_picker(app: &App, f: &mut Frame, area: Rect) {
         .direction(Direction::Vertical)
         .constraints(constraints)
         .split(row_area);
-    for (visible, row_idx) in (start..end).enumerate() {
-        let row = &picker.rows[row_idx];
-        let selected = row_idx == picker.sel;
+    for (visible, option_idx) in (start..end).enumerate() {
+        let (name, _) = &picker.options[option_idx];
+        let selected = option_idx == picker.sel;
         let line = Line::from(vec![
             Span::styled(
                 if selected { "›" } else { " " },
@@ -178,7 +193,7 @@ pub(super) fn draw_picker(app: &App, f: &mut Frame, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                label(row),
+                name.as_str(),
                 if selected {
                     Style::default()
                         .fg(Color::White)
@@ -192,7 +207,7 @@ pub(super) fn draw_picker(app: &App, f: &mut Frame, area: Rect) {
             Paragraph::new(line).wrap(Wrap { trim: false }),
             rows[visible],
         );
-        hit_map.push(rows[visible], Zone::PickerRow(row_idx));
+        hit_map.push(rows[visible], Zone::PickerRow(option_idx));
     }
     if overflow {
         crate::widgets::vertical_scrollbar(

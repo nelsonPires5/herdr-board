@@ -1,12 +1,11 @@
 //! Managed Herdr launch: `agent.start` on a board-owned pane, with the
 //! name/busy retry taxonomy, the wait for the agent to become interactive,
-//! and — for self-minting harnesses like codex, opencode and agy — the
-//! bounded capture of the integration-reported conversation/session id,
-//! ordered per harness: codex captures after readiness and before the prompt,
-//! opencode and agy after the prompt (real OpenCode mints `agent_session`
-//! only once its first prompt lands, and the agy integration reports its
-//! conversation id the same way; a prompt-less rescue reduces to
-//! capture-after-readiness).
+//! and — for self-minting harnesses like codex and opencode — the bounded
+//! capture of the integration-reported conversation/session id, ordered per
+//! harness: codex captures after readiness and before the prompt, opencode
+//! after the prompt (real OpenCode mints `agent_session` only once its first
+//! prompt lands; a prompt-less opencode rescue reduces to capture-after-
+//! readiness).
 
 use std::fs;
 use std::io::Write;
@@ -78,14 +77,12 @@ pub(crate) fn launch_managed(
     }
 
     match kind {
-        // Self-minting harnesses (codex/opencode/agy) mint their own id and
-        // have no system-prompt file: startup argv carries no prompt text,
-        // and the reported id is captured through the same gated connection
-        // after readiness — codex before the prompt, opencode and agy after
-        // it (C5/C7/O7/A7).
+        // Self-minting harnesses (codex/opencode) mint their own id and have
+        // no system-prompt file: startup argv carries no prompt text, and the
+        // reported id is captured through the same gated connection after
+        // readiness — codex before the prompt, opencode after it (C5/C7/O7).
         "codex" => launch_managed_codex(client, req, pane_id, delay),
         "opencode" => launch_managed_opencode(client, req, pane_id, delay),
-        "agy" => launch_managed_agy(client, req, pane_id, delay),
         // Pi/Claude keep the authoritative 0600 startup system-prompt file.
         "pi" | "claude" => {
             launch_managed_prompt_file(client, req, kind, pane_id, delay)?;
@@ -138,71 +135,6 @@ fn launch_managed_opencode(
         opencode_prompt_text,
         capture_opencode_session,
         CaptureTiming::AfterPrompt,
-    )
-}
-
-/// An agy launch: the same self-minting shape as opencode — startup-only
-/// argv, bounded session capture, and prompt delivery (Mint: delimited
-/// system+task block; resume/retry: task alone; rescue: nothing) — with the
-/// capture ordered AFTER the prompt: the agy integration reports its
-/// conversation id via `agent_session` ({agent: agy, kind: id, source:
-/// herdr:antigravity_cli, value}) once the CLI is up; capturing after the
-/// prompt is strictly safer and matches opencode.
-fn launch_managed_agy(
-    client: &mut HerdrClient,
-    req: &HerdrLaunchPlan,
-    pane_id: &str,
-    delay: &DelayFn,
-) -> anyhow::Result<Option<String>> {
-    launch_managed_self_minting(
-        client,
-        req,
-        pane_id,
-        delay,
-        agy_prompt_text,
-        capture_agy_session,
-        CaptureTiming::AfterPrompt,
-    )
-}
-
-/// The `agent.prompt` text for an agy launch: Mint receives one clearly
-/// delimited block with the system instructions first, then the card task;
-/// resume/retry (fresh pane) receive the task alone; a rescue sends nothing
-/// (`initial_prompt` was cleared by `resume_invocation`). Same-pane reuse is
-/// handled by [`launch_managed`] before this point and delivers the task
-/// alone.
-fn agy_prompt_text(req: &HerdrLaunchPlan) -> Option<String> {
-    let task = req.initial_prompt.as_deref()?;
-    if is_agy_mint(&req.argv) {
-        let system = req.system_prompt.as_deref().unwrap_or_default();
-        Some(board_core::harness::agy::mint_prompt(system, task))
-    } else {
-        Some(task.to_string())
-    }
-}
-
-/// Whether a board-built agy argv is a Mint. The agy session adapter appends
-/// `--conversation <id>` as the LAST two argv tokens for resume/retry; a Mint
-/// argv carries no conversation flag at all. Only the presence of the flag is
-/// inspected (not position) because the model value after `--model` could
-/// itself be spelled `--conversation`.
-fn is_agy_mint(argv: &[String]) -> bool {
-    !argv.iter().any(|arg| arg == "--conversation")
-}
-
-/// The agy view of [`capture_self_minted_session`]: an `id`-kind reference
-/// owned by the agy agent, pinned to the exact source the Herdr 0.8.0
-/// antigravity integration (embedded hook v1, `HERDR_INTEGRATION_ID=
-/// antigravity_cli`) reports — the source Herdr echoes verbatim into
-/// `AgentInfo.agent_session`.
-fn capture_agy_session(client: &mut HerdrClient, pane_id: &str, delay: &DelayFn) -> Option<String> {
-    capture_self_minted_session(
-        client,
-        pane_id,
-        delay,
-        "agy",
-        "agy conversation id",
-        Some("herdr:antigravity_cli"),
     )
 }
 

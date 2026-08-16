@@ -28,7 +28,7 @@ command, flag, or JSON shape from memory — verify against `api schema` /
 ## Compatibility gate: Herdr 0.8.0 / socket protocol 19
 
 The supported matrix is exact: **Herdr 0.8.0**, **socket protocol 19**, board protocol
-v1, and SQLite schema v14. `board-herdr` rejects a different Herdr version or
+v1, and SQLite schema v13. `board-herdr` rejects a different Herdr version or
 protocol before the daemon performs workspace discovery, pane placement, an agent
 launch, a configured runner action, or a notification mutation. This is a policy
 gate, not a protocol-negotiation fallback.
@@ -129,16 +129,8 @@ The delta is additive and outside the board client surface:
   data includes `workspace_ids`, `workspaces`, and an optional
   `before_workspace_id`.
 - `antigravity_cli` (CLI spelling `antigravity-cli`) and `grok` are new
-  integration targets with session reporting/native restore. `antigravity_cli`
-  DOES add a board built-in harness: `antigravity` (Herdr kind/executable
-  `agy`) is a self-minting managed harness whose conversation id is reported
-  by this integration (`{agent: agy, kind: id, source: herdr:antigravity_cli,
-  value}`) and captured by the daemon after the first `agent.prompt`. On the
-  host inspected for this update the integration is NOT installed (its hook
-  would live at `~/.gemini/config/hooks/herdr-agent-state.sh`); the board
-  never installs it — without it an antigravity run still executes, but no
-  conversation id is captured, a `system` card warning explains that
-  focus/retry may be unavailable, and reuse/rescue fail closed.
+  integration targets with session reporting/native restore. They do not add
+  board built-in harnesses.
 - `AgentInfo.agent_session` carries an `AgentSessionInfo | null` reference —
   `{agent, kind, source, value}` with `kind` ∈ {`id`, `path`} — for panes whose
   integration reported a session. It is absent on panes without one. `board-herdr`
@@ -146,16 +138,12 @@ The delta is additive and outside the board client surface:
   harnesses need the reported id: a codex/opencode Mint persists `session_id =
   NULL` at enqueue, and the daemon's bounded post-launch `agent.get` capture
   accepts only an `id`-kind reference owned by the expected agent with a
-  non-empty value — codex leaves `source` unconstrained, while opencode and
-  antigravity pin the exact source the current Herdr integration reports
-  (`herdr:opencode` / `herdr:antigravity_cli`) — promoting it
+  non-empty value — codex leaves `source` unconstrained, while opencode pins the
+  exact source the current Herdr opencode integration reports — promoting it
   atomically onto the run and card. A wrong-agent, wrong-source, `path`-kind,
   blank, or never-reported session degrades the capture to `None` (run still
   executes); the pane then keeps no recorded conversation id, so reuse/rescue
-  fail closed. For antigravity the comparison between the captured id and the
-  requested pre-promotion id is also the fallback detector: when agy started a
-  new conversation because the recorded one no longer exists, the new id is
-  persisted and a `system` card comment names both.
+  fail closed.
 
 The client does not call the new workspace method. It preserves unknown additive
 events rather than treating them as a change to the used transport. The current
@@ -205,9 +193,8 @@ bounded 100ms backoff doubling per retry (100/200/400/800/1600ms). It never allo
 response. Persistent busy is a launch failure whose cleanup closes only the
 owned child pane and leaves the anchor; `pane_not_found` is handled separately
 as a placement race that restarts discovery from `tab.list` and retries
-complete placement once. Schema v14 persists the exact anchor id with the run
-(the anchor was introduced in v12) and adds comment audit state plus project/selection
-context; after restart
+complete placement once. Schema v13 persists the exact anchor id with the run
+(the anchor was introduced in v12) and adds comment audit state; after restart
 both tab and anchor are selected only from scoped durable pane identities.
 Labels are display metadata and never authorize a tab or pane.
 `agent.read` remains a terminal screen/scrollback read, not a semantic result
@@ -330,7 +317,7 @@ DTOs are not part of this crate's public surface; repository isolation belongs i
 The checked-in schema fixture is regenerated from the installed Herdr contract and
 is not rewritten during unrelated API cleanup. The board fixture and typed client
 are currently pinned to **Herdr 0.8.0 / protocol 19**; board protocol v1 and DB
-schema v14 remain independent and unchanged.
+schema v13 remain independent and unchanged.
 
 This repo's current Herdr facts — [`docs/research.md`](research.md),
 [`docs/design.md`](design.md), and the wire shapes hard-coded in `board-herdr` —

@@ -1,9 +1,6 @@
 use super::*;
 use board_core::db::{ColumnTarget, ColumnWiring, BOARD_ID};
-use board_core::protocol::{
-    BoardChangedReason, BoardCreateParams, BoardListParams, BoardSelectParams, ColumnCreateParams,
-    TemplateApplyParams, Trigger,
-};
+use board_core::protocol::{BoardChangedReason, ColumnCreateParams, TemplateApplyParams, Trigger};
 pub(super) fn daemon_status(d: &Arc<Daemon>) -> Result<Value> {
     let (active_runs, queued_runs) = {
         let db = d.store.lock();
@@ -25,46 +22,29 @@ pub(super) fn daemon_status(d: &Arc<Daemon>) -> Result<Value> {
     }))
 }
 
-pub(super) fn board_snapshot(d: &Arc<Daemon>, board_id: i64) -> Result<BoardSnapshot> {
+fn board_snapshot(d: &Arc<Daemon>, board_id: i64) -> Result<Value> {
     let db = d.store.lock();
     let mut cards = db.list_cards(board_id)?;
     for card in &mut cards {
         crate::ops::cards::stamp_card_labels(d, card);
     }
-    Ok(BoardSnapshot {
+    Ok(json!(BoardSnapshot {
         board: db.get_board(board_id)?,
         columns: db.list_columns(board_id)?,
         cards,
         active_runs: db.active_run_summaries(board_id)?,
-    })
+    }))
 }
 
 pub(super) fn board_open(d: &Arc<Daemon>, p: BoardOpenParams) -> Result<Value> {
     let board = d.store.lock().open_board(&p.scope_path)?;
-    Ok(json!(board_snapshot(d, board.id)?))
+    board_snapshot(d, board.id)
 }
 
-pub(super) fn board_list(d: &Arc<Daemon>, p: BoardListParams) -> Result<Value> {
-    let db = d.store.lock();
-    let boards = match p.project_id {
-        Some(project_id) => db.list_boards_for_project(project_id)?,
-        None => db.list_boards()?,
-    };
-    Ok(json!(BoardListResult { boards }))
-}
-
-/// `board.create`: a named board in a project, auto-selected (creation is an
-/// explicit selection, so it also updates recency). The snapshot response
-/// lets the caller land directly on the new board.
-pub(super) fn board_create(d: &Arc<Daemon>, p: BoardCreateParams) -> Result<Value> {
-    let board = d.store.lock().create_board(p.project_id, &p.name)?;
-    Ok(json!(board_snapshot(d, board.id)?))
-}
-
-/// `board.select`: persist this board — and its project — as the context.
-pub(super) fn board_select(d: &Arc<Daemon>, p: BoardSelectParams) -> Result<Value> {
-    let (_, board) = d.store.lock().select_board(p.board_id)?;
-    Ok(json!(board_snapshot(d, board.id)?))
+pub(super) fn board_list(d: &Arc<Daemon>) -> Result<Value> {
+    Ok(json!(BoardListResult {
+        boards: d.store.lock().list_boards()?,
+    }))
 }
 
 pub(super) fn board_rename(d: &Arc<Daemon>, p: BoardRenameParams) -> Result<Value> {
@@ -77,7 +57,7 @@ pub(super) fn board_rename(d: &Arc<Daemon>, p: BoardRenameParams) -> Result<Valu
 }
 
 pub(super) fn board_get(d: &Arc<Daemon>, p: BoardGetParams) -> Result<Value> {
-    Ok(json!(board_snapshot(d, p.board_id.unwrap_or(BOARD_ID))?))
+    board_snapshot(d, p.board_id.unwrap_or(BOARD_ID))
 }
 
 const PLAN_PROMPT: &str =

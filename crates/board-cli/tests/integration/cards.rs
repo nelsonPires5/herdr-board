@@ -28,7 +28,7 @@ fn board_commands_list_show_open_and_rename() {
     let mut client = td.client();
     let opened = client.board_open(project.to_str().unwrap()).unwrap().board;
 
-    let listed = json_output(&td.board(&["board", "list", "--all", "--json"]));
+    let listed = json_output(&td.board(&["board", "list", "--json"]));
     let boards = listed.as_array().expect("board list JSON is an array");
     assert!(boards.iter().any(|board| board["id"] == opened.id));
 

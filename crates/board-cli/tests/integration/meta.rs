@@ -105,7 +105,7 @@ fn skill_prints_the_operational_skill_byte_for_byte() {
         "## Inside a run",
         "## TUI",
         "## CLI taxonomy",
-        "### Projects and boards",
+        "### Boards and templates",
         "### Cards",
         "### Comments",
         "### Runs",

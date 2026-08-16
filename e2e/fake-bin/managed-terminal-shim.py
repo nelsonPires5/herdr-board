@@ -225,16 +225,16 @@ def main() -> int:
     if prompt == expected:
         update(record_path, prompt_matches_run_snapshot=True)
         return 0
-    # A codex/opencode/agy Mint receives ONE delimited block: `## herdr-board
+    # A codex/opencode Mint receives ONE delimited block: `## herdr-board
     # system instructions` + non-empty system text + `## herdr-board card
-    # task` + the exact run snapshot (the opencode and agy adapters share the
-    # codex delimiter convention). The system half is private DB state (never
+    # task` + the exact run snapshot (the opencode adapter shares the codex
+    # delimiter convention). The system half is private DB state (never
     # exposed by `card show`), so the fixture pins the block structure and
     # the exact task half here, records the system half verbatim, and the
     # scenario reconstructs the full block from its own sources. Resume,
     # fork, and same-pane reuse deliver the task alone and matched above.
     mint_block = None
-    if os.environ.get("FAKE_MANAGED_KIND", "pi") in ("codex", "opencode", "agy"):
+    if os.environ.get("FAKE_MANAGED_KIND", "pi") in ("codex", "opencode"):
         prefix = "## herdr-board system instructions\n"
         task_delim = "\n\n## herdr-board card task\n"
         if prompt.startswith(prefix) and task_delim in prompt[len(prefix):]:

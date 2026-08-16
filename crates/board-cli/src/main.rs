@@ -20,7 +20,6 @@ use commands::board::cmd_board;
 use commands::card::{cmd_card, cmd_move};
 use commands::column::cmd_column;
 use commands::discovery::{cmd_harness, cmd_session, cmd_space, cmd_status};
-use commands::project::cmd_project;
 use commands::run::{cmd_card_run, cmd_comment, cmd_pane_exited};
 use commands::template::cmd_template;
 use context::Ctx;
@@ -83,8 +82,7 @@ fn real_main() -> Result<(), Failure> {
 
 fn dispatch(cli: Cli) -> Result<()> {
     let selector = cli.board.as_deref();
-    let project = cli.project.as_deref();
-    let mut ctx = Ctx::new(project, selector, cli.json);
+    let mut ctx = Ctx::new(selector, cli.json);
     match cli.cmd {
         Cmd::Daemon {
             foreground,
@@ -107,7 +105,6 @@ fn dispatch(cli: Cli) -> Result<()> {
         Cmd::Version => cmd_version(cli.json),
         Cmd::Skill => print_skill(),
         Cmd::Board { sub } => cmd_board(sub, &mut ctx),
-        Cmd::Project { sub } => cmd_project(sub, &mut ctx),
         Cmd::Template { sub } => cmd_template(sub, &mut ctx),
         Cmd::Card { sub } => cmd_card(sub, &mut ctx),
         Cmd::Column { sub } => cmd_column(sub, &mut ctx),
@@ -137,12 +134,10 @@ fn dispatch(cli: Cli) -> Result<()> {
             column,
             position,
             destination_board,
-            to_project,
         } => cmd_move(
             &mut ctx,
             card_id,
             &column,
-            to_project.as_deref(),
             destination_board.as_deref(),
             position,
         ),

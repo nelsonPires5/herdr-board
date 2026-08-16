@@ -4,8 +4,8 @@ use board_core::engine::{
     validate_card_space, validate_column_permission_override, ValidationError,
 };
 use board_core::protocol::{
-    BoardCreateParams, CardCreateParams, CardMoveParams, CardUpdateParams, ColumnCreateParams,
-    ColumnUpdateParams, Effort, Patch, ProjectCreateParams, SpaceKind, Trigger,
+    CardCreateParams, CardUpdateParams, ColumnCreateParams, ColumnUpdateParams, Effort, Patch,
+    SpaceKind, Trigger,
 };
 
 use super::{ChoiceVal, FieldId, FieldKind, Form, FormKind, Submit};
@@ -137,46 +137,6 @@ impl Form {
                 }
                 Ok(Submit::CommentEdit { comment_id, body })
             }
-            FormKind::MoveCard { card_id } => {
-                let Some(column_id) = self.opt_col(FieldId::MoveColumn) else {
-                    return Err("column is required (pick a board first)".into());
-                };
-                let board_id = self.opt_col(FieldId::MoveBoard);
-                let position = {
-                    let text = self.trim(FieldId::MovePosition);
-                    if text.is_empty() {
-                        None
-                    } else {
-                        match text.parse::<i64>() {
-                            Ok(p) if p >= 0 => Some(p),
-                            _ => return Err("position must be a whole number".into()),
-                        }
-                    }
-                };
-                Ok(Submit::CardMove(CardMoveParams {
-                    id: card_id,
-                    column_id,
-                    board_id,
-                    position,
-                }))
-            }
-            FormKind::ProjectCreate => {
-                let scope_path = self.trim(FieldId::ProjectPath);
-                if scope_path.is_empty() {
-                    return Err("path is required".into());
-                }
-                Ok(Submit::ProjectCreate(ProjectCreateParams { scope_path }))
-            }
-            FormKind::BoardCreate => {
-                let name = self.trim(FieldId::BoardName);
-                if name.is_empty() {
-                    return Err("name is required".into());
-                }
-                let Some(project_id) = self.opt_col(FieldId::MoveProject) else {
-                    return Err("project is required".into());
-                };
-                Ok(Submit::BoardCreate(BoardCreateParams { project_id, name }))
-            }
         }
     }
 
@@ -197,7 +157,6 @@ impl Form {
                 )
             }
             FormKind::Comment { .. } | FormKind::CommentEdit { .. } => Ok(()),
-            FormKind::MoveCard { .. } | FormKind::ProjectCreate | FormKind::BoardCreate => Ok(()),
         }
     }
 
@@ -233,7 +192,7 @@ impl Form {
             _ => self.opt_text(id),
         }
     }
-    pub(crate) fn opt_col(&self, id: FieldId) -> Option<i64> {
+    pub(super) fn opt_col(&self, id: FieldId) -> Option<i64> {
         match self.field(id).and_then(|f| f.choice_val()) {
             Some(ChoiceVal::Col(c)) => Some(*c),
             _ => None,

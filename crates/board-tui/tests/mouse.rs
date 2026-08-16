@@ -10,7 +10,7 @@
 //! a test-only accessor to production code.
 
 use board_core::client::BoardClient;
-use board_tui::app::{update, Effect, Msg, Screen};
+use board_tui::app::{update, Effect, Msg, Screen, SwitcherLevel};
 use board_tui::forms::FieldId;
 use board_tui::testkit::{
     demo_client, demo_driver, driver_with_editor, key as key_msg, left_down, mouse, render_at,
@@ -89,6 +89,35 @@ fn setup_switcher_columns() -> Driver {
         .expect("HeaderSwitch zone must be registered on the Compact board header");
     d.handle(left_down(x, y));
     assert_eq!(d.app.screen, Screen::Switcher);
+    assert_eq!(
+        d.app.switcher.as_ref().unwrap().level,
+        SwitcherLevel::Columns
+    );
+    d
+}
+
+/// Enter the Compact switcher sheet directly at the Boards level via `b`
+/// (Compact's `b` means "switch board" and skips Columns entirely — see
+/// `board::board_key`'s `Char('b')` arm).
+fn setup_switcher_boards_via_b() -> Driver {
+    let mut d = driver();
+    d.app.last_area = Rect::new(0, 0, 40, 20);
+    d.handle(key_msg(KeyCode::Char('b')));
+    let state = d.app.switcher.as_ref().unwrap();
+    assert_eq!(state.level, SwitcherLevel::Boards);
+    assert!(!state.boards.is_empty(), "boards must have loaded");
+    assert!(state.entered_at_boards);
+    d
+}
+
+fn setup_switcher_boards() -> Driver {
+    let mut d = setup_switcher_columns();
+    let n = d.app.board.columns.len();
+    d.app.switcher.as_mut().unwrap().sel = n; // trailing "switch board" row
+    d.handle(key_msg(KeyCode::Enter)); // -> Effect::LoadBoardsForSwitcher
+    let state = d.app.switcher.as_ref().unwrap();
+    assert_eq!(state.level, SwitcherLevel::Boards);
+    assert!(!state.boards.is_empty(), "boards must have loaded");
     d
 }
 
@@ -108,8 +137,8 @@ fn setup_form() -> Driver {
 
 fn setup_picker() -> Driver {
     let mut d = driver();
-    d.handle(key_msg(KeyCode::Char('b')));
-    assert_eq!(d.app.screen, Screen::BoardPicker);
+    d.handle(key_msg(KeyCode::Char('m')));
+    assert_eq!(d.app.screen, Screen::Picker);
     d
 }
 
@@ -195,6 +224,7 @@ fn compact_board_header_zones_present_and_wrap_both_ends() {
             Zone::HeaderSwitch => {
                 assert_eq!(d.app.screen, Screen::Switcher);
                 let state = d.app.switcher.as_ref().unwrap();
+                assert_eq!(state.level, SwitcherLevel::Columns);
                 assert_eq!(state.sel, before_col);
             }
             other => panic!("unexpected zone on the board screen: {other:?}"),
@@ -214,44 +244,6 @@ fn regular_board_draws_no_compact_header_zones() {
         )),
         "Regular board must not register the Compact-only header zones"
     );
-}
-
-/// The header's project and board chips are real click targets at every
-/// breakpoint: the project chip opens the project picker, the board chip the
-/// board picker.
-#[test]
-fn header_project_and_board_chips_open_their_pickers_at_every_breakpoint() {
-    for (w, h) in [(40u16, 20u16), (52, 24), (60, 24), (80, 24), (120, 35)] {
-        let mut project = setup_board();
-        render_at(&mut project, w, h);
-        let project_pt = hit_zones(&project, w, h)
-            .into_iter()
-            .find_map(|(point, zone)| {
-                (zone == Zone::Action(UiAction::SwitchProject)).then_some(point)
-            })
-            .unwrap_or_else(|| panic!("project chip zone missing at {w}x{h}"));
-        project.handle(left_down(project_pt.0, project_pt.1));
-        assert_eq!(
-            project.app.screen,
-            Screen::ProjectPicker,
-            "project chip must open the project picker at {w}x{h}"
-        );
-
-        let mut board = setup_board();
-        render_at(&mut board, w, h);
-        let board_pt = hit_zones(&board, w, h)
-            .into_iter()
-            .find_map(|(point, zone)| {
-                (zone == Zone::Action(UiAction::SwitchBoard)).then_some(point)
-            })
-            .unwrap_or_else(|| panic!("board chip zone missing at {w}x{h}"));
-        board.handle(left_down(board_pt.0, board_pt.1));
-        assert_eq!(
-            board.app.screen,
-            Screen::BoardPicker,
-            "board chip must open the board picker at {w}x{h}"
-        );
-    }
 }
 
 // -- dead-zone contract: switcher (level 1 = Columns, level 2 = Boards) ------
@@ -288,12 +280,9 @@ fn switcher_columns_level_rows_select_and_close() {
                     assert!(d.app.switcher.is_none());
                 }
                 Zone::SwitcherSwitchBoard => {
-                    // The trailing row opens the board picker for the current
-                    // project; the sheet stays open underneath so Esc from the
-                    // picker returns to the columns.
-                    assert_eq!(d.app.screen, Screen::BoardPicker);
-                    assert!(d.app.picker.is_some());
-                    assert!(d.app.switcher.is_some());
+                    let state = d.app.switcher.as_ref().unwrap();
+                    assert_eq!(state.level, SwitcherLevel::Boards);
+                    assert!(!state.boards.is_empty());
                 }
                 Zone::SwitcherApplyTemplate => {
                     // The demo board is non-empty, so this row is disabled:
@@ -314,6 +303,96 @@ fn switcher_columns_level_rows_select_and_close() {
                     assert!(d.app.switcher.is_some());
                 }
                 other => panic!("unexpected zone at switcher columns level: {other:?}"),
+            }
+        }
+    }
+}
+
+#[test]
+fn switcher_boards_level_rows_switch_board_and_back_button_restores_columns_sel() {
+    for &(w, h) in &[COMPACT, REGULAR] {
+        let mut probe = setup_switcher_boards();
+        render_at(&mut probe, w, h);
+        let zones = hit_zones(&probe, w, h);
+        assert!(
+            !zones.is_empty(),
+            "switcher (boards level) must register hit zones at {w}x{h}"
+        );
+
+        for ((x, y), zone) in zones
+            .into_iter()
+            .filter(|(_, zone)| matches!(zone, Zone::SwitcherRow(_) | Zone::SheetClose))
+        {
+            let mut d = setup_switcher_boards();
+            render_at(&mut d, w, h);
+            let expected_board_id = d.app.switcher.as_ref().and_then(|s| match zone {
+                Zone::SwitcherRow(idx) => s.boards.get(idx).map(|(_, id)| *id),
+                _ => None,
+            });
+            d.handle(left_down(x, y));
+            match zone {
+                Zone::SwitcherRow(_) => {
+                    assert_eq!(d.app.screen, Screen::Board);
+                    assert_eq!(Some(d.app.board.board.id), expected_board_id);
+                }
+                Zone::SheetClose => {
+                    // Esc at the Boards level backs out to Columns rather
+                    // than closing the whole sheet.
+                    assert_eq!(d.app.screen, Screen::Switcher);
+                    let state = d.app.switcher.as_ref().unwrap();
+                    assert_eq!(state.level, SwitcherLevel::Columns);
+                }
+                other if is_leaked_board_header_zone(other) => {
+                    assert_eq!(d.app.screen, Screen::Switcher);
+                    let state = d.app.switcher.as_ref().unwrap();
+                    assert_eq!(state.level, SwitcherLevel::Boards);
+                }
+                other => panic!("unexpected zone at switcher boards level: {other:?}"),
+            }
+        }
+    }
+}
+
+/// Counterpart to the test above: when the Boards level was reached directly
+/// via `b` (not drilled down from Columns), `SheetClose` must close the
+/// sheet outright — there is no Columns view to back out to.
+#[test]
+fn switcher_boards_level_reached_via_b_closes_outright_on_sheet_close() {
+    for &(w, h) in &[COMPACT, REGULAR] {
+        let mut probe = setup_switcher_boards_via_b();
+        render_at(&mut probe, w, h);
+        let zones = hit_zones(&probe, w, h);
+        assert!(
+            !zones.is_empty(),
+            "switcher (boards level via `b`) must register hit zones at {w}x{h}"
+        );
+
+        for ((x, y), zone) in zones
+            .into_iter()
+            .filter(|(_, zone)| matches!(zone, Zone::SwitcherRow(_) | Zone::SheetClose))
+        {
+            let mut d = setup_switcher_boards_via_b();
+            render_at(&mut d, w, h);
+            d.handle(left_down(x, y));
+            match zone {
+                Zone::SwitcherRow(_) => {
+                    assert_eq!(d.app.screen, Screen::Board);
+                }
+                Zone::SheetClose => {
+                    assert_eq!(
+                        d.app.screen,
+                        Screen::Board,
+                        "Esc from a `b`-opened Boards level must close the sheet, \
+                         not fall back to a Columns view the user never opened"
+                    );
+                    assert!(d.app.switcher.is_none());
+                }
+                other if is_leaked_board_header_zone(other) => {
+                    assert_eq!(d.app.screen, Screen::Switcher);
+                    let state = d.app.switcher.as_ref().unwrap();
+                    assert_eq!(state.level, SwitcherLevel::Boards);
+                }
+                other => panic!("unexpected zone at switcher boards level: {other:?}"),
             }
         }
     }
@@ -859,7 +938,6 @@ fn board_chrome_exposes_the_reduced_creation_and_column_actions_at_every_breakpo
         UiAction::DeleteColumn,
         UiAction::MoveColumn,
         UiAction::ApplyTemplate,
-        UiAction::SwitchProject,
     ];
     let expected_wide = [UiAction::SwitchBoard];
     for (w, h) in [(40, 20), (80, 24), (120, 35)] {
@@ -919,12 +997,10 @@ fn mandatory_board_breakpoints_keep_filter_labels_complete_and_action_zone_tight
                 "filter {filter:?} clipped at {w}x{h}"
             );
         }
-        if w >= 60 {
-            assert!(
-                !output.contains("Board:"),
-                "redundant Board label at {w}x{h}"
-            );
-        }
+        assert!(
+            !output.contains("Board:"),
+            "redundant Board label at {w}x{h}"
+        );
         assert!(
             !output.contains("Visible:"),
             "redundant Visible label at {w}x{h}"
@@ -1151,7 +1227,6 @@ fn rendered_form_fields_and_choice_arrows_update_the_real_form_focus_and_value()
 
 #[test]
 fn rendered_picker_rows_and_confirm_buttons_use_existing_reducers() {
-    // The board picker's item row activates through Enter (SelectBoard).
     let mut picker = setup_picker();
     render_at(&mut picker, 80, 24);
     let (point, selected) = hit_zones(&picker, 80, 24)
@@ -1161,22 +1236,6 @@ fn rendered_picker_rows_and_confirm_buttons_use_existing_reducers() {
             _ => None,
         })
         .expect("second picker row");
-    picker.handle(left_down(point.0, point.1));
-    // Row 1 is the "⇄ Other projects…" action: it drills into the project
-    // picker rather than closing (only an item row selects a board).
-    assert_eq!(picker.app.screen, Screen::ProjectPicker);
-    assert!(picker.app.picker.is_some());
-
-    // An item row (0 = the current project's board) selects and closes.
-    let mut picker = setup_picker();
-    render_at(&mut picker, 80, 24);
-    let (point, _) = hit_zones(&picker, 80, 24)
-        .into_iter()
-        .find_map(|(point, zone)| match zone {
-            Zone::PickerRow(0) => Some((point, 0)),
-            _ => None,
-        })
-        .expect("first picker row");
     picker.handle(left_down(point.0, point.1));
     assert_eq!(picker.app.screen, Screen::Board);
     assert!(
@@ -1238,7 +1297,7 @@ fn move_column_controls_and_contextual_footer_help_follow_keyboard_paths() {
     picker.handle(left_down(help.0, help.1));
     assert_eq!(picker.app.screen, Screen::Help);
     picker.handle(key_msg(KeyCode::Esc));
-    assert_eq!(picker.app.screen, Screen::BoardPicker);
+    assert_eq!(picker.app.screen, Screen::Picker);
 }
 
 #[test]

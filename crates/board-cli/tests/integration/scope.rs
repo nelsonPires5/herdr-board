@@ -3,11 +3,8 @@ use std::process::Command;
 use board_core::client::BoardClient;
 use board_core::protocol::{CardCreateParams, ColumnCreateParams};
 
-use super::{json_error, json_output, TestDaemon};
+use super::{json_output, TestDaemon};
 
-/// Plain-directory scoping: the first board-aware command bootstraps (and
-/// persists) the current directory's project, and every project keeps its own
-/// board while the special Global project stays untouched.
 #[test]
 fn cli_scopes_plain_cwds_and_preserves_global() {
     let td = TestDaemon::start(&[]);
@@ -15,70 +12,18 @@ fn cli_scopes_plain_cwds_and_preserves_global() {
     let two = td._dir.path().join("plain-two");
     std::fs::create_dir_all(&one).unwrap();
     std::fs::create_dir_all(&two).unwrap();
-    let one = one.canonicalize().unwrap();
-    let two = two.canonicalize().unwrap();
 
-    // The first card new bootstraps plain-one (an explicit open — it selects
-    // and persists). A second project must be created explicitly before it can
-    // be selected (selecting a missing project fails with the create hint).
     json_output(&td.board_in(&one, &["card", "new", "--title", "one", "--json"]));
-    json_output(&td.board_in(
-        &two,
-        &["project", "create", two.to_str().unwrap(), "--json"],
-    ));
-    json_output(&td.board_in(
-        &two,
-        &[
-            "card",
-            "new",
-            "--title",
-            "two",
-            "--project",
-            two.to_str().unwrap(),
-            "--json",
-        ],
-    ));
+    json_output(&td.board_in(&two, &["card", "new", "--title", "two", "--json"]));
 
-    // Selecting a project that was never created fails with the create hint.
-    let missing = td._dir.path().join("plain-missing");
-    std::fs::create_dir_all(&missing).unwrap();
-    let error = json_error(&td.board_in(
-        &missing,
-        &["project", "select", missing.to_str().unwrap(), "--json"],
-    ));
-    assert_eq!(error["error"]["code"], 2);
-    assert!(
-        error["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("board project create"),
-        "selecting a missing project must point at the create command"
-    );
+    let cards_one = json_output(&td.board_in(&one, &["card", "list", "--json"]));
+    assert_eq!(cards_one.as_array().unwrap().len(), 1);
+    assert_eq!(cards_one[0]["title"], "one");
+    let cards_two = json_output(&td.board_in(&two, &["card", "list", "--json"]));
+    assert_eq!(cards_two.as_array().unwrap().len(), 1);
+    assert_eq!(cards_two[0]["title"], "two");
 
     let mut client = td.client();
-    let one_board = client
-        .project_get(one.to_str().unwrap())
-        .unwrap()
-        .boards
-        .into_iter()
-        .find(|board| board.name == "main")
-        .unwrap();
-    let two_board = client
-        .project_get(two.to_str().unwrap())
-        .unwrap()
-        .boards
-        .into_iter()
-        .find(|board| board.name == "main")
-        .unwrap();
-    let cards_one = client.board_get_by_id(one_board.id).unwrap().cards;
-    assert_eq!(cards_one.len(), 1);
-    assert_eq!(cards_one[0].title, "one");
-    let cards_two = client.board_get_by_id(two_board.id).unwrap().cards;
-    assert_eq!(cards_two.len(), 1);
-    assert_eq!(cards_two[0].title, "two");
-
-    // The Global board stays empty; the flat listing is one board per project
-    // (Global + the two plain dirs).
     assert!(client.board_get().unwrap().cards.is_empty());
     assert_eq!(client.board_list().unwrap().boards.len(), 3);
 }

@@ -3,8 +3,8 @@
 use board_core::capability::{default_capabilities, efforts_for, HarnessCapabilities};
 use board_core::engine::validate_column_permission_override;
 use board_core::harness::{BUILTIN_HARNESSES, DEFAULT_HARNESS};
-use board_core::model::{Board, Card, Column, Comment, Project};
-use board_core::protocol::{Effort, ProjectInfo, SessionInfo, SpaceInfo};
+use board_core::model::{Card, Column, Comment};
+use board_core::protocol::{Effort, SessionInfo, SpaceInfo};
 
 use crate::app::Screen;
 
@@ -147,82 +147,6 @@ impl Form {
         }
     }
 
-    /// The cross-board move form: destination project → board → column (+ an
-    /// optional position). The project/board selectors are seeded from the
-    /// `project.list` cache; the Column field starts empty until
-    /// `board.get` for the chosen board lands (see [`Form::apply_move_columns`]).
-    /// Focus starts on the Column field — the one thing the same-board move
-    /// must still choose — with the project/board already correct.
-    pub fn move_card(
-        card_id: i64,
-        projects: &[ProjectInfo],
-        current: &Project,
-        current_board: &Board,
-    ) -> Form {
-        let (project_opts, project_idx) = project_choice_opts(projects, current);
-        let info = projects.iter().find(|pi| pi.project.id == current.id);
-        let (board_opts, board_idx) = board_choice_opts(info, Some(current_board));
-        Form {
-            kind: FormKind::MoveCard { card_id },
-            fields: vec![
-                Field::choice(FieldId::MoveProject, "project", project_opts, project_idx),
-                Field::choice(FieldId::MoveBoard, "board", board_opts, board_idx),
-                Field::choice(FieldId::MoveColumn, "column", Vec::new(), 0),
-                Field::text(FieldId::MovePosition, "position (optional)", "", false),
-            ],
-            focus: 2,
-            return_to: Screen::Board,
-            caps: None,
-            harnesses: default_harnesses(),
-            columns: Vec::new(),
-            spaces: Vec::new(),
-            sessions: Vec::new(),
-            session_default_label: None,
-        }
-    }
-
-    /// The project-create form: one `scope_path` text field.
-    pub fn project_create() -> Form {
-        Form {
-            kind: FormKind::ProjectCreate,
-            fields: vec![Field::text(FieldId::ProjectPath, "path", "", false)],
-            focus: 0,
-            return_to: Screen::Board,
-            caps: None,
-            harnesses: default_harnesses(),
-            columns: Vec::new(),
-            spaces: Vec::new(),
-            sessions: Vec::new(),
-            session_default_label: None,
-        }
-    }
-
-    /// The board-create form: a name plus the project to create it in. The
-    /// Project selector is seeded from the `project.list` cache with
-    /// `project_id` preselected (the project the board picker was showing).
-    pub fn board_create(project_id: i64, projects: &[ProjectInfo], current: &Project) -> Form {
-        let (opts, _) = project_choice_opts(projects, current);
-        let idx = opts
-            .iter()
-            .position(|o| matches!(o.val, ChoiceVal::Col(id) if id == project_id))
-            .unwrap_or(0);
-        Form {
-            kind: FormKind::BoardCreate,
-            fields: vec![
-                Field::text(FieldId::BoardName, "name", "", false),
-                Field::choice(FieldId::MoveProject, "project", opts, idx),
-            ],
-            focus: 0,
-            return_to: Screen::Board,
-            caps: None,
-            harnesses: default_harnesses(),
-            columns: Vec::new(),
-            spaces: Vec::new(),
-            sessions: Vec::new(),
-            session_default_label: None,
-        }
-    }
-
     /// Record the screen this form was opened from, so save/cancel lands back
     /// there instead of unconditionally on the board.
     pub fn returning_to(mut self, screen: Screen) -> Form {
@@ -238,86 +162,8 @@ impl Form {
             FormKind::ColumnEdit { .. } => "Edit column",
             FormKind::Comment { .. } => "Add comment",
             FormKind::CommentEdit { .. } => "Edit comment",
-            FormKind::MoveCard { .. } => "Move card",
-            FormKind::ProjectCreate => "New project",
-            FormKind::BoardCreate => "New board",
         }
     }
-}
-
-// -- project/board selector templates ---------------------------------------
-
-/// Project selector options for the move and board-create forms: `current`
-/// first, then the remaining projects case-insensitively by name with Global
-/// last. `current` is always offered even when the cache has not loaded (the
-/// fallback single-option case).
-pub(super) fn project_choice_opts(
-    projects: &[ProjectInfo],
-    current: &Project,
-) -> (Vec<ChoiceOpt>, usize) {
-    let mut rest: Vec<&Project> = projects
-        .iter()
-        .map(|pi| &pi.project)
-        .filter(|p| p.id != current.id)
-        .collect();
-    rest.sort_by(|a, b| {
-        (a.scope_path.is_none(), a.name.to_lowercase())
-            .cmp(&(b.scope_path.is_none(), b.name.to_lowercase()))
-    });
-    let mut opts = Vec::with_capacity(rest.len() + 1);
-    opts.push(ChoiceOpt {
-        label: crate::view::project_label(current),
-        val: ChoiceVal::Col(current.id),
-    });
-    opts.extend(rest.into_iter().map(|p| ChoiceOpt {
-        label: crate::view::project_label(p),
-        val: ChoiceVal::Col(p.id),
-    }));
-    (opts, 0)
-}
-
-/// Board selector options for the move form: `info`'s boards with the
-/// project's selected board first, then the rest alphabetically. `fallback`
-/// (the current board) is preselected when present and is the whole option
-/// list when the cache has no entry for the project.
-pub(super) fn board_choice_opts(
-    info: Option<&ProjectInfo>,
-    fallback: Option<&Board>,
-) -> (Vec<ChoiceOpt>, usize) {
-    let Some(info) = info else {
-        return match fallback {
-            Some(board) => (
-                vec![ChoiceOpt {
-                    label: board.name.clone(),
-                    val: ChoiceVal::Col(board.id),
-                }],
-                0,
-            ),
-            None => (Vec::new(), 0),
-        };
-    };
-    let mut ordered: Vec<&Board> = info.boards.iter().collect();
-    ordered.sort_by_key(|b| b.name.to_lowercase());
-    if let Some(selected_id) = info.selected_board_id {
-        if let Some(pos) = ordered.iter().position(|b| b.id == selected_id) {
-            let board = ordered.remove(pos);
-            ordered.insert(0, board);
-        }
-    }
-    let opts: Vec<ChoiceOpt> = ordered
-        .iter()
-        .map(|b| ChoiceOpt {
-            label: b.name.clone(),
-            val: ChoiceVal::Col(b.id),
-        })
-        .collect();
-    let idx = fallback
-        .and_then(|current| {
-            opts.iter()
-                .position(|o| matches!(o.val, ChoiceVal::Col(id) if id == current.id))
-        })
-        .unwrap_or(0);
-    (opts, idx)
 }
 
 // -- field templates ---------------------------------------------------------
