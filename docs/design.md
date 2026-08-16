@@ -18,7 +18,7 @@ visible.
 
 | Entity | What it is |
 |---|---|
-| **Board** | An independent pipeline (columns/config/cards) selected by canonical Git root or non-Git CWD. `Global` preserves the pre-v5 board. A fresh scoped board contains **only a `Todo` column**; everything else is user-created. |
+| **Project / Board** | A **project** is a named collection of boards identified by a canonical filesystem path (Git root or plain existing directory); `Global` is the special project (scope NULL) preserving the pre-v14 boards. Each project's first board is named `main`. A **board** is an independent pipeline (columns/config/cards); names are unique case-insensitively within one project, while board ids are global stable selectors. A fresh board contains **only a `Todo` column**; everything else is user-created. |
 | **Column** | A stage, entirely user-defined: create/rename/reorder/delete from the TUI (keyboard or mouse). Config: `system_prompt`, `trigger` (`auto` = entering the column starts a run; `manual` = waits for human), `on_success` / `on_fail` (move card to column X, or stay), optional overrides (model/effort/harness) applied to every card passing through. Nothing about column names or count is hardcoded. |
 | **Card** | A unit of work. Title, **description = the base prompt**, harness, model, effort, permission mode, a **herdr session** (`session`, null = daemon default) AND a **space** within it (`workspace` = an already-open workspace id; `new_workspace` = a label + cwd the daemon opens on first dispatch), position, live status (`idle · queued · running · blocked · awaiting · done · failed`), the harness `session_id` for resume, and an optional `archived_at` timestamp. Archiving is reversible and preserves comments/run history. `awaiting` (agent finished/went idle without `board done`, run still open, pending human review) records an `awaiting_reason` (`agent_done` / `idle_expired`); `done` is confirmed completion with no target column. |
 | **Comment** | Timestamped note on a card. Author = `user`, `agent` (from a run), or `system` (daemon transitions). Comments are both the audit log **and** context for the next run. |
@@ -153,7 +153,7 @@ anchor unchanged: `pane run` exits close their child, so the anchor is what the 
 from. Old live anchors from earlier releases converge on the next successful managed launch;
 old durable child evidence remains valid tab proof.
 Herdr labels are not unique, so neither tab nor anchor ownership is inferred from one. The current
-schema v13 retains the exact anchor pane id introduced by v12 with each promoted run; after restart,
+schema v14 retains the exact anchor pane id introduced by v12 with each promoted run; after restart,
 the daemon reconstructs the exact tab and anchor only from scoped durable pane identities in the same
 session and workspace.
 A renamed anchor remains owned by identity. If that exact anchor was closed, it is recreated only by
@@ -177,7 +177,12 @@ child when present, restarts from `tab.list`, and retries complete placement onc
 See [`../schema.sql`](../schema.sql). Summary:
 
 ```
-boards(id, name, scope_path)                 -- NULL = Global; canonical path otherwise
+projects(id, scope_path)                     -- NULL = the special Global project; canonical path otherwise
+boards(id, project_id, name)                 -- per-project case-insensitive unique name; first board 'main'
+selection(id=1, project_id)                  -- singleton: the selected project (absent = none yet)
+board_selection(project_id, board_id)        -- the selected board per project
+project_recents(project_id, rank)            -- recent projects, capped at 3
+board_recents(project_id, board_id, rank)    -- recent boards per project, capped at 3
 columns(id, board_id, name, position, system_prompt, trigger,
         on_success_column_id, on_fail_column_id,
         model_override, effort_override, harness_override, permission_override)
@@ -199,8 +204,8 @@ runs(id, card_id, column_id, harness, argv_json, prompt_snapshot,
      result_summary, log_path)
 ```
 
-Schema is versioned via `PRAGMA user_version` (current = **v13**). A fresh DB is built straight from
-`schema.sql` and stamped v13. Existing v1→v4 migrations retain their space/session, archive, and Pi
+Schema is versioned via `PRAGMA user_version` (current = **v14**). A fresh DB is built straight from
+`schema.sql` and stamped v14. Existing v1→v4 migrations retain their space/session, archive, and Pi
 effort behavior. v5 adds unique non-null `boards.scope_path`, preserves board `id=1` plus every
 related row as `Global`, and leaves existing card harnesses unchanged. v6 rebuilds `cards` to admit
 the `awaiting`/`done` statuses and adds `cards.awaiting_reason` (NULL outside `awaiting`). v7 adds
@@ -219,7 +224,14 @@ format versions are rejected rather than interpreted. Dispatch uses that spec an
 `runs.session`, so queued runs, retries, and auto-hops are unaffected by later card, column, or
 configuration edits. New runs also atomically preserve the fully resolved,
 board-protocol-trailer-inclusive system prompt at enqueue time. v12 adds the durable anchor identity;
-v13 adds current comment soft deletion plus immutable audit snapshots. A legacy NULL remains a
+v13 adds current comment soft deletion plus immutable audit snapshots. **v14 introduces projects**
+(canonical-path identity, Global as the special project `id=1` with `scope_path NULL`), rebuilds
+`boards` with `project_id` + per-project case-insensitive unique name, and adds the selection,
+board_selection, project_recents, and board_recents tables. The v13→v14 migration runs with foreign
+keys disabled (boards is the parent of columns/cards): every existing scoped board becomes its own
+project's first board `main` and the Global board becomes the Global project's `main`, so **all**
+board ids, columns, cards, runs, and comment history are preserved; a crash rolls the upgrade back
+and `user_version` stays 13. A legacy NULL remains a
 launch-version marker: pre-v7 built-ins
 execute their persisted all-in-one argv unchanged, while pre-v7 configured rows retain their
 historical spawn-time current-column reconstruction. `Run` deserialization defaults an omitted field
@@ -227,7 +239,7 @@ to NULL, but serialization always omits `system_prompt_snapshot` and its content
 responses. `launch_spec_json` is likewise internal and omitted in full from boardd wire responses.
 
 Source ownership is explicit: `schema.sql` is the fresh schema source, `board-core::db` owns ordered
-upgrades through v13, and `board-core::protocol` owns the v1 wire DTOs and additive compatibility
+upgrades through v14, and `board-core::protocol` owns the v1 wire DTOs and additive compatibility
 rules. The CLI and TUI use typed `BoardClient` wrappers; only boardd reads or writes SQLite. New
 v1 fields such as `BoardSnapshot.active_runs` and RPC error `kind`/`details` are additive, so older
 clients can continue decoding the existing fields.
@@ -359,11 +371,11 @@ Notes:
 - Column `system_prompt` is combined with the mandatory board-protocol trailer and snapshotted at enqueue. For managed Pi it is delivered through a temporary file passed to `--append-system-prompt`; for managed Claude the file flag is `--append-system-prompt-file`; codex and opencode have **no system-prompt file equivalent**, so their system instructions are delivered inside the single Mint `agent.prompt` block (see [Prompt assembly](#5-prompt-assembly)). Neither replaces harness defaults/context files, and neither puts the system text directly in startup argv. It can invoke skills (`/quick-planner`, `/code-review`) — that's how "column triggers a skill" works, no special mechanism needed.
 - `on_fail = "Execute"` from Review + comments-as-context gives the fix loop for free: the re-entered Execute run sees the reviewer's findings in its prompt.
 
-### Cross-board card move (prototype)
+### Cross-board / cross-project card move (prototype)
 
-A card can be moved to a column of **another board**. `card.move` gains an optional `board_id`
-(destination board). When it is present and differs from the card's current board, the daemon
-performs an atomic **transfer**:
+A card can be moved to a column of **another board**, including a board of **another project**.
+`card.move` gains an optional `board_id` (destination board). When it is present and differs from the
+card's current board, the daemon performs an atomic **transfer**:
 
 - the store validates the target `column_id` belongs to the declared `board_id` (and that the board
   exists), then updates `cards.board_id` / `cards.column_id` in one transaction and recompacts the
@@ -380,8 +392,11 @@ performs an atomic **transfer**:
 
 The TUI `m` flow is a hybrid: `m` opens the active board's column picker directly (the fast
 same-board path); pressing `b` inside it switches to the destination-board picker for a cross-board
-move (board → column). Validation errors from the blocking check surface as the existing red
-footer toast (the `guard()` path is unchanged). The help line reads `m  move card (board→column)`.
+move (board → column). The move form is now a **Project / Board / Column / Position** form that can
+target another project's board (`--to-project` on the CLI); choosing another board reloads the
+column options. A move — cross-board or cross-project — **never** changes the persistent selection
+or recency, and its validation errors surface as the existing red footer toast (the `guard()` path
+is unchanged). The help line reads `m  move card (board→column)`.
 
 ### Card duplication
 
@@ -400,12 +415,16 @@ event for the copy, and the TUI shows a `card duplicated as #N` toast after the 
 
 ### Scope selection
 
-At the CLI/TUI boundary, non-empty `BOARD_SCOPE_PATH` wins. TUI otherwise uses
+At the CLI/TUI boundary, the **persisted selection prevails**: the selected project (and its
+selected board) wins over the current directory, so board-aware commands keep their context across
+cwd changes. When no selection exists yet (right after a v14 migration, before any explicit
+open/create/select), the first board-aware command **bootstraps** it from the current directory:
+non-empty `BOARD_SCOPE_PATH` wins, the TUI otherwise uses
 `HERDR_PLUGIN_CONTEXT_JSON.focused_pane_cwd`, then `workspace_cwd`, then process CWD. The candidate
 is canonicalized; `git -C <candidate> rev-parse --show-toplevel` selects a canonical Git root,
 while a non-Git directory keeps its exact canonical CWD. Subdirectories of one repo therefore share
-a board; equal basenames at different paths do not. Moving/renaming a path does not migrate its old
-board, which remains available in the picker.
+a project (and its boards); equal basenames at different paths do not. Moving/renaming a path does
+not migrate its old project, which remains available in the picker.
 
 `o` is daemon-mediated, and **run selection is explicit end to end**: `run.focus` takes a required
 `{card_id, run_id}` and never implicitly picks a run. The TUI passes the run the user *selected* in
@@ -528,7 +547,7 @@ execution, not to resurrect it as a run. Two consequences follow and are not wor
 - **Access: overlay only** — `[[keys.command]]` keybinding (e.g. `prefix+k`) → `plugin pane open --plugin herdr-board --placement overlay`; the board floats over the current workspace from anywhere, dismiss to drop back. No pinned workspace, no sidebar entry (herdr has no sidebar extension point — verified against api schema/config).
 - **Responsive board view, three layout modes by terminal width** (`LayoutMode::from_width`): **Compact** `< 60` cols, **Regular** `60..=119`, **Wide** `>= 120`. Regular/Wide: visible columns divide the content viewport while preserving a readable minimum width (`MIN_COL_W = 26`); when not all columns fit, the selected column drives a full-width sliding window, and the brand/count, centered board dropdown, and right filter rail share one header line. Compact renders exactly one full-width column with row one `◈ herdr-board` plus the global running count, row two the board dropdown plus direct visibility chips, and row three `[ ‹ ]  [ <column name> (M/A) · n/N · cards ]  [ › ]`; the navigator segments are independent tap/click targets and the running count is not repeated there. Cards use status-colored borders and a readable selected background; each status line owns exactly one semantic glyph (▶ running, ⏸ blocked, ✗ failed, ⧗ queued, ? awaiting — yellow, ✓ done — green), while title/id lines stay free of status markers. Cards also carry harness/model metadata and a live run timer; in Compact, card titles word-wrap to up to two lines instead of being truncated.
 - **Per-column card scrolling, all modes:** each column carries its own scroll offset keyed by column id and draws a 1-cell scrollbar on its right edge once its card count exceeds what fits. Previously cards past the bottom of a column were simply not drawn, with no scroll state at all. Mouse wheel over a column scrolls that column's card list (whichever column the pointer hovers, not necessarily the focused one); wheel no longer reorders the focused card — card reordering stays keyboard-only (`H`/`L`; column reordering stays on `M`, below).
-- **Board/column switcher, Compact only** (`Screen::Switcher`): two entry points land on different levels. `b` means "switch board" and opens straight at level 2 (the board list — board names only exist there); tapping the header's center button opens at level 1. Level 1 lists the current board's columns with card counts, plus a trailing `⇄ Switch board →` row that drills into level 2 and, below it, an `⊞ Apply template` row; level 2 lists boards. The template row is the touch counterpart of the board screen's `T` key — both route through one helper so the template name lives in a single constant — and it stays visible but dimmed when the board is not pristine, activating it then explaining why rather than silently doing nothing. `j`/`k` (or `↑`/`↓`) move, `Enter` activates the selected row, and `q` closes the sheet outright from either level (it is the "get me out" key everywhere else in the TUI, and the switcher used to swallow it). `Esc` behavior at level 2 depends on how it was reached: opened directly via `b`, it closes the sheet outright (there is no level-1 view to back out to); drilled into from level 1 via the header tap, it steps back to level 1 and restores the selection that was active before drilling in rather than resetting to the top row. `SwitcherState::entered_at_boards` tracks which case applies. Regular/Wide are unchanged: `b` still opens the existing board `Picker`.
+- **Column switcher, Compact only** (`Screen::Switcher`): now columns-only. Tapping the header's center button opens it; it lists the current board's columns with card counts, plus a trailing `⇄ Switch board →` row that opens the **board picker** (the old second level is gone — `b` and the header board chip open the same picker at every breakpoint) and, below it, an `⊞ Apply template` row. The template row is the touch counterpart of the board screen's `T` key — both route through one helper so the template name lives in a single constant — and it stays visible but dimmed when the board is not pristine, activating it then explaining why rather than silently doing nothing. `j`/`k` (or `↑`/`↓`) move, `Enter` activates the selected row, and `q` closes the sheet outright (it is the "get me out" key everywhere else in the TUI, and the switcher used to swallow it). `Esc` closes the sheet outright; there is no level-2 state to back out to anymore. The board picker opened from the switcher returns to the switcher when closed, restoring the selection that was active before drilling in. `SwitcherState::entered_at_boards` is gone; `b` always opens the board picker, at every breakpoint.
 - **Sheets route through one placement rule, `sheet_area(mode, pref_w, pref_h, area)`:** fullscreen in Compact, the existing centered popup in Regular/Wide. Every overlay uses it — card/column form, move-card and board pickers, the `M` move-column mini-mode, confirm, help, card detail, and the switcher. Both branches derive from the board content region (below persistent header chrome and above the bottom action rail); an idle frame reserves no footer hint row, while a visible toast reserves one transient row above that rail.
 - **Widget/hit-testing layer** (`board-tui/src/widgets/`): a `HitMap` of `Zone`s is rebuilt every frame in `view()` and consulted by the mouse handler on the next input event, instead of the mouse code recomputing overlay geometry inline; the last-pushed zone wins, so overlays drawn after the board shadow it at the same cell. Built on it: transparent white `[ Save ]  [ Cancel ]` chips on forms (touch has no keyboard to submit/cancel with), and `render_sheet_frame`, a bordered sheet with a short Compact-only title (truncated to leave room for the corner, a gap, and the chip) plus an in-border `[ X ]` close chip registered as a hit zone; centered Regular/Wide overlays expose the same exact `[ X ]` chip. Selected chips use bold/underline rather than a background. `windowed_rows` picks the widest contiguous run of whole rows around the focused one that fits the available height; it drives both form field scrolling (card/column forms keep the focused field wholly visible) and picker option scrolling.
 - **Help is global, returns where it came from, and scrolls in every layout.** `?` is bound once in `app::on_key`, ahead of the per-screen dispatch, so every screen can reach help except the two forms (where `?` is a literal character) and help itself. Opening it records `App::help_return_to`, and closing returns to exactly that screen — including card detail, which previously dumped you back on the board. The keybinding table has since outgrown a fixed sheet, so both layouts scroll with `j`/`k`: Compact renders one entry per row with the full description plus a scrollbar and closes only on `Esc`/`q` (so `j`/`k` stay available for reading), while Regular/Wide keeps its two-column layout and its "any other key closes" behaviour but no longer closes on the keys a reader reaches for. Before this the table silently truncated at 80x24. Neither help layout reserves a trailing hint row, and Compact picker options wrap instead of clipping.
@@ -571,7 +590,7 @@ execution, not to resurrect it as a run. Two consequences follow and are not wor
   meaning and edits the card, returning to detail after save/cancel. `Enter` on an `awaiting` card confirms completion (the same `run.done
   ok` channel as `board done ok`); the detail view shows the `awaiting` reason (agent reported
   done / idle past grace).
-- Mouse **and** keyboard for everything: `b` switches between `Global` and scoped boards; drag card
+- Mouse **and** keyboard for everything: `p` opens the project picker and `b` the board picker (both chips are clickable); drag card
   between columns / `m` move; `n` new card, `N` new column; `e` edit card; `a` archive/restore; `v`
   cycles `ACTIVE` / `ALL` / `ARCHIVED`; `c` comment, with `e`/`d`/`h` managing the focused one in
   card detail; `Enter` card detail; `o` focuses the **selected** run's
@@ -689,7 +708,7 @@ the hidden `board __pane-exited --run-id "$BOARD_RUN_ID"` guard. That guard send
 `run.pane_exited {card_id,run_id}`; only the exact matching open queued or started configured run is failed, with no `on_fail`
 transition. A callback before registration is accepted. The same narrow race rule applies to an
 immediate configured-harness `board done`: the CLI forwards `BOARD_RUN_ID`, and only that exact
-queued run may finalize before runner registration; a queued built-in (pi/claude/codex/opencode) completion is
+queued run may finalize before runner registration; a queued built-in (pi/claude/codex/opencode/antigravity) completion is
 rejected because no managed pane exists yet. For an already-started run, `run_id` remains optional
 so manual/TUI callers remain compatible, but a supplied mismatched id is rejected. Stale,
 replaced, completed, and built-in callbacks are rejected, so a stale child cannot complete a
@@ -732,7 +751,7 @@ opens the script, the residual configured-script orphan is an accepted asynchron
 
 **Golden rule:** herdr status is a HINT; `board done` is the only terminal success truth. For a
 configured harness, that completion may arrive in the narrow queued-before-registration window;
-queued built-in (pi/claude/codex/opencode) runs are deliberately not eligible. Pane-idle scraping alone is the
+queued built-in (pi/claude/codex/opencode/antigravity) runs are deliberately not eligible. Pane-idle scraping alone is the
 documented weak point of every tmux-style orchestrator (claude-squad); the explicit `board done`
 channel is what makes auto-transition trustworthy, and silent finishes park
 the card in `awaiting` for review instead of guessing an outcome. Without the optional Pi

@@ -898,3 +898,135 @@ async fn v7_and_pre_v7_launch_adapters_remain_explicit() {
     assert_ne!(v7_card, legacy_card);
     assert!(column_id > 0);
 }
+
+// Antigravity (A7 enqueue contracts): the daemon persists NULL for a Mint
+// (agy mints its own conversation id), keeps the real recorded id for
+// resume/retry with the `--conversation <id>` pair closing the argv, and the
+// managed prompt channels ride outside argv exactly like the adapter produced
+// them.
+
+#[test]
+fn antigravity_mint_enqueue_persists_null_session_without_a_synthetic_uuid() {
+    // agy mints its own conversation id (no pre-allocation), so an
+    // antigravity Mint enqueue persists NULL — the board never invents a uuid
+    // for it — and the startup argv carries no conversation flag and no
+    // prompt text.
+    let d = test_daemon(Arc::new(MissingPiSpawner));
+    let (card_id, column_id) = {
+        let db = d.store.lock();
+        let column = db
+            .create_column(&ColumnCreateParams {
+                name: "Antigravity".into(),
+                system_prompt: Some("col instructions".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let card = db
+            .create_card(&CardCreateParams {
+                column_id: Some(column.id),
+                title: "antigravity mint".into(),
+                harness: Some("antigravity".into()),
+                model: Some("gemini-3.7-flash".into()),
+                effort: Some(Effort::High),
+                permission_mode: Some("sandbox".into()),
+                description: Some("build the widget".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        (card.id, card.column_id)
+    };
+
+    let run = enqueue_run(&d, card_id, column_id, false).unwrap();
+    let card = d.store.lock().get_card(card_id).unwrap().unwrap();
+    assert_eq!(
+        run.session_id, None,
+        "antigravity Mint must persist NULL, never a board-invented uuid"
+    );
+    assert_eq!(card.session_id, None);
+
+    let argv: Vec<String> = serde_json::from_str(&run.argv_json).unwrap();
+    assert_eq!(
+        argv,
+        [
+            "agy".to_string(),
+            "--model".into(),
+            "gemini-3.7-flash".into(),
+            "--effort".into(),
+            "high".into(),
+            "--sandbox".into(),
+        ],
+        "the exact agy mint argv: model (base id) + effort + sandbox permission"
+    );
+    assert!(!argv.iter().any(|a| a == "--conversation"));
+    assert!(!argv.iter().any(|a| a == "--"));
+    assert!(!argv.iter().any(|a| a.starts_with("--append-system-prompt")));
+
+    // The managed prompt channels ride outside argv exactly like the adapter
+    // produced them at enqueue time.
+    let spec = run.launch_spec.as_ref().unwrap().execution();
+    assert_eq!(spec.agent_kind.as_deref(), Some("agy"));
+    let prompt = assemble_prompt("build the widget", &[]);
+    assert_eq!(spec.initial_prompt.as_deref(), Some(prompt.as_str()));
+    assert_eq!(
+        spec.system_prompt.as_deref(),
+        Some(board_core::harness::protocol_system_prompt(Some("col instructions")).as_str())
+    );
+}
+
+#[test]
+fn antigravity_retry_enqueue_keeps_the_real_recorded_conversation_id() {
+    // Retry must persist the real recorded id — never a fresh minted uuid —
+    // spelled as the `--conversation <id>` pair closing the argv (agy has no
+    // fork; the retry re-attaches to the same conversation).
+    let d = test_daemon(Arc::new(MissingPiSpawner));
+    let (card_id, column_id, old_session) = {
+        let db = d.store.lock();
+        let card = db
+            .create_card(&CardCreateParams {
+                title: "antigravity retry".into(),
+                harness: Some("antigravity".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let old_session = "conv-1";
+        db.set_card_session(card.id, old_session).unwrap();
+        let prior = db
+            .enqueue_run_uow(&EnqueueRun {
+                card_id: card.id,
+                column_id: card.column_id,
+                harness: "antigravity",
+                argv_json: "[]",
+                prompt_snapshot: "prior",
+                system_prompt_snapshot: Some("system"),
+                launch_spec_json: None,
+                session_id: Some(old_session),
+                session: None,
+            })
+            .unwrap();
+        db.promote_run_uow(prior.id, None, None, None).unwrap();
+        db.finalize_run_uow(&FinalizeRun {
+            run_id: prior.id,
+            outcome: RunOutcome::Ok,
+            summary: None,
+            comments: &[(&format!("agent:{}", prior.id), "done")],
+            target_column_id: None,
+            final_status: CardStatus::Done,
+            final_awaiting_reason: None,
+            next: None,
+        })
+        .unwrap();
+        (card.id, card.column_id, old_session.to_string())
+    };
+
+    let run = enqueue_run(&d, card_id, column_id, true).unwrap();
+    assert_eq!(run.session_id.as_deref(), Some(old_session.as_str()));
+    let argv: Vec<String> = serde_json::from_str(&run.argv_json).unwrap();
+    assert!(
+        argv.ends_with(&["--conversation".to_string(), old_session.clone()]),
+        "antigravity retry is the `--conversation <id>` pair appended last: {argv:?}"
+    );
+    assert!(
+        !argv.iter().any(|a| a == "--fork"),
+        "agy has no fork flag; a retry must never simulate one"
+    );
+}

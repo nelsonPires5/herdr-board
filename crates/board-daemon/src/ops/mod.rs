@@ -17,6 +17,7 @@ mod comments;
 mod discovery;
 mod errors;
 mod panes;
+mod projects;
 mod runs;
 #[cfg(test)]
 mod tests;
@@ -55,7 +56,22 @@ routes!(d, params, {
     },
     "board.open" => boards::board_open(d, from(params)?),
     "board.rename" => boards::board_rename(d, from(params)?),
-    "board.list" => boards::board_list(d),
+    "board.list" => boards::board_list(
+        d,
+        if params.is_null() {
+            BoardListParams::default()
+        } else {
+            from(params)?
+        },
+    ),
+    "board.create" => boards::board_create(d, from(params)?),
+    "board.select" => boards::board_select(d, from(params)?),
+    "project.list" => projects::project_list(d),
+    "project.get" => projects::project_get(d, from(params)?),
+    "project.open" => projects::project_open(d, from(params)?),
+    "project.create" => projects::project_create(d, from(params)?),
+    "project.select" => projects::project_select(d, from(params)?),
+    "project.selected" => projects::project_selected(d),
     "board.get" => boards::board_get(
         d,
         if params.is_null() {

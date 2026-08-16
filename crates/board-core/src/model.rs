@@ -6,12 +6,49 @@ use crate::protocol::{
     AwaitingReason, CardLabels, CardStatus, Effort, RunOutcome, SpaceKind, Trigger,
 };
 
-/// One independent board pipeline. `scope_path=None` is the preserved Global board.
+/// A named collection of boards, identified by a canonical filesystem path.
+/// `scope_path=None` is the special Global project; its title is `Global`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Project {
+    pub id: i64,
+    /// Folder-name title (`Global` for the special project).
+    pub name: String,
+    /// Canonical root path; `None` only for Global.
+    pub scope_path: Option<String>,
+}
+
+impl Project {
+    /// Folder-name title of a project scope; `Global` for the special project.
+    /// A path without a file name (e.g. `/`) falls back to the path itself.
+    pub fn display_name(scope_path: Option<&str>) -> String {
+        match scope_path {
+            None => "Global".into(),
+            Some(path) => std::path::Path::new(path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .filter(|n| !n.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| path.to_string()),
+        }
+    }
+}
+
+/// One board pipeline inside a [`Project`]. `scope_path` is the owning
+/// project's canonical path (denormalized for wire compatibility); `None`
+/// means the board belongs to the Global project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Board {
     pub id: i64,
+    /// Missing on pre-v14 wire payloads: the only pre-v14 board rows were the
+    /// Global board (id 1) and scoped boards, which migrated to project 1.
+    #[serde(default = "default_project_id")]
+    pub project_id: i64,
     pub name: String,
     pub scope_path: Option<String>,
+}
+
+fn default_project_id() -> i64 {
+    1
 }
 
 /// A pipeline stage.

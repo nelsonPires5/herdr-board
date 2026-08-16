@@ -2,8 +2,8 @@
 source: crates/board-tui/tests/snapshots.rs
 expression: "render_sized(&mut d, w, h)"
 ---
-" ◈ herdr-board ● 1 running                          "
-"    [ Global ▾ ]     [ Active ] [ All ] [ Archived ]"
+"[ Project: Global ]  [ Active ] [ All ] [ Archived ]"
+"                  [ Board: main ]                   "
 "[ ‹ ]      [ Review (A) · 4/6 · 2 cards ]      [ › ]"
 "────────────────────────────────────────────────────"
 "┌ Card #5: Refactor auth module         [ X ] [ □ ]┐"
