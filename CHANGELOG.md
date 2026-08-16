@@ -8,6 +8,14 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- [#91](https://github.com/nelsonPires5/herdr-board/pull/91) feat: projects group boards by folder, with separate project/board selectors in the TUI and CLI.
+- [#91](https://github.com/nelsonPires5/herdr-board/pull/91) feat: move cards across projects with `card move --to-project/--to-board` without changing your selection.
+- [#91](https://github.com/nelsonPires5/herdr-board/pull/91) feat: create projects and boards from the TUI with forms that select what you create.
+
+### Changed
+
+- [#91](https://github.com/nelsonPires5/herdr-board/pull/91) feat: each project's first board is `main`; existing boards migrate into their project as `main` (schema v14).
+- [#91](https://github.com/nelsonPires5/herdr-board/pull/91) feat: the selected project and per-project board persist, and only opening, creating, or selecting updates recency.
 - [#90](https://github.com/nelsonPires5/herdr-board/pull/90) feat: add the Antigravity CLI (agy) as a native harness with a live model catalog, conversation resume/retry and safe permission modes.
 
 ### Fixed

@@ -51,14 +51,24 @@ fn board_rename_preserves_identity_scope_columns_and_cards() {
     );
 }
 
+/// Board names are unique case-insensitively within one project only: a
+/// rename onto a sibling's name in the same project is refused, while the
+/// same name in a different project is legal.
 #[test]
-fn board_rename_keeps_names_unique() {
+fn board_rename_keeps_names_unique_within_a_project() {
     let db = mem();
     let one = db.open_board("/one").expect("board one");
     let two = db.open_board("/two").expect("board two");
+    let sibling = db.create_board(one.project_id, "Backlog").expect("sibling");
 
-    assert!(db.rename_board(one.id, two.name.as_str()).is_err());
+    // Same project: renaming onto a sibling's name (case-insensitively) fails.
+    assert!(db.rename_board(one.id, "BACKLOG").is_err());
+    assert!(db.rename_board(one.id, "Backlog").is_err());
     assert_eq!(db.get_board(one.id).expect("board").name, one.name);
+    // Different project: the same name is legal.
+    assert!(db.rename_board(one.id, two.name.as_str()).is_ok());
+    // Project-scoped rename keeps the board in its project.
+    assert_eq!(db.get_board(sibling.id).expect("board").name, "Backlog");
 }
 
 #[test]

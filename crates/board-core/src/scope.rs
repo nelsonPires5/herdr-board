@@ -63,6 +63,19 @@ pub fn resolve_scope_path(candidate: &Path) -> Result<PathBuf> {
     Ok(canonical)
 }
 
+/// A project must point at an existing directory on disk: creating a project
+/// registers its canonical path but never creates directories itself. Shared
+/// by the daemon op and the fake client so protocol callers see one rule.
+pub fn validate_existing_directory(path: &str) -> Result<()> {
+    let p = Path::new(path);
+    if !p.is_dir() {
+        return Err(crate::Error::BadRequest(format!(
+            "project path is not an existing directory: {path}"
+        )));
+    }
+    Ok(())
+}
+
 fn non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }

@@ -167,22 +167,33 @@ fn duplicate_board_rename_is_a_bad_request_over_the_rpc() {
     let board_id = scoped["board"]["id"].as_i64().unwrap();
     let mut events = d.events_tx.subscribe();
 
+    // Every project's first board is `main`; a sibling board shares the
+    // project, so renaming onto the sibling's name is a same-project
+    // case-insensitive duplicate.
+    let sibling = handle_request(
+        &d,
+        "board.create",
+        json!({"project_id": scoped["board"]["project_id"], "name": "Backlog"}),
+    )
+    .unwrap();
+    assert_eq!(sibling["board"]["name"], "Backlog");
+
     let err = handle_request(
         &d,
         "board.rename",
-        json!({"board_id": board_id, "name": "Global"}),
+        json!({"board_id": board_id, "name": "BACKLOG"}),
     )
     .unwrap_err();
 
     assert_eq!(err.code(), 1);
     let message = err.to_string();
     assert!(
-        message.contains(r#"board "Global" already exists"#),
+        message.contains(r#"board "BACKLOG" already exists in this project"#),
         "{message}"
     );
     assert!(!message.contains("sqlite"), "{message}");
     testkit::assert_no_events(&mut events);
-    assert_eq!(d.store.lock().get_board(board_id).unwrap().name, "/repo");
+    assert_eq!(d.store.lock().get_board(board_id).unwrap().name, "main");
 }
 
 // Antigravity (A7 validation): the daemon validates antigravity cards against

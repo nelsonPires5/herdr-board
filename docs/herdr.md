@@ -28,7 +28,7 @@ command, flag, or JSON shape from memory — verify against `api schema` /
 ## Compatibility gate: Herdr 0.8.0 / socket protocol 19
 
 The supported matrix is exact: **Herdr 0.8.0**, **socket protocol 19**, board protocol
-v1, and SQLite schema v13. `board-herdr` rejects a different Herdr version or
+v1, and SQLite schema v14. `board-herdr` rejects a different Herdr version or
 protocol before the daemon performs workspace discovery, pane placement, an agent
 launch, a configured runner action, or a notification mutation. This is a policy
 gate, not a protocol-negotiation fallback.
@@ -205,8 +205,9 @@ bounded 100ms backoff doubling per retry (100/200/400/800/1600ms). It never allo
 response. Persistent busy is a launch failure whose cleanup closes only the
 owned child pane and leaves the anchor; `pane_not_found` is handled separately
 as a placement race that restarts discovery from `tab.list` and retries
-complete placement once. Schema v13 persists the exact anchor id with the run
-(the anchor was introduced in v12) and adds comment audit state; after restart
+complete placement once. Schema v14 persists the exact anchor id with the run
+(the anchor was introduced in v12) and adds comment audit state plus project/selection
+context; after restart
 both tab and anchor are selected only from scoped durable pane identities.
 Labels are display metadata and never authorize a tab or pane.
 `agent.read` remains a terminal screen/scrollback read, not a semantic result
@@ -329,7 +330,7 @@ DTOs are not part of this crate's public surface; repository isolation belongs i
 The checked-in schema fixture is regenerated from the installed Herdr contract and
 is not rewritten during unrelated API cleanup. The board fixture and typed client
 are currently pinned to **Herdr 0.8.0 / protocol 19**; board protocol v1 and DB
-schema v13 remain independent and unchanged.
+schema v14 remain independent and unchanged.
 
 This repo's current Herdr facts — [`docs/research.md`](research.md),
 [`docs/design.md`](design.md), and the wire shapes hard-coded in `board-herdr` —

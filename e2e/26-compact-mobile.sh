@@ -4,14 +4,12 @@
 #
 # Asserts the Compact contract that 12-cwd-boards and 21-active-run-timer
 # used to check by accident (at whatever width the host window happened to
-# have) and that the `b` regression fix (b => Boards level directly, not
-# Columns) depends on:
-#   - row one shows the global running count and row three renders the focused
-#     column + `(M/A)` + `n/N` (the count is not repeated per column);
-#   - row two has the board dropdown and direct visibility controls with no
-#     `Board:`/`Visible:` prose;
-#   - `b` reaches the board list directly (a known board name appears);
-#   - the header/switcher sheet shows the `[ X ]` close affordance;
+# have):
+#   - row one shows `Project: <name>` and the direct visibility controls;
+#   - row two shows `Board: <name>`;
+#   - row three renders the focused column + `(M/A)` + `n/N`;
+#   - `b` opens the board picker directly (a known board name appears);
+#   - the picker sheet shows the `[ X ]` close affordance;
 #   - a card title in the focused column is visible.
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/lib.sh"
@@ -46,16 +44,18 @@ wait_for() {
   return 1
 }
 
-step "Compact header renders identity/count, board filters, and focused column trigger"
+step "Compact header renders project/board lines, filters, and focused column trigger"
 wait_for 'Todo \(M\) · 1/1' || fail "Compact header did not show the focused column, trigger, and position at 40 cols -- got: $(read_pane)"
 screen="$(read_pane)"
-grep -Fq '● 0 running' <<<"$screen" \
-  || fail "Compact identity did not show the global running count (0) -- got: $screen"
+grep -Fq 'Project:' <<<"$screen" \
+  || fail "Compact row one did not show the Project selector -- got: $screen"
+grep -Fq 'Board:' <<<"$screen" \
+  || fail "Compact row two did not show the Board selector -- got: $screen"
 grep -Eq '\[ (Act|Active) \].*\[ All \].*\[ (Arc|Archived) \]' <<<"$screen" \
-  || fail "Compact row two did not show all visibility controls -- got: $screen"
-! grep -Eq 'Board:|Visible:' <<<"$screen" \
-  || fail "Compact header retained a redundant Board:/Visible: label -- got: $screen"
-ok "Compact header shows global count, direct filters, trigger, and position"
+  || fail "Compact header did not show all visibility controls -- got: $screen"
+! grep -Eq 'Visible:' <<<"$screen" \
+  || fail "Compact header retained a redundant Visible: label -- got: $screen"
+ok "Compact header shows separate Project/Board selectors, direct filters, trigger, and position"
 
 step "The focused column's card title is visible"
 screen="$(read_pane)"
@@ -63,26 +63,26 @@ grep -Fq 'Compact Mobile Card' <<<"$screen" \
   || fail "focused column's card title not visible in the Compact board view"
 ok "card title visible in the focused (only) column"
 
-step "'b' reaches the board list directly (Compact 'b' => Boards level, not Columns)"
+step "'b' opens the board picker directly (Compact 'b' => board picker, not the columns switcher)"
 e2e_herdr_mutate -- pane send-keys "$TUI_PANE" b >/dev/null
-wait_for 'Boards' || fail "switcher sheet did not open after 'b'"
-wait_for 'Global' || fail "board list did not show the known board name 'Global' -- got: $(read_pane)"
-ok "'b' opened the switcher sheet directly at the board list"
+wait_for 'Switch board' || fail "board picker did not open after 'b'"
+wait_for 'main' || fail "board picker did not show the known board name 'main' -- got: $(read_pane)"
+ok "'b' opened the board picker directly"
 
-step "The switcher sheet shows the [ X ] close affordance (not [ Close ])"
+step "The picker sheet shows the [ X ] close affordance (not [ Close ])"
 screen="$(read_pane)"
 grep -Fq '[ X ]' <<<"$screen" \
-  || fail "switcher sheet did not show the [ X ] close affordance"
+  || fail "picker sheet did not show the [ X ] close affordance"
 ! grep -Fq '[ Close ]' <<<"$screen" \
   || fail "legacy [ Close ] button is still visible"
 ok "[ X ] close affordance present"
 
-step "Esc closes the sheet outright (opened directly via 'b', nothing to back out to)"
+step "Esc closes the picker outright (opened directly via 'b', nothing to back out to)"
 e2e_herdr_mutate -- pane send-keys "$TUI_PANE" esc >/dev/null
 wait_for 'Todo \(M\) · 1/1' || fail "board view did not return after Esc"
 screen="$(read_pane)"
 grep -Fq 'Compact Mobile Card' <<<"$screen" \
-  || fail "board view lost its card after closing the switcher"
-ok "Esc closed the sheet and returned to the Compact board view"
+  || fail "board view lost its card after closing the picker"
+ok "Esc closed the picker and returned to the Compact board view"
 
 step "26-compact-mobile: ALL CHECKS PASSED"

@@ -22,14 +22,16 @@ in root Cargo.toml. Never edit another crate. Phase A creates all five crates co
 
 ## Contract versions and source ownership
 
-The final compatibility matrix is: board protocol **v1**, SQLite schema **v13**, and exactly
+The final compatibility matrix is: board protocol **v1**, SQLite schema **v14**, and exactly
 Herdr **0.8.0 / socket protocol 19**. The versioned source of truth is `schema.sql` for fresh
 SQLite databases and `board-core::db` migrations for upgrades; `board-core::protocol` owns the
 board wire DTOs; `board-herdr` owns only the verified Herdr socket surface; and `docs/design.md`
-and `docs/protocol.md` explain behavior rather than defining duplicate serde shapes. Schema v13 adds
-soft-deleted comments and immutable comment-history snapshots; the CLI exposes their nested CRUD
-and history commands while boardd remains the sole SQLite writer. The complete live use-case catalog
-is [`../e2e/README.md`](../e2e/README.md), scenarios **01–36** (through `e2e/36-managed-antigravity.sh`); the safe
+and `docs/protocol.md` explain behavior rather than defining duplicate serde shapes. Schema v14 adds
+projects (canonical-path identity, Global as the special project), per-project named boards,
+persistent selection, and capped recency on top of v13's soft-deleted comments and immutable
+comment-history snapshots; the CLI exposes the project/board subcommands while boardd remains the
+sole SQLite writer. The complete live use-case catalog
+is [`../e2e/README.md`](../e2e/README.md), scenarios **01–37** (through `e2e/37-multi-project.sh`); the safe
 static harness is `e2e/test-harness.sh`, while `e2e/run-all.sh` is the opt-in live gate.
 
 The current Herdr boundary is deliberately narrower than the upstream schema. The 0.8.0/protocol-19
@@ -102,7 +104,7 @@ pub(crate) fn rescue_run_pane(plan: &RescuePlan<'_>) -> Result<RescueOutcome>;
 ## Semantics source of truth
 
 `docs/protocol.md` + `docs/design.md` §5–§8. `schema.sql` at repo root is the current fresh schema
-(embedded and versioned with `PRAGMA user_version`). Schema v13 is current. v8 adds the partial
+(embedded and versioned with `PRAGMA user_version`). Schema v14 is current. v8 adds the partial
 unique index `idx_runs_one_open_per_card` and transactional enqueue/promotion/finalization units of
 work. v9 adds nullable durable timeout deadline/pause timestamps. Promotion writes the deadline in
 its transaction; awaiting pause/resume updates the card and timeout atomically and idempotently,
@@ -123,7 +125,12 @@ reuse that live child: placement protects it from reclaim, waits for protocol-19
 `agent.prompt`. Mint/fork (including fresh columns and retries) retain new-pane startup, and a manual
 landing leaves the last pane open. v12 adds durable anchor identity, while v13 adds
 `comments.deleted_at`, `comment_history`, and its immutable insert-audit
-trigger. The launch spec and system snapshot are both private DB state omitted from board wire DTOs;
+trigger. v14 introduces `projects` (canonical-path identity, Global as project `id=1` with
+`scope_path NULL`), rebuilds `boards` with `project_id` + per-project case-insensitive unique
+names (every project's first board is `main`), and adds the `selection`, `board_selection`,
+`project_recents`, and `board_recents` tables (recency capped at 3). The v13→v14 migration runs
+outside the transaction with foreign keys disabled, moving every existing board into its project
+as `main` so all ids/cards/columns/runs/history are preserved. The launch spec and system snapshot are both private DB state omitted from board wire DTOs;
 comment history is exposed only through `comment.history`. The typed `SpaceKey` preserves
 session/kind/ref null identity. A per-daemon async pass lock prevents competing passes from duplicating
 claims; each pass claims
@@ -176,7 +183,7 @@ A (core+scaffold) → B (herdr client) ∥ C (TUI) → D (daemon+CLI+integration
 - C: insta snapshots via `ratatui::backend::TestBackend` + synthetic key events + FakeBoardClient: empty board (Todo only + hints), board with example pipeline & cards (status glyphs), new-card modal, column form, card detail w/ comments+runs, `?` help, delete-column prompt, move flow.
 - Restart recovery (`board-daemon::supervisor`) is a conservative one-pass classifier. Session resolution and snapshot I/O are injectable and happen before mutation. `Alive` adopts scheduler/watch intent and replays terminal status, `Gone` uses the existing pane-exit finalizer, and `Unknown` does nothing. The apply phase re-reads the open run/card, making duplicate passes idempotent and rejecting stale observations. Startup constructs/runs this pass for the Herdr spawner regardless of whether its initial best-effort client connected. The always-on supervisor then maintains independent per-socket streams and backoff, subscribes before taking a fresh bounded snapshot, and periodically reconciles missed events without resetting healthy sockets.
 - D: integration test (no herdr): start daemon on temp socket + temp DB with LocalSpawner + fake harness script → create card → move to auto column → fake agent comments + done → assert auto-transition, comments, run rows, statuses; timeout path; cancel path; queue serialization (two cards same space key run serially). The daemon comment suite also checks actor ownership, system-comment immutability, soft deletion, audit history, and event routing.
-- E: scenarios `e2e/01-core.sh` through `e2e/36-managed-antigravity.sh` (real Herdr 0.8.0 / socket
+- E: scenarios `e2e/01-core.sh` through `e2e/37-multi-project.sh` (real Herdr 0.8.0 / socket
   protocol 19, fake harnesses): disposable workspaces, pane-first placement, typed prompt delivery,
   bounded same-pane `agent_pane_busy` retry, supervisor recovery, timer refresh, and
   identity-gated cleanup. The managed fixtures use Pi integration v8 and Claude integration v7

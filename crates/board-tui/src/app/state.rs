@@ -10,31 +10,11 @@ use board_core::model::{Column, CommentHistory};
 
 use super::Screen;
 
-/// Which level the Compact switcher sheet is showing.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum SwitcherLevel {
-    /// The current board's columns, plus a trailing "switch board" row.
-    Columns,
-    /// The list of boards (reached via the trailing row).
-    Boards,
-}
-
-/// State for the Compact-only two-level switcher sheet (`Screen::Switcher`).
+/// State for the Compact-only column switcher sheet (`Screen::Switcher`): the
+/// current board's columns plus a trailing "switch board" row (which opens
+/// the board picker) and an "apply template" row.
 pub struct SwitcherState {
-    pub level: SwitcherLevel,
     pub sel: usize,
-    /// The Columns-level selection to restore when backing out of `Boards`
-    /// via `Esc`, rather than resetting to the top row. Only meaningful when
-    /// `entered_at_boards` is `false`.
-    pub columns_sel: usize,
-    /// Whether this sheet was opened directly at `Boards` (`b`, which means
-    /// "switch board") rather than drilled into from `Columns` (the header's
-    /// center-button tap). Determines what `Esc` does at the `Boards` level:
-    /// `true` closes the sheet outright, `false` steps back to `Columns` and
-    /// restores `columns_sel`. Never used at the `Columns` level.
-    pub entered_at_boards: bool,
-    /// Populated on transition to `Boards`; `(label, board_id)`.
-    pub boards: Vec<(String, i64)>,
     /// Where closing this sheet lands. See [`Screen`]'s `return_to` note.
     pub return_to: Screen,
 }
@@ -87,31 +67,45 @@ pub struct Toast {
     pub at: i64,
 }
 
-/// A column picker (move card / choose where a deleted column's cards go).
+/// A project/board picker (switch flows) or a column picker (choose where a
+/// deleted column's cards go). Rows are either concrete items (`(label, id)`)
+/// or trailing action rows that open a follow-up picker/form.
 pub struct Picker {
     pub title: String,
-    pub options: Vec<(String, i64)>,
+    pub rows: Vec<PickerRow>,
     pub sel: usize,
     pub purpose: PickerPurpose,
     /// Where dismissing this picker lands. See [`Screen`]'s `return_to` note.
     pub return_to: Screen,
+    /// The project whose boards a board picker lists; for the project picker
+    /// it is the current project. Unused by the delete-column picker.
+    pub project_id: i64,
 }
 
-#[derive(Clone, Copy)]
+/// One selectable row of a [`Picker`]: either a concrete item (a project or
+/// board id) or a trailing action.
+#[derive(Clone, Debug)]
+pub enum PickerRow {
+    Item(String, i64),
+    Action(String, PickerAction),
+}
+
+/// The trailing action rows a picker can offer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PickerAction {
+    /// Board picker → open the project picker ("⇄ Other projects…").
+    OtherProjects,
+    /// Project picker → open the project-create form ("＋ New project").
+    NewProject,
+    /// Board picker → open the board-create form ("＋ New board").
+    NewBoard,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PickerPurpose {
     SwitchBoard,
-    /// Cross-board move: choosing the destination board (stage 1).
-    MoveCardPickBoard {
-        card_id: i64,
-    },
-    /// Cross-board move: choosing a column of `board_id` (stage 2).
-    MoveCardPickColumn {
-        card_id: i64,
-        board_id: i64,
-    },
-    DeleteColumnMoveTo {
-        column_id: i64,
-    },
+    SwitchProject,
+    DeleteColumnMoveTo { column_id: i64 },
 }
 
 /// Columns as `(label, id)` picker options, optionally without `exclude` — the

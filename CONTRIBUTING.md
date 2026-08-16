@@ -32,7 +32,7 @@ prompts, config, harness adapters), `board-daemon` (orchestration and dispatch),
 The CLI and TUI share the typed `board_core::client::BoardClient`; only boardd touches SQLite.
 Design and protocol: [`docs/design.md`](docs/design.md) and [`docs/protocol.md`](docs/protocol.md);
 index: [`docs/README.md`](docs/README.md). `schema.sql` is the SQLite migration source of truth;
-`scripts/` holds build/install helpers; `e2e/` holds scenarios 01–32 against disposable Herdr
+`scripts/` holds build/install helpers; `e2e/` holds scenarios 01–36 against disposable Herdr
 sessions and workspaces.
 
 ## Gates that must pass

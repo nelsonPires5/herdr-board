@@ -2,7 +2,7 @@
 
 ![Rust](https://img.shields.io/badge/rust-edition%202021-orange.svg)
 ![herdr 0.8.0](https://img.shields.io/badge/herdr-0.8.0-8a2be2)
-![board protocol v1 · schema v13](https://img.shields.io/badge/board-protocol%20v1%20%C2%B7%20schema%20v13-blue.svg)
+![board protocol v1 · schema v14](https://img.shields.io/badge/board-protocol%20v1%20%C2%B7%20schema%20v14-blue.svg)
 ![platforms: linux, macOS](https://img.shields.io/badge/platforms-linux%2C%20macOS-informational)
 
 **Turn a kanban card into a real AI coding agent running in a visible Herdr pane.** Cards hold
@@ -50,8 +50,9 @@ Agents run in visible Herdr panes, one stable `card-<id>` tab per card.
   failed runs to another stage.
 - **Human gates where they matter.** Automatic stages keep moving; manual columns stop the pipeline
   for approval.
-- **One board per project.** The focused pane's Git root selects an independent pipeline; non-Git
-  directories use their canonical CWD. The preserved `Global` board remains available with `b`.
+- **Projects with named boards.** A project is a folder/Git root holding an independent set of
+  named boards (each project's first board is `main`); non-Git directories use their canonical
+  CWD. The preserved `Global` project remains available with `p`.
 - **One binary.** `board` provides the TUI, daemon, and CLI used by both humans and agents.
 - **Session- and workspace-aware.** One daemon can dispatch cards across every Herdr session and
   existing or newly created workspaces.
@@ -138,7 +139,7 @@ prefix is `ctrl+a`, it is `Ctrl+A Shift+K`). Do not reuse `prefix+k` — it is H
 - Requires exactly **Herdr 0.8.0 (socket protocol 19)**, Git, and a Rust toolchain with `cargo`;
   Linux and macOS are supported. The daemon rejects any other Herdr version or protocol before
   workspace discovery and pane launch.
-- Board protocol **v1**, SQLite schema **v13** (`schema.sql`; upgrades via `board-core::db`).
+- Board protocol **v1**, SQLite schema **v14** (`schema.sql`; upgrades via `board-core::db`).
 - The installer copies the `board` CLI to `~/.local/bin` — make sure that directory is on your
   `PATH` (`HERDR_BOARD_CLI_INSTALL_DIR` overrides it before installing).
 - Without the harness integration the board still dispatches and accepts `board done`, but runs in
@@ -179,7 +180,7 @@ board move <new-card-id> Execute
 | Key | Action | Key | Action |
 |---|---|---|---|
 | `←/→` or `h/l` | Focus column | `↑/↓` or `k/j` | Focus card |
-| `b` | Switch project/Global board | `n` | New card |
+| `p` / `b` | Switch project / board selectors | `n` | New card |
 | `N` | New column | `Enter` | Card detail |
 | `m` | Move card picker | `o` (detail) | Jump to selected run's pane |
 | `M` / `O` | Reorder focused column / selected card | `H / L` | Move card left/right |
@@ -195,7 +196,7 @@ board move <new-card-id> Execute
 |---|---|---|---|---|
 | `←/→ h/l` | focus column | | `Enter` | card detail |
 | `↑/↓ k/j` | focus card | | `T` | apply template (empty board only) |
-| `b` | switch board | | `r` | refresh board |
+| `p` / `b` | switch project / board | | `r` | refresh board |
 | `n` | new card | | `?` | help |
 | `N` | new column | | `q / Esc` | back / quit |
 | `e` | edit card | | **card detail** | |
@@ -223,21 +224,25 @@ board move <new-card-id> Execute
 full reference** — every flag, every return shape, and the agent lifecycle rules. `board skill`
 prints those exact bytes, so a dispatched agent can read the contract it is held to.
 
-`--board` and `--json` are **global**: both parse before or after the subcommand.
+`--board`, `--project`, and `--json` are **global**: all parse before or after the subcommand.
 
 ```bash
 board --board <ID|PATH> card list --json
 board card list --board <ID|PATH> --json     # identical
+board --project /path/to/repo board list
 ```
 
-`--board` takes a stable board id or canonical scope path. Without it, board-aware commands use the
-focused Git root (or canonical non-Git CWD; `BOARD_SCOPE_PATH` overrides both). Card-id operations
-infer the card's own board; `card create`, `card list`, `column list`, and board commands use the
+`--board` takes a stable board id or canonical scope path; `--project` takes a canonical scope path
+(a Git root or existing directory). Without them, board-aware commands use the **selected project**
+(and its selected board); the first board-aware command bootstraps the selection from the focused
+Git root (or canonical non-Git CWD; `BOARD_SCOPE_PATH` overrides both). Card-id operations infer
+the card's own board; `card create`, `card list`, `column list`, and board commands use the
 selected/current board.
 
 | Noun | Verbs |
 |---|---|
-| `board board` | `list`, `show`, `open`, `rename` |
+| `board project` | `list`, `show [PATH]`, `create PATH`, `select PATH [--board ID|NAME]` |
+| `board board` | `list [--all|--project PATH]`, `show [ID|PATH|NAME]`, `open PATH`, `create NAME [--project PATH]`, `select ID|NAME [--project PATH]`, `rename [SELECTOR] NAME` |
 | `board template` | `apply <NAME>` |
 | `board card` | `create` (alias `new`), `edit`, `show`, `list`, `move`, `duplicate`, `archive`, `restore`, `delete` |
 | `board card comment` | `add`, `show`, `edit`, `delete`, `history` |
@@ -249,8 +254,9 @@ selected/current board.
 
 Legacy top-level forms stay supported and re-dispatch into the nested handlers: `board comment`,
 `board done`, `board move`, `board cancel`, `board retry`. `card new` and `--to-board` remain
-aliases. Cross-board `move` should use `--destination-board`; the old global-`--board` fallback still
-works but warns on stderr.
+aliases. Cross-board `move` should use `--destination-board`; a cross-**project** move uses
+`--to-project PATH --to-board NAME|ID`. The old global-`--board` fallback still works but warns on
+stderr.
 
 ### Daemon
 
@@ -283,7 +289,7 @@ The exit status carries the same number, so scripts branch on `$?` instead of pa
 
 - [`docs/README.md`](docs/README.md) — the documentation index (design, protocol, herdr facts,
   testing, releasing), the single source of the
-  [test gates](docs/README.md#test-gates-single-source), and the `e2e/` catalog (scenarios 01–36);
+  [test gates](docs/README.md#test-gates-single-source), and the `e2e/` catalog (scenarios 01–37);
 - [`docs/configuration.md`](docs/configuration.md) — `config.toml`, `[daemon]` settings,
   config-defined harnesses, and every environment variable;
 - [`docs/operations.md`](docs/operations.md) — update, uninstall, and local-development
