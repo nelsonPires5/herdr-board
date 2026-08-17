@@ -33,7 +33,7 @@ command -v cargo >/dev/null 2>&1 || {
 echo "build.sh: cargo build --release -p board-cli (repo: $repo_root)"
 cargo build --release -p board-cli
 
-bin="$repo_root/target/release/board"
+bin="${CARGO_TARGET_DIR:-$repo_root/target}/release/board"
 if [ ! -x "$bin" ]; then
   echo "build.sh: expected binary not found at $bin" >&2
   exit 1
