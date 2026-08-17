@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- [#97](https://github.com/nelsonPires5/herdr-board/pull/97) feat: run the full gate set, live E2E, shell/CLI/TUI sessions, and opted-in provider smokes in an isolated Docker sandbox (`scripts/sandbox.sh`).
+
 ## [0.15.0] - 2026-08-16
 
 ### Added
