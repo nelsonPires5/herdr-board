@@ -32,6 +32,7 @@ isolation is an agent prompt concern, not a board space primitive.
 | [releasing.md](releasing.md) | The release contract: the `dev`/`main` branch model (feature → dev, action-owned promotion to main, hotfix, back-merge), Prepare Release, version bumps, CI-gated tagging/publishing, artifacts, reruns, and tag policy. | are cutting a release or need the repo's release policy. |
 | [herdr.md](herdr.md) | How to learn and verify **Herdr** facts (there is no man page): the live sources of truth (`herdr api schema --json`, `herdr <cmd> --help`, `herdr api snapshot`), the Herdr 0.8.0/protocol-19 delta, per-harness integrations, and the exact compatibility gate. | hit a Herdr command/shape that misbehaves, or need to confirm what the installed Herdr actually does. |
 | [testing.md](testing.md) | The testing pyramid in this repo (unit/pure → daemon+CLI integration → TUI snapshots → live E2E), how the provider-free fake Pi/Claude suite works (including the current pane-first scenarios 16/17, whose filenames are historical), and how to write a scenario. The use case ↔ scenario catalog lives in [`../e2e/README.md`](../e2e/README.md). | are adding a feature and need to test it, or are writing/running the live E2E suite. |
+| [sandbox.md](sandbox.md) | The Docker sandbox (`scripts/sandbox.sh`): running the full gate set and every live E2E scenario in an isolated, network-disabled, non-root container from a read-only worktree mount; shell/CLI/TUI use against a container-local Herdr; the explicit real-provider smoke opt-in; artifacts, cache reset, architecture behavior, and troubleshooting. | want a fast edit-test loop without touching the host's active Herdr, board daemon, or sessions. |
 
 The [`schema.sql`](../schema.sql) at the repo root is the fresh SQLite schema; migration behavior
 and upgrade tests live in `board-core::db`. Before handoff, check that docs still point to existing
@@ -53,6 +54,7 @@ python3 -m unittest discover -s scripts/tests -p 'test_docs.py'
 python3 -m unittest discover -s scripts/tests -p 'test_prepare_release.py'
 python3 -m unittest discover -s scripts/tests -p 'test_install_cli.py'
 python3 -m unittest discover -s scripts/tests -p 'test_stage_claude_config.py'
+python3 -m unittest discover -s scripts/tests -p 'test_sandbox.py'
 python3 -m unittest discover -s scripts/tests -p 'test_e2e_*.py'
 bash e2e/test-harness.sh
 bash e2e/ci.sh
