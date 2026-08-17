@@ -17,6 +17,11 @@ cargo build            # or ./scripts/build.sh for the release binary herdr's [[
 cargo run -p board-cli -- tui   # run the board locally
 ```
 
+Prefer not to run Herdr and the test suite against your own machine? The Docker sandbox gives an
+agent-friendly edit-test loop in an isolated container (works with Colima on macOS and Docker
+Engine on Linux): `./scripts/sandbox.sh prepare` once, then `./scripts/sandbox.sh gates` — see
+[`docs/sandbox.md`](docs/sandbox.md).
+
 ## Architecture
 
 One `board` binary, five workspace crates: `board-core` (models, protocol, database, engine,
