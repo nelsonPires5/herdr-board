@@ -1,0 +1,9 @@
+{
+  "artifactReviewPolicy": "always-proceed",
+  "colorScheme": "dark",
+  "enableTelemetry": false,
+  "notifications": false,
+  "showFeedbackSurvey": false,
+  "toolPermission": "always-proceed",
+  "trustedWorkspaces": ["/home/board", "/home/board/work"]
+}

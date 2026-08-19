@@ -155,6 +155,17 @@ prefix is `ctrl+a`, it is `Ctrl+A Shift+K`). Do not reuse `prefix+k` — it is H
 
 </details>
 
+## Developing in the Docker sandbox
+
+Contributors and coding agents can run the complete test gates — including every live E2E scenario
+against a container-local Herdr — without touching the host's active Herdr, board daemon, or
+sessions: `./scripts/sandbox.sh prepare` once, then `./scripts/sandbox.sh gates` after every edit.
+It also opens shells, runs `board` CLI commands and the interactive TUI against the isolated
+environment, and gates real-provider agent dispatches (pi/codex/antigravity) behind an explicit
+opt-in with the provider credentials mounted read-only. Works with Docker
+Engine on Linux and Colima on macOS, on amd64 and arm64. See
+[`docs/sandbox.md`](docs/sandbox.md).
+
 ## Quickstart
 
 1. Open the board: `herdr plugin action invoke open-board --plugin herdr-board` (or your keybinding).

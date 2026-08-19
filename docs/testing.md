@@ -441,6 +441,8 @@ bash e2e/ci.sh                  # CI-equivalent pin/verify/run/export wrapper (L
 e2e/run-all.sh 04 07            # only scenarios matching a filename filter
 scripts/e2e.sh                  # compat wrapper -> run-all.sh
 bash e2e/test-harness.sh         # static Linux/macOS safety gate; no Herdr
+scripts/sandbox.sh gates        # the whole gate set + all scenarios in an isolated container
+                                 # (Docker/Colima; see docs/sandbox.md)
 bash e2e/01-core.sh             # a single scenario (boots its own ephemeral session)
 E2E_REAL_PI=1 e2e/real-pi-smoke.sh  # explicit real-provider opt-in; may incur cost
 E2E_REAL_PI=1 E2E_REAL_PI_MODEL=openai-codex/gpt-5.3 E2E_REAL_PI_EFFORT=high e2e/real-pi-smoke.sh  # model/effort overrides; model must exist in `pi --list-models`
