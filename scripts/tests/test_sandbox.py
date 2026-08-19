@@ -45,13 +45,42 @@ def sandbox(
     )
 
 
+def _stub_provider(home: str, prov: str) -> None:
+    """Create the minimum credential + Herdr-integration files a provider
+    pre-check requires (stubs; never real credentials)."""
+    root = Path(home)
+    if prov == "pi":
+        d = root / ".pi" / "agent"
+        (d / "extensions").mkdir(parents=True)
+        for f in ("auth.json", "settings.json", "extensions/herdr-agent-state.ts"):
+            (d / f).write_text("stub\n", encoding="utf-8")
+    elif prov == "codex":
+        d = root / ".codex"
+        d.mkdir()
+        for f in ("auth.json", "config.toml", "herdr-agent-state.sh"):
+            (d / f).write_text("stub\n", encoding="utf-8")
+    elif prov == "antigravity":
+        d = root / ".gemini"
+        (d / "antigravity-cli").mkdir(parents=True)
+        (d / "config" / "hooks").mkdir(parents=True)
+        for f in ("config/config.json", "antigravity-cli/antigravity-oauth-token",
+                  "oauth_creds.json", "google_accounts.json", "state.json",
+                  "installation_id", "antigravity-cli/jetski_state.pbtxt",
+                  "config/hooks/herdr-agent-state.sh"):
+            p = d / f
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("stub\n", encoding="utf-8")
+    else:
+        raise AssertionError(prov)
+
+
 class ArgumentHandlingTests(unittest.TestCase):
     def test_help_exits_zero_and_lists_subcommands(self) -> None:
         proc = sandbox("--help")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         for sub in (
             "gates", "prepare", "selfcheck", "shell", "board", "tui",
-            "smoke", "artifacts", "lock", "down", "reset", "doctor",
+            "agent", "artifacts", "lock", "down", "reset", "doctor",
         ):
             self.assertIn(sub, proc.stdout)
 
@@ -68,29 +97,43 @@ class ArgumentHandlingTests(unittest.TestCase):
         proc = sandbox("--nope", "gates")
         self.assertEqual(proc.returncode, 2)
 
-    def test_smoke_requires_provider(self) -> None:
-        proc = sandbox("smoke", "--allow-network")
+    def test_agent_requires_provider(self) -> None:
+        proc = sandbox("agent", "--allow-network")
         self.assertEqual(proc.returncode, 2)
         self.assertIn("--provider", proc.stderr)
 
-    def test_smoke_requires_explicit_network_opt_in(self) -> None:
-        proc = sandbox("smoke", "--provider", "codex")
+    def test_agent_requires_explicit_network_opt_in(self) -> None:
+        proc = sandbox("agent", "--provider", "codex")
         self.assertEqual(proc.returncode, 2)
         self.assertIn("--allow-network", proc.stderr)
 
-    def test_smoke_refuses_pi_before_any_launch(self) -> None:
-        proc = sandbox("smoke", "--provider", "pi", "--allow-network")
-        self.assertEqual(proc.returncode, 2)
-        self.assertIn("WezTerm", proc.stderr)
+    def test_agent_accepts_pi_and_antigravity(self) -> None:
+        # pi and antigravity are now first-class agent providers (the old
+        # host-only smoke refusals are gone): with credentials present they
+        # must reach the docker phase instead of being refused up front.
+        for prov in ("pi", "codex", "antigravity"):
+            with tempfile.TemporaryDirectory() as home:
+                _stub_provider(home, prov)
+                env_extra = {"HOME": home}
+                if prov == "codex":
+                    env_extra["CODEX_HOME"] = str(Path(home) / ".codex")
+                proc = sandbox("--dry-run", "agent", "--provider", prov,
+                               "--allow-network", env_extra=env_extra)
+            self.assertEqual(proc.returncode, 0, f"{prov}: {proc.stderr}")
+            self.assertIn("docker run -d", proc.stdout, prov)
 
-    def test_smoke_refuses_antigravity_before_any_launch(self) -> None:
-        proc = sandbox("smoke", "--provider", "antigravity", "--allow-network")
+    def test_agent_rejects_unknown_provider(self) -> None:
+        proc = sandbox("agent", "--provider", "gpt", "--allow-network")
         self.assertEqual(proc.returncode, 2)
-        self.assertIn("Antigravity", proc.stderr)
 
-    def test_smoke_rejects_unknown_provider(self) -> None:
-        proc = sandbox("smoke", "--provider", "gpt", "--allow-network")
-        self.assertEqual(proc.returncode, 2)
+    def test_agent_rejects_provider_with_tui_seed(self) -> None:
+        # --seed seeds one card per harness (all three); a lone --provider could
+        # never scope it, so the wrapper must reject the combination instead of
+        # mounting one provider while seeding cards for three.
+        proc = sandbox("--dry-run", "agent", "--provider", "pi",
+                       "--allow-network", "--tui", "--seed")
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn("--tui --seed seeds all three", proc.stderr)
 
     def test_board_requires_arguments(self) -> None:
         proc = sandbox("--dry-run", "board")
@@ -106,14 +149,34 @@ class ArgumentHandlingTests(unittest.TestCase):
 
     def test_missing_credentials_fail_before_container_launch(self) -> None:
         # A HOME with no provider credentials at all must fail the pre-launch
-        # checks without ever reaching docker.
+        # checks without ever reaching docker, for every agent provider.
+        for prov in ("pi", "codex", "antigravity"):
+            with tempfile.TemporaryDirectory() as home:
+                env_extra = {"HOME": home}
+                if prov == "codex":
+                    env_extra["CODEX_HOME"] = str(Path(home) / ".codex")
+                proc = sandbox(
+                    "agent", "--provider", prov, "--allow-network",
+                    env_extra=env_extra,
+                )
+            self.assertEqual(proc.returncode, 2, prov)
+            self.assertIn("missing", proc.stderr.lower())
+            self.assertNotIn("docker run", proc.stdout)
+
+    def test_missing_integration_hook_fails_before_launch(self) -> None:
+        # A provider whose credential dir exists but whose Herdr integration
+        # hook file is absent must be refused before any container launch.
         with tempfile.TemporaryDirectory() as home:
+            d = Path(home) / ".codex"
+            d.mkdir()
+            for f in ("auth.json", "config.toml"):
+                (d / f).write_text("stub\n", encoding="utf-8")
             proc = sandbox(
-                "smoke", "--provider", "codex", "--allow-network",
-                env_extra={"HOME": home, "CODEX_HOME": str(Path(home) / ".codex")},
+                "agent", "--provider", "codex", "--allow-network",
+                env_extra={"HOME": home, "CODEX_HOME": str(d)},
             )
         self.assertEqual(proc.returncode, 2)
-        self.assertIn("missing Codex config dir", proc.stderr)
+        self.assertIn("herdr-agent-state.sh", proc.stderr)
         self.assertNotIn("docker run", proc.stdout)
 
 
@@ -173,24 +236,39 @@ class DryRunIsolationTests(unittest.TestCase):
         out = self.dry_gates()
         self.assertRegex(out, r"--tmpfs /tmp:rw,exec,nosuid,nodev,")
 
-    def test_smoke_dry_run_enables_network_only_with_opt_in(self) -> None:
+    def test_agent_dry_run_enables_network_only_with_opt_in(self) -> None:
         # Without --allow-network there is no docker run at all (pre-checks
-        # fail first); with it, the network is on and secrets mount read-only.
+        # fail first); with it, the network is on (no --network none) and the
+        # opted-in credential dir mounts read-only at /secrets.
         with tempfile.TemporaryDirectory() as home:
-            codex = Path(home) / ".codex"
-            codex.mkdir()
-            for f in ("auth.json", "config.toml", "herdr-agent-state.sh"):
-                (codex / f).write_text("stub\n", encoding="utf-8")
+            _stub_provider(home, "codex")
             proc = sandbox(
-                "--dry-run", "smoke", "--provider", "codex", "--allow-network",
-                env_extra={"HOME": home, "CODEX_HOME": str(codex)},
+                "--dry-run", "agent", "--provider", "codex", "--allow-network",
+                env_extra={"HOME": home, "CODEX_HOME": str(Path(home) / ".codex")},
             )
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        run_lines = [ln for ln in proc.stdout.splitlines() if "docker run" in ln]
-        self.assertTrue(run_lines, "smoke dry-run printed no docker run")
+        run_lines = [ln for ln in proc.stdout.splitlines() if "docker run -d" in ln]
+        self.assertTrue(run_lines, "agent dry-run printed no agent container run")
         self.assertNotIn("--network none", " ".join(run_lines))
-        self.assertIn(f"-v {codex}:/secrets/codex:ro", proc.stdout)
-        self.assertIn("-e E2E_REAL_CODEX=1", proc.stdout)
+        self.assertIn(f"-v {Path(home) / '.codex'}:/secrets/codex:ro", proc.stdout)
+        self.assertIn("-e AGY_BIN=", proc.stdout)
+
+    def test_agent_dedicated_state_volume_and_no_host_state_leak(self) -> None:
+        # The agent container runs on its own state volume (never the offline
+        # environment container's), so it cannot collide with or inherit the
+        # offline sandbox's herdr/board state.
+        with tempfile.TemporaryDirectory() as home:
+            _stub_provider(home, "pi")
+            proc = sandbox(
+                "--dry-run", "agent", "--provider", "pi", "--allow-network",
+                env_extra={"HOME": home},
+            )
+        agent_start = " ".join(ln for ln in proc.stdout.splitlines() if "--name" in ln)
+        self.assertRegex(agent_start, r"--name hb-sb-[a-z0-9-]+-agent ")
+        mounts = re.findall(r"-v (\S+):/home/board", agent_start)
+        self.assertEqual(len(mounts), 1, agent_start)
+        self.assertTrue(mounts[0].endswith("-agent-state"), agent_start)
+        self.assertNotIn("-env ", agent_start)
 
 
 class PinningTests(unittest.TestCase):
@@ -230,6 +308,19 @@ class PinningTests(unittest.TestCase):
         self.assertIn("--uid 1000", text)
         self.assertIsNotNone(re.search(r"^USER board\s*$", text, re.M))
 
+    def test_provider_cli_node_version_is_pinned(self) -> None:
+        text = DOCKERFILE.read_text(encoding="utf-8")
+        # pi 0.84.x requires Node >= 22.19.0; the image must carry a pinned
+        # Node 22 LTS (the Debian bookworm node is 18 and too old), verified
+        # by SHA-256 per architecture, with no floating tags anywhere.
+        self.assertIn("NODE_VERSION=22.23.2", text)
+        self.assertIn("node-v${NODE_VERSION}-linux-x64.tar.xz", text)
+        self.assertIn("node-v${NODE_VERSION}-linux-arm64.tar.xz", text)
+        self.assertIn("22.19.0", text)
+        self.assertIn("d60acfe00a2932254bb0ad20e01b0d74397a0875595de719654b214f4b03f307", text)
+        self.assertIn("fff4078c5def658577f92c88db7db3bc0072924bfb93fe52c1e744a54e94abb8", text)
+        self.assertNotIn("nodejs npm", text)
+
 
 class CleanupTests(unittest.TestCase):
     def test_reset_only_touches_sandbox_prefixed_resources(self) -> None:
@@ -255,25 +346,146 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertNotIn("docker.sock", text)
         self.assertNotRegex(text, r"-v /var/run")
 
-    def test_host_secrets_mount_only_in_smoke_path(self) -> None:
+    def test_host_secrets_mount_only_in_agent_path(self) -> None:
         text = WRAPPER.read_text(encoding="utf-8")
-        smoke_start = text.index("cmd_smoke()")
+        agent_start = text.index("# Agent mode")
         for m in re.finditer(r"/secrets", text):
-            self.assertGreater(m.start(), smoke_start, "/secrets mount outside cmd_smoke")
+            self.assertGreater(m.start(), agent_start, "/secrets mount outside the agent mode")
 
-    def test_provider_optin_env_only_in_smoke_path(self) -> None:
+    def test_agent_provider_env_only_in_agent_path(self) -> None:
         text = WRAPPER.read_text(encoding="utf-8")
-        smoke_start = text.index("cmd_smoke()")
-        for marker in ("E2E_REAL_CLAUDE_HAIKU=1", "E2E_REAL_CODEX=1", "E2E_REAL_OPENCODE=1"):
-            self.assertGreater(text.index(marker), smoke_start, marker)
+        agent_start = text.index("# Agent mode")
+        for marker in ("AGY_BIN=", "agent-entrypoint.sh", "agent-run.sh",
+                       "agent-prepare.sh", "agent_base_flags()"):
+            self.assertGreater(text.index(marker), agent_start, marker)
 
     def test_docker_dir_scripts_exist_and_are_bash(self) -> None:
         for name in ("lib.sh", "selfcheck.sh", "gates.sh", "prepare.sh",
-                     "env-entrypoint.sh", "smoke.sh", "lock.sh"):
+                     "env-entrypoint.sh", "agent-prepare.sh", "agent-entrypoint.sh",
+                     "agent-run.sh", "lock.sh"):
             path = DOCKER_DIR / name
             self.assertTrue(path.is_file(), name)
             self.assertTrue(path.stat().st_mode & 0o111, f"{name} not executable")
             self.assertTrue(path.read_text(encoding="utf-8").startswith("#!"), name)
+
+    def test_agy_tarball_pins_exist_for_both_arches(self) -> None:
+        pins = (DOCKER_DIR / "agy-pin.txt").read_text(encoding="utf-8")
+        arm = "6189cf6291625a56c510e80f57489531721bca152ced838e6925725e5ddd9d3d1bfd74b2c379f328d4a2b68a91c383f865d7a0433f707ba8b75ac0fcd96aea00"
+        amd = "481f590b102ca6847ef13b865f08d457048a1f3f01851ed2a3818eb09a53264b107ca5e442a8677248d9790fd96eccf4918a2aed82d866b23d294422ba42f67e"
+        self.assertIn("arm64", pins)
+        self.assertIn("amd64", pins)
+        self.assertIn(arm, pins)
+        self.assertIn(amd, pins)
+        # every pin line spells version/url/sha512 and uses no floating version
+        for line in pins.splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            for tok in ("version=", "url=", "sha512="):
+                self.assertIn(tok, line)
+            self.assertRegex(line, r"sha512=[0-9a-f]{128}")
+
+    def test_agent_prepare_pins_clis_and_verifies_checksums(self) -> None:
+        text = (DOCKER_DIR / "agent-prepare.sh").read_text(encoding="utf-8")
+        # exact pinned npm versions, no floating tags
+        self.assertIn("@earendil-works/pi-coding-agent@0.84.2", text)
+        self.assertIn("@openai/codex@0.147.0", text)
+        self.assertNotIn("npm install --prefix \"$npm_prefix\" \"$npm_pkg\"", text)
+        # agy: pinned file download + sha512 verification, never install.sh
+        self.assertIn("agy-pin.txt", text)
+        self.assertIn("sha512sum --check", text)
+        self.assertNotIn("antigravity.google/cli/install.sh", text)
+        self.assertIn("/artifacts", text)  # evidence written, never credentials
+        self.assertNotIn("/secrets", text)  # prepare never sees host secrets
+        # codex needs a WRITABLE config.toml (it persists the directory-trust
+        # answer into it): a checked-in minimal container config is installed,
+        # never the host's macOS-specific one.
+        self.assertIn("agent-codex-config.toml", text)
+
+    def test_agent_codex_config_is_minimal_and_leaks_no_host_paths(self) -> None:
+        cfg = (DOCKER_DIR / "agent-codex-config.toml").read_text(encoding="utf-8")
+        # pre-trusts the container workspace dirs so a headless run never
+        # blocks on the codex "trust this directory?" prompt
+        for trust in ('[projects."/"]', '[projects."/home/board"]',
+                      '[projects."/home/board/work"]'):
+            self.assertIn(trust, cfg)
+        self.assertIn('trust_level = "trusted"', cfg)
+        # no host/macOS leakage: no Homebrew, no /Applications, no user paths
+        self.assertNotIn("/Users/", cfg)
+        self.assertNotIn("/Applications", cfg)
+        self.assertNotIn("/opt/homebrew", cfg)
+        # credentials are never part of this config
+        self.assertNotIn("auth.json", cfg)
+
+    def test_agent_agy_settings_skips_onboarding_and_leaks_no_host_paths(self) -> None:
+        cfg = (DOCKER_DIR / "agent-agy-settings.json").read_text(encoding="utf-8")
+        # agy opens a first-run color-scheme wizard unless the CLI settings
+        # exist; the seeded checked-in file pre-selects the UI and auto-proceeds
+        # tools so a headless dispatch never blocks on an interactive prompt.
+        self.assertIn('"colorScheme": "dark"', cfg)
+        self.assertIn('"toolPermission": "always-proceed"', cfg)
+        for trust in ('"/home/board"', '"/home/board/work"'):
+            self.assertIn(trust, cfg)
+        # no host/macOS leakage, no credentials
+        self.assertNotIn("/Users/", cfg)
+        self.assertNotIn("/Applications", cfg)
+        self.assertNotIn("/opt/homebrew", cfg)
+        self.assertNotIn("auth.json", cfg)
+
+    def test_agent_entrypoint_wires_creds_ro_and_fails_closed(self) -> None:
+        text = (DOCKER_DIR / "agent-entrypoint.sh").read_text(encoding="utf-8")
+        # credentials are read-only symlinks from /secrets (never copied)
+        self.assertIn("ln -sfn", text)
+        self.assertIn('/secrets/codex', text)
+        self.assertIn("fatal", text)
+        self.assertIn("herdr integration status", text)
+        self.assertIn("gemini-3.7-flash", text)
+        self.assertIn("exec herdr server", text)
+        # surgical wiring: codex config.toml is NOT symlinked from the ro
+        # source (it must be writable); pi links only the herdr extension;
+        # the host moshi voice extension is never wired.
+        self.assertNotIn('"config.toml"', text)
+        self.assertIn("herdr-agent-state.ts", text)
+        self.assertNotIn("moshi", text)
+        self.assertIn("onboarding.json", text)  # agy color-scheme wizard skipped
+        self.assertIn("agent-agy-settings.json", text)
+        self.assertIn("jetski_state.pbtxt", text)  # host install identity so the
+        # account-eligibility gate never re-triggers in a headless run
+        text_no_comment = "\n".join(l for l in text.splitlines()
+                                     if not l.lstrip().startswith("#"))
+        # the pi extension list is restricted to the herdr integration
+        self.assertIn("extensions/herdr-agent-state.ts", text_no_comment)
+
+    def test_agent_run_uses_auto_column_and_bounded_watchdog(self) -> None:
+        text = (DOCKER_DIR / "agent-run.sh").read_text(encoding="utf-8")
+        self.assertIn('--trigger "$trigger"', text)
+        self.assertIn("board done --outcome ok", text)
+        self.assertIn("seq 1 2400", text)  # 20 min watchdog at 0.5s
+        self.assertIn("new-workspace", text)
+        self.assertIn("/artifacts", text)
+        # headless approval presets per harness (codex/antigravity block on
+        # interactive prompts otherwise)
+        self.assertIn('codex) perm="approve-for-me"', text)
+        self.assertIn('antigravity) perm="sandbox"', text)
+        self.assertIn('--permission "$perm"', text)
+
+    def test_agent_run_ensure_column_fails_closed_on_trigger_mismatch(self) -> None:
+        # Regressions from final review P1: a stale volume must never silently
+        # auto-dispatch seeded cards (an auto 'Todo') or park one-shots (a
+        # manual 'Running'). ensure_column must verify the trigger of an
+        # existing same-named column and fail rather than reuse it.
+        text = (DOCKER_DIR / "agent-run.sh").read_text(encoding="utf-8")
+        self.assertIn("'.trigger'", text)
+        self.assertIn('refusing to use a mismatched column', text)
+        self.assertIn("already exists with trigger", text)
+
+    def test_agent_entrypoint_creates_cache_and_clears_stale_socket(self) -> None:
+        # Regressions from final review P1: a fresh agent-state volume must
+        # have antigravity-cli/cache before the onboarding marker is written,
+        # and a torn-down predecessor must not leave a stale socket that a
+        # fresh herdr server cannot bind.
+        text = (DOCKER_DIR / "agent-entrypoint.sh").read_text(encoding="utf-8")
+        self.assertIn('"$base/antigravity-cli/cache"', text)
+        self.assertIn("rm -f /home/board/.config/herdr/herdr.sock", text)
 
     def test_selfcheck_asserts_the_isolation_contract(self) -> None:
         text = (DOCKER_DIR / "selfcheck.sh").read_text(encoding="utf-8")

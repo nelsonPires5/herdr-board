@@ -4,8 +4,8 @@
 # Runs the repository's deterministic gate set (including every provider-free
 # live Herdr e2e scenario) inside a disposable, network-disabled, non-root
 # container; provides a persistent container-local Herdr + board daemon for
-# shell/CLI/TUI use; and gates real-provider smoke tests behind an explicit
-# network + credential opt-in.
+# shell/CLI/TUI use; and gates real-provider agent dispatches (pi/codex/
+# antigravity) behind an explicit network + read-only credential opt-in.
 #
 # Supported hosts: Docker Engine on Linux, Docker via Colima on macOS
 # (amd64 and arm64). See docs/sandbox.md for the full guide.
@@ -43,9 +43,18 @@ Subcommands:
   shell                      Interactive bash against container-local Herdr
   board <args...>            Run a board CLI command in the sandbox environment
   tui                        Open the interactive TUI in the sandbox environment
-  smoke --provider <p> --allow-network
-                             Real-provider smoke test (claude|codex|opencode);
-                             explicit network + credential opt-in
+  agent --provider <p> --allow-network [--model M] [--effort E]
+                             One-shot end-to-end real-provider dispatch in the
+                             sandbox (pi|codex|antigravity): a card runs in a
+                             dedicated agent container and must finish ok
+  agent --allow-network --tui [--seed]
+                             Start the persistent agent sandbox (network +
+                             read-only credentials) and open the interactive
+                             TUI; --seed adds one card per harness into Todo so
+                             you can drag them into Running. The agent
+                             container is torn down when the TUI quits
+  (CURRENCY NOTE: every agent run — one-shot or a dragged seeded card — makes
+   real paid provider API calls; --allow-network is the explicit opt-in)
   artifacts [DEST]           Copy sandbox artifacts to the host
                              (default: ~/.cache/herdr-board/sandbox-artifacts/<ts>)
   lock                       Regenerate Cargo.lock in a network container and
@@ -61,7 +70,9 @@ Examples:
   scripts/sandbox.sh gates
   scripts/sandbox.sh gates 03-sessions        # e2e iteration on one scenario
   scripts/sandbox.sh board card list --json
-  scripts/sandbox.sh smoke --provider codex --allow-network
+  scripts/sandbox.sh agent --provider pi --allow-network
+  scripts/sandbox.sh agent --provider codex --allow-network --model gpt-5.6-luna --effort low
+  scripts/sandbox.sh agent --allow-network --tui   # all three harnesses in the TUI
 EOF
 }
 
@@ -88,9 +99,12 @@ VOL_STATE="$PREFIX-state"
 VOL_ARTIFACTS="$PREFIX-artifacts"
 VOL_TMP="$PREFIX-tmp"
 ENV_CONTAINER="$PREFIX-env"
+VOL_AGENT_STATE="$PREFIX-agent-state"
+AGENT_CONTAINER="$PREFIX-agent"
 
 INNER_PATH="/home/board/.local/bin:/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin"
-SMOKE_PATH="/home/board/.npm-global/bin:/home/board/.local/bin:/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin"
+AGENT_PATH="/home/board/.npm-global/bin:/home/board/.local/bin:/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin"
+AGENT_BIN="/home/board/.local/bin/agy"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -375,9 +389,9 @@ cmd_reset() {
   local scope="${1:-}"
   [ -n "$scope" ] || die "reset needs a scope: --cargo|--target|--state|--artifacts|--image|--all"
   case "$scope" in
-    --cargo) run docker rm -f "$ENV_CONTAINER" >/dev/null 2>&1 || true; run docker volume rm "$VOL_CARGO" ;;
+    --cargo) run docker rm -f "$ENV_CONTAINER" "$AGENT_CONTAINER" >/dev/null 2>&1 || true; run docker volume rm "$VOL_CARGO" ;;
     --target) run docker volume rm "$VOL_TARGET" ;;
-    --state) run docker rm -f "$ENV_CONTAINER" >/dev/null 2>&1 || true; run docker volume rm "$VOL_STATE" ;;
+    --state) run docker rm -f "$ENV_CONTAINER" "$AGENT_CONTAINER" >/dev/null 2>&1 || true; run docker volume rm "$VOL_STATE" "$VOL_AGENT_STATE" ;;
     --artifacts) run docker volume rm "$VOL_ARTIFACTS" ;;
     --image)
       local hash
@@ -386,8 +400,8 @@ cmd_reset() {
       run docker rmi "hb-sandbox:$hash-$PLATFORM" || true
       ;;
     --all)
-      run docker rm -f "$ENV_CONTAINER" >/dev/null 2>&1 || true
-      run docker volume rm "$VOL_CARGO" "$VOL_TARGET" "$VOL_STATE" "$VOL_ARTIFACTS" "$VOL_TMP"
+      run docker rm -f "$ENV_CONTAINER" "$AGENT_CONTAINER" >/dev/null 2>&1 || true
+      run docker volume rm "$VOL_CARGO" "$VOL_TARGET" "$VOL_STATE" "$VOL_AGENT_STATE" "$VOL_ARTIFACTS" "$VOL_TMP"
       local hash
       hash="$(image_hash)"
       resolve_platform
@@ -398,80 +412,175 @@ cmd_reset() {
   info "reset $scope: done"
 }
 
-cmd_smoke() {
-  local provider="" allow_network=0
+# ---------------------------------------------------------------------------
+# Agent mode (real-provider dispatches in a dedicated network container)
+# ---------------------------------------------------------------------------
+agent_base_flags() { # base isolation profile with the DEDICATED agent state vol
+  local flags
+  flags="$(base_flags | grep -v -- "-v $VOL_STATE:/home/board")"
+  printf '%s\n-v %s:/home/board\n' "$flags" "$VOL_AGENT_STATE"
+}
+
+agent_ensure_state() { # agent-state volume + reuse the offline-built board binary
+  if [ "$DRY_RUN" -eq 1 ]; then
+    run docker volume create "$VOL_AGENT_STATE" >/dev/null
+  elif ! docker volume inspect "$VOL_AGENT_STATE" >/dev/null 2>&1; then
+    run docker volume create "$VOL_AGENT_STATE" >/dev/null
+  fi
+  if [ "$DRY_RUN" -eq 0 ]; then
+    docker run --rm --user 0:0 --network none -v "$VOL_AGENT_STATE":/home/board \
+      --entrypoint bash "$IMAGE_TAG" -c 'chown -R 1000:1000 /home/board' >/dev/null
+    if ! docker run --rm --user 0:0 --network none \
+      -v "$VOL_STATE":/src:ro -v "$VOL_AGENT_STATE":/dst \
+      --entrypoint bash "$IMAGE_TAG" \
+      -c 'mkdir -p /dst/.local/bin && cp -f /src/.local/bin/board /dst/.local/bin/board 2>/dev/null && chown 1000:1000 /dst/.local/bin/board' >/dev/null 2>&1; then
+      die "board is not built in the sandbox yet; run: scripts/sandbox.sh prepare"
+    fi
+  fi
+}
+
+agent_provision_clis() { # pinned provider CLIs into the agent state volume
+  info "agent: provisioning pinned provider CLIs ($AGENT_CONTAINER state volume)"
+  local flags
+  flags="$(agent_base_flags | grep -v '^--network none$')"
+  # shellcheck disable=SC2086
+  run docker run --rm $flags "$IMAGE_TAG" bash /repo/docker/agent-prepare.sh
+}
+
+cmd_agent() {
+  local provider="" model="" effort="" allow_network=0 tui=0 seed=0
+  local providers=() mounts=() env_args=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --provider) [ $# -ge 2 ] || die "--provider needs a value"; provider="$2"; shift 2 ;;
+      --model) [ $# -ge 2 ] || die "--model needs a value"; model="$2"; shift 2 ;;
+      --effort) [ $# -ge 2 ] || die "--effort needs a value"; effort="$2"; shift 2 ;;
       --allow-network) allow_network=1; shift ;;
-      *) die "unknown smoke flag '$1'" ;;
+      --tui) tui=1; shift ;;
+      --seed) seed=1; shift ;;
+      *) die "unknown agent flag '$1'" ;;
     esac
   done
-  [ -n "$provider" ] || die "smoke needs --provider <claude|codex|opencode>"
-  case "$provider" in
-    pi) die "refusing: the real Pi smoke requires a WezTerm GUI on the host (wezterm cli); run it on the host instead: E2E_REAL_PI=1 bash e2e/real-pi-smoke.sh" ;;
-    antigravity) die "refusing: there is no real-provider Antigravity smoke in this repository" ;;
-    claude|codex|opencode) ;;
-    *) die "unknown provider '$provider' (supported: claude, codex, opencode)" ;;
-  esac
-  [ "$allow_network" -eq 1 ] || die "smoke requires the explicit --allow-network opt-in (real provider calls cost money)"
+  [ "$allow_network" -eq 1 ] || die "agent requires the explicit --allow-network opt-in (real provider calls cost money)"
 
-  # Host-side credential pre-checks: fail BEFORE any container launch.
-  case "$provider" in
-    claude)
-      local d="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-      [ -d "$d" ] || die "missing Claude config dir: $d"
-      for f in .credentials.json settings.json remote-settings.json; do
-        [ -f "$d/$f" ] || die "missing Claude credential/config file: $d/$f"
-      done
-      ;;
-    codex)
-      local d="${CODEX_HOME:-$HOME/.codex}"
-      [ -d "$d" ] || die "missing Codex config dir: $d"
-      for f in auth.json config.toml herdr-agent-state.sh; do
-        [ -f "$d/$f" ] || die "missing Codex file: $d/$f (herdr-agent-state.sh comes from: herdr integration install codex)"
-      done
-      ;;
-    opencode)
-      local cfg="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
-      local data="${XDG_DATA_HOME:-$HOME/.local/share}/opencode"
-      [ -f "$cfg/opencode.json" ] || die "missing OpenCode config: $cfg/opencode.json"
-      [ -d "$data" ] || die "missing OpenCode data dir: $data"
-      ;;
-  esac
+  if [ -n "$provider" ]; then
+    case "$provider" in
+      pi|codex|antigravity) providers=("$provider") ;;
+      *) die "unknown provider '$provider' (supported: pi, codex, antigravity)" ;;
+    esac
+  elif [ "$tui" -eq 1 ]; then
+    providers=(pi codex antigravity)
+  else
+    die "agent needs --provider <pi|codex|antigravity> (or --tui for the interactive sandbox with all harnesses)"
+  fi
+
+  # --seed seeds one card per harness (all three); a lone --provider could
+  # never scope that, so reject the combination instead of mounting one
+  # provider while creating cards for three.
+  if [ "$seed" -eq 1 ] && [ -n "$provider" ]; then
+    die "--tui --seed seeds all three harnesses; drop --provider (one-shot needs --provider without --tui --seed)"
+  fi
+
+  # Host credential + Herdr integration pre-checks: fail BEFORE any launch.
+  local p
+  for p in "${providers[@]}"; do
+    case "$p" in
+      pi)
+        local d="$HOME/.pi/agent"
+        [ -d "$d" ] || die "missing Pi agent dir: $d"
+        for f in auth.json settings.json extensions/herdr-agent-state.ts; do
+          [ -f "$d/$f" ] || die "missing Pi file: $d/$f (herdr-agent-state.ts comes from: herdr integration install pi)"
+        done
+        ;;
+      codex)
+        local d="${CODEX_HOME:-$HOME/.codex}"
+        [ -d "$d" ] || die "missing Codex config dir: $d"
+        for f in auth.json config.toml herdr-agent-state.sh; do
+          [ -f "$d/$f" ] || die "missing Codex file: $d/$f (herdr-agent-state.sh comes from: herdr integration install codex)"
+        done
+        ;;
+      antigravity)
+        local d="$HOME/.gemini"
+        [ -d "$d" ] || die "missing Antigravity config dir: $d"
+        for f in config/config.json antigravity-cli/antigravity-oauth-token \
+                 oauth_creds.json google_accounts.json state.json installation_id \
+                 antigravity-cli/jetski_state.pbtxt config/hooks/herdr-agent-state.sh; do
+          [ -e "$d/$f" ] || die "missing Antigravity credential/hook: $d/$f (hook comes from: herdr integration install antigravity-cli)"
+        done
+        ;;
+    esac
+  done
 
   docker_no_daemon_hint
   resolve_platform
   ensure_image
   ensure_volumes
   init_volumes
-  info "smoke: network enabled + only the '$provider' credential dir mounted read-only"
-  local flags secrets_env=()
-  flags="$(base_flags | grep -v '^--network none$' | grep -v '^--tmpfs /tmp:.*$')"
-  case "$provider" in
-    claude)
-      flags="$flags
--v ${CLAUDE_CONFIG_DIR:-$HOME/.claude}:/secrets/claude:ro"
-      secrets_env=(-e CLAUDE_CONFIG_DIR=/secrets/claude -e E2E_REAL_CLAUDE_HAIKU=1)
-      ;;
-    codex)
-      flags="$flags
--v ${CODEX_HOME:-$HOME/.codex}:/secrets/codex:ro"
-      secrets_env=(-e CODEX_HOME=/secrets/codex -e E2E_REAL_CODEX=1)
-      ;;
-    opencode)
-      flags="$flags
--v ${XDG_CONFIG_HOME:-$HOME/.config}/opencode:/secrets/opencode/opencode:ro
--v ${XDG_DATA_HOME:-$HOME/.local/share}/opencode:/secrets/opencode/data/opencode:ro"
-      secrets_env=(-e XDG_CONFIG_HOME=/secrets/opencode -e XDG_DATA_HOME=/secrets/opencode/data -e E2E_REAL_OPENCODE=1)
-      ;;
-  esac
-  flags="$flags
--v $VOL_TMP:/tmp
--e PATH=$SMOKE_PATH"
-  # shellcheck disable=SC2086
-  run docker run --rm $flags "${secrets_env[@]}" \
-    "$IMAGE_TAG" bash /repo/docker/smoke.sh "$provider"
+  agent_ensure_state
+  agent_provision_clis
+
+  info "agent: starting real-provider container ($AGENT_CONTAINER)"
+  local flags i
+  flags="$(agent_base_flags | grep -v '^--network none$')"
+  for p in "${providers[@]}"; do
+    case "$p" in
+      pi) mounts+=("-v" "$HOME/.pi/agent:/secrets/pi/agent:ro") ;;
+      codex) mounts+=("-v" "${CODEX_HOME:-$HOME/.codex}:/secrets/codex:ro") ;;
+      antigravity) mounts+=("-v" "$HOME/.gemini:/secrets/gemini:ro") ;;
+    esac
+  done
+  env_args=(-e AGY_BIN="$AGENT_BIN" -e PATH="$AGENT_PATH")
+  if [ "$DRY_RUN" -eq 1 ]; then
+    # --dry-run documents every step; the real docker calls stay quiet below.
+    run docker rm -f "$AGENT_CONTAINER"
+    # shellcheck disable=SC2086
+    run docker run -d --name "$AGENT_CONTAINER" --init $flags "${mounts[@]}" "${env_args[@]}" \
+      "$IMAGE_TAG" bash /repo/docker/agent-entrypoint.sh
+  else
+    docker rm -f "$AGENT_CONTAINER" >/dev/null 2>&1 || true
+    # shellcheck disable=SC2086
+    docker run -d --name "$AGENT_CONTAINER" --init $flags "${mounts[@]}" "${env_args[@]}" \
+      "$IMAGE_TAG" bash /repo/docker/agent-entrypoint.sh >/dev/null
+  fi
+  # Install the teardown trap immediately after launch, so an interruption
+  # during the readiness wait also tears the (networked) agent container down.
+  cleanup_agent() { run docker rm -f "$AGENT_CONTAINER" >/dev/null 2>&1 || true; }
+  trap cleanup_agent EXIT INT TERM
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    info "(dry-run) agent herdr server ready (would wait for the socket)"
+  else
+    local i
+    for i in $(seq 1 120); do
+      # functional probe, not just a socket file: a stale socket left in the
+      # persisted volume by a torn-down predecessor must not count as ready
+      if docker exec "$AGENT_CONTAINER" herdr api snapshot >/dev/null 2>&1; then
+        info "agent herdr server ready (agent state socket)"
+        break
+      fi
+      sleep 0.5
+      if [ "$i" -eq 120 ]; then
+        run docker rm -f "$AGENT_CONTAINER" >/dev/null 2>&1 || true
+        die "agent herdr did not become ready (see agent-entrypoint preflight); try: scripts/sandbox.sh doctor"
+      fi
+    done
+  fi
+
+  if [ "$tui" -eq 1 ]; then
+    if [ "$seed" -eq 1 ]; then
+      info "agent: seeding one card per harness into Todo (drag them to Running to dispatch)"
+      # shellcheck disable=SC2086
+      run docker exec -e PATH="$AGENT_PATH" -e AGY_BIN="$AGENT_BIN" "$AGENT_CONTAINER" bash /repo/docker/agent-run.sh seed
+    fi
+    info "agent: opening the TUI ($AGENT_CONTAINER; q quits and tears the container down)"
+    run docker exec -it -e PATH="$AGENT_PATH" -e AGY_BIN="$AGENT_BIN" -e TERM="${TERM:-xterm-256color}" "$AGENT_CONTAINER" board tui
+  else
+    [ -n "$provider" ] || die "one-shot agent mode needs --provider"
+    info "agent: dispatching one real '$provider' run (model '${model:-default}', effort '${effort:-low}')"
+    # shellcheck disable=SC2086
+    run docker exec -e PATH="$AGENT_PATH" -e AGY_BIN="$AGENT_BIN" "$AGENT_CONTAINER" bash \
+      /repo/docker/agent-run.sh one-shot "$provider" "$model" "$effort"
+  fi
 }
 
 cmd_doctor() {
@@ -495,6 +604,8 @@ cmd_doctor() {
   local state
   state="$(docker container inspect -f '{{.State.Status}}' "$ENV_CONTAINER" 2>/dev/null || echo absent)"
   echo "env:       $ENV_CONTAINER ($state)"
+  state="$(docker container inspect -f '{{.State.Status}}' "$AGENT_CONTAINER" 2>/dev/null || echo absent)"
+  echo "agent:     $AGENT_CONTAINER ($state; real-provider, network + ro secrets)"
   echo "disk:"
   docker system df 2>/dev/null | sed 's/^/           /' || true
 }
@@ -520,7 +631,7 @@ case "$SUBCOMMAND" in
   shell) cmd_shell "$@" ;;
   board) cmd_board "$@" ;;
   tui) cmd_tui "$@" ;;
-  smoke) cmd_smoke "$@" ;;
+  agent) cmd_agent "$@" ;;
   artifacts) cmd_artifacts "$@" ;;
   lock) cmd_lock "$@" ;;
   down) cmd_down "$@" ;;

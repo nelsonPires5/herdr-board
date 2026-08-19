@@ -12,12 +12,12 @@ Local test and development runs use the Docker sandbox by default:
 `./scripts/sandbox.sh gates` runs every gate and the live E2E suite in an isolated,
 network-disabled, non-root container with the worktree read-only (setup, modes, and
 troubleshooting: [`docs/sandbox.md`](docs/sandbox.md)). Do **not** run `cargo test`,
-`e2e/run-all.sh`/`e2e/ci.sh`, the TUI, or real-provider smokes directly against the host
+`e2e/run-all.sh`/`e2e/ci.sh`, the TUI, or real-provider agent runs directly against the host
 Herdr/board — that conflicts with the user's active environment. Follow the
 [`development-workflow` skill](.agents/skills/development-workflow/SKILL.md) for the
-edit-test loop, interactive shell/board CLI/TUI, the explicit opt-in smokes, visual
-validation through the sandbox, and the handoff checklist. Host-side execution is an
-explicit, documented exception only.
+edit-test loop, interactive shell/board CLI/TUI, the explicit opt-in real-provider agent
+mode (pi/codex/antigravity), visual validation through the sandbox, and the handoff
+checklist. Host-side execution is an explicit, documented exception only.
 
 ## Workspace layout & crate ownership
 

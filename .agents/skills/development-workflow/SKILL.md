@@ -1,6 +1,6 @@
 ---
 name: development-workflow
-description: Default sandbox-first developer workflow for herdr-board. Run every test gate and the live Herdr E2E suite through scripts/sandbox.sh in an isolated, network-disabled, non-root container (worktree read-only); never run cargo tests, the live E2E suite, the TUI, or provider smokes directly against the host Herdr/board. Covers the one-command edit-test loop, interactive shell/board CLI/TUI, the explicit opt-in real-provider smokes, artifact/cache housekeeping, and the visual-validation stage (references/visual-validation.md) for TUI work through the sandbox.
+description: Default sandbox-first developer workflow for herdr-board. Run every test gate and the live Herdr E2E suite through scripts/sandbox.sh in an isolated, network-disabled, non-root container (worktree read-only); never run cargo tests, the live E2E suite, the TUI, or real-provider agent runs directly against the host Herdr/board. Covers the one-command edit-test loop, interactive shell/board CLI/TUI, the explicit opt-in real-provider agent mode (pi/codex/antigravity), artifact/cache housekeeping, and the visual-validation stage (references/visual-validation.md) for TUI work through the sandbox.
 ---
 
 # Development workflow (sandbox-first)
@@ -21,7 +21,7 @@ the thin policy + routing layer on top of it; it does not duplicate the guide.
 
 1. Every local test run goes through the sandbox:
    `./scripts/sandbox.sh gates`. Do NOT run `cargo test`, `e2e/run-all.sh`,
-   `e2e/ci.sh`, the TUI, or provider smokes directly against the host.
+   `e2e/ci.sh`, the TUI, or real-provider agent runs directly against the host.
 2. The host is never a test or run target for this repository's own state:
    no host `BOARD_*`, `HERDR_*`, or provider variables are forwarded, no host
    Herdr/board sockets, sessions, workspaces, databases, the Docker socket, or
@@ -31,8 +31,8 @@ the thin policy + routing layer on top of it; it does not duplicate the guide.
    output, databases, sockets, logs, and artifacts live in per-worktree named
    volumes outside the repository. Build output goes to the `/repo/target`
    volume so the herdr plugin contract `./target/release/board` keeps working.
-4. Real-provider smokes run **only** through the explicit opt-in mode
-   (`smoke --provider X --allow-network`). Without both, the command fails
+4. Real-provider agent runs happen **only** through the explicit opt-in mode
+   (`agent --provider X --allow-network`). Without both, the command fails
    before any container launches with a clear message.
 5. Visual (TUI) work routes through the sandbox when Docker/Colima is
    available — see the **visual-validation stage** below. Host-isolated
@@ -87,23 +87,28 @@ exactly like on a host. Everything in there is disposable: Herdr sessions,
 workspaces, board database, and sockets live in the container and its state
 volume. Stop it with `scripts/sandbox.sh down`.
 
-## 4. Real-provider smoke tests (explicit opt-in only)
+## 4. Real-provider agent mode (explicit opt-in only)
+
+The sandbox dispatches a **real provider end to end** (pi, codex, or
+antigravity) in a dedicated agent container with network access and the
+provider's credentials mounted read-only:
 
 ```bash
-./scripts/sandbox.sh smoke --provider claude   --allow-network
-./scripts/sandbox.sh smoke --provider codex    --allow-network
-./scripts/sandbox.sh smoke --provider opencode --allow-network
+./scripts/sandbox.sh agent --provider pi         --allow-network
+./scripts/sandbox.sh agent --provider codex      --allow-network --model gpt-5.6-luna --effort low
+./scripts/sandbox.sh agent --provider antigravity --allow-network   # gemini-3.7-flash, effort low
+./scripts/sandbox.sh agent --allow-network --tui --seed      # all 3 harnesses in the TUI, drag to dispatch
 ```
 
-This is the only mode with network access. It requires **both** `--provider`
-and `--allow-network`; missing credentials or a missing opt-in fail **before**
-any container launch, with a clear message. Only the chosen provider's
-credential directory is mounted, read-only, at `/secrets` (respecting
-`CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `XDG_*` overrides). Provider CLIs are
-Linux binaries installed at smoke time into the state volume; credentials are
-never copied into the image or logs. `pi` is refused pre-launch (the real Pi
-smoke requires a WezTerm GUI on the host) and `antigravity` is refused (no
-in-repo real smoke) — with the reasons printed; nothing silently skips.
+It requires **both** a provider (unless `--tui`) and `--allow-network`;
+missing credentials or a missing Herdr integration hook fail **before** any
+container launches, with a message naming the host prerequisite. Host
+prerequisites (one-time, reversible): provider login + `herdr integration
+install pi|codex|antigravity-cli`. CLIs are pinned (pi 0.84.2, codex 0.147.0,
+agy via SHA-512-verified tarball). Credentials are mounted read-only at
+`/secrets/<provider>` and wired into the writable agent HOME through read-only
+symlinks — never copied into the image, the logs, or other modes. Everything
+runs only inside the sandbox; nothing reaches the host provider config.
 
 ## 5. Housekeeping
 

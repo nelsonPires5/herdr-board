@@ -1,0 +1,26 @@
+# Minimal codex config for the sandbox AGENT container (checked-in, no host
+# leakage). Written writable into CODEX_HOME (~/.codex/config.toml) by
+# agent-prepare.sh so codex can persist runtime state (e.g. trusted
+# directories) — the host's own config carries macOS-only absolute paths,
+# desktop/notify settings and dependency mcp_servers that are meaningless
+# here and must never be mirrored.
+#
+# The daemon passes --model/-c model_reasoning_effort and the approval preset
+# on the card, so this file only pins safe defaults and pre-trusts the
+# container workspace directories so codex never prompts "Do you trust this
+# directory?" in a headless run.
+#
+# Credentials are never part of this file.
+model = "gpt-5.6-luna"
+model_reasoning_effort = "low"
+approval_policy = "never"
+sandbox_mode = "workspace-write"
+
+[projects."/"]
+trust_level = "trusted"
+
+[projects."/home/board"]
+trust_level = "trusted"
+
+[projects."/home/board/work"]
+trust_level = "trusted"

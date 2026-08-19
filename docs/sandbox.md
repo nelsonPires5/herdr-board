@@ -129,33 +129,72 @@ fake-client TUI path (snapshot tests in `board-tui`) remains part of `gates`
 for deterministic visual checks — the Docker path adds the real thing on top,
 it does not replace it.
 
-## Real-provider smoke tests (explicit opt-in)
+## Real-provider agent mode (explicit opt-in)
+
+The sandbox can run a **real provider end to end** (pi, codex, or antigravity)
+in a dedicated agent container that has network access and the provider's
+credentials mounted read-only. This replaces the earlier host-side single-call
+smoke: a card actually runs against the real provider and must finish
+`board done --outcome ok`.
 
 ```bash
-scripts/sandbox.sh smoke --provider claude   --allow-network
-scripts/sandbox.sh smoke --provider codex    --allow-network
-scripts/sandbox.sh smoke --provider opencode --allow-network
+scripts/sandbox.sh agent --provider codex --allow-network
+scripts/sandbox.sh agent --provider pi       --allow-network --model opencode-go/deepseek-v4-flash --effort low
+scripts/sandbox.sh agent --provider antigravity --allow-network   # model gemini-3.7-flash, effort low
+scripts/sandbox.sh agent --allow-network --tui --seed        # all three harnesses in the interactive TUI
 ```
 
-This is the only mode with network access. It requires **both** the provider
-choice and `--allow-network`; missing credentials or a missing opt-in fail
-**before** any container launches, with a clear message. Only the chosen
-provider's credential directory is mounted, read-only, at `/secrets`:
-`~/.claude`, `~/.codex`, or `~/.config/opencode` + `~/.local/share/opencode`
-(respecting `CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `XDG_*` overrides). The host
-must have the matching Herdr integration installed once
-(`herdr integration install <provider>`) — the smoke scripts stage configs
-from those directories themselves. Provider CLIs are Linux binaries installed
-at smoke time into the state volume (never into the image, never logged).
-Credentials are never copied into the image, the logs, or other modes.
+This is the only mode with network access (besides `prepare`/`lock`). It
+requires **both** a provider choice (if not `--tui`) and `--allow-network`;
+missing credentials or a missing Herdr integration hook fail **before** any
+container launches, with a clear message naming the host prerequisite.
 
-`pi` is refused with a pointer to the host-side command (the real Pi smoke
-requires a WezTerm GUI), and `antigravity` is refused (no real-provider
-Antigravity smoke exists in this repository). These refusals are deliberate:
-nothing silently skips.
+> **Cost:** one-shot dispatch and every seeded card you drag into "Running"
+> start a real agent that makes **paid provider API calls**. The cheap
+defaults above keep the cost low, but nothing in this mode is free and
+nothing is rate-limited.
 
-Each smoke makes at most one real provider call — the same one-attempt cost
-guard as on the host.
+**Host prerequisites (one-time, reversible):** the host must already be
+logged in to each provider and have the matching Herdr integration hook
+installed — `herdr integration install pi`, `herdr integration install
+codex`, `herdr integration install antigravity-cli` (confirm with
+`herdr integration status`; `pi` is usually already present). Locally:
+
+- pi:        `~/.pi/agent` (auth.json, settings.json, `extensions/herdr-agent-state.ts`)
+- codex:     `~/.codex` (auth.json, config.toml, `herdr-agent-state.sh`)
+- antigravity: `~/.gemini` (oauth creds + `jetski_state.pbtxt` install identity + `config/hooks/herdr-agent-state.sh`)
+
+The agent container runs on its **own state volume** (`...-agent-state`), so
+it never collides with the offline environment container. The pinned provider
+CLIs (pi 0.84.2, codex 0.147.0, and antigravity from a pinned tarball) are
+installed there by `docker/agent-prepare.sh`; the antigravity tarball is
+verified against the SHA-512 pin in `docker/agy-pin.txt`, never fetched via
+the floating `install.sh`. Credentials are never copied into the image, the
+logs, or other modes: they are mounted read-only at `/secrets/<provider>` and
+wired into the writable container HOME through read-only symlinks (the agent's
+own session/cache state stays in the agent state volume).
+
+The agent entrypoint preflights `herdr integration status` inside the
+container (fails closed on a missing/outdated hook) and, for antigravity,
+requires the live `agy --output-format json models` catalog to offer
+`gemini-3.7-flash` before the daemon starts. Default models/efforts (all
+cheap):
+
+| provider | model | effort |
+|---|---|---|
+| pi | `opencode-go/deepseek-v4-flash` | low |
+| codex | `gpt-5.6-luna` | low |
+| antigravity | `gemini-3.7-flash` | low |
+
+One-shot (`agent --provider <p> ...`) dispatches a single card onto an auto
+"Running" column (column timeout 15 min), polls up to a 20-minute watchdog,
+and requires `board done --outcome ok`; the agent container is torn down on
+exit. With `--tui` the agent container stays up: `--seed` creates one card per
+harness in the manual "Todo" column so you can drag cards into "Running" and
+watch each real harness run in the sandbox TUI (quitting the TUI tears the
+agent container down). Evidence (sanitized: versions/checksums, card/run JSON,
+herdr snapshots — never credentials or raw env) is written under `/artifacts`
+and copied out with `scripts/sandbox.sh artifacts`.
 
 ## Artifacts, cache reset, and cleanup
 
@@ -211,6 +250,6 @@ run, the gate fails loudly.
 | `docker/gates.sh` | Gate sequence with named first failure and e2e evidence export. |
 | `docker/prepare.sh` | Dependency fetch + `board` build (network-enabled step). |
 | `docker/env-entrypoint.sh` | Persistent environment container (Herdr server). |
-| `docker/smoke.sh` | Real-provider smoke runner (opt-in network + credentials). |
+| `docker/agent-prepare.sh`, `docker/agent-entrypoint.sh`, `docker/agent-run.sh`, `docker/agy-pin.txt` | Real-provider agent mode: pinned CLI install (SHA-verified agy tarball), credential symlinking + fail-closed integration preflight, and the in-container one-shot/seed runner. |
 | `docker/lock.sh` | Lockfile regeneration through a single-file write-back mount. |
 | `scripts/tests/test_sandbox.py` | Daemon-free contract tests: arguments, isolation defaults, pinning, cleanup, refusals. |

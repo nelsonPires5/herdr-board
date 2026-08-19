@@ -1,0 +1,18 @@
+# Antigravity CLI pinned release tarballs, one per architecture.
+#
+# Source of truth: the official release manifest
+#   https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_<arch>.json
+# whose entries are {version, url, sha512}. The sha512 below is the value
+# published in that manifest, and the arm64 value was additionally verified
+# against the downloaded tarball bytes (sha512sum) before pinning. The
+# install-time path (docker/agent-prepare.sh) re-verifies the sha512 of the
+# actual downloaded asset, so a tampered/desynced artifact never installs.
+#
+# HARD RULE: never install with the floating install.sh
+# (https://antigravity.google/cli/install.sh) — it would fetch an unpinned,
+# latest-version tarball. Download the exact pinned asset and verify it.
+#
+# Format: <arch>  version=<v>  url=<src>  sha512=<hex>
+
+arm64  version=1.1.14  url=https://storage.googleapis.com/antigravity-public/antigravity-cli/1.1.14-6392696810635264/linux-arm/cli_linux_arm64.tar.gz  sha512=6189cf6291625a56c510e80f57489531721bca152ced838e6925725e5ddd9d3d1bfd74b2c379f328d4a2b68a91c383f865d7a0433f707ba8b75ac0fcd96aea00
+amd64  version=1.1.14  url=https://storage.googleapis.com/antigravity-public/antigravity-cli/1.1.14-6392696810635264/linux-x64/cli_linux_x64.tar.gz  sha512=481f590b102ca6847ef13b865f08d457048a1f3f01851ed2a3818eb09a53264b107ca5e442a8677248d9790fd96eccf4918a2aed82d866b23d294422ba42f67e

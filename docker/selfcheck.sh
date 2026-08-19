@@ -5,8 +5,8 @@
 # modes. Any failure exits non-zero.
 #
 # HB_SELFCHECK_NETWORK=on flips the network expectation for modes that
-# legitimately enable the network (explicit real-provider smoke opt-in); every
-# mount and identity check still applies there.
+# legitimately enable the network (the explicit real-provider agent opt-in);
+# every mount and identity check still applies there.
 set -euo pipefail
 selfcheck_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 # shellcheck source=lib.sh
