@@ -65,8 +65,23 @@ const EXPECTED: &[(Screen, &str, &str)] = &[
     (Screen::Picker, "--", "-- picker / confirm --"),
     (Screen::Picker, "↑/↓ k/j", "move selection"),
     (Screen::Picker, "Enter", "choose"),
+    (Screen::Picker, "v", "cycle active/all/archived"),
+    (Screen::Picker, "a", "archive board/project"),
+    (Screen::Picker, "r", "restore board/project"),
+    (Screen::ProjectPicker, "↑/↓ k/j", "move selection"),
+    (Screen::ProjectPicker, "Enter", "choose"),
+    (Screen::ProjectPicker, "v", "cycle active/all/archived"),
+    (Screen::ProjectPicker, "a", "archive board/project"),
+    (Screen::ProjectPicker, "r", "restore board/project"),
+    (Screen::BoardPicker, "↑/↓ k/j", "move selection"),
+    (Screen::BoardPicker, "Enter", "choose"),
+    (Screen::BoardPicker, "v", "cycle active/all/archived"),
+    (Screen::BoardPicker, "a", "archive board/project"),
+    (Screen::BoardPicker, "r", "restore board/project"),
     (Screen::Confirm, "y / n", "confirm / decline"),
     (Screen::Picker, "q / Esc", "cancel"),
+    (Screen::ProjectPicker, "q / Esc", "cancel"),
+    (Screen::BoardPicker, "q / Esc", "cancel"),
     (Screen::MoveColumn, "--", "-- move column (M) --"),
     (Screen::MoveColumn, "←/→ h/l", "stage the reorder"),
     (Screen::MoveColumn, "Enter", "commit the reorder"),
@@ -93,8 +108,8 @@ const EXPECTED: &[(Screen, &str, &str)] = &[
 fn contract_freezes_the_exact_72_row_interaction_table() {
     assert_eq!(
         HELP_KEYS.len(),
-        72,
-        "the interaction contract must stay at exactly 72 bindings"
+        87,
+        "the interaction contract must stay at exactly 87 bindings"
     );
     assert_eq!(EXPECTED.len(), HELP_KEYS.len());
     for (idx, (expected, actual)) in EXPECTED.iter().zip(HELP_KEYS.iter()).enumerate() {

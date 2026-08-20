@@ -66,8 +66,17 @@ routes!(d, params, {
     ),
     "board.create" => boards::board_create(d, from(params)?),
     "board.select" => boards::board_select(d, from(params)?),
-    "project.list" => projects::project_list(d),
+    "board.archive" => boards::board_archive(d, from(params)?),
+    "project.list" => projects::project_list(
+        d,
+        if params.is_null() {
+            ProjectListParams::default()
+        } else {
+            from(params)?
+        },
+    ),
     "project.get" => projects::project_get(d, from(params)?),
+    "project.archive" => projects::project_archive(d, from(params)?),
     "project.open" => projects::project_open(d, from(params)?),
     "project.create" => projects::project_create(d, from(params)?),
     "project.select" => projects::project_select(d, from(params)?),

@@ -2,12 +2,17 @@
 //! returns *decisions* (target column, new statuses, system-comment text,
 //! validation verdicts). The daemon executes the resulting effects.
 
+pub mod archive;
 mod columns;
 mod lifecycle;
 mod signals;
 mod transitions;
 mod validation;
 
+pub use archive::{
+    decide_board_archive, decide_new_work_on_board, decide_new_work_on_project,
+    decide_project_archive, ArchivedDestination, BoardArchiveRejection, ProjectArchiveRejection,
+};
 pub use columns::resolve_column;
 pub use lifecycle::{
     decide_lifecycle, FinalizePlan, LifecycleAction, LifecycleDecision, LifecycleFacts,

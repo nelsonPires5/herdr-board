@@ -61,7 +61,9 @@ impl Driver {
     /// when opened via `p`, the board picker when drilled into via "⇄ Other
     /// projects…".
     pub(super) fn load_project_picker(&mut self) {
-        let r = self.client.project_list();
+        let r = self
+            .client
+            .project_list_visible(Some(self.app.picker_visibility));
         let Some(result) = self.guard(r) else {
             return;
         };
@@ -125,7 +127,14 @@ impl Driver {
     /// drilled from its "switch board" row, the project picker when drilled
     /// from a project choice.
     pub(super) fn load_board_picker(&mut self, project_id: Option<i64>) {
-        self.refresh_projects();
+        // Refresh the cache with the current picker visibility so the board list
+        // inside each ProjectInfo reflects the same filter the picker is showing.
+        let r = self
+            .client
+            .project_list_visible(Some(self.app.picker_visibility));
+        if let Some(result) = self.guard(r) {
+            self.install_projects(result);
+        }
         let target_id = project_id.unwrap_or(self.app.board.board.project_id);
         let Some(info) = self
             .app

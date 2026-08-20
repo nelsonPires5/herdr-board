@@ -10,9 +10,9 @@
 use rusqlite::{params, OptionalExtension, Transaction};
 
 use super::rows;
-use super::{constraints, Db};
+use super::{constraints, rows::PROJECT_SELECT, Db};
 use crate::model::{Board, Project};
-use crate::protocol::{ProjectDetail, ProjectInfo, ProjectListResult};
+use crate::protocol::{ProjectDetail, ProjectInfo, ProjectListResult, Visibility};
 use crate::{Error, Result};
 
 /// A fresh board gets exactly one seeded column: manual `Todo` at position 0.
@@ -32,7 +32,7 @@ impl Db {
     pub fn get_project(&self, id: i64) -> Result<Project> {
         self.conn
             .query_row(
-                "SELECT id, scope_path FROM projects WHERE id=?1",
+                &format!("{PROJECT_SELECT} WHERE id=?1"),
                 params![id],
                 rows::row_to_project,
             )
@@ -44,7 +44,7 @@ impl Db {
 
     pub fn get_project_by_scope(&self, scope_path: &str) -> Result<Option<Project>> {
         rows::opt(self.conn.query_row(
-            "SELECT id, scope_path FROM projects WHERE scope_path=?1",
+            &format!("{PROJECT_SELECT} WHERE scope_path=?1"),
             params![scope_path],
             rows::row_to_project,
         ))
@@ -60,10 +60,29 @@ impl Db {
         })
     }
 
+    fn project_visibility_clause(visibility: Option<Visibility>) -> &'static str {
+        match visibility.unwrap_or(Visibility::Active) {
+            Visibility::Active => "WHERE archived_at IS NULL",
+            Visibility::Archived => "WHERE archived_at IS NOT NULL",
+            Visibility::All => "",
+        }
+    }
+
     /// All projects, ordered by folder name (case-insensitive) with the
     /// special Global project last — the deterministic picker source order.
+    /// Default excludes archived projects.
     pub fn list_projects(&self) -> Result<Vec<Project>> {
-        let mut stmt = self.conn.prepare("SELECT id, scope_path FROM projects")?;
+        self.list_projects_filtered(None)
+    }
+
+    pub fn list_projects_filtered(&self, visibility: Option<Visibility>) -> Result<Vec<Project>> {
+        let clause = Self::project_visibility_clause(visibility);
+        let sql = if clause.is_empty() {
+            PROJECT_SELECT.to_string()
+        } else {
+            format!("{PROJECT_SELECT} {clause}")
+        };
+        let mut stmt = self.conn.prepare(&sql)?;
         let mut projects = stmt
             .query_map([], rows::row_to_project)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -90,7 +109,7 @@ impl Db {
         // double-create (the UNIQUE index is the final guard either way).
         let existing = tx
             .query_row(
-                "SELECT id, scope_path FROM projects WHERE scope_path=?1",
+                &format!("{PROJECT_SELECT} WHERE scope_path=?1"),
                 params![scope_path],
                 rows::row_to_project,
             )
@@ -116,10 +135,25 @@ impl Db {
 
     /// The board a project context lands on: its persisted selected board,
     /// else its first board `main` (falling back to the earliest board if the
-    /// `main` name was renamed away).
+    /// `main` name was renamed away). Archived boards are never returned — a
+    /// persisted selection that points at an archived board falls back to the
+    /// most recent active board, then to the deterministic active fallback.
     pub fn project_context_board(&self, project_id: i64) -> Result<Board> {
         if let Some(board) = self.selected_board_for(project_id)? {
-            return Ok(board);
+            if board.archived_at.is_none() {
+                return Ok(board);
+            }
+            // Selected board is archived: try the most recent active board in
+            // this project before the deterministic fallback.
+            if let Ok(recents) = self.recent_board_ids_excluding(board.project_id, Some(board.id)) {
+                for bid in recents {
+                    if let Ok(b) = self.get_board(bid) {
+                        if b.archived_at.is_none() {
+                            return Ok(b);
+                        }
+                    }
+                }
+            }
         }
         self.main_board(project_id)
     }
@@ -129,7 +163,7 @@ impl Db {
             .conn
             .query_row(
                 &format!(
-                    "{} WHERE b.project_id=?1 AND b.name='main' COLLATE NOCASE",
+                    "{} WHERE b.project_id=?1 AND b.name='main' COLLATE NOCASE AND b.archived_at IS NULL",
                     rows::BOARD_SELECT
                 ),
                 params![project_id],
@@ -142,7 +176,7 @@ impl Db {
         self.conn
             .query_row(
                 &format!(
-                    "{} WHERE b.project_id=?1 ORDER BY b.id LIMIT 1",
+                    "{} WHERE b.project_id=?1 AND b.archived_at IS NULL ORDER BY b.id LIMIT 1",
                     rows::BOARD_SELECT
                 ),
                 params![project_id],
@@ -262,7 +296,13 @@ impl Db {
         if name.trim().is_empty() {
             return Err(Error::BadRequest("board name must not be empty".into()));
         }
-        self.get_project(project_id)?;
+        let project = self.get_project(project_id)?;
+        if project.archived_at.is_some() {
+            return Err(Error::InvalidState(format!(
+                "archived project must be restored first: `board project restore {}`",
+                project.scope_path.as_deref().unwrap_or("(Global)")
+            )));
+        }
         let tx = self.conn.unchecked_transaction()?;
         constraints::reject_duplicate(
             tx.execute(
@@ -278,6 +318,238 @@ impl Db {
         Self::touch_board_recency_tx(&tx, project_id, board_id)?;
         tx.commit()?;
         self.get_board(board_id)
+    }
+
+    // -- archive ------------------------------------------------------------
+
+    /// `board.archive`: set `archived_at` and reassign selection atomically.
+    /// Idempotent when already in the target state (original timestamp kept).
+    pub fn set_board_archived(&self, board_id: i64, archived: bool) -> Result<Board> {
+        let board = self.get_board(board_id)?;
+        let already = board.archived_at.is_some();
+        if already == archived {
+            return Ok(board);
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let has_open: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runs r JOIN cards c ON c.id=r.card_id WHERE c.board_id=?1 AND r.ended_at IS NULL)",
+            params![board_id],
+            |r| r.get(0),
+        )?;
+        crate::engine::decide_board_archive(board_id, already, has_open, archived)
+            .map_err(|e| Error::InvalidState(e.to_string()))?;
+        if archived {
+            tx.execute(
+                "UPDATE boards SET archived_at=datetime('now') WHERE id=?1",
+                params![board_id],
+            )?;
+        } else {
+            tx.execute(
+                "UPDATE boards SET archived_at=NULL WHERE id=?1",
+                params![board_id],
+            )?;
+        }
+        if archived {
+            let sel: Option<i64> = tx
+                .query_row(
+                    "SELECT board_id FROM board_selection WHERE project_id=?1",
+                    params![board.project_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if sel == Some(board_id) {
+                // Most recent active board in this project, excluding the archived one.
+                let mut fallback: Option<i64> = None;
+                let recents: Vec<i64> = tx
+                    .prepare(
+                        "SELECT board_id FROM board_recents WHERE project_id=?1 ORDER BY rank",
+                    )?
+                    .query_map(params![board.project_id], |r| r.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                for bid in recents {
+                    if bid == board_id {
+                        continue;
+                    }
+                    let archived_at: Option<String> = tx
+                        .query_row(
+                            "SELECT archived_at FROM boards WHERE id=?1",
+                            params![bid],
+                            |r| r.get(0),
+                        )
+                        .optional()?
+                        .flatten();
+                    if archived_at.is_none() {
+                        fallback = Some(bid);
+                        break;
+                    }
+                }
+                if fallback.is_none() {
+                    fallback = tx
+                        .query_row(
+                            "SELECT id FROM boards WHERE project_id=?1 AND archived_at IS NULL ORDER BY id LIMIT 1",
+                            params![board.project_id],
+                            |r| r.get(0),
+                        )
+                        .optional()?;
+                }
+                if let Some(fb) = fallback {
+                    Self::write_selection_tx(&tx, board.project_id, fb)?;
+                    Self::touch_board_recency_tx(&tx, board.project_id, fb)?;
+                    Self::touch_project_recency_tx(&tx, board.project_id)?;
+                } else {
+                    tx.execute(
+                        "DELETE FROM board_selection WHERE project_id=?1",
+                        params![board.project_id],
+                    )?;
+                    let sel_proj: Option<i64> = tx
+                        .query_row("SELECT project_id FROM selection WHERE id=1", [], |r| {
+                            r.get(0)
+                        })
+                        .optional()?;
+                    if sel_proj == Some(board.project_id) {
+                        if let Some(pid) = Self::find_active_project_fallback_tx(&tx)? {
+                            let fb_board: Option<i64> = tx
+                                .query_row(
+                                    "SELECT id FROM boards WHERE project_id=?1 AND archived_at IS NULL ORDER BY id LIMIT 1",
+                                    params![pid],
+                                    |r| r.get(0),
+                                )
+                                .optional()?;
+                            if let Some(bid) = fb_board {
+                                Self::write_selection_tx(&tx, pid, bid)?;
+                                Self::touch_project_recency_tx(&tx, pid)?;
+                                Self::touch_board_recency_tx(&tx, pid, bid)?;
+                            } else {
+                                tx.execute("DELETE FROM selection WHERE id=1", [])?;
+                            }
+                        } else {
+                            tx.execute("DELETE FROM selection WHERE id=1", [])?;
+                        }
+                    }
+                }
+            }
+        }
+        tx.commit()?;
+        self.get_board(board_id)
+    }
+
+    /// `project.archive`: set `archived_at` and reassign selection atomically.
+    /// Idempotent when already in the target state.
+    pub fn set_project_archived(&self, scope_path: &str, archived: bool) -> Result<Project> {
+        let project = self.require_project_by_scope(scope_path)?;
+        let already = project.archived_at.is_some();
+        if already == archived {
+            return Ok(project);
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let unarchived: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM boards WHERE project_id=?1 AND archived_at IS NULL",
+            params![project.id],
+            |r| r.get(0),
+        )?;
+        let has_open: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runs r JOIN cards c ON c.id=r.card_id JOIN boards b ON b.id=c.board_id WHERE b.project_id=?1 AND r.ended_at IS NULL)",
+            params![project.id],
+            |r| r.get(0),
+        )?;
+        crate::engine::decide_project_archive(
+            project.scope_path.is_none(),
+            already,
+            unarchived as usize,
+            has_open,
+            archived,
+        )
+        .map_err(|e| Error::InvalidState(e.to_string()))?;
+        if archived {
+            tx.execute(
+                "UPDATE projects SET archived_at=datetime('now') WHERE id=?1",
+                params![project.id],
+            )?;
+        } else {
+            tx.execute(
+                "UPDATE projects SET archived_at=NULL WHERE id=?1",
+                params![project.id],
+            )?;
+        }
+        if archived {
+            let sel: Option<i64> = tx
+                .query_row("SELECT project_id FROM selection WHERE id=1", [], |r| {
+                    r.get(0)
+                })
+                .optional()?;
+            if sel == Some(project.id) {
+                if let Some(pid) = Self::find_active_project_fallback_tx(&tx)? {
+                    let fb_board: Option<i64> = tx
+                        .query_row(
+                            "SELECT id FROM boards WHERE project_id=?1 AND archived_at IS NULL ORDER BY id LIMIT 1",
+                            params![pid],
+                            |r| r.get(0),
+                        )
+                        .optional()?;
+                    if let Some(bid) = fb_board {
+                        Self::write_selection_tx(&tx, pid, bid)?;
+                        Self::touch_project_recency_tx(&tx, pid)?;
+                        Self::touch_board_recency_tx(&tx, pid, bid)?;
+                    } else {
+                        tx.execute("DELETE FROM selection WHERE id=1", [])?;
+                    }
+                } else {
+                    tx.execute("DELETE FROM selection WHERE id=1", [])?;
+                }
+            }
+        }
+        tx.commit()?;
+        self.get_project(project.id)
+    }
+
+    fn find_active_project_fallback_tx(tx: &Transaction) -> Result<Option<i64>> {
+        // Most recent active project that still has an active board, by recency.
+        let recents: Vec<i64> = tx
+            .prepare("SELECT project_id FROM project_recents ORDER BY rank")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for pid in recents {
+            let archived_at: Option<String> = tx
+                .query_row(
+                    "SELECT archived_at FROM projects WHERE id=?1",
+                    params![pid],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .flatten();
+            if archived_at.is_some() {
+                continue;
+            }
+            let has_active: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM boards WHERE project_id=?1 AND archived_at IS NULL)",
+                params![pid],
+                |r| r.get(0),
+            )?;
+            if has_active {
+                return Ok(Some(pid));
+            }
+        }
+        // Deterministic fallback: alphabetical, Global last.
+        let mut stmt =
+            tx.prepare("SELECT id, scope_path FROM projects WHERE archived_at IS NULL")?;
+        let mut projects: Vec<(i64, Option<String>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        projects.sort_by(|a, b| {
+            (a.1.is_none(), a.1.as_deref().unwrap_or("").to_lowercase())
+                .cmp(&(b.1.is_none(), b.1.as_deref().unwrap_or("").to_lowercase()))
+        });
+        for (pid, _) in projects {
+            let has_active: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM boards WHERE project_id=?1 AND archived_at IS NULL)",
+                params![pid],
+                |r| r.get(0),
+            )?;
+            if has_active {
+                return Ok(Some(pid));
+            }
+        }
+        Ok(None)
     }
 
     // -- selection & recency ---------------------------------------------------
@@ -320,13 +592,41 @@ impl Db {
     /// Recent project ids, most recent first, capped at 3, excluding the
     /// selected project (the picker shows the current separately).
     pub fn recent_project_ids_excluding(&self, exclude: Option<i64>) -> Result<Vec<i64>> {
+        self.recent_project_ids_excluding_filtered(exclude, None)
+    }
+
+    pub fn recent_project_ids_excluding_filtered(
+        &self,
+        exclude: Option<i64>,
+        visibility: Option<Visibility>,
+    ) -> Result<Vec<i64>> {
         let mut stmt = self
             .conn
             .prepare("SELECT project_id FROM project_recents ORDER BY rank LIMIT 3")?;
         let ids = stmt
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<Vec<i64>>>()?;
-        Ok(ids.into_iter().filter(|id| Some(*id) != exclude).collect())
+        let mut out = Vec::new();
+        for id in ids {
+            if Some(id) == exclude {
+                continue;
+            }
+            if visibility.unwrap_or(Visibility::Active) == Visibility::Active {
+                if let Ok(project) = self.get_project(id) {
+                    if project.archived_at.is_some() {
+                        continue;
+                    }
+                }
+            } else if visibility == Some(Visibility::Archived) {
+                if let Ok(project) = self.get_project(id) {
+                    if project.archived_at.is_none() {
+                        continue;
+                    }
+                }
+            }
+            out.push(id);
+        }
+        Ok(out)
     }
 
     /// One project's recent board ids, most recent first, capped at 3,
@@ -336,13 +636,94 @@ impl Db {
         project_id: i64,
         exclude: Option<i64>,
     ) -> Result<Vec<i64>> {
+        self.recent_board_ids_excluding_filtered(project_id, exclude, None)
+    }
+
+    pub fn recent_board_ids_excluding_filtered(
+        &self,
+        project_id: i64,
+        exclude: Option<i64>,
+        visibility: Option<Visibility>,
+    ) -> Result<Vec<i64>> {
         let mut stmt = self.conn.prepare(
             "SELECT board_id FROM board_recents WHERE project_id=?1 ORDER BY rank LIMIT 3",
         )?;
         let ids = stmt
             .query_map(params![project_id], |r| r.get(0))?
             .collect::<rusqlite::Result<Vec<i64>>>()?;
-        Ok(ids.into_iter().filter(|id| Some(*id) != exclude).collect())
+        let mut out = Vec::new();
+        for id in ids {
+            if Some(id) == exclude {
+                continue;
+            }
+            let board = match self.get_board(id) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            match visibility.unwrap_or(Visibility::Active) {
+                Visibility::Active if board.archived_at.is_some() => continue,
+                Visibility::Archived if board.archived_at.is_none() => continue,
+                _ => {}
+            }
+            out.push(id);
+        }
+        Ok(out)
+    }
+
+    pub fn selected_project_id_filtered(
+        &self,
+        visibility: Option<Visibility>,
+    ) -> Result<Option<i64>> {
+        let id = self.selection_project_id()?;
+        if let Some(pid) = id {
+            match visibility.unwrap_or(Visibility::Active) {
+                Visibility::Active => {
+                    if let Ok(project) = self.get_project(pid) {
+                        if project.archived_at.is_some() {
+                            return Ok(None);
+                        }
+                    }
+                }
+                Visibility::Archived => {
+                    if let Ok(project) = self.get_project(pid) {
+                        if project.archived_at.is_none() {
+                            return Ok(None);
+                        }
+                    }
+                }
+                Visibility::All => {}
+            }
+        }
+        Ok(id)
+    }
+
+    pub fn selected_board_id_for_filtered(
+        &self,
+        project_id: i64,
+        visibility: Option<Visibility>,
+    ) -> Result<Option<i64>> {
+        let id = self.selected_board_id_for(project_id)?;
+        if let Some(bid) = id {
+            if let Ok(board) = self.get_board(bid) {
+                match visibility.unwrap_or(Visibility::Active) {
+                    Visibility::Active if board.archived_at.is_some() => return Ok(None),
+                    Visibility::Archived if board.archived_at.is_none() => return Ok(None),
+                    _ => {}
+                }
+            }
+        }
+        Ok(id)
+    }
+
+    pub fn selected_board_for_filtered(
+        &self,
+        project_id: i64,
+        visibility: Option<Visibility>,
+    ) -> Result<Option<Board>> {
+        match self.selected_board_id_for_filtered(project_id, visibility)? {
+            Some(id) => self.get_board(id).map(Some),
+            None => Ok(None),
+        }
     }
 
     fn write_selection_tx(tx: &Transaction, project_id: i64, board_id: i64) -> Result<()> {
@@ -404,17 +785,32 @@ impl Db {
 
     /// The full `project.list` payload: per-project boards plus the selection
     /// and recency data the pickers need, deterministically ordered.
+    /// Default visibility `active` excludes archived projects/boards.
     pub fn project_list_result(&self) -> Result<ProjectListResult> {
-        let projects = self.list_projects()?;
-        let selected_project_id = self.selected_project_id()?;
-        let recent_project_ids = self.recent_project_ids_excluding(selected_project_id)?;
+        self.project_list_result_filtered(None)
+    }
+
+    pub fn project_list_result_filtered(
+        &self,
+        visibility: Option<Visibility>,
+    ) -> Result<ProjectListResult> {
+        let projects = self.list_projects_filtered(visibility)?;
+        // Selection and recency are always read from the persisted state,
+        // but archived projects/boards are filtered from the recency lists
+        // when the caller asked for the active view.
+        let selected_project_id = self.selected_project_id_filtered(visibility)?;
+        let recent_project_ids =
+            self.recent_project_ids_excluding_filtered(selected_project_id, visibility)?;
         let mut infos = Vec::with_capacity(projects.len());
         for project in projects {
-            let mut boards = self.list_boards_for_project(project.id)?;
+            let mut boards = self.list_boards_for_project_filtered(project.id, visibility)?;
             boards.sort_by_key(|a| a.name.to_lowercase());
-            let selected_board_id = self.selected_board_id_for(project.id)?;
-            let recent_board_ids =
-                self.recent_board_ids_excluding(project.id, selected_board_id)?;
+            let selected_board_id = self.selected_board_id_for_filtered(project.id, visibility)?;
+            let recent_board_ids = self.recent_board_ids_excluding_filtered(
+                project.id,
+                selected_board_id,
+                visibility,
+            )?;
             infos.push(ProjectInfo {
                 project,
                 boards,
@@ -430,11 +826,20 @@ impl Db {
     }
 
     /// `project.get`: one project plus its boards, no side effects.
+    /// Default visibility `active` excludes archived boards inside the detail.
     pub fn project_detail(&self, scope_path: &str) -> Result<ProjectDetail> {
+        self.project_detail_filtered(scope_path, None)
+    }
+
+    pub fn project_detail_filtered(
+        &self,
+        scope_path: &str,
+        visibility: Option<Visibility>,
+    ) -> Result<ProjectDetail> {
         let project = self.require_project_by_scope(scope_path)?;
-        let mut boards = self.list_boards_for_project(project.id)?;
+        let mut boards = self.list_boards_for_project_filtered(project.id, visibility)?;
         boards.sort_by_key(|a| a.name.to_lowercase());
-        let selected_board = self.selected_board_for(project.id)?;
+        let selected_board = self.selected_board_for_filtered(project.id, visibility)?;
         Ok(ProjectDetail {
             project,
             boards,

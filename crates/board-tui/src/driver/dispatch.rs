@@ -110,6 +110,94 @@ impl Driver {
                     );
                 }
             }
+            Effect::BoardArchive { board_id, archived } => {
+                let r = self.client.board_archive(board_id, archived);
+                if self.guard(r).is_some() {
+                    self.refresh_projects();
+                    self.refetch();
+                    // picker_visibility may still filter the archived board away; that is
+                    // exactly the "hidden by default" visual contract.
+                    if let Some(picker) = &mut self.app.picker {
+                        // Keep the picker open and refresh its rows with the current filter.
+                        // The simplest is to reload the appropriate picker.
+                        match picker.purpose {
+                            crate::app::PickerPurpose::SwitchBoard => {
+                                let pid = picker.project_id;
+                                // Close and reopen to rebuilt rows.
+                                self.app.picker = None;
+                                self.load_board_picker(Some(pid));
+                            }
+                            crate::app::PickerPurpose::SwitchProject => {
+                                self.app.picker = None;
+                                self.load_project_picker();
+                            }
+                            _ => {}
+                        }
+                    }
+                    self.app.set_toast(
+                        if archived {
+                            format!("board #{board_id} archived")
+                        } else {
+                            format!("board #{board_id} restored")
+                        },
+                        false,
+                    );
+                }
+            }
+            Effect::ProjectArchive {
+                project_id,
+                archived,
+            } => {
+                let project = self
+                    .app
+                    .projects
+                    .iter()
+                    .find(|pi| pi.project.id == project_id)
+                    .map(|pi| pi.project.clone());
+                let scope = project
+                    .and_then(|p| p.scope_path)
+                    .unwrap_or_else(|| project_id.to_string());
+                let r = self.client.project_archive(&scope, archived);
+                if self.guard(r).is_some() {
+                    self.refresh_projects();
+                    // After a project archive/restore the selected board may have moved.
+                    self.refetch();
+                    if let Some(picker) = &self.app.picker {
+                        match picker.purpose {
+                            crate::app::PickerPurpose::SwitchProject
+                            | crate::app::PickerPurpose::SwitchBoard => {
+                                self.app.picker = None;
+                                self.load_project_picker();
+                            }
+                            _ => {}
+                        }
+                    }
+                    self.app.set_toast(
+                        if archived {
+                            format!("project #{project_id} archived")
+                        } else {
+                            format!("project #{project_id} restored")
+                        },
+                        false,
+                    );
+                }
+            }
+            Effect::ReloadPickers => {
+                // Re-open the current picker with the new visibility filter.
+                if let Some(picker) = self.app.picker.take() {
+                    match picker.purpose {
+                        crate::app::PickerPurpose::SwitchBoard => {
+                            self.load_board_picker(Some(picker.project_id));
+                        }
+                        crate::app::PickerPurpose::SwitchProject => {
+                            self.load_project_picker();
+                        }
+                        _ => {
+                            self.app.picker = Some(picker);
+                        }
+                    }
+                }
+            }
             Effect::CardMove(p) => {
                 let r = self.client.card_move(&p);
                 self.mutate(r, After::Board);

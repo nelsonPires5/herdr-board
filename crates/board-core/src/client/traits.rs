@@ -5,17 +5,18 @@ use crate::capability::HarnessCapabilities;
 use crate::model::{Card, Column, Comment, CommentHistory, CommentRecord};
 
 use crate::protocol::{
-    BoardCreateParams, BoardGetParams, BoardListParams, BoardListResult, BoardOpenParams,
-    BoardRenameParams, BoardSelectParams, BoardSnapshot, CardArchiveParams, CardCreateParams,
-    CardDetail, CardListParams, CardMoveParams, CardUpdateParams, CardVisibility,
+    BoardArchiveParams, BoardCreateParams, BoardGetParams, BoardListParams, BoardListResult,
+    BoardOpenParams, BoardRenameParams, BoardSelectParams, BoardSnapshot, CardArchiveParams,
+    CardCreateParams, CardDetail, CardListParams, CardMoveParams, CardUpdateParams, CardVisibility,
     ColumnCreateParams, ColumnDeleteParams, ColumnReorderParams, ColumnUpdateParams,
     CommentAddParams, CommentDeleteParams, CommentGetParams, CommentHistoryParams,
     CommentUpdateParams, DaemonStatus, DeletedResult, Event, HarnessCapabilitiesParams,
-    HarnessListResult, PaneSetTitleParams, PaneSetTitleResult, ProjectCreateParams, ProjectDetail,
-    ProjectGetParams, ProjectListResult, ProjectOpenParams, ProjectOpenResult, ProjectSelectParams,
-    ProjectSelectedResult, RunActionResult, RunCardParams, RunDoneParams, RunFocusParams,
-    RunFocusResult, RunOutcome, RunPaneExitedParams, SessionListResult, SpaceListParams,
-    SpaceListResult, StopResult, TemplateApplyParams,
+    HarnessListResult, PaneSetTitleParams, PaneSetTitleResult, ProjectArchiveParams,
+    ProjectCreateParams, ProjectDetail, ProjectGetParams, ProjectListParams, ProjectListResult,
+    ProjectOpenParams, ProjectOpenResult, ProjectSelectParams, ProjectSelectedResult,
+    RunActionResult, RunCardParams, RunDoneParams, RunFocusParams, RunFocusResult, RunOutcome,
+    RunPaneExitedParams, SessionListResult, SpaceListParams, SpaceListResult, StopResult,
+    TemplateApplyParams, Visibility,
 };
 
 /// Blocking client to boardd. Object-safe so the TUI can hold `Box<dyn BoardClient>`.
@@ -62,7 +63,30 @@ pub trait BoardClient {
         )?)
     }
     fn board_list(&mut self) -> anyhow::Result<BoardListResult> {
-        Ok(serde_json::from_value(self.call("board.list", json!({}))?)?)
+        self.board_list_visible(None, None)
+    }
+    fn board_list_visible(
+        &mut self,
+        project_id: Option<i64>,
+        visibility: Option<Visibility>,
+    ) -> anyhow::Result<BoardListResult> {
+        let p = BoardListParams {
+            project_id,
+            visibility,
+        };
+        Ok(serde_json::from_value(
+            self.call("board.list", serde_json::to_value(p)?)?,
+        )?)
+    }
+    fn board_archive(
+        &mut self,
+        board_id: i64,
+        archived: bool,
+    ) -> anyhow::Result<crate::model::Board> {
+        let p = BoardArchiveParams { board_id, archived };
+        Ok(serde_json::from_value(
+            self.call("board.archive", serde_json::to_value(p)?)?,
+        )?)
     }
     fn board_rename(&mut self, board_id: i64, name: &str) -> anyhow::Result<crate::model::Board> {
         let p = BoardRenameParams {
@@ -89,17 +113,32 @@ pub trait BoardClient {
         )?)
     }
     fn board_list_for_project(&mut self, project_id: i64) -> anyhow::Result<BoardListResult> {
-        let p = BoardListParams {
-            project_id: Some(project_id),
-        };
-        Ok(serde_json::from_value(
-            self.call("board.list", serde_json::to_value(p)?)?,
-        )?)
+        self.board_list_visible(Some(project_id), None)
     }
 
     fn project_list(&mut self) -> anyhow::Result<ProjectListResult> {
+        self.project_list_visible(None)
+    }
+    fn project_list_visible(
+        &mut self,
+        visibility: Option<Visibility>,
+    ) -> anyhow::Result<ProjectListResult> {
+        let p = ProjectListParams { visibility };
         Ok(serde_json::from_value(
-            self.call("project.list", json!({}))?,
+            self.call("project.list", serde_json::to_value(p)?)?,
+        )?)
+    }
+    fn project_archive(
+        &mut self,
+        scope_path: &str,
+        archived: bool,
+    ) -> anyhow::Result<crate::model::Project> {
+        let p = ProjectArchiveParams {
+            scope_path: scope_path.to_string(),
+            archived,
+        };
+        Ok(serde_json::from_value(
+            self.call("project.archive", serde_json::to_value(p)?)?,
         )?)
     }
     fn project_selected(&mut self) -> anyhow::Result<ProjectSelectedResult> {
@@ -108,8 +147,16 @@ pub trait BoardClient {
         )?)
     }
     fn project_get(&mut self, scope_path: &str) -> anyhow::Result<ProjectDetail> {
+        self.project_get_visible(scope_path, None)
+    }
+    fn project_get_visible(
+        &mut self,
+        scope_path: &str,
+        visibility: Option<Visibility>,
+    ) -> anyhow::Result<ProjectDetail> {
         let p = ProjectGetParams {
             scope_path: scope_path.to_string(),
+            visibility,
         };
         Ok(serde_json::from_value(
             self.call("project.get", serde_json::to_value(p)?)?,

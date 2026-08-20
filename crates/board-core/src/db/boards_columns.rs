@@ -3,7 +3,7 @@ use rusqlite::{params, OptionalExtension};
 use super::{constraints, rows};
 use super::{ColumnTarget, ColumnWiring, Db, BOARD_ID};
 use crate::model::{Board, Column};
-use crate::protocol::{ColumnCreateParams, ColumnUpdateParams, Patch, Trigger};
+use crate::protocol::{ColumnCreateParams, ColumnUpdateParams, Patch, Trigger, Visibility};
 use crate::{Error, Result};
 
 impl Db {
@@ -40,13 +40,28 @@ impl Db {
         self.get_board(id)
     }
 
+    fn board_visibility_clause(visibility: Option<Visibility>) -> &'static str {
+        match visibility.unwrap_or(Visibility::Active) {
+            Visibility::Active => "AND b.archived_at IS NULL",
+            Visibility::Archived => "AND b.archived_at IS NOT NULL",
+            Visibility::All => "",
+        }
+    }
+
     /// Every board across every project (legacy flat listing); Global project
-    /// first, then projects by path and boards by name.
+    /// first, then projects by path and boards by name. Default excludes
+    /// archived boards.
     pub fn list_boards(&self) -> Result<Vec<Board>> {
+        self.list_boards_filtered(None)
+    }
+
+    pub fn list_boards_filtered(&self, visibility: Option<Visibility>) -> Result<Vec<Board>> {
+        let clause = Self::board_visibility_clause(visibility);
         let mut stmt = self.conn.prepare(&format!(
-            "{} ORDER BY CASE WHEN p.scope_path IS NULL THEN 0 ELSE 1 END,
+            "{} WHERE 1=1 {} ORDER BY CASE WHEN p.scope_path IS NULL THEN 0 ELSE 1 END,
              p.scope_path, b.name COLLATE NOCASE, b.id",
-            rows::BOARD_SELECT
+            rows::BOARD_SELECT,
+            clause
         ))?;
         let rows = stmt
             .query_map([], rows::row_to_board)?
@@ -54,11 +69,22 @@ impl Db {
         Ok(rows)
     }
 
-    /// One project's boards, ordered by name (case-insensitive).
+    /// One project's boards, ordered by name (case-insensitive). Default
+    /// excludes archived boards.
     pub fn list_boards_for_project(&self, project_id: i64) -> Result<Vec<Board>> {
+        self.list_boards_for_project_filtered(project_id, None)
+    }
+
+    pub fn list_boards_for_project_filtered(
+        &self,
+        project_id: i64,
+        visibility: Option<Visibility>,
+    ) -> Result<Vec<Board>> {
+        let clause = Self::board_visibility_clause(visibility);
         let mut stmt = self.conn.prepare(&format!(
-            "{} WHERE b.project_id=?1 ORDER BY b.name COLLATE NOCASE, b.id",
-            rows::BOARD_SELECT
+            "{} WHERE b.project_id=?1 {} ORDER BY b.name COLLATE NOCASE, b.id",
+            rows::BOARD_SELECT,
+            clause
         ))?;
         let rows = stmt
             .query_map(params![project_id], rows::row_to_board)?

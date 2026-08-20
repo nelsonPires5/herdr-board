@@ -146,6 +146,23 @@ pub(super) fn run_retry(d: &Arc<Daemon>, p: RunCardParams) -> Result<Value> {
                 "archived card must be restored before retrying".into(),
             ));
         }
+        // Archived destination guard: board/project of the card.
+        {
+            let board = db.get_board(card.board_id)?;
+            if board.archived_at.is_some() {
+                return Err(Error::InvalidState(format!(
+                    "archived board must be restored first: `board board restore {}`",
+                    board.id
+                )));
+            }
+            let project = db.get_project(board.project_id)?;
+            if project.archived_at.is_some() {
+                return Err(Error::InvalidState(format!(
+                    "archived project must be restored first: `board project restore {}`",
+                    project.scope_path.as_deref().unwrap_or("(Global)")
+                )));
+            }
+        }
         if db.open_run_for_card(p.card_id)?.is_some() {
             return Err(Error::InvalidState(
                 "card has an open run; complete or cancel it before retrying".into(),

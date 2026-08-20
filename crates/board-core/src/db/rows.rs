@@ -18,7 +18,10 @@ pub(super) fn opt<T>(r: SqliteResult<T>) -> Result<Option<T>> {
 /// Board rows are always read joined onto their project so the denormalized
 /// `scope_path` cannot drift from `projects.scope_path`.
 pub(super) const BOARD_SELECT: &str =
-    "SELECT b.id, b.project_id, b.name, p.scope_path FROM boards b JOIN projects p ON p.id = b.project_id";
+    "SELECT b.id, b.project_id, b.name, p.scope_path, b.archived_at FROM boards b JOIN projects p ON p.id = b.project_id";
+
+/// Project rows always read the archive timestamp alongside the identity.
+pub(super) const PROJECT_SELECT: &str = "SELECT id, scope_path, archived_at FROM projects";
 
 pub(super) fn row_to_project(row: &Row) -> SqliteResult<Project> {
     let scope_path: Option<String> = row.get("scope_path")?;
@@ -26,6 +29,7 @@ pub(super) fn row_to_project(row: &Row) -> SqliteResult<Project> {
         id: row.get("id")?,
         name: Project::display_name(scope_path.as_deref()),
         scope_path,
+        archived_at: row.get("archived_at")?,
     })
 }
 
@@ -35,6 +39,7 @@ pub(super) fn row_to_board(row: &Row) -> SqliteResult<Board> {
         project_id: row.get("project_id")?,
         name: row.get("name")?,
         scope_path: row.get("scope_path")?,
+        archived_at: row.get("archived_at")?,
     })
 }
 
