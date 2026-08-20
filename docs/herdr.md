@@ -143,7 +143,7 @@ The delta is additive and outside the board client surface:
   `{agent, kind, source, value}` with `kind` ∈ {`id`, `path`} — for panes whose
   integration reported a session. It is absent on panes without one. `board-herdr`
   decodes it (`AgentInfo.agent_session`) because the self-minting built-in
-  harnesses need the reported id: a codex/opencode Mint persists `session_id =
+  harnesses need the reported id: a codex/opencode/antigravity Mint persists `session_id =
   NULL` at enqueue, and the daemon's bounded post-launch `agent.get` capture
   accepts only an `id`-kind reference owned by the expected agent with a
   non-empty value — codex leaves `source` unconstrained, while opencode and

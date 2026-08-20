@@ -132,6 +132,7 @@ prefix is `ctrl+a`, it is `Ctrl+A Shift+K`). Do not reuse `prefix+k` — it is H
 | **Claude Code** | `herdr integration install claude` | [anthropics/claude-code](https://github.com/anthropics/claude-code) |
 | **Codex** | `herdr integration install codex` | [openai/codex](https://github.com/openai/codex) |
 | **OpenCode** | `herdr integration install opencode` | [anomalyco/opencode](https://github.com/anomalyco/opencode) |
+| **Antigravity** (CLI `agy`) | `herdr integration install antigravity-cli` | [google-antigravity/antigravity-cli](https://github.com/google-antigravity/antigravity-cli) |
 
 <details>
 <summary><strong>Requirements and details</strong></summary>

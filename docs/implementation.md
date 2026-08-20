@@ -142,7 +142,7 @@ responses. Every canonical-path board independently seeds one manual `Todo` colu
 The completion race is harness-specific: `RunDoneParams.run_id` is optional so manual/TUI
 completion remains compatible, while the CLI forwards `BOARD_RUN_ID` when present. An immediate
 configured-harness `board done` may finalize only its exact queued run before runner registration;
-a queued built-in Pi/Claude run is rejected until its managed pane is registered. A supplied
+a queued built-in (Pi/Claude/Codex/OpenCode/Antigravity) run is rejected until its managed pane is registered. A supplied
 mismatched id is rejected unless `actor_pane_id` exactly identifies the managed pane shared with the
 current open resume run; that pane credential resolves the process's immutable first-stage
 `BOARD_RUN_ID` to the current stage. A different/missing pane never grants that remap. The

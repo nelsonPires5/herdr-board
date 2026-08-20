@@ -127,9 +127,11 @@ The current parity/schema-v14 change is specified test-first:
 - **CLI/E2E boundary:** scenarios 01, 04, 06, 08, 09, 11, 16, and 17 exercise CLI comment
   creation, transition/silent-exit/timeout system comments, comment context in later prompts, and
   managed/configured comment completion against disposable Herdr. Scenarios 12 and 26 were updated
-  for the project/board selector flow, and scenario 36 covers project create/select, selection and
+  for the project/board selector flow, scenario 37 covers project create/select, selection and
   recency persistence across a daemon restart, per-project board isolation, and a cross-project
-  card move that leaves the selection untouched. The managed and configured
+  card move that leaves the selection untouched, and scenario 36 covers the managed Antigravity
+  launch contract (self-minted conversation capture, `--conversation` retry/rescue, pinned
+  permission modes, fixed-effort models, anchorless tabs). The managed and configured
   scenarios use the current Herdr 0.8.0 / protocol 19 contract; their files,
   `16-managed-p17.sh` and `17-configured-p17-runner.sh`, retain the historical `p17` names.
   CRUD/audit semantics stay in hermetic core/daemon/CLI tests; the live suite does not duplicate
@@ -143,7 +145,12 @@ pane rescue, Pi catalog behavior, diagnostics, pane reuse, the managed Codex lau
 rescue), and the managed OpenCode TUI launch contract (self-minted `ses_…` session capture,
 `--agent herdr-board`/`--auto`/`-s`/`--fork` argv plus the exact `OPENCODE_CONFIG_CONTENT`
 agent-config env — the root/TUI has no `--variant` — delimited mint prompt, fork/reuse/rescue,
-fail-closed missing-report rescue). This document describes the intended coverage
+fail-closed missing-report rescue). Scenario 36 covers the managed Antigravity CLI (agy) launch
+contract: self-minted conversation capture from `agent.get.agent_session` (mint persists NULL at
+enqueue, the captured id atomically at promotion), one delimited system+task `agent.prompt` block
+on mint, `--conversation <id>` retry in a fresh pane (agy has no fork) and rescue without
+re-sending the task, the lost-conversation fallback with a visible warning, and pinned permission
+modes. This document describes the intended coverage
 and gate configuration; it does **not** claim that the full live E2E suite has passed.
 
 Nullable update coverage in `board-core` is table-driven across every column/card nullable:
@@ -328,7 +335,7 @@ state is copied. Its intended contract is one authorized Haiku/low attempt with 
   rc files, `PATH`, and exported fake-provider functions; it never sources user rc files. It
   resolves the Herdr executable to an absolute path before narrowing the managed pane `PATH`.
   Built-in managed agents see checked-in `e2e/fake-bin/pi`, `e2e/fake-bin/claude`,
-  `e2e/fake-bin/codex`, and `e2e/fake-bin/opencode` only inside
+  `e2e/fake-bin/codex`, `e2e/fake-bin/opencode`, and `e2e/fake-bin/agy` only inside
   the disposable Herdr server/workspaces. The fixtures record argv/readiness/prompt evidence
   under the scenario temp dir and call only the isolated `board comment`/`board done`; they never
   replace user installations or make model calls.

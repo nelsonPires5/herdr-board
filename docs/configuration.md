@@ -32,8 +32,8 @@ and `{permission_mode}` are available in `argv`. Optional keys `models`, `effort
 what lets `board card run focus` **reopen a run whose pane was closed** (see
 [`protocol.md`](protocol.md) → `run.focus`). It **defaults to `false`**: there is no
 universal CLI syntax for resuming, so herdr-board never guesses one — the built-ins `pi`
-(`--session-id <id>`), `claude` (`--resume <id>`), `codex` (`resume <id>` subcommand), and
-`opencode` (`-s <id>`) declare
+(`--session-id <id>`), `claude` (`--resume <id>`), `codex` (`resume <id>` subcommand),
+`opencode` (`-s <id>`), and `antigravity` (`--conversation <id>`) declare
 it themselves. Setting `resume = true`
 promises that your `argv` re-attaches to the conversation named by `$BOARD_RESUME_SESSION_ID`, which
 the daemon sets on the reopened pane along with `BOARD_RESCUE=1` (the run's argv is persisted fully

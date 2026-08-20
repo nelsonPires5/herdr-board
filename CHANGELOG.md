@@ -9,6 +9,9 @@ All notable changes to this project are documented here. The format is based on
 ### Added
 - [#97](https://github.com/nelsonPires5/herdr-board/pull/97) feat: run the full gate set and live E2E in an isolated Docker sandbox (`scripts/sandbox.sh`), with opt-in real-provider agent runs.
 
+### Changed
+- [#98](https://github.com/nelsonPires5/herdr-board/pull/98) docs: harness lists now name all five built-ins, including Antigravity (agy) install, resume, and model guidance.
+
 ## [0.15.0] - 2026-08-16
 
 ### Added
