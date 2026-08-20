@@ -29,11 +29,12 @@ pub(super) fn lifecycle_facts(
 
 pub(super) fn lifecycle_rejection(card_id: i64, rejection: LifecycleRejection) -> Error {
     match rejection {
-        LifecycleRejection::NoOpenRun
-        | LifecycleRejection::QueuedCompletionRequiresRunId
-        | LifecycleRejection::QueuedBuiltinCompletion => {
+        LifecycleRejection::NoOpenRun | LifecycleRejection::QueuedBuiltinCompletion => {
             Error::NotFound(format!("no active run for card {card_id}"))
         }
+        LifecycleRejection::QueuedCompletionRequiresRunId => Error::InvalidState(format!(
+            "queued run for card {card_id} requires run_id"
+        )),
         LifecycleRejection::SuppliedRunIdMismatch { expected, supplied } => Error::InvalidState(
             format!(
                 "no active run for card {card_id}: run {supplied} does not match active run {expected}"
