@@ -30,6 +30,8 @@ set -euo pipefail
 trap e2e_cleanup EXIT
 e2e_enable_fake_pi
 [ -x "$E2E_FAKE_PI_BIN_DIR/codex" ] || fail "fake codex missing/not executable at $E2E_FAKE_PI_BIN_DIR/codex"
+[ "$(type -P codex)" = "$E2E_FAKE_PI_BIN_DIR/codex" ] || fail "fake Codex PATH shadowing failed"
+[ "$(type -t codex)" = function ] || fail "fake Codex exec function was not exported"
 # Same-conversation reuse needs the looping fixture, and a daemon split pane
 # inherits the SERVER's env (never the workspace env), so the knob must be
 # exported before e2e_boot boots the ephemeral server.
