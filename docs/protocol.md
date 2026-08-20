@@ -8,7 +8,8 @@ protocol version.
 ## Transport
 
 - Unix socket. Path resolution (both daemon and clients): `$BOARD_SOCKET` if set, else
-  `~/.local/share/herdr-board/boardd.sock`.
+  `~/.local/share/herdr-board/boardd.sock`. The daemon sets the socket to mode `0600`; local socket
+  access is the protocol's authentication boundary.
 - DB path resolution (daemon only): `$BOARD_DB` if set, else `~/.local/share/herdr-board/board.db`.
 - Log directory resolution (daemon only): `$BOARD_LOG_DIR` if set, else `<data>/logs`.
 - Newline-delimited JSON (NDJSON), UTF-8. One JSON object per line, both directions.

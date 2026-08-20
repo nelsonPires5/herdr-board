@@ -23,6 +23,7 @@ tempfile = { workspace = true }
 
 [dev-dependencies]
 rusqlite = { workspace = true }
+tempfile = { workspace = true }
 # The fake-client ↔ daemon method parity guard (`ops::tests::parity`) compares
 # `ROUTED_METHODS` against board-core's `FAKE_CLIENT_METHODS`, which the
 # `fake-client` feature gates.
