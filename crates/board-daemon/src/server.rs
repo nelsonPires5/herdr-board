@@ -243,12 +243,14 @@ async fn handle_conn(d: Arc<Daemon>, stream: UnixStream, conn_id: u64) {
                 };
                 if req.method == "events.subscribe" {
                     tracing::info!(target: "board_rpc", operation_family = "board_rpc", conn = conn_id, req_id = request_correlation, method = "events.subscribe", outcome = "ok", duration_ms = 0_u64, "board RPC completed");
-                    let ack = Response::ok(req.id, json!(SubscribeResult { subscribed: true }));
-                    if !outbox.response(to_line(&ack)).await {
+                    let ack = subscribe_ack_after_receiver_registration(
+                        &mut event_forwarder,
+                        &d,
+                        &outbox,
+                        req.id,
+                    );
+                    if !outbox.response(ack).await {
                         break;
-                    }
-                    if event_forwarder.is_none() {
-                        event_forwarder = Some(spawn_event_forwarder(&d, outbox.clone()));
                     }
                     continue;
                 }
@@ -362,6 +364,32 @@ fn spawn_event_forwarder(d: &Arc<Daemon>, outbox: Arc<Outbox>) -> tokio::task::J
             }
         }
     })
+}
+
+/// Build the subscribe acknowledgement AFTER ensuring the event receiver is
+/// registered.
+///
+/// TIMING INVARIANT: the client treats this acknowledgement as "events will be
+/// delivered for any mutation from now on" and refetches the full snapshot
+/// immediately after receiving it. The receiver therefore MUST be active before
+/// the ack exists; acknowledging first (or moving registration into the spawned
+/// forwarder task) would silently reopen the missed-mutation window between the
+/// client's snapshot refetch and receiver activation. The two steps live in one
+/// function so the order cannot drift — the unit test in `server/tests.rs`
+/// locks it.
+fn subscribe_ack_after_receiver_registration(
+    event_forwarder: &mut Option<tokio::task::JoinHandle<()>>,
+    d: &Arc<Daemon>,
+    outbox: &Arc<Outbox>,
+    req_id: String,
+) -> String {
+    if event_forwarder.is_none() {
+        *event_forwarder = Some(spawn_event_forwarder(d, outbox.clone()));
+    }
+    to_line(&Response::ok(
+        req_id,
+        json!(SubscribeResult { subscribed: true }),
+    ))
 }
 
 #[cfg(test)]
