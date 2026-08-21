@@ -10,6 +10,9 @@ All notable changes to this project are documented here. The format is based on
 - [#33](https://github.com/nelsonPires5/herdr-board/pull/33) feat: archive and restore boards and projects with visibility filters and guarded restores.
 - [#97](https://github.com/nelsonPires5/herdr-board/pull/97) feat: run the full gate set and live E2E in an isolated Docker sandbox (`scripts/sandbox.sh`), with opt-in real-provider agent runs.
 
+### Changed
+- [#99](https://github.com/nelsonPires5/herdr-board/pull/99) docs: harness lists now name all five built-ins, including Antigravity (agy) install, resume, and model guidance.
+
 ## [0.15.0] - 2026-08-16
 
 ### Added

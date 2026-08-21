@@ -16,6 +16,7 @@ SQLite schema v15. See the README for the one-line install command itself.
 | SQLite | schema v15 | `schema.sql` and `board-core::db` migrations |
 | Pi integration | v8 for precise Pi lifecycle/session signals | `herdr integration status` |
 | Claude integration | v7 for precise Claude lifecycle/session signals | `herdr integration status` |
+| Antigravity CLI integration | v1 for the `agy` conversation-id capture (resume/retry/rescue) | `herdr integration status` |
 
 The board rejects a different Herdr version or socket protocol before workspace discovery or pane
 placement; it does not silently fall back to an older wire contract. The integration versions are
@@ -35,7 +36,9 @@ herdr integration status
 
 Use `herdr api schema --output PATH` when you need a saved schema for review. Confirm that the
 status output shows Pi **current (v8)** and Claude **current (v7)** before relying on precise
-working/blocked/done or session-identity signals. `herdr integration install --help` is the
+working/blocked/done or session-identity signals. Antigravity users: confirm the status shows
+**antigravity-cli current (v1)** before relying on conversation reuse — without it an antigravity
+run still executes, but its conversation id is never captured. `herdr integration install --help` is the
 source of truth for the installable target names; install only the harness integrations you use.
 
 ## Installation details and a custom CLI directory
@@ -81,7 +84,14 @@ herdr integration install pi
 ```
 
 Claude users can similarly run `herdr integration install claude` (the supported Claude integration
-is v7). The repository's optional
+is v7). Antigravity users run `herdr integration install antigravity-cli` (the Antigravity CLI
+integration, current v1): it installs the hook that reports the `agy` conversation id, which the
+daemon captures after launch so later stages, `card run focus`, and rescues can re-attach with
+`--conversation <id>`; when the recorded conversation no longer exists the CLI starts a new one and
+the daemon persists the new id with a visible card warning. Without the integration the run still
+dispatches and `board done` still works, but the mint completes with no recorded conversation id (a
+`system` card warning explains the missing integration) and reuse/rescue fail closed — see
+[`herdr.md`](herdr.md) for the integration contract. The repository's optional
 [`skill/SKILL.md`](../skill/SKILL.md) teaches interactive or dispatched agents to comment, call
 `board done`, and queue work. GitHub plugin installation does not copy the skill; the
 local-development installer below can do so.
