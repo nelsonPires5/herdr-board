@@ -93,15 +93,31 @@ fn managed_pi_uses_startup_only_system_file_then_polls_ready_before_card_prompt(
             assert_eq!(req["params"], serde_json::json!({"target": "w1:p2"}));
             if call == 0 {
                 agent_get_result(req, "w1:p2", "card-42-execute", true, false)
-            } else {
+            } else if call == 1 {
                 agent_get_result(req, "w1:p2", "card-42-execute", false, true)
+            } else if call == 2 {
+                agent_get_with_session_for_kind(
+                    req,
+                    "w1:p2",
+                    "pi",
+                    json!({"agent":"pi","kind":"path","source":"herdr:pi","value":"/tmp/pi-sess.json"}),
+                )
+            } else {
+                reply(
+                    req,
+                    json!({"type":"agent_info","agent":{
+                        "pane_id":"w1:p2","agent":"pi","agent_status":"working",
+                        "interactive_ready":true,"launch_pending":false,"focused":false,"revision":2,
+                        "agent_session":{"agent":"pi","kind":"path","source":"herdr:pi","value":"/tmp/pi-sess.json"}
+                    }}),
+                )
             }
         }
         "agent.prompt" => {
             assert_eq!(
                 gets2.load(Ordering::SeqCst),
-                2,
-                "agent.prompt must not be sent while agent.get is still pending",
+                3,
+                "agent.prompt must not be sent while readiness/session gate is still pending",
             );
             assert_eq!(
                 req["params"],
@@ -140,9 +156,11 @@ fn managed_pi_uses_startup_only_system_file_then_polls_ready_before_card_prompt(
             "agent.start",
             "agent.get",
             "agent.get",
-            "agent.prompt"
+            "agent.get",
+            "agent.prompt",
+            "agent.get"
         ],
-        "schema-valid readiness polling must precede prompt submission",
+        "readiness + session gate + confirm ordering",
     );
     assert_eq!(
         requests[2]["params"],
@@ -738,11 +756,14 @@ fn managed_codex_mint_has_no_prompt_file_captures_session_then_prompts_delimited
 
     let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
     let prompts_for_server = Arc::clone(&prompts);
+    let gets = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let gets_for_server = Arc::clone(&gets);
+    let prompted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let prompted_for_server = Arc::clone(&prompted);
     let fake = serve_recording_herdr(move |req, _| match req["method"].as_str().unwrap() {
         "tab.list" => empty_tab_list(req),
         "tab.create" => tab_created(req, "w1:p2"),
         "agent.start" => {
-            // C7: no system-prompt file and no argv prompt for codex.
             let args: Vec<&str> = req["params"]["args"]
                 .as_array()
                 .unwrap()
@@ -758,9 +779,22 @@ fn managed_codex_mint_has_no_prompt_file_captures_session_then_prompts_delimited
         }
         "agent.get" => {
             assert_eq!(req["params"], json!({"target": "w1:p2"}));
-            agent_get_with_session(req, "w1:p2", codex_session("thread-1"))
+            if prompted_for_server.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                gets_for_server.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                agent_get_with_session(req, "w1:p2", codex_session("thread-1"))
+            } else {
+                reply(
+                    req,
+                    json!({"type":"agent_info","agent":{
+                        "pane_id":"w1:p2","agent":"codex","agent_status":"working",
+                        "interactive_ready":true,"launch_pending":false,"focused":false,"revision":2,
+                        "agent_session":{"agent":"codex","kind":"id","source":"session","value":"thread-1"}
+                    }}),
+                )
+            }
         }
         "agent.prompt" => {
+            prompted_for_server.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             prompts_for_server
                 .lock()
                 .unwrap()
@@ -794,9 +828,10 @@ fn managed_codex_mint_has_no_prompt_file_captures_session_then_prompts_delimited
             "tab.create",
             "agent.start",
             "agent.get",
-            "agent.prompt"
+            "agent.prompt",
+            "agent.get"
         ],
-        "capture polls agent.get once and only then delivers the prompt"
+        "capture before prompt, confirm after prompt"
     );
     let prompts = prompts.lock().unwrap();
     assert_eq!(prompts.len(), 1);
@@ -822,6 +857,10 @@ fn managed_codex_resume_and_fork_prompt_task_only_with_the_real_thread_id() {
     ] {
         let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
         let prompts_for_server = Arc::clone(&prompts);
+        let prompted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let prompted_for_server = Arc::clone(&prompted);
+        let thread_owned = thread.to_string();
+        let thread_for_get = thread_owned.clone();
         let fake = serve_recording_herdr(move |req, _| match req["method"].as_str().unwrap() {
             "tab.list" => empty_tab_list(req),
             "tab.create" => tab_created(req, "w1:p2"),
@@ -837,8 +876,22 @@ fn managed_codex_resume_and_fork_prompt_task_only_with_the_real_thread_id() {
                 assert_eq!(args, expected, "the session subcommand closes the argv");
                 agent_started(req, "w1:p2", false, true)
             }
-            "agent.get" => agent_get_with_session(req, "w1:p2", codex_session(thread)),
+            "agent.get" => {
+                if prompted_for_server.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                    agent_get_with_session(req, "w1:p2", codex_session(&thread_for_get))
+                } else {
+                    reply(
+                        req,
+                        json!({"type":"agent_info","agent":{
+                            "pane_id":"w1:p2","agent":"codex","agent_status":"working",
+                            "interactive_ready":true,"launch_pending":false,"focused":false,"revision":2,
+                            "agent_session":{"agent":"codex","kind":"id","source":"session","value": thread_for_get}
+                        }}),
+                    )
+                }
+            }
             "agent.prompt" => {
+                prompted_for_server.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 prompts_for_server
                     .lock()
                     .unwrap()
@@ -865,6 +918,8 @@ fn managed_codex_resume_and_fork_prompt_task_only_with_the_real_thread_id() {
 fn managed_codex_reuse_prompts_task_only_and_does_not_capture() {
     let gets = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let gets_for_server = Arc::clone(&gets);
+    let prompted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let prompted_for_server = Arc::clone(&prompted);
     let fake = serve_recording_herdr(move |req, _| match req["method"].as_str().unwrap() {
         "tab.list" => reply(
             req,
@@ -881,16 +936,39 @@ fn managed_codex_reuse_prompts_task_only_and_does_not_capture() {
             reply(req, json!({"type":"pane_list","panes":[prior]}))
         }
         "agent.get" => {
-            gets_for_server.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            codex_reuse_agent_ready(req, "w1:p-prior", "done")
+            let n = gets_for_server.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let prompt_happened = prompted_for_server.load(std::sync::atomic::Ordering::SeqCst) > 0;
+            if n == 0 {
+                codex_reuse_agent_ready(req, "w1:p-prior", "done")
+            } else if !prompt_happened {
+                // session gate for reuse: session already present
+                agent_get_with_session(req, "w1:p-prior", codex_session("thread-7"))
+            } else {
+                reply(
+                    req,
+                    json!({"type":"agent_info","agent":{
+                        "pane_id":"w1:p-prior","agent":"codex","agent_status":"working",
+                        "interactive_ready":true,"launch_pending":false,"focused":false,"revision":2,
+                        "agent_session":{"agent":"codex","kind":"id","source":"session","value":"thread-7"}
+                    }}),
+                )
+            }
         }
         "agent.prompt" => {
+            prompted_for_server.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             assert_eq!(req["params"]["text"], "next stage task");
             agent_prompted(req, "w1:p-prior", "card-42-execute")
         }
         method => panic!("unexpected codex-reuse method {method}"),
     });
-    let spawner = HerdrSpawner::new(fake.socket.clone());
+    let spawner = HerdrSpawner::with_pane_runner_and_delay(
+        fake.socket.clone(),
+        Arc::new(RecordingPaneRunner {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            behavior: Box::new(|_, _| unreachable!()),
+        }),
+        Arc::new(|_: Duration| {}),
+    );
     let mut request = codex_req(&["resume", "thread-7"], Some("next stage task"));
     request.tab_label = Some("card-42".into());
     request.owned_tab_id = Some("w1:t1".into());
@@ -904,10 +982,10 @@ fn managed_codex_reuse_prompts_task_only_and_does_not_capture() {
         handle.captured_session_id, None,
         "same-pane reuse re-prompts the live conversation; there is nothing to capture"
     );
-    assert_eq!(
-        gets.load(std::sync::atomic::Ordering::SeqCst),
-        1,
-        "reuse does exactly one agent.get (quiescence) and no capture poll"
+    assert!(
+        gets.load(std::sync::atomic::Ordering::SeqCst) >= 3,
+        "reuse now includes quiescence + session gate + confirm, got {}",
+        gets.load(std::sync::atomic::Ordering::SeqCst)
     );
 }
 
@@ -917,6 +995,8 @@ fn managed_codex_absent_session_degrades_within_bounds_and_launch_succeeds() {
 
     let gets = Arc::new(AtomicUsize::new(0));
     let gets_for_server = Arc::clone(&gets);
+    let prompted = Arc::new(AtomicUsize::new(0));
+    let prompted_for_server = Arc::clone(&prompted);
     let fake = serve_recording_herdr(move |req, _| match req["method"].as_str().unwrap() {
         "tab.list" => empty_tab_list(req),
         "tab.create" => tab_created(req, "w1:p2"),
@@ -930,9 +1010,22 @@ fn managed_codex_absent_session_degrades_within_bounds_and_launch_succeeds() {
         }
         "agent.get" => {
             gets_for_server.fetch_add(1, Ordering::SeqCst);
-            agent_get_result(req, "w1:p2", "card-42-execute", false, true)
+            if prompted_for_server.load(Ordering::SeqCst) == 0 {
+                agent_get_result(req, "w1:p2", "card-42-execute", false, true)
+            } else {
+                reply(
+                    req,
+                    json!({"type":"agent_info","agent":{
+                        "pane_id":"w1:p2","agent":"codex","agent_status":"working",
+                        "interactive_ready":true,"launch_pending":false,"focused":false,"revision":2
+                    }}),
+                )
+            }
         }
-        "agent.prompt" => agent_prompted(req, "w1:p2", "card-42-execute"),
+        "agent.prompt" => {
+            prompted_for_server.fetch_add(1, Ordering::SeqCst);
+            agent_prompted(req, "w1:p2", "card-42-execute")
+        }
         method => panic!("unexpected codex-absent method {method}"),
     });
     // Zero-delay clock: the bounded capture backoff never hits the wall.
@@ -954,8 +1047,8 @@ fn managed_codex_absent_session_degrades_within_bounds_and_launch_succeeds() {
     );
     assert_eq!(
         gets.load(Ordering::SeqCst),
-        super::super::SESSION_CAPTURE_PROBES,
-        "the capture is bounded: exactly the probe budget, never an unbounded poll"
+        super::super::SESSION_CAPTURE_PROBES + 1,
+        "capture bounded + one confirm probe"
     );
     let requests = fake.requests.lock().unwrap();
     let methods: Vec<_> = requests
@@ -964,8 +1057,8 @@ fn managed_codex_absent_session_degrades_within_bounds_and_launch_succeeds() {
         .collect();
     assert_eq!(
         methods.last().copied(),
-        Some("agent.prompt"),
-        "basic launch stays successful without a reported session"
+        Some("agent.get"),
+        "confirm polls after prompt"
     );
 }
 
@@ -1190,9 +1283,10 @@ fn managed_opencode_mint_prompts_delimited_block_then_captures_session() {
             "tab.create",
             "agent.start",
             "agent.prompt",
+            "agent.get",
             "agent.get"
         ],
-        "the prompt is delivered first; only then does the capture poll agent.get once"
+        "prompt first, then confirm and capture each poll once"
     );
     let prompts = prompts.lock().unwrap();
     assert_eq!(prompts.len(), 1);
@@ -1275,9 +1369,10 @@ fn managed_opencode_resume_and_fork_prompt_task_only_then_capture_the_real_sessi
                 "tab.create",
                 "agent.start",
                 "agent.prompt",
+                "agent.get",
                 "agent.get"
             ],
-            "the prompt is delivered first; only then does the capture poll agent.get once"
+            "prompt first, then confirm and capture each poll once"
         );
         let prompts = prompts.lock().unwrap();
         assert_eq!(
@@ -1341,8 +1436,8 @@ fn managed_opencode_absent_session_degrades_within_bounds_after_the_prompt_and_l
     );
     assert_eq!(
         gets.load(Ordering::SeqCst),
-        super::super::SESSION_CAPTURE_PROBES,
-        "the capture is bounded: exactly the probe budget, never an unbounded poll"
+        super::super::SESSION_CAPTURE_PROBES + super::super::PROMPT_CONFIRM_PROBES,
+        "capture + confirm each bounded"
     );
     let requests = fake.requests.lock().unwrap();
     let methods: Vec<_> = requests
@@ -1352,15 +1447,18 @@ fn managed_opencode_absent_session_degrades_within_bounds_after_the_prompt_and_l
     assert_eq!(
         methods.last().copied(),
         Some("agent.get"),
-        "the bounded capture probes close the launch once no session is reported"
+        "the bounded probes close the launch once no session is reported"
     );
     let prompt_at = methods
         .iter()
         .position(|m| *m == "agent.prompt")
         .expect("the prompt must still be delivered");
     assert!(
-        prompt_at < methods.len() - super::super::SESSION_CAPTURE_PROBES,
-        "the prompt must be delivered before the bounded capture probes start"
+        prompt_at
+            < methods.len()
+                - (super::super::SESSION_CAPTURE_PROBES + super::super::PROMPT_CONFIRM_PROBES)
+                + super::super::PROMPT_CONFIRM_PROBES,
+        "prompt before capture, confirm in between"
     );
 }
 
@@ -1592,9 +1690,10 @@ fn managed_agy_mint_prompts_delimited_block_then_captures_session() {
             "tab.create",
             "agent.start",
             "agent.prompt",
+            "agent.get",
             "agent.get"
         ],
-        "the prompt is delivered first; only then does the capture poll agent.get once"
+        "prompt first, then confirm and capture each poll once"
     );
     let prompts = prompts.lock().unwrap();
     assert_eq!(prompts.len(), 1);
@@ -1674,9 +1773,10 @@ fn managed_agy_resume_and_retry_prompt_task_only_then_capture_the_conversation_i
             "tab.create",
             "agent.start",
             "agent.prompt",
+            "agent.get",
             "agent.get"
         ],
-        "the prompt is delivered first; only then does the capture poll agent.get once"
+        "prompt first, then confirm and capture each poll once"
     );
     let prompts = prompts.lock().unwrap();
     assert_eq!(
@@ -1739,8 +1839,8 @@ fn managed_agy_absent_session_degrades_within_bounds_after_the_prompt_and_launch
     );
     assert_eq!(
         gets.load(Ordering::SeqCst),
-        super::super::SESSION_CAPTURE_PROBES,
-        "the capture is bounded: exactly the probe budget, never an unbounded poll"
+        super::super::SESSION_CAPTURE_PROBES + super::super::PROMPT_CONFIRM_PROBES,
+        "capture + confirm each bounded"
     );
     let requests = fake.requests.lock().unwrap();
     let methods: Vec<_> = requests
@@ -1750,15 +1850,18 @@ fn managed_agy_absent_session_degrades_within_bounds_after_the_prompt_and_launch
     assert_eq!(
         methods.last().copied(),
         Some("agent.get"),
-        "the bounded capture probes close the launch once no session is reported"
+        "the bounded probes close the launch once no session is reported"
     );
     let prompt_at = methods
         .iter()
         .position(|m| *m == "agent.prompt")
         .expect("the prompt must still be delivered");
     assert!(
-        prompt_at < methods.len() - super::super::SESSION_CAPTURE_PROBES,
-        "the prompt must be delivered before the bounded capture probes start"
+        prompt_at
+            < methods.len()
+                - (super::super::SESSION_CAPTURE_PROBES + super::super::PROMPT_CONFIRM_PROBES)
+                + super::super::PROMPT_CONFIRM_PROBES,
+        "prompt before capture, confirm in between"
     );
 }
 
@@ -1884,5 +1987,750 @@ fn managed_agy_rescue_shaped_launch_captures_but_never_prompts() {
     assert!(
         requests.iter().all(|r| r["method"] != "agent.prompt"),
         "a rescue-shaped launch must never re-send the card task"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Prompt delivery race (issue #98) — session-readiness gate, busy retry,
+// and post-prompt confirmation. These tests pin B1-B4 with the FakeHerdr
+// fixture and the injected DelayFn (no real sleeps).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn managed_pi_slow_provider_waits_for_session_before_prompt() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let gets = Arc::new(AtomicUsize::new(0));
+    let gets2 = Arc::clone(&gets);
+    let prompts = Arc::new(AtomicUsize::new(0));
+    let prompts2 = Arc::clone(&prompts);
+    let delays = Arc::new(Mutex::new(Vec::new()));
+    let delays2 = Arc::clone(&delays);
+    let prompt_path = Arc::new(Mutex::new(None::<PathBuf>));
+    let prompt_path2 = Arc::clone(&prompt_path);
+    let fake = serve_recording_herdr(move |req, _| match req["method"].as_str().unwrap() {
+        "tab.list" => empty_tab_list(req),
+        "tab.create" => tab_created(req, "w1:p2"),
+        "agent.start" => {
+            let path = assert_startup_prompt_file(
+                req,
+                &[
+                    "--model",
+                    "provider/model with space",
+                    "--session-id",
+                    "session-42",
+                ],
+                "--append-system-prompt",
+                "system instructions\nwith an exact second line",
+            );
+            *prompt_path2.lock().unwrap() = Some(path);
+            agent_started(req, "w1:p2", false, true)
+        }
+        "agent.get" => {
+            let n = gets2.fetch_add(1, Ordering::SeqCst);
+            let prompt_happened = prompts2.load(Ordering::SeqCst) > 0;
+            if !prompt_happened {
+                if n < 3 {
+                    agent_get_result(req, "w1:p2", "card-42-execute", false, true)
+                } else {
+                    agent_get_with_session_for_kind(
+                        req,
+                        "w1:p2",
+                        "pi",
+                        json!({"agent":"pi","kind":"path","source":"herdr:pi","value":"/tmp/pi-sess.json"}),
+                    )
+                }
+            } else {
+                reply(
+                    req,
+                    json!({"type":"agent_info","agent":{
+                        "pane_id":"w1:p2","agent":"pi","agent_status":"working",
+                        "interactive_ready":true,"launch_pending":false,"focused":false,"revision":2,
+                        "agent_session":{"agent":"pi","kind":"path","source":"herdr:pi","value":"/tmp/pi-sess.json"}
+                    }}),
+                )
+            }
+        }
+        "agent.prompt" => {
+            assert!(
+                gets2.load(Ordering::SeqCst) >= 4,
+                "prompt must wait until agent_session appeared"
+            );
+            prompts2.fetch_add(1, Ordering::SeqCst);
+            agent_prompted(req, "w1:p2", "card-42-execute")
+        }
+        method => panic!("unexpected slow-provider method {method}"),
+    });
+    let spawner = HerdrSpawner::with_pane_runner_and_delay(
+        fake.socket.clone(),
+        Arc::new(RecordingPaneRunner {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            behavior: Box::new(|_, _| unreachable!("managed must not use pane runner")),
+        }),
+        Arc::new(move |d| delays2.lock().unwrap().push(d)),
+    );
+    let handle = spawner.spawn(&pi_req(Some("slow task"))).unwrap();
+    assert_eq!(handle.pane_id.as_deref(), Some("w1:p2"));
+    assert_eq!(prompts.load(Ordering::SeqCst), 1, "exactly one prompt");
+    assert_eq!(fake.count("agent.prompt"), 1);
+    assert!(
+        !delays.lock().unwrap().is_empty(),
+        "slow provider must record injected delay"
+    );
+    assert!(!prompt_path.lock().unwrap().as_ref().unwrap().exists());
+    let methods = fake.methods();
+    let prompt_pos = methods.iter().position(|m| m == "agent.prompt").unwrap();
+    let get_before_prompt = methods[..prompt_pos]
+        .iter()
+        .filter(|m| **m == "agent.get")
+        .count();
+    assert!(
+        get_before_prompt >= 4,
+        "prompt after at least 4 gets, got {get_before_prompt}"
+    );
+}
+
+#[test]
+fn managed_pi_fast_provider_no_extra_wait() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let gets = Arc::new(AtomicUsize::new(0));
+    let gets2 = Arc::clone(&gets);
+    let prompts = Arc::new(AtomicUsize::new(0));
+    let prompts2 = Arc::clone(&prompts);
+    let delays = Arc::new(Mutex::new(Vec::new()));
+    let delays2 = Arc::clone(&delays);
+    let fake = serve_recording_herdr(move |req, _| match req["method"].as_str().unwrap() {
+        "tab.list" => empty_tab_list(req),
+        "tab.create" => tab_created(req, "w1:p2"),
+        "agent.start" => agent_started(req, "w1:p2", false, true),
+        "agent.get" => {
+            let prompt_happened = prompts2.load(Ordering::SeqCst) > 0;
+            gets2.fetch_add(1, Ordering::SeqCst);
+            if !prompt_happened {
+                agent_get_with_session_for_kind(
+                    req,
+                    "w1:p2",
+                    "pi",
+                    json!({"agent":"pi","kind":"path","source":"herdr:pi","value":"/tmp/fast.json"}),
+                )
+            } else {
+                reply(
+                    req,
+                    json!({"type":"agent_info","agent":{
+                        "pane_id":"w1:p2","agent":"pi","agent_status":"working",
+                        "interactive_ready":true,"launch_pending":false,"focused":false,"revision":2,
+                        "agent_session":{"agent":"pi","kind":"path","source":"herdr:pi","value":"/tmp/fast.json"}
+                    }}),
+                )
+            }
+        }
+        "agent.prompt" => {
+            prompts2.fetch_add(1, Ordering::SeqCst);
+            agent_prompted(req, "w1:p2", "card-42-execute")
+        }
+        method => panic!("unexpected fast-provider method {method}"),
+    });
+    let spawner = HerdrSpawner::with_pane_runner_and_delay(
+        fake.socket.clone(),
+        Arc::new(RecordingPaneRunner {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            behavior: Box::new(|_, _| unreachable!()),
+        }),
+        Arc::new(move |d| delays2.lock().unwrap().push(d)),
+    );
+    let handle = spawner.spawn(&pi_req(Some("fast task"))).unwrap();
+    assert_eq!(handle.pane_id.as_deref(), Some("w1:p2"));
+    assert_eq!(fake.count("agent.prompt"), 1);
+    assert_eq!(
+        gets.load(Ordering::SeqCst),
+        2,
+        "one gate get + one confirm get"
+    );
+    assert!(
+        delays.lock().unwrap().is_empty(),
+        "fast provider must not record any session-gate delay"
+    );
+}
+
+#[test]
+fn managed_pi_session_gate_timeout_degrades_and_still_prompts() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let gets = Arc::new(AtomicUsize::new(0));
+    let gets2 = Arc::clone(&gets);
+    let prompts = Arc::new(AtomicUsize::new(0));
+    let prompts2 = Arc::clone(&prompts);
+    let delays = Arc::new(Mutex::new(Vec::new()));
+    let delays2 = Arc::clone(&delays);
+    let fake = serve_recording_herdr(move |req, _| match req["method"].as_str().unwrap() {
+        "tab.list" => empty_tab_list(req),
+        "tab.create" => tab_created(req, "w1:p2"),
+        "agent.start" => agent_started(req, "w1:p2", false, true),
+        "agent.get" => {
+            gets2.fetch_add(1, Ordering::SeqCst);
+            let prompt_happened = prompts2.load(Ordering::SeqCst) > 0;
+            // Always idle with no session, even after prompt -> confirm will also timeout
+            if !prompt_happened {
+                // gate phase: never reports session
+                agent_get_result(req, "w1:p2", "card-42-execute", false, true)
+            } else {
+                // confirm phase: stays idle, no session change
+                reply(
+                    req,
+                    json!({"type":"agent_info","agent":{
+                        "pane_id":"w1:p2","agent":"pi","agent_status":"idle",
+                        "interactive_ready":true,"launch_pending":false,"focused":false,"revision":2
+                    }}),
+                )
+            }
+        }
+        "agent.prompt" => {
+            prompts2.fetch_add(1, Ordering::SeqCst);
+            agent_prompted(req, "w1:p2", "card-42-execute")
+        }
+        method => panic!("unexpected gate-timeout method {method}"),
+    });
+    let spawner = HerdrSpawner::with_pane_runner_and_delay(
+        fake.socket.clone(),
+        Arc::new(RecordingPaneRunner {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            behavior: Box::new(|_, _| unreachable!()),
+        }),
+        Arc::new(move |d| delays2.lock().unwrap().push(d)),
+    );
+    let handle = spawner.spawn(&pi_req(Some("gated task"))).unwrap();
+    assert_eq!(handle.pane_id.as_deref(), Some("w1:p2"));
+    assert_eq!(
+        fake.count("agent.prompt"),
+        1,
+        "prompt still sent once after timeout"
+    );
+    let gate_gets = 5; // SESSION_READY_PROBES
+    let confirm_gets = 5; // PROMPT_CONFIRM_PROBES
+    assert_eq!(
+        gets.load(Ordering::SeqCst),
+        gate_gets + confirm_gets,
+        "gate + confirm probes bounded"
+    );
+}
+
+#[test]
+fn managed_pi_prompt_busy_retry_succeeds_with_doubling_backoff() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let prompts = Arc::new(AtomicUsize::new(0));
+    let prompts2 = Arc::clone(&prompts);
+    let gets = Arc::new(AtomicUsize::new(0));
+    let gets2 = Arc::clone(&gets);
+    let delays = Arc::new(Mutex::new(Vec::new()));
+    let delays2 = Arc::clone(&delays);
+    let prompt_path = Arc::new(Mutex::new(None::<PathBuf>));
+    let prompt_path2 = Arc::clone(&prompt_path);
+    let fake = serve_recording_herdr(move |req, _| match req["method"].as_str().unwrap() {
+        "tab.list" => empty_tab_list(req),
+        "tab.create" => tab_created(req, "w1:p2"),
+        "agent.start" => {
+            let path = assert_startup_prompt_file(
+                req,
+                &[
+                    "--model",
+                    "provider/model with space",
+                    "--session-id",
+                    "session-42",
+                ],
+                "--append-system-prompt",
+                "system instructions\nwith an exact second line",
+            );
+            *prompt_path2.lock().unwrap() = Some(path);
+            agent_started(req, "w1:p2", false, true)
+        }
+        "agent.get" => {
+            gets2.fetch_add(1, Ordering::SeqCst);
+            let p = prompts2.load(Ordering::SeqCst);
+            if p == 0 {
+                // gate: session present immediately
+                agent_get_with_session_for_kind(
+                    req,
+                    "w1:p2",
+                    "pi",
+                    json!({"agent":"pi","kind":"path","source":"herdr:pi","value":"/tmp/s.json"}),
+                )
+            } else if p < 3 {
+                // busy-retry inter-attempt is_interactive check: must be interactive
+                agent_get_result(req, "w1:p2", "card-42-execute", false, true)
+            } else {
+                // confirm: working
+                reply(
+                    req,
+                    json!({"type":"agent_info","agent":{
+                        "pane_id":"w1:p2","agent":"pi","agent_status":"working",
+                        "interactive_ready":true,"launch_pending":false,"focused":false,"revision":2,
+                        "agent_session":{"agent":"pi","kind":"path","source":"herdr:pi","value":"/tmp/s.json"}
+                    }}),
+                )
+            }
+        }
+        "agent.prompt" => {
+            let n = prompts2.fetch_add(1, Ordering::SeqCst);
+            if n < 2 {
+                error(req, "agent_pane_busy", "pane is busy")
+            } else {
+                agent_prompted(req, "w1:p2", "card-42-execute")
+            }
+        }
+        method => panic!("unexpected busy-retry method {method}"),
+    });
+    let spawner = HerdrSpawner::with_pane_runner_and_delay(
+        fake.socket.clone(),
+        Arc::new(RecordingPaneRunner {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            behavior: Box::new(|_, _| unreachable!()),
+        }),
+        Arc::new(move |d| delays2.lock().unwrap().push(d)),
+    );
+    let handle = spawner.spawn(&pi_req(Some("busy task"))).unwrap();
+    assert_eq!(handle.pane_id.as_deref(), Some("w1:p2"));
+    assert_eq!(
+        prompts.load(Ordering::SeqCst),
+        3,
+        "two busy then success = 3 prompts"
+    );
+    let delays = delays.lock().unwrap().clone();
+    assert_eq!(
+        delays,
+        vec![
+            super::super::AGENT_PROMPT_BUSY_BACKOFF,
+            super::super::AGENT_PROMPT_BUSY_BACKOFF.saturating_mul(2)
+        ]
+    );
+    assert!(!prompt_path.lock().unwrap().as_ref().unwrap().exists());
+    assert_eq!(fake.count("agent.prompt"), 3);
+}
+
+#[test]
+fn managed_pi_prompt_busy_retry_exhausted_propagates_and_cleans_file() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let prompts = Arc::new(AtomicUsize::new(0));
+    let prompts2 = Arc::clone(&prompts);
+    let delays = Arc::new(Mutex::new(Vec::new()));
+    let delays2 = Arc::clone(&delays);
+    let prompt_path = Arc::new(Mutex::new(None::<PathBuf>));
+    let prompt_path2 = Arc::clone(&prompt_path);
+    let fake = serve_recording_herdr(move |req, _| match req["method"].as_str().unwrap() {
+        "tab.list" => empty_tab_list(req),
+        "tab.create" => tab_created(req, "w1:p2"),
+        "agent.start" => {
+            let path = assert_startup_prompt_file(
+                req,
+                &[
+                    "--model",
+                    "provider/model with space",
+                    "--session-id",
+                    "session-42",
+                ],
+                "--append-system-prompt",
+                "system instructions\nwith an exact second line",
+            );
+            *prompt_path2.lock().unwrap() = Some(path);
+            agent_started(req, "w1:p2", false, true)
+        }
+        "agent.get" => agent_get_with_session_for_kind(
+            req,
+            "w1:p2",
+            "pi",
+            json!({"agent":"pi","kind":"path","source":"herdr:pi","value":"/tmp/s.json"}),
+        ),
+        "agent.prompt" => {
+            prompts2.fetch_add(1, Ordering::SeqCst);
+            error(req, "agent_pane_busy", "pane is busy")
+        }
+        "pane.close" => pane_result(req, "w1:p2"),
+        method => panic!("unexpected busy-exhausted method {method}"),
+    });
+    let spawner = HerdrSpawner::with_pane_runner_and_delay(
+        fake.socket.clone(),
+        Arc::new(RecordingPaneRunner {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            behavior: Box::new(|_, _| unreachable!()),
+        }),
+        Arc::new(move |d| delays2.lock().unwrap().push(d)),
+    );
+    let err = spawner.spawn(&pi_req(Some("exhausted"))).unwrap_err();
+    assert!(err.to_string().contains("agent_pane_busy"));
+    assert_eq!(
+        prompts.load(Ordering::SeqCst),
+        super::super::AGENT_PROMPT_BUSY_RETRIES + 1,
+        "initial + retries"
+    );
+    let mut expected = Vec::new();
+    let mut backoff = super::super::AGENT_PROMPT_BUSY_BACKOFF;
+    for _ in 0..super::super::AGENT_PROMPT_BUSY_RETRIES {
+        expected.push(backoff);
+        backoff = backoff.saturating_mul(2);
+    }
+    assert_eq!(*delays.lock().unwrap(), expected);
+    assert!(
+        !prompt_path.lock().unwrap().as_ref().unwrap().exists(),
+        "0600 file must be removed even on exhausted busy error"
+    );
+}
+
+#[test]
+fn managed_pi_prompt_non_retryable_error_propagates_immediately() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let prompts = Arc::new(AtomicUsize::new(0));
+    let prompts2 = Arc::clone(&prompts);
+    let delays = Arc::new(Mutex::new(Vec::new()));
+    let delays2 = Arc::clone(&delays);
+    let prompt_path = Arc::new(Mutex::new(None::<PathBuf>));
+    let prompt_path2 = Arc::clone(&prompt_path);
+    let fake = serve_recording_herdr(move |req, _| match req["method"].as_str().unwrap() {
+        "tab.list" => empty_tab_list(req),
+        "tab.create" => tab_created(req, "w1:p2"),
+        "agent.start" => {
+            let path = assert_startup_prompt_file(
+                req,
+                &[
+                    "--model",
+                    "provider/model with space",
+                    "--session-id",
+                    "session-42",
+                ],
+                "--append-system-prompt",
+                "system instructions\nwith an exact second line",
+            );
+            *prompt_path2.lock().unwrap() = Some(path);
+            agent_started(req, "w1:p2", false, true)
+        }
+        "agent.get" => agent_get_with_session_for_kind(
+            req,
+            "w1:p2",
+            "pi",
+            json!({"agent":"pi","kind":"path","source":"herdr:pi","value":"/tmp/s.json"}),
+        ),
+        "agent.prompt" => {
+            prompts2.fetch_add(1, Ordering::SeqCst);
+            error(req, "internal_error", "something broke")
+        }
+        "pane.close" => pane_result(req, "w1:p2"),
+        method => panic!("unexpected non-retryable method {method}"),
+    });
+    let spawner = HerdrSpawner::with_pane_runner_and_delay(
+        fake.socket.clone(),
+        Arc::new(RecordingPaneRunner {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            behavior: Box::new(|_, _| unreachable!()),
+        }),
+        Arc::new(move |d| delays2.lock().unwrap().push(d)),
+    );
+    let err = spawner.spawn(&pi_req(Some("bad task"))).unwrap_err();
+    assert!(err.to_string().contains("internal_error"));
+    assert_eq!(
+        prompts.load(Ordering::SeqCst),
+        1,
+        "non-retryable must not retry"
+    );
+    assert!(
+        delays.lock().unwrap().is_empty(),
+        "no busy backoff for non-retryable"
+    );
+    assert!(!prompt_path.lock().unwrap().as_ref().unwrap().exists());
+}
+
+#[test]
+fn managed_pi_post_prompt_confirmation_does_not_resend() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let prompts = Arc::new(AtomicUsize::new(0));
+    let prompts2 = Arc::clone(&prompts);
+    let gets = Arc::new(AtomicUsize::new(0));
+    let gets2 = Arc::clone(&gets);
+    let fake = serve_recording_herdr(move |req, _| match req["method"].as_str().unwrap() {
+        "tab.list" => empty_tab_list(req),
+        "tab.create" => tab_created(req, "w1:p2"),
+        "agent.start" => agent_started(req, "w1:p2", false, true),
+        "agent.get" => {
+            gets2.fetch_add(1, Ordering::SeqCst);
+            let prompt_happened = prompts2.load(Ordering::SeqCst) > 0;
+            if !prompt_happened {
+                agent_get_with_session_for_kind(
+                    req,
+                    "w1:p2",
+                    "pi",
+                    json!({"agent":"pi","kind":"path","source":"herdr:pi","value":"/tmp/s.json"}),
+                )
+            } else {
+                // first confirm poll sees working -> confirmed
+                reply(
+                    req,
+                    json!({"type":"agent_info","agent":{
+                        "pane_id":"w1:p2","agent":"pi","agent_status":"working",
+                        "interactive_ready":true,"launch_pending":false,"focused":false,"revision":2,
+                        "agent_session":{"agent":"pi","kind":"path","source":"herdr:pi","value":"/tmp/s.json"}
+                    }}),
+                )
+            }
+        }
+        "agent.prompt" => {
+            prompts2.fetch_add(1, Ordering::SeqCst);
+            agent_prompted(req, "w1:p2", "card-42-execute")
+        }
+        method => panic!("unexpected confirm method {method}"),
+    });
+    let spawner = HerdrSpawner::with_pane_runner_and_delay(
+        fake.socket.clone(),
+        Arc::new(RecordingPaneRunner {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            behavior: Box::new(|_, _| unreachable!()),
+        }),
+        Arc::new(|_: Duration| {}),
+    );
+    let handle = spawner.spawn(&pi_req(Some("confirm task"))).unwrap();
+    assert_eq!(handle.pane_id.as_deref(), Some("w1:p2"));
+    assert_eq!(prompts.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fake.count("agent.prompt"),
+        1,
+        "confirm must not resend prompt"
+    );
+}
+
+#[test]
+fn managed_reuse_path_session_gate_before_prompt() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let gets = Arc::new(AtomicUsize::new(0));
+    let gets2 = Arc::clone(&gets);
+    let prompts = Arc::new(AtomicUsize::new(0));
+    let prompts2 = Arc::clone(&prompts);
+    let delays = Arc::new(Mutex::new(Vec::new()));
+    let delays2 = Arc::clone(&delays);
+    let fake = serve_recording_herdr(move |req, _| match req["method"].as_str().unwrap() {
+        "tab.list" => reply(
+            req,
+            json!({"type":"tab_list","tabs":[{
+                "tab_id":"w1:t1","workspace_id":"w1","number":1,
+                "label":"card-42","pane_count":1
+            }]}),
+        ),
+        "pane.list" => {
+            let mut prior = pane_info("w1:p-prior");
+            prior["label"] = json!("card-42-execute");
+            prior["agent"] = json!("pi");
+            prior["agent_status"] = json!("idle");
+            reply(req, json!({"type":"pane_list","panes":[prior]}))
+        }
+        "pane.layout" => reply(
+            req,
+            json!({"type":"pane_layout","layout":{
+                "workspace_id":"w1","tab_id":"w1:t1","zoomed":false,
+                "area":{"x":0,"y":0,"width":200,"height":40},
+                "focused_pane_id":"w1:p-prior",
+                "panes":[{"pane_id":"w1:p-prior","focused":true,"rect":{"x":0,"y":0,"width":200,"height":40}}],"splits":[]
+            }}),
+        ),
+        "agent.get" => {
+            let n = gets2.fetch_add(1, Ordering::SeqCst);
+            let prompt_happened = prompts2.load(Ordering::SeqCst) > 0;
+            if n == 0 {
+                // await_reuse_ready quiescence: idle interactive
+                reply(
+                    req,
+                    json!({"type":"agent_info","agent":{
+                        "pane_id":"w1:p-prior","agent":"pi","agent_status":"idle",
+                        "interactive_ready":true,"launch_pending":false,"focused":false,"revision":2,
+                        "agent_session":{"agent":"pi","kind":"path","source":"herdr:pi","value":"/tmp/reuse-sess.json"}
+                    }}),
+                )
+            } else if !prompt_happened {
+                // session gate: first 2 probes miss, third has session
+                if n < 3 {
+                    agent_get_result(req, "w1:p-prior", "card-42-execute", false, true)
+                } else {
+                    agent_get_with_session_for_kind(
+                        req,
+                        "w1:p-prior",
+                        "pi",
+                        json!({"agent":"pi","kind":"path","source":"herdr:pi","value":"/tmp/reuse-sess.json"}),
+                    )
+                }
+            } else {
+                // confirm
+                reply(
+                    req,
+                    json!({"type":"agent_info","agent":{
+                        "pane_id":"w1:p-prior","agent":"pi","agent_status":"working",
+                        "interactive_ready":true,"launch_pending":false,"focused":false,"revision":2,
+                        "agent_session":{"agent":"pi","kind":"path","source":"herdr:pi","value":"/tmp/reuse-sess.json"}
+                    }}),
+                )
+            }
+        }
+        "agent.prompt" => {
+            assert!(
+                gets2.load(Ordering::SeqCst) >= 4,
+                "reuse prompt must wait for session"
+            );
+            prompts2.fetch_add(1, Ordering::SeqCst);
+            agent_prompted(req, "w1:p-prior", "card-42-execute")
+        }
+        method => panic!("unexpected reuse method {method}"),
+    });
+    let spawner = HerdrSpawner::with_pane_runner_and_delay(
+        fake.socket.clone(),
+        Arc::new(RecordingPaneRunner {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            behavior: Box::new(|_, _| unreachable!()),
+        }),
+        Arc::new(move |d| delays2.lock().unwrap().push(d)),
+    );
+    let mut request = pi_req(Some("reuse task"));
+    request.tab_label = Some("card-42".into());
+    request.owned_tab_id = Some("w1:t1".into());
+    request.durable_pane_ids = vec!["w1:p-prior".into()];
+    request.reclaimable_pane_ids = vec!["w1:p-prior".into()];
+    request.reuse_pane_id = Some("w1:p-prior".into());
+    let handle = spawner.spawn(&request).unwrap();
+    assert_eq!(handle.pane_id.as_deref(), Some("w1:p-prior"));
+    assert_eq!(prompts.load(Ordering::SeqCst), 1);
+    assert!(
+        !delays.lock().unwrap().is_empty(),
+        "reuse gate should have delayed"
+    );
+}
+
+#[test]
+fn managed_opencode_no_pre_prompt_session_wait() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let prompts = Arc::new(AtomicUsize::new(0));
+    let prompts2 = Arc::clone(&prompts);
+    let gets_before_prompt = Arc::new(AtomicUsize::new(0));
+    let gets_before_prompt2 = Arc::clone(&gets_before_prompt);
+    let fake = serve_recording_herdr(move |req, _| match req["method"].as_str().unwrap() {
+        "tab.list" => empty_tab_list(req),
+        "tab.create" => tab_created(req, "w1:p2"),
+        "agent.start" => agent_started(req, "w1:p2", false, true),
+        "agent.get" => {
+            if prompts2.load(Ordering::SeqCst) == 0 {
+                gets_before_prompt2.fetch_add(1, Ordering::SeqCst);
+                panic!("opencode must not poll session before prompt");
+            }
+            // after prompt: first confirm get returns working with session, capture returns session
+            agent_get_with_session_for_kind(req, "w1:p2", "opencode", opencode_session("ses-99"))
+        }
+        "agent.prompt" => {
+            assert_eq!(
+                gets_before_prompt2.load(Ordering::SeqCst),
+                0,
+                "no agent.get before prompt for opencode"
+            );
+            prompts2.fetch_add(1, Ordering::SeqCst);
+            agent_prompted(req, "w1:p2", "card-42-execute")
+        }
+        method => panic!("unexpected opencode no-wait method {method}"),
+    });
+    let spawner = HerdrSpawner::with_pane_runner_and_delay(
+        fake.socket.clone(),
+        Arc::new(RecordingPaneRunner {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            behavior: Box::new(|_, _| unreachable!()),
+        }),
+        Arc::new(|_: Duration| {}),
+    );
+    let handle = spawner
+        .spawn(&opencode_req(&[], Some("opencode task")))
+        .unwrap();
+    assert_eq!(handle.pane_id.as_deref(), Some("w1:p2"));
+    assert_eq!(prompts.load(Ordering::SeqCst), 1);
+    assert_eq!(gets_before_prompt.load(Ordering::SeqCst), 0);
+    assert_eq!(fake.count("agent.prompt"), 1);
+}
+
+#[test]
+fn managed_agy_no_pre_prompt_session_wait() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let prompts = Arc::new(AtomicUsize::new(0));
+    let prompts2 = Arc::clone(&prompts);
+    let gets_before = Arc::new(AtomicUsize::new(0));
+    let gets_before2 = Arc::clone(&gets_before);
+    let fake = serve_recording_herdr(move |req, _| match req["method"].as_str().unwrap() {
+        "tab.list" => empty_tab_list(req),
+        "tab.create" => tab_created(req, "w1:p2"),
+        "agent.start" => agent_started(req, "w1:p2", false, true),
+        "agent.get" => {
+            if prompts2.load(Ordering::SeqCst) == 0 {
+                gets_before2.fetch_add(1, Ordering::SeqCst);
+                panic!("agy must not poll session before prompt");
+            }
+            agent_get_with_session_for_kind(req, "w1:p2", "agy", agy_session("conv-99"))
+        }
+        "agent.prompt" => {
+            prompts2.fetch_add(1, Ordering::SeqCst);
+            agent_prompted(req, "w1:p2", "card-42-execute")
+        }
+        method => panic!("unexpected agy no-wait method {method}"),
+    });
+    let spawner = HerdrSpawner::with_pane_runner_and_delay(
+        fake.socket.clone(),
+        Arc::new(RecordingPaneRunner {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            behavior: Box::new(|_, _| unreachable!()),
+        }),
+        Arc::new(|_: Duration| {}),
+    );
+    let handle = spawner.spawn(&agy_req(&[], Some("agy task"))).unwrap();
+    assert_eq!(handle.pane_id.as_deref(), Some("w1:p2"));
+    assert_eq!(fake.count("agent.prompt"), 1);
+    assert_eq!(gets_before.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn managed_codex_capture_before_prompt_preserved() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let gets_before = Arc::new(AtomicUsize::new(0));
+    let gets_before2 = Arc::clone(&gets_before);
+    let prompts = Arc::new(AtomicUsize::new(0));
+    let prompts2 = Arc::clone(&prompts);
+    let fake = serve_recording_herdr(move |req, _| match req["method"].as_str().unwrap() {
+        "tab.list" => empty_tab_list(req),
+        "tab.create" => tab_created(req, "w1:p2"),
+        "agent.start" => agent_started(req, "w1:p2", false, true),
+        "agent.get" => {
+            if prompts2.load(Ordering::SeqCst) == 0 {
+                gets_before2.fetch_add(1, Ordering::SeqCst);
+                agent_get_with_session(req, "w1:p2", codex_session("thread-99"))
+            } else {
+                // confirm after prompt: working
+                reply(
+                    req,
+                    json!({"type":"agent_info","agent":{
+                        "pane_id":"w1:p2","agent":"codex","agent_status":"working",
+                        "interactive_ready":true,"launch_pending":false,"focused":false,"revision":2,
+                        "agent_session":{"agent":"codex","kind":"id","source":"session","value":"thread-99"}
+                    }}),
+                )
+            }
+        }
+        "agent.prompt" => {
+            assert_eq!(
+                gets_before2.load(Ordering::SeqCst),
+                1,
+                "codex must capture before prompt"
+            );
+            prompts2.fetch_add(1, Ordering::SeqCst);
+            agent_prompted(req, "w1:p2", "card-42-execute")
+        }
+        method => panic!("unexpected codex method {method}"),
+    });
+    let spawner = HerdrSpawner::with_pane_runner_and_delay(
+        fake.socket.clone(),
+        Arc::new(RecordingPaneRunner {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            behavior: Box::new(|_, _| unreachable!()),
+        }),
+        Arc::new(|_: Duration| {}),
+    );
+    let handle = spawner.spawn(&codex_req(&[], Some("codex task"))).unwrap();
+    assert_eq!(handle.captured_session_id.as_deref(), Some("thread-99"));
+    assert_eq!(prompts.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        gets_before.load(Ordering::SeqCst),
+        1,
+        "capture is before prompt"
     );
 }

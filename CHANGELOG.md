@@ -13,6 +13,9 @@ All notable changes to this project are documented here. The format is based on
 ### Changed
 - [#99](https://github.com/nelsonPires5/herdr-board/pull/99) docs: harness lists now name all five built-ins, including Antigravity (agy) install, resume, and model guidance.
 
+### Fixed
+- [#103](https://github.com/nelsonPires5/herdr-board/pull/103) fix: managed Pi and Claude runs wait for harness session readiness before sending the initial prompt.
+
 ## [0.15.0] - 2026-08-16
 
 ### Added
