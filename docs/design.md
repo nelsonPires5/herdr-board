@@ -153,7 +153,7 @@ anchor unchanged: `pane run` exits close their child, so the anchor is what the 
 from. Old live anchors from earlier releases converge on the next successful managed launch;
 old durable child evidence remains valid tab proof.
 Herdr labels are not unique, so neither tab nor anchor ownership is inferred from one. The current
-schema v14 retains the exact anchor pane id introduced by v12 with each promoted run; after restart,
+schema v15 retains the exact anchor pane id introduced by v12 with each promoted run; after restart,
 the daemon reconstructs the exact tab and anchor only from scoped durable pane identities in the same
 session and workspace.
 A renamed anchor remains owned by identity. If that exact anchor was closed, it is recreated only by
@@ -204,8 +204,8 @@ runs(id, card_id, column_id, harness, argv_json, prompt_snapshot,
      result_summary, log_path)
 ```
 
-Schema is versioned via `PRAGMA user_version` (current = **v14**). A fresh DB is built straight from
-`schema.sql` and stamped v14. Existing v1→v4 migrations retain their space/session, archive, and Pi
+Schema is versioned via `PRAGMA user_version` (current = **v15**). A fresh DB is built straight from
+`schema.sql` and stamped v15. Existing v1→v4 migrations retain their space/session, archive, and Pi
 effort behavior. v5 adds unique non-null `boards.scope_path`, preserves board `id=1` plus every
 related row as `Global`, and leaves existing card harnesses unchanged. v6 rebuilds `cards` to admit
 the `awaiting`/`done` statuses and adds `cards.awaiting_reason` (NULL outside `awaiting`). v7 adds
@@ -239,7 +239,7 @@ to NULL, but serialization always omits `system_prompt_snapshot` and its content
 responses. `launch_spec_json` is likewise internal and omitted in full from boardd wire responses.
 
 Source ownership is explicit: `schema.sql` is the fresh schema source, `board-core::db` owns ordered
-upgrades through v14, and `board-core::protocol` owns the v1 wire DTOs and additive compatibility
+upgrades through v15, and `board-core::protocol` owns the v1 wire DTOs and additive compatibility
 rules. The CLI and TUI use typed `BoardClient` wrappers; only boardd reads or writes SQLite. New
 v1 fields such as `BoardSnapshot.active_runs` and RPC error `kind`/`details` are additive, so older
 clients can continue decoding the existing fields.

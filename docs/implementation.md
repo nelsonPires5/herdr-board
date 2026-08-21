@@ -22,16 +22,16 @@ in root Cargo.toml. Never edit another crate. Phase A creates all five crates co
 
 ## Contract versions and source ownership
 
-The final compatibility matrix is: board protocol **v1**, SQLite schema **v14**, and exactly
+The final compatibility matrix is: board protocol **v1**, SQLite schema **v15**, and exactly
 Herdr **0.8.0 / socket protocol 19**. The versioned source of truth is `schema.sql` for fresh
 SQLite databases and `board-core::db` migrations for upgrades; `board-core::protocol` owns the
 board wire DTOs; `board-herdr` owns only the verified Herdr socket surface; and `docs/design.md`
-and `docs/protocol.md` explain behavior rather than defining duplicate serde shapes. Schema v14 adds
+and `docs/protocol.md` explain behavior rather than defining duplicate serde shapes. Schema v15 adds
 projects (canonical-path identity, Global as the special project), per-project named boards,
 persistent selection, and capped recency on top of v13's soft-deleted comments and immutable
 comment-history snapshots; the CLI exposes the project/board subcommands while boardd remains the
 sole SQLite writer. The complete live use-case catalog
-is [`../e2e/README.md`](../e2e/README.md), scenarios **01–37** (through `e2e/37-multi-project.sh`); the safe
+is [`../e2e/README.md`](../e2e/README.md), scenarios **01–38** (through `e2e/38-board-project-archive.sh`); the safe
 static harness is `e2e/test-harness.sh`, while `e2e/run-all.sh` is the opt-in live gate.
 
 The current Herdr boundary is deliberately narrower than the upstream schema. The 0.8.0/protocol-19

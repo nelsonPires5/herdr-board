@@ -8,8 +8,8 @@ exercises the herdr wire integration end to end.
 
 For the layers below this one (unit, daemon+CLI integration, TUI snapshots), the
 isolation/safety design, and the **how-to-write-a-scenario** guide, see
-[`../docs/testing.md`](../docs/testing.md). This file is the authoritative use-case catalog for board protocol v1 / SQLite schema v14:
-every numbered scenario from **01 through 37** must appear here and in `run-all.sh`. The provider-free
+[`../docs/testing.md`](../docs/testing.md). This file is the authoritative use-case catalog for board protocol v1 / SQLite schema v15:
+every numbered scenario from **01 through 38** must appear here and in `run-all.sh`. The provider-free
 safe boundary is `fake-agent.sh`,
 `fake-bin/{pi,claude,codex,opencode,agy}`, and `test-harness.sh`; prompt/system-prompt contents are never logged.
 Scenario 21 is the active-run timer/event-refresh characterization. The CI live gate is configured to
@@ -56,6 +56,7 @@ exercise the complete catalog after the cheaper static checks succeed.
 | A run whose pane AND workspace were closed is reopened by creating a fresh workspace from the card's current space config (same `new_workspace` label+cwd resolution dispatch uses) in the run's own Herdr session, adopting its initial tab as the card tab and resuming the harness conversation there (`action=rescued`); a second focus reuses that workspace and pane (`action=focused_rescued_pane`) without creating a second of either; the `runs` row stays byte-for-byte unchanged; a run whose card config still references the closed workspace and a run whose harness cannot resume are both refused explicitly and non-destructively | `35-rescue-dead-workspace.sh` | live, zero provider cost |
 | Projects: `project.create` requires an existing directory (never mkdirs) and selects the project + its first board `main`; missing paths are refused; selection and recency are durable and survive a daemon restart; `project.list` serves picker-ready data (alphabetical, Global last, recency capped at 3); same-project boards keep isolated columns/cards and `board create` auto-selects; a `card.move --to-project/--to-board` transfers across projects without touching the selection or recency | `37-multi-project.sh` | live, zero provider cost |
 | Managed Antigravity CLI (agy) mint captures its self-minted conversation id from `agent.get.agent_session` ({agent: agy, kind: id, source: herdr:antigravity_cli}; mint persists NULL at enqueue, the captured id atomically at promotion) and receives ONE delimited system+task `agent.prompt` block; retry re-attaches to the SAME conversation (`--conversation <id>` — agy has no fork) in a FRESH pane with the task alone; every `--conversation` hop launches a fresh pane by design (never-reuse, even across a non-fresh auto hop); a rescue reopens the dead pane with `agy --conversation <id>` without re-sending the task; when the recorded conversation no longer exists agy starts a new one and the daemon persists the NEW id plus a visible `system` card warning naming both; a missing session report degrades the capture (mint completes NULL, warning explains the missing integration) and rescue fails closed with an actionable refusal; the three permission modes are pinned (`current` = no flag, `sandbox` = `--sandbox`, `always-proceed` = `--dangerously-skip-permissions`) and a fixed-effort model never receives `--effort`; every managed tab converges anchorless to exactly one agy pane | `36-managed-antigravity.sh` | live, checked-in fake `agy`, zero provider cost |
+| Boards and projects archive and restore: `archived_at` durável, `active|all|archived` visibility default `active`, nomes/paths reservados, `Global` nunca arquivável, projeto só arquiva com boards arquivados, recusa atômica com open run, destinos arquivados rejeitam card/envio/template, `board board archive|restore` e `board project archive|restore` com `--visibility`, `active_runs` e `archived_at` em human/JSON, eventos `BoardArchived/BoardRestored/ProjectArchived/ProjectRestored`, seleção recai para board/projeto ativo mais recente e sobrevive a restart, TUI pickers padrão ACTIVE ciclo `v` e `a` confirma/`r` restaura | `38-board-project-archive.sh` | live, zero provider cost |
 
 ### How the live scenario produces Herdr `done`
 
@@ -128,7 +129,7 @@ unmarked, or out-of-root paths. Named-session sockets must be at most 92 bytes, 
 short `/tmp/hb-e2e.XXXXXX` isolated root. `TMPDIR` is pinned to that exact marker-owned root, so
 generated configured-harness scripts remain contained even if asynchronous `pane run` never opens
 their normal self-removing script. The forced-build standard suite is configured and required to exercise
-scenarios 01–37 without provider calls; this is a coverage requirement, not a claim that a live run
+scenarios 01–38 without provider calls; this is a coverage requirement, not a claim that a live run
 has completed. Scenarios 18–29 use only the configured or managed
 fake harnesses and never record prompt or system-prompt bodies.
 
@@ -205,7 +206,7 @@ personal Claude state. Its intended contract is one authorized attempt with no r
 | `12-cwd-boards.sh` | Scoped project identity/isolation plus real TUI title and the board→project picker drill-down (`b` → `⇄ Other projects…` → Global last). |
 | `13-jump-to-pane.sh` | Canonical CLI and same-session TUI focus of a deliberately selected run through a real plugin overlay. |
 | `NN-*.sh` | The scenarios above. |
-| `run-all.sh` | Builds once, runs scenarios 01–37 as environment-scrubbed children with their own sessions, captures artifacts, and prints the summary (`--require-all` forbids skips). | with their own sessions, captures artifacts, and prints the summary (`--require-all` forbids skips). |
+| `run-all.sh` | Builds once, runs scenarios 01–38 as environment-scrubbed children with their own sessions, captures artifacts, and prints the summary (`--require-all` forbids skips). | with their own sessions, captures artifacts, and prints the summary (`--require-all` forbids skips). |
 | `ci.sh` | Pins, caches, and verifies Herdr for Linux x86_64; runs the complete suite with `--require-all`; exports only its exact private artifact root to `e2e-artifacts/`. |
 
 Columns have no `board` CLI verb, so scenarios configure them over the boardd

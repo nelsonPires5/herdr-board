@@ -61,7 +61,9 @@ impl Driver {
     /// when opened via `p`, the board picker when drilled into via "⇄ Other
     /// projects…".
     pub(super) fn load_project_picker(&mut self) {
-        let r = self.client.project_list();
+        let r = self
+            .client
+            .project_list_visible(Some(self.app.picker_visibility));
         let Some(result) = self.guard(r) else {
             return;
         };
@@ -105,8 +107,12 @@ impl Driver {
         ));
 
         let return_to = self.app.screen;
+        let visibility = self.app.picker_visibility;
         self.app.picker = Some(Picker {
-            title: "Switch project".into(),
+            title: format!(
+                "Switch project [{}]",
+                visibility.as_str().to_ascii_uppercase()
+            ),
             rows,
             sel: 0,
             purpose: PickerPurpose::SwitchProject,
@@ -125,9 +131,17 @@ impl Driver {
     /// drilled from its "switch board" row, the project picker when drilled
     /// from a project choice.
     pub(super) fn load_board_picker(&mut self, project_id: Option<i64>) {
-        self.refresh_projects();
+        use board_core::protocol::Visibility;
+        // Board picker must keep the target project reachable even when the
+        // picker's visibility would otherwise filter it away (e.g. an active
+        // project while the picker is showing "ARCHIVED"). Fetch all projects
+        // and filter only the boards inside the target project.
+        let r = self.client.project_list_visible(Some(Visibility::All));
+        if let Some(result) = self.guard(r) {
+            self.install_projects(result);
+        }
         let target_id = project_id.unwrap_or(self.app.board.board.project_id);
-        let Some(info) = self
+        let Some(mut info) = self
             .app
             .projects
             .iter()
@@ -137,6 +151,22 @@ impl Driver {
             self.app.set_toast("project not found", true);
             return;
         };
+        // Filter boards inside the target project according to the current picker visibility.
+        let picker_vis = self.app.picker_visibility;
+        info.boards.retain(|b| match picker_vis {
+            Visibility::Active => b.archived_at.is_none(),
+            Visibility::Archived => b.archived_at.is_some(),
+            Visibility::All => true,
+        });
+        // Recent board ids that no longer survive the filter must be ignored.
+        info.recent_board_ids
+            .retain(|id| info.boards.iter().any(|b| b.id == *id));
+        // selected_board_id may point to a now-hidden board; fall back to first visible.
+        if let Some(sel) = info.selected_board_id {
+            if !info.boards.iter().any(|b| b.id == sel) {
+                info.selected_board_id = info.boards.first().map(|b| b.id);
+            }
+        }
 
         let mut rows: Vec<PickerRow> = Vec::new();
         let mut seen: Vec<i64> = Vec::new();
@@ -179,8 +209,13 @@ impl Driver {
         ));
 
         let return_to = self.app.screen;
+        let title = format!(
+            "Switch board · {} [{}]",
+            info.project.name,
+            picker_vis.as_str().to_ascii_uppercase()
+        );
         self.app.picker = Some(Picker {
-            title: format!("Switch board · {}", info.project.name),
+            title,
             rows,
             sel: 0,
             purpose: PickerPurpose::SwitchBoard,

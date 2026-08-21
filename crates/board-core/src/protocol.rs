@@ -229,6 +229,9 @@ str_enum!(RunOutcome {
 str_enum!(CardVisibility {
     Active => "active", All => "all", Archived => "archived",
 });
+
+/// Alias so board/project visibility reuses the same vocabulary.
+pub type Visibility = CardVisibility;
 str_enum!(Effort {
     Off => "off", Minimal => "minimal", Low => "low", Medium => "medium",
     High => "high", Xhigh => "xhigh", Max => "max",
@@ -321,6 +324,10 @@ pub enum BoardChangedReason {
     RunStarted,
     RunEnded,
     RunBlocked,
+    BoardArchived,
+    BoardRestored,
+    ProjectArchived,
+    ProjectRestored,
 }
 
 /// Streamed to subscribers (no `id` field on the wire).
@@ -403,10 +410,13 @@ pub struct BoardListResult {
 
 /// `board.list` params. An omitted `project_id` preserves the legacy listing
 /// of every board across all projects; with it, only that project's boards.
+/// `visibility` defaults to `active` when omitted.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoardListParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<Visibility>,
 }
 
 /// `board.create` params: a named board inside one project.
@@ -422,10 +432,35 @@ pub struct BoardSelectParams {
     pub board_id: i64,
 }
 
-/// `project.get` params: show one project without side effects.
+/// `board.archive` params. `archived=true` archives, `false` restores.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardArchiveParams {
+    #[serde(alias = "id")]
+    pub board_id: i64,
+    pub archived: bool,
+}
+
+/// `project.archive` params. `archived=true` archives, `false` restores.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectArchiveParams {
+    pub scope_path: String,
+    pub archived: bool,
+}
+
+/// `project.get` params: show one project without side effects.
+/// `visibility` filters the boards inside the detail; omitted means `active`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectGetParams {
     pub scope_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<Visibility>,
+}
+
+/// `project.list` params. Omitted `visibility` means `active`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectListParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<Visibility>,
 }
 
 /// `project.open` / `project.create` params (identical shapes).

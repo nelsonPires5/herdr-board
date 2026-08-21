@@ -7,6 +7,7 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- [#33](https://github.com/nelsonPires5/herdr-board/pull/33) feat: archive and restore boards and projects with visibility filters and guarded restores.
 - [#97](https://github.com/nelsonPires5/herdr-board/pull/97) feat: run the full gate set and live E2E in an isolated Docker sandbox (`scripts/sandbox.sh`), with opt-in real-provider agent runs.
 
 ### Changed

@@ -1,5 +1,6 @@
 ---
 source: crates/board-tui/tests/snapshots.rs
+assertion_line: 1430
 expression: "render_sized(&mut d, w, h)"
 ---
 " ◈ herdr-board ● 1 running [  ▾ ][ … ▾ ] [ A ] [ All ] [ R ]"
@@ -8,7 +9,7 @@ expression: "render_sized(&mut d, w, h)"
 "│┌Board ─────────────────────────────────────────────────┐▲│"
 "││←/→ h/l     focus column                               │█│"
 "││↑/↓ k/j     focus card                                 │█│"
-"││p           switch project                             │█│"
+"││p           switch project                             │││"
 "││b           switch board                               │││"
 "││n           new card                                   │││"
 "││N           new column                                 │││"

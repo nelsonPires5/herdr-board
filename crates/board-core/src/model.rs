@@ -15,6 +15,10 @@ pub struct Project {
     pub name: String,
     /// Canonical root path; `None` only for Global.
     pub scope_path: Option<String>,
+    /// When the project was archived; `None` means it is active.
+    /// Missing on pre-v15 wire payloads.
+    #[serde(default)]
+    pub archived_at: Option<String>,
 }
 
 impl Project {
@@ -45,6 +49,10 @@ pub struct Board {
     pub project_id: i64,
     pub name: String,
     pub scope_path: Option<String>,
+    /// When the board was archived; `None` means it is active.
+    /// Missing on pre-v15 wire payloads.
+    #[serde(default)]
+    pub archived_at: Option<String>,
 }
 
 fn default_project_id() -> i64 {

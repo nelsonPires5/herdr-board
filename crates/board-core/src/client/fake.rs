@@ -6,15 +6,15 @@ use crate::engine;
 use crate::labels::card_labels;
 
 use crate::protocol::{
-    BoardCreateParams, BoardGetParams, BoardListParams, BoardListResult, BoardOpenParams,
-    BoardRenameParams, BoardSelectParams, BoardSnapshot, CardArchiveParams, CardCreateParams,
-    CardDetail, CardListParams, CardMoveParams, CardUpdateParams, ColumnCreateParams,
-    ColumnDeleteParams, ColumnReorderParams, ColumnUpdateParams, CommentAddParams,
-    CommentDeleteParams, CommentGetParams, CommentHistoryParams, CommentUpdateParams,
-    DeletedResult, Event, PaneSetTitleParams, PaneSetTitleResult, ProjectCreateParams,
-    ProjectGetParams, ProjectOpenParams, ProjectOpenResult, ProjectSelectParams,
-    ProjectSelectedResult, RunActionResult, RunDoneParams, RunFocusParams, RunFocusResult,
-    TemplateApplyParams, Trigger,
+    BoardArchiveParams, BoardCreateParams, BoardGetParams, BoardListParams, BoardListResult,
+    BoardOpenParams, BoardRenameParams, BoardSelectParams, BoardSnapshot, CardArchiveParams,
+    CardCreateParams, CardDetail, CardListParams, CardMoveParams, CardUpdateParams,
+    ColumnCreateParams, ColumnDeleteParams, ColumnReorderParams, ColumnUpdateParams,
+    CommentAddParams, CommentDeleteParams, CommentGetParams, CommentHistoryParams,
+    CommentUpdateParams, DeletedResult, Event, PaneSetTitleParams, PaneSetTitleResult,
+    ProjectArchiveParams, ProjectCreateParams, ProjectGetParams, ProjectListParams,
+    ProjectOpenParams, ProjectOpenResult, ProjectSelectParams, ProjectSelectedResult,
+    RunActionResult, RunDoneParams, RunFocusParams, RunFocusResult, TemplateApplyParams, Trigger,
 };
 
 use super::BoardClient;
@@ -208,11 +208,16 @@ fake_methods!(db, config, params, {
         } else {
             serde_json::from_value(params)?
         };
+        let visibility = p.visibility;
         let boards = match p.project_id {
-            Some(project_id) => db.list_boards_for_project(project_id)?,
-            None => db.list_boards()?,
+            Some(project_id) => db.list_boards_for_project_filtered(project_id, visibility)?,
+            None => db.list_boards_filtered(visibility)?,
         };
         serde_json::to_value(BoardListResult { boards })?
+    },
+    "board.archive" => {
+        let p: BoardArchiveParams = serde_json::from_value(params)?;
+        serde_json::to_value(db.set_board_archived(p.board_id, p.archived)?)?
     },
     "board.rename" => {
         let p: BoardRenameParams = serde_json::from_value(params)?;
@@ -225,16 +230,41 @@ fake_methods!(db, config, params, {
     },
     "board.select" => {
         let p: BoardSelectParams = serde_json::from_value(params)?;
+        let board = db.get_board(p.board_id)?;
+        if board.archived_at.is_some() {
+            anyhow::bail!("archived board must be restored first: `board board restore {}`", board.id);
+        }
+        let project = db.get_project(board.project_id)?;
+        if project.archived_at.is_some() {
+            anyhow::bail!("archived project must be restored first: `board project restore {}`", project.scope_path.unwrap_or_default());
+        }
         let (_, board) = db.select_board(p.board_id)?;
         serde_json::to_value(snapshot_of(db, board.id)?)?
     },
-    "project.list" => serde_json::to_value(db.project_list_result()?)?,
+    "project.list" => {
+        let p: ProjectListParams = if params.is_null() {
+            ProjectListParams::default()
+        } else {
+            serde_json::from_value(params)?
+        };
+        serde_json::to_value(db.project_list_result_filtered(p.visibility)?)?
+    },
     "project.get" => {
         let p: ProjectGetParams = serde_json::from_value(params)?;
-        serde_json::to_value(db.project_detail(&p.scope_path)?)?
+        serde_json::to_value(db.project_detail_filtered(&p.scope_path, p.visibility)?)?
+    },
+    "project.archive" => {
+        let p: ProjectArchiveParams = serde_json::from_value(params)?;
+        serde_json::to_value(db.set_project_archived(&p.scope_path, p.archived)?)?
     },
     "project.open" => {
         let p: ProjectOpenParams = serde_json::from_value(params)?;
+        let proj = db.get_project_by_scope(&p.scope_path)?;
+        if let Some(pr) = proj {
+            if pr.archived_at.is_some() {
+                anyhow::bail!("archived project must be restored first: `board project restore {}`", p.scope_path);
+            }
+        }
         project_open_result(db, db.open_project_context(&p.scope_path)?)?
     },
     "project.create" => {
@@ -244,6 +274,16 @@ fake_methods!(db, config, params, {
     },
     "project.select" => {
         let p: ProjectSelectParams = serde_json::from_value(params)?;
+        let proj = db.require_project_by_scope(&p.scope_path)?;
+        if proj.archived_at.is_some() {
+            anyhow::bail!("archived project must be restored first: `board project restore {}`", p.scope_path);
+        }
+        if let Some(bid) = p.board_id {
+            let b = db.get_board(bid)?;
+            if b.archived_at.is_some() {
+                anyhow::bail!("archived board must be restored first: `board board restore {bid}`");
+            }
+        }
         project_open_result(db, db.select_project_by_scope(&p.scope_path, p.board_id)?)?
     },
     "project.selected" => {
@@ -281,10 +321,38 @@ fake_methods!(db, config, params, {
     },
     "card.create" => {
         let p: CardCreateParams = serde_json::from_value(params)?;
+        // Archived destination guard (mirrors daemon ops).
+        if let Some(board_id) = p.board_id {
+            let board = db.get_board(board_id)?;
+            if board.archived_at.is_some() {
+                anyhow::bail!("archived board must be restored first: `board board restore {board_id}`");
+            }
+            let project = db.get_project(board.project_id)?;
+            if project.archived_at.is_some() {
+                anyhow::bail!("archived project must be restored first: `board project restore {}`", project.scope_path.unwrap_or_default());
+            }
+        } else {
+            // Default board path: check the context board when possible via selected project.
+            if let Some(proj) = db.selected_project()? {
+                if proj.archived_at.is_some() {
+                    anyhow::bail!("archived project must be restored first: `board project restore {}`", proj.scope_path.unwrap_or_default());
+                }
+                if let Ok(board) = db.project_context_board(proj.id) {
+                    if board.archived_at.is_some() {
+                        anyhow::bail!("archived board must be restored first: `board board restore {}`", board.id);
+                    }
+                }
+            }
+        }
         serde_json::to_value(stamp(db.create_card(&p)?))?
     },
     "card.duplicate" => {
         let id = params["id"].as_i64().unwrap_or_default();
+        let card = db.get_card(id)?.ok_or_else(|| anyhow::anyhow!("card {id} not found"))?;
+        let board = db.get_board(card.board_id)?;
+        if board.archived_at.is_some() {
+            anyhow::bail!("archived board must be restored first: `board board restore {}`", board.id);
+        }
         serde_json::to_value(stamp(db.duplicate_card(id)?))?
     },
     "card.update" => {
@@ -312,9 +380,26 @@ fake_methods!(db, config, params, {
         if card.archived_at.is_some() {
             anyhow::bail!("archived card must be restored before moving");
         }
+        // Source board archived guard.
+        let src_board = db.get_board(card.board_id)?;
+        if src_board.archived_at.is_some() {
+            anyhow::bail!("archived board must be restored first: `board board restore {}`", src_board.id);
+        }
+        // Destination board archived guard.
+        let dest_board_id = p.board_id.unwrap_or(card.board_id);
+        // For a within-board column move, dest is the card's current board.
+        // For a cross-board transfer, p.board_id is the destination.
+        let dest_board = db.get_board(dest_board_id)?;
+        if dest_board.archived_at.is_some() {
+            anyhow::bail!("archived board must be restored first: `board board restore {}`", dest_board.id);
+        }
+        let dest_project = db.get_project(dest_board.project_id)?;
+        if dest_project.archived_at.is_some() {
+            anyhow::bail!("archived project must be restored first: `board project restore {}`", dest_project.scope_path.unwrap_or_default());
+        }
+        // Destination column must belong to dest board — checked by DB, but
+        // we also guard column's board.
         let card = match p.board_id {
-            // Cross-board transfer only when an explicit destination
-            // board is named and differs from the current one.
             Some(bid) if bid != card.board_id => {
                 db.transfer_card(p.id, bid, p.column_id, p.position)?
             }
@@ -519,6 +604,14 @@ fake_methods!(db, config, params, {
             );
         }
         let board_id = p.board_id.unwrap_or(BOARD_ID);
+        let board = db.get_board(board_id)?;
+        if board.archived_at.is_some() {
+            anyhow::bail!("archived board must be restored first: `board board restore {board_id}`");
+        }
+        let project = db.get_project(board.project_id)?;
+        if project.archived_at.is_some() {
+            anyhow::bail!("archived project must be restored first: `board project restore {}`", project.scope_path.unwrap_or_default());
+        }
         db.get_board(board_id)?;
         let existing = db.list_columns(board_id)?;
         let cards = db.list_cards(board_id)?;
