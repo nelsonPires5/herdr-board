@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Hermetic, no-provider Codex stand-in for protocol-19 managed launches.
+# Hermetic, no-provider Codex stand-in for protocol-20 managed launches.
 # Codex mints its own thread/session id, has no system-prompt file, and carries
 # no prompt text in startup argv: the card task (Mint: system_prompt + task
 # block; resume/fork: task only) must arrive through the interactive terminal
@@ -94,7 +94,7 @@ while (($#)); do
       [ -z "$sandbox" ] || { echo 'fake codex: duplicate --sandbox' >&2; exit 2; }
       sandbox="$2"; shift 2 ;;
     --session-id|--resume|--fork|--append-system-prompt|--append-system-prompt-file|--)
-      echo "fake codex: invalid protocol-19 startup option: $1" >&2; exit 2 ;;
+      echo "fake codex: invalid protocol-20 startup option: $1" >&2; exit 2 ;;
     resume|fork)
       # Subcommands are the session flags and MUST close the argv: nothing may
       # follow the thread id (in particular no task text).

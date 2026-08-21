@@ -4,14 +4,14 @@ The install steps the [root README](../README.md) summarizes, plus everything op
 them: a custom CLI directory, a Herdr keybinding, the harness integration, the agent skill, and
 named Herdr sessions.
 
-Requires exactly **Herdr 0.8.0 (socket protocol 19)**, Git, and a Rust toolchain with `cargo`; Linux
+Requires exactly **Herdr 0.8.2 (socket protocol 20)**, Git, and a Rust toolchain with `cargo`; Linux
 and macOS are supported. The board-side compatibility contract remains board protocol v1 and
 SQLite schema v14. See the README for the one-line install command itself.
 
 | Component | Required support level | How to verify |
 |---|---|---|
-| Herdr binary | 0.8.0 | `herdr --version` → `herdr 0.8.0` |
-| Herdr socket | protocol 19 | `herdr api schema --json` → top-level `protocol: 19`; a running session's `herdr api snapshot` also reports `version` and `protocol` |
+| Herdr binary | 0.8.2 | `herdr --version` → `herdr 0.8.2` |
+| Herdr socket | protocol 20 | `herdr api schema --json` → top-level `protocol: 20`; a running session's `herdr api snapshot` also reports `version` and `protocol` |
 | Board socket | v1 | `docs/protocol.md` and `board-core::protocol` |
 | SQLite | schema v14 | `schema.sql` and `board-core::db` migrations |
 | Pi integration | v8 for precise Pi lifecycle/session signals | `herdr integration status` |
@@ -26,7 +26,7 @@ user-managed prerequisites, not plugin files installed by herdr-board.
 These are read-only checks against the binary and session you are about to use:
 
 ```bash
-test "$(herdr --version)" = "herdr 0.8.0"
+test "$(herdr --version)" = "herdr 0.8.2"
 herdr api schema --json | python3 -c \
   'import json, sys; s=json.load(sys.stdin); assert s["protocol"] == 19, s'
 herdr api snapshot
@@ -40,7 +40,7 @@ source of truth for the installable target names; install only the harness integ
 
 ## Installation details and a custom CLI directory
 
-Herdr 0.8.0 first shows an interactive trust preview of the plugin's build commands. Relative
+Herdr 0.8.2 first shows an interactive trust preview of the plugin's build commands. Relative
 plugin commands resolve from the plugin root, so the manifest's build/action paths do not depend on
 the caller's current directory. After approval Herdr checks out the source, builds the release
 binary, registers the plugin, and copies the CLI to `~/.local/bin/board` as a regular executable.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Hermetic, no-provider Antigravity CLI stand-in for protocol-19 managed
+# Hermetic, no-provider Antigravity CLI stand-in for protocol-20 managed
 # launches. agy mints its own conversation id (a UUID printed at startup),
 # has no system-prompt file, and carries no prompt text in startup argv: the
 # card task (Mint: system_prompt + task delimited block; resume/retry: task
@@ -94,7 +94,7 @@ while (($#)); do
       [ -n "$2" ] || { echo 'fake agy: --conversation needs a non-empty id' >&2; exit 2; }
       conversation="1"; conversation_id="$2"; shift 2 ;;
     --fork|--permission-mode|-s|--session|--session-id|--resume|--fork-session|--append-system-prompt|--append-system-prompt-file|--prompt|--)
-      echo "fake agy: invalid protocol-19 startup option: $1" >&2; exit 2 ;;
+      echo "fake agy: invalid protocol-20 startup option: $1" >&2; exit 2 ;;
     -*) echo "fake agy: unexpected startup option: $1" >&2; exit 2 ;;
     *) echo "fake agy: card prompt leaked into startup argv: $1" >&2; exit 2 ;;
   esac

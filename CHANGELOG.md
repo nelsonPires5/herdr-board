@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+
+- [#102](https://github.com/nelsonPires5/herdr-board/pull/102) feat(herdr): support Herdr 0.8.2 / socket protocol 20 (additive over 19; no dispatch-path change).
+
 ## [0.15.0] - 2026-08-16
 
 ### Added

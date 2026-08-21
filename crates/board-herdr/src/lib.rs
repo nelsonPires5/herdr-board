@@ -24,9 +24,9 @@ mod transport;
 mod types;
 
 /// The only Herdr release supported by this client.
-pub const SUPPORTED_HERDR_VERSION: &str = "0.8.0";
+pub const SUPPORTED_HERDR_VERSION: &str = "0.8.2";
 /// The only Herdr socket protocol supported by this client.
-pub const SUPPORTED_HERDR_PROTOCOL: u32 = 19;
+pub const SUPPORTED_HERDR_PROTOCOL: u32 = 20;
 
 pub use client::HerdrClient;
 pub use envelope::{ErrorBody, Request, Response};
