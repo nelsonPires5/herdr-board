@@ -12,6 +12,7 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 - [#99](https://github.com/nelsonPires5/herdr-board/pull/99) docs: harness lists now name all five built-ins, including Antigravity (agy) install, resume, and model guidance.
+- [#102](https://github.com/nelsonPires5/herdr-board/pull/102) feat(herdr): support Herdr 0.8.2 / socket protocol 20 (additive over 19; no dispatch-path change) (thanks to @montionugera).
 
 ### Fixed
 - [#103](https://github.com/nelsonPires5/herdr-board/pull/103) fix: managed Pi and Claude runs wait for harness session readiness before sending the initial prompt.

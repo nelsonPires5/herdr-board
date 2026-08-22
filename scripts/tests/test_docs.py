@@ -145,7 +145,7 @@ class DocumentationContractTests(unittest.TestCase):
         for surface, expected in (
             ("Board socket", "v1;"),
             ("SQLite", "schema v15"),
-            ("Herdr client", "0.8.0 / socket protocol 19"),
+            ("Herdr client", "0.8.2 / socket protocol 20"),
             ("Herdr integrations", "Pi v8; Claude v7"),
             ("Runtime launch", "daemon-owned"),
             ("Config", "typed `RootConfig`"),
@@ -522,10 +522,10 @@ class DocumentationContractTests(unittest.TestCase):
         fixture = ROOT / "crates/board-herdr/tests/fixtures/schema.json"
         schema = json.loads(fixture.read_text(encoding="utf-8"))
         hint = (
-            "regenerate with `herdr api schema --json` from exactly Herdr 0.8.0 "
+            "regenerate with `herdr api schema --json` from exactly Herdr 0.8.2 "
             "and re-verify docs/herdr.md before changing this"
         )
-        self.assertEqual(schema.get("protocol"), 19, f"protocol must stay 19 — {hint}")
+        self.assertEqual(schema.get("protocol"), 20, f"protocol must stay 20 — {hint}")
         self.assertEqual(schema.get("schema_version"), 1, hint)
 
         methods = {

@@ -296,11 +296,11 @@ if declare -F codex >/dev/null 2>&1; then
 fi
 
 HERDR_VERSION="$($HERDR_BIN --version 2>&1)"
-[ "$HERDR_VERSION" = "herdr 0.8.0" ] \
-  || fail "requires exactly Herdr 0.8.0 (got: $HERDR_VERSION)"
+[ "$HERDR_VERSION" = "herdr 0.8.2" ] \
+  || fail "requires exactly Herdr 0.8.2 (got: $HERDR_VERSION)"
 HERDR_SCHEMA="$($HERDR_BIN api schema --json)"
-printf '%s' "$HERDR_SCHEMA" | jq -e '.protocol == 19' >/dev/null \
-  || fail "requires Herdr schema protocol 19"
+printf '%s' "$HERDR_SCHEMA" | jq -e '.protocol == 20' >/dev/null \
+  || fail "requires Herdr schema protocol 20"
 CODEX_VERSION="$($CODEX_BIN --version 2>&1)"
 INTEGRATION_LINE="$($HERDR_BIN integration status | awk '$1 == "codex:" {print; exit}')"
 printf '%s\n' "$INTEGRATION_LINE" \
@@ -356,7 +356,7 @@ printf 'logged_in=yes\nconfig=staged\n' >"$EVIDENCE/auth-preflight.txt"
 
 {
   printf 'herdr_version=%s\n' "$HERDR_VERSION"
-  printf 'herdr_schema_protocol=19\n'
+  printf 'herdr_schema_protocol=20\n'
   printf 'codex_version=%s\n' "$CODEX_VERSION"
   printf 'codex_binary=%s\n' "$CODEX_BIN"
   printf 'codex_integration=%s\n' "$INTEGRATION_LINE"
@@ -440,8 +440,8 @@ e2e_process_identity_verify "$SERVER_PID" "$SERVER_IDENTITY" \
   || fail "disposable Herdr server failed identity check before socket publication"
 write_state
 PING="$(HERDR_SOCKET_PATH="$SOCK" python3 "$ROOT/e2e/hrpc.py" ping '{}')"
-printf '%s' "$PING" | jq -e '.version == "0.8.0" and .protocol == 19' >/dev/null \
-  || fail "disposable session ping is not Herdr 0.8.0 protocol 19"
+printf '%s' "$PING" | jq -e '.version == "0.8.2" and .protocol == 20' >/dev/null \
+  || fail "disposable session ping is not Herdr 0.8.2 protocol 20"
 printf '%s\n' "$PING" >"$EVIDENCE/herdr-ping.json"
 
 printf 'HERDR MUTATION: create one disposable workspace in %s\n' "$SESSION"

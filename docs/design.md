@@ -90,7 +90,7 @@ about whether the document is valid.
 ### Herdr compatibility and launch boundary
 
 The public boardd socket protocol remains **v1**. That is independent of the upstream Herdr socket
-contract: this version supports **exactly Herdr 0.8.0 / protocol 19**. The daemon opens a fresh
+contract: this version supports **exactly Herdr 0.8.2 / protocol 20**. The daemon opens a fresh
 Herdr request connection per operation, so compatibility is checked at each boundary rather than
 only once at startup:
 
@@ -284,8 +284,8 @@ Cards target a **herdr session** plus a space in it. Because two sessions can ea
 
 ### new_workspace flow
 
-On first dispatch of a `new_workspace` card: preflight the selected socket for exact Herdr 0.8.0 /
-protocol 19, then list the session's workspaces; if one's label matches `space_ref`
+On first dispatch of a `new_workspace` card: preflight the selected socket for exact Herdr 0.8.2 /
+protocol 20, then list the session's workspaces; if one's label matches `space_ref`
 (case-insensitive) reuse it, else `workspace.create {label:space_ref, cwd:space_cwd, focus:false}`.
 Then proceed identically to a `workspace` card (cwd snapshot, pane-first per-card tab placement). If the reused or existing workspace snapshot fails, or contains no live cwd, dispatch fails; it never falls back to process cwd or a stale snapshot. A workspace this dispatch **created** additionally
 threads its exact initial tab/root pane as a one-shot bootstrap hint: the first card-tab
@@ -767,7 +767,7 @@ opens the script, the residual configured-script orphan is an accepted asynchron
 2. **User drags card → Plan** (TUI → boardd `card.move`).
 3. Column engine: *Plan* is `trigger=auto` → **enqueue run** on the card's space queue.
 4. Dispatcher (respecting per-space serial queue + global cap):
-   a. Resolve the card's session socket and `ping` it. Anything except exact Herdr 0.8.0 / protocol 19 fails before workspace discovery/creation. Then reuse workspace `w4`, or create/reuse the card's labeled `new_workspace`; repository worktree isolation remains an agent prompt responsibility.
+   a. Resolve the card's session socket and `ping` it. Anything except exact Herdr 0.8.2 / protocol 20 fails before workspace discovery/creation. Then reuse workspace `w4`, or create/reuse the card's labeled `new_workspace`; repository worktree isolation remains an agent prompt responsibility.
    b. Preflight the selected socket again at the spawner boundary. For a new durable run, the card's **`card-<id>` tab** is resolved by exact owned id (reconstructed from the newest matching durable pane in the same session/workspace when boardd restarts), or `tab.create {workspace_id,cwd,env,…}` supplies a new shell anchor — unless the dispatch just created the workspace, in which case the workspace's own initial tab is adopted (verified, then renamed) instead of leaving an unused tab. The anchor is labeled `card-<id>-anchor`, its exact id is persisted on the promoted run (NULL for managed runs, whose anchor is closed after a successful launch), and the run child is always created by `pane.split` from that anchor; `agent.start`/`pane run` never target the root. A renamed anchor is still selected only by exact identity; a closed anchor is recreated only from a durable board-run child in the exact proven tab, and missing proof creates a fresh tab without selecting a duplicate-label user tab. Exact ended children may be reclaimed before a later split so the anchor keeps usable geometry. The child receives the run env; the anchor receives only stable card identity. If multiple historical panes are live, newest run id wins; legacy rows retain their old lookup. Placement, cwd, and environment are not `agent.start` fields; the call receives neither the workspace placement nor the anchor pane id.
     c. For Pi/Claude, write the snapshotted system prompt to a mode-`0600` temporary file; issue `agent.start {name,kind,pane_id,args}` on the split child with prompt-free startup args; a typed `agent_pane_busy` retries the exact request on that same child with bounded 100ms/200ms backoff (never another split); poll `agent.get` for readiness; then send only the task snapshot through `agent.prompt`. Remove the file. For codex/opencode/antigravity, no prompt file exists: after the same readiness poll the daemon bounded-polls `agent.get.agent_session` (at most 5 probes / 10s) for the integration-reported id (expected agent, `kind:"id"`, non-empty `value`; opencode and antigravity also pin the integration source, `herdr:opencode` / `herdr:antigravity_cli`) and persists it atomically with the promotion — **codex captures before delivering the prompt, opencode and antigravity after it** (real OpenCode mints `agent_session` only once the first `agent.prompt` lands; antigravity likewise reports its conversation id only after the first prompt) — and the prompt is a delimited `system + task` block on a Mint, the task alone on a resume/fork fresh pane. Card status → `running`; record the exact child pane/workspace ids. The pane is **visible** — you can watch or type into it anytime.
 
@@ -921,6 +921,6 @@ herdr panes are fully drivable from the CLI (`pane send-keys` with named keys, `
 | 1. Unit | column engine, prompt assembly, queue, transitions | plain Rust tests, in-memory SQLite; no herdr |
 | 2. TUI snapshot | every view/modal/keybind incl. `?` help | ratatui `TestBackend` + fed `KeyEvent`s + `insta` snapshots; no herdr, no terminal |
 | 3. Daemon integration | dispatch → run → done → auto-move, without tokens | config fake harness plus built-in Pi adapter tests; real boardd paths, no provider call |
-| 4. Full E2E | real Herdr wiring | collision-resistant ephemeral named Herdr session plus disposable workspace; the standard suite uses checked-in fake Pi/Claude/Codex/OpenCode/Antigravity (`agy`)/configured harnesses and asserts pane-first placement/prompt/argv contracts against the current Herdr 0.8.0 / protocol 19 gate with zero provider cost. Separate opt-in real-Claude Haiku/low, real-Codex low, and real-OpenCode low smokes are never in `run-all.sh`; each intended contract is one authorized attempt with no retry or fallback (and may incur cost). |
+| 4. Full E2E | real Herdr wiring | collision-resistant ephemeral named Herdr session plus disposable workspace; the standard suite uses checked-in fake Pi/Claude/Codex/OpenCode/Antigravity (`agy`)/configured harnesses and asserts pane-first placement/prompt/argv contracts against the current Herdr 0.8.2 / protocol 20 gate with zero provider cost. Separate opt-in real-Claude Haiku/low, real-Codex low, and real-OpenCode low smokes are never in `run-all.sh`; each intended contract is one authorized attempt with no retry or fallback (and may incur cost). |
 
 Isolation rules for level 3–4: `BOARD_DB=/tmp/…` + dedicated daemon socket per test run so tests never touch the real board; every interactive/live test must create and use a collision-resistant ephemeral named Herdr session plus a disposable workspace, never a user's session, workspace, or tab. The session may run headlessly in CI, but it must retain the same named-session and workspace requirements.

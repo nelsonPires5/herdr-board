@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Hermetic, no-provider OpenCode stand-in for protocol-19 managed launches.
+# Hermetic, no-provider OpenCode stand-in for protocol-20 managed launches.
 # OpenCode TUI mints its own `ses_…` session id, has no system-prompt file,
 # and carries no prompt text in startup argv: the card task (Mint:
 # system_prompt + task block; resume/fork: task only) must arrive through the
@@ -111,7 +111,7 @@ while (($#)); do
       [ $# -eq 1 ] || { echo "fake opencode: '--fork' must close the argv; unexpected: $2" >&2; exit 2; }
       fork="1"; shift 1 ;;
     --session|--session-id|--resume|--fork-session|--append-system-prompt|--append-system-prompt-file|--prompt|--)
-      echo "fake opencode: invalid protocol-19 startup option: $1" >&2; exit 2 ;;
+      echo "fake opencode: invalid protocol-20 startup option: $1" >&2; exit 2 ;;
     -*) echo "fake opencode: unexpected startup option: $1" >&2; exit 2 ;;
     *) echo "fake opencode: card prompt leaked into startup argv: $1" >&2; exit 2 ;;
   esac

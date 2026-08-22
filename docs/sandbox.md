@@ -23,9 +23,9 @@ scripts/sandbox.sh doctor
 ```
 
 The image is built on first use from the pinned `docker/Dockerfile`: a
-digest-pinned `rust:1.97.0-slim-bookworm` base, the Herdr 0.8.0 release asset
+digest-pinned `rust:1.97.0-slim-bookworm` base, the Herdr 0.8.2 release asset
 for your architecture verified by SHA-256, exact version string, and socket
-protocol 19 (both `amd64` and `arm64` assets are pinned). Nothing floats; the
+protocol 20 (both `amd64` and `arm64` assets are pinned). Nothing floats; the
 image is rebuilt automatically when the `docker/` directory changes.
 
 ## The one-command edit-test loop
@@ -245,7 +245,7 @@ run, the gate fails loudly.
 | Path | Purpose |
 |---|---|
 | `scripts/sandbox.sh` | The one entry command (argument handling, isolation profile, volumes, modes). |
-| `docker/Dockerfile` | Pinned image: digest-pinned Rust base, per-arch SHA-verified Herdr 0.8.0, non-root user. |
+| `docker/Dockerfile` | Pinned image: digest-pinned Rust base, per-arch SHA-verified Herdr 0.8.2, non-root user. |
 | `docker/selfcheck.sh`, `docker/lib.sh` | The in-container isolation proof and shared mount audit. |
 | `docker/gates.sh` | Gate sequence with named first failure and e2e evidence export. |
 | `docker/prepare.sh` | Dependency fetch + `board` build (network-enabled step). |

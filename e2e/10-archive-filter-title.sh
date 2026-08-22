@@ -16,7 +16,7 @@ tab_json="$(e2e_herdr_mutate -- tab create --workspace "$WS_ID" --label archive-
 PANE_ID="$(printf '%s' "$tab_json" | jget pane_id)"
 [ -n "$PANE_ID" ] || fail "could not find pane for archive-filter tab"
 
-# Verified against Herdr 0.8.0 / protocol 19: `pane rename <pane_id> <label>`.
+# Verified against Herdr 0.8.2 / protocol 20: `pane rename <pane_id> <label>`.
 # The plugin variables reproduce the real pane context without linking a plugin
 # into anything except this disposable session/workspace.
 E2E_TUI_COLS=52 e2e_launch_tui "$PANE_ID" \

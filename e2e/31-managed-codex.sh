@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 31-managed-codex.sh — managed Codex protocol-19/current launch contract,
+# 31-managed-codex.sh — managed Codex protocol-20/current launch contract,
 # provider-free through e2e/fake-bin/codex.
 #
 # Contract exercised end to end against a real Herdr:
