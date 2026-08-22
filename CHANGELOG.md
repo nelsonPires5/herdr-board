@@ -15,6 +15,7 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 - [#103](https://github.com/nelsonPires5/herdr-board/pull/103) fix: managed Pi and Claude runs wait for harness session readiness before sending the initial prompt.
+- [#104](https://github.com/nelsonPires5/herdr-board/pull/104) fix: `board card edit` accepts `--space-kind`, restoring parity with the TUI edit form.
 
 ## [0.15.0] - 2026-08-16
 

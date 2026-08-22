@@ -65,6 +65,9 @@ pub(crate) enum CardCmd {
         session: Option<String>,
         #[arg(long)]
         clear_session: bool,
+        /// Space kind: `workspace` or `new-workspace`.
+        #[arg(long)]
+        space_kind: Option<String>,
         #[arg(long)]
         space_ref: Option<String>,
         #[arg(long)]
