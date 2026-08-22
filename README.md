@@ -94,7 +94,7 @@ state is never modified.
 ## Install
 
 ```bash
-herdr plugin install nelsonPires5/herdr-board --ref v0.15.0
+herdr plugin install nelsonPires5/herdr-board --ref v0.16.0
 ```
 
 Open the board:
