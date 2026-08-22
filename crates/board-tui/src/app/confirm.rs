@@ -28,6 +28,14 @@ pub(super) fn confirm_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
                 ConfirmPurpose::CancelRun(id) => vec![Effect::RunCancel(id)],
                 ConfirmPurpose::RetryRun(id) => vec![Effect::RunRetry(id)],
                 ConfirmPurpose::DeleteComment(id) => vec![Effect::CommentDelete { id }],
+                ConfirmPurpose::ArchiveBoard(id) => vec![Effect::BoardArchive {
+                    board_id: id,
+                    archived: true,
+                }],
+                ConfirmPurpose::ArchiveProject(id) => vec![Effect::ProjectArchive {
+                    project_id: id,
+                    archived: true,
+                }],
             }
         }
         KeyCode::Char('n') | KeyCode::Esc => {

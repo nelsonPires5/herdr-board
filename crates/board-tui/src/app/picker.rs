@@ -3,6 +3,16 @@ use crossterm::event::{KeyCode, KeyEvent};
 use super::nav::{nav_delta, step_clamped};
 use super::{App, Confirm, ConfirmPurpose, Effect, PickerAction, PickerPurpose, PickerRow, Screen};
 
+fn cycle_picker_visibility(app: &mut App) -> Vec<Effect> {
+    use board_core::protocol::Visibility;
+    app.picker_visibility = match app.picker_visibility {
+        Visibility::Active => Visibility::All,
+        Visibility::All => Visibility::Archived,
+        Visibility::Archived => Visibility::Active,
+    };
+    vec![Effect::ReloadPickers]
+}
+
 pub(super) fn picker_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
     let Some(picker) = app.picker.as_mut() else {
         app.screen = Screen::Board;
@@ -11,6 +21,22 @@ pub(super) fn picker_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
     if let Some(delta) = nav_delta(k.code) {
         picker.sel = step_clamped(picker.sel, delta, picker.rows.len().saturating_sub(1));
         return vec![];
+    }
+    // Visibility cycling (active → all → archived) works on board/project pickers.
+    if matches!(k.code, KeyCode::Char('v'))
+        && matches!(
+            picker.purpose,
+            PickerPurpose::SwitchBoard | PickerPurpose::SwitchProject
+        )
+    {
+        return cycle_picker_visibility(app);
+    }
+    // Archive (with confirmation) and restore (direct) for board/project pickers.
+    if matches!(k.code, KeyCode::Char('a')) {
+        return handle_archive_request(app);
+    }
+    if matches!(k.code, KeyCode::Char('r')) {
+        return handle_restore_request(app);
     }
     match k.code {
         KeyCode::Enter => {
@@ -30,6 +56,16 @@ pub(super) fn picker_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
             return match (purpose, item_id, row_action) {
                 // -- project picker -------------------------------------------
                 (PickerPurpose::SwitchProject, Some(id), None) => {
+                    // Archived projects cannot be selected; restore first.
+                    if let Some(pi) = app.projects.iter().find(|pi| pi.project.id == id) {
+                        if pi.project.archived_at.is_some() {
+                            app.set_toast(
+                                "archived project must be restored first (r to restore)",
+                                true,
+                            );
+                            return vec![];
+                        }
+                    }
                     if id == app.project.id {
                         app.picker = None;
                         app.screen = return_to;
@@ -53,6 +89,28 @@ pub(super) fn picker_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
                 }
                 // -- board picker ---------------------------------------------
                 (PickerPurpose::SwitchBoard, Some(board_id), None) => {
+                    if let Some(b) = app
+                        .projects
+                        .iter()
+                        .flat_map(|pi| &pi.boards)
+                        .find(|b| b.id == board_id)
+                    {
+                        if b.archived_at.is_some() {
+                            app.set_toast(
+                                "archived board must be restored first (r to restore)",
+                                true,
+                            );
+                            return vec![];
+                        }
+                        if let Some(pi) =
+                            app.projects.iter().find(|pi| pi.project.id == b.project_id)
+                        {
+                            if pi.project.archived_at.is_some() {
+                                app.set_toast("archived project must be restored first", true);
+                                return vec![];
+                            }
+                        }
+                    }
                     app.picker = None;
                     app.screen = return_to;
                     if project_id == app.project.id {
@@ -110,6 +168,98 @@ pub(super) fn picker_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
             let return_to = picker.return_to;
             app.picker = None;
             app.screen = return_to;
+        }
+        _ => {}
+    }
+    vec![]
+}
+
+fn handle_archive_request(app: &mut App) -> Vec<Effect> {
+    let Some(picker) = app.picker.as_ref() else {
+        return vec![];
+    };
+    let Some(row) = picker.rows.get(picker.sel) else {
+        return vec![];
+    };
+    let return_to = picker.return_to;
+    match (picker.purpose, row) {
+        (PickerPurpose::SwitchBoard, PickerRow::Item(_, board_id)) => {
+            // Find board and check if already archived.
+            let board = app
+                .projects
+                .iter()
+                .flat_map(|pi| &pi.boards)
+                .find(|b| b.id == *board_id);
+            if let Some(b) = board {
+                if b.archived_at.is_some() {
+                    app.set_toast("board is already archived", true);
+                    return vec![];
+                }
+            }
+            app.confirm = Some(Confirm {
+                message: format!("Archive board #{}?", board_id),
+                purpose: ConfirmPurpose::ArchiveBoard(*board_id),
+                return_to,
+            });
+            app.screen = Screen::Confirm;
+        }
+        (PickerPurpose::SwitchProject, PickerRow::Item(_, project_id)) => {
+            let proj = app.projects.iter().find(|pi| pi.project.id == *project_id);
+            if let Some(pi) = proj {
+                if pi.project.archived_at.is_some() {
+                    app.set_toast("project is already archived", true);
+                    return vec![];
+                }
+                if pi.project.scope_path.is_none() {
+                    app.set_toast("the Global project cannot be archived", true);
+                    return vec![];
+                }
+            }
+            app.confirm = Some(Confirm {
+                message: format!("Archive project #{project_id}?"),
+                purpose: ConfirmPurpose::ArchiveProject(*project_id),
+                return_to,
+            });
+            app.screen = Screen::Confirm;
+        }
+        _ => {}
+    }
+    vec![]
+}
+
+fn handle_restore_request(app: &mut App) -> Vec<Effect> {
+    let Some(picker) = app.picker.as_ref() else {
+        return vec![];
+    };
+    let Some(row) = picker.rows.get(picker.sel) else {
+        return vec![];
+    };
+    match (picker.purpose, row) {
+        (PickerPurpose::SwitchBoard, PickerRow::Item(_, board_id)) => {
+            let board = app
+                .projects
+                .iter()
+                .flat_map(|pi| &pi.boards)
+                .find(|b| b.id == *board_id);
+            if board.is_some_and(|b| b.archived_at.is_some()) {
+                return vec![Effect::BoardArchive {
+                    board_id: *board_id,
+                    archived: false,
+                }];
+            } else {
+                app.set_toast("board is not archived", true);
+            }
+        }
+        (PickerPurpose::SwitchProject, PickerRow::Item(_, project_id)) => {
+            let proj = app.projects.iter().find(|pi| pi.project.id == *project_id);
+            if proj.is_some_and(|pi| pi.project.archived_at.is_some()) {
+                return vec![Effect::ProjectArchive {
+                    project_id: *project_id,
+                    archived: false,
+                }];
+            } else {
+                app.set_toast("project is not archived", true);
+            }
         }
         _ => {}
     }

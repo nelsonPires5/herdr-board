@@ -16,8 +16,8 @@ CLI, cards, runs, comments, columns, and Herdr-backed spaces; it does not prescr
 prototype, test, or release herdr-board itself.
 
 A **card** is a title/description plus harness/model/effort, optional harness permission, and a target
-Herdr session and workspace. New cards default to Pi; the built-in catalog is `pi`, `claude`, `codex`
-(in that order), then any config-defined `[harness.NAME]`. **Columns** are pipeline stages: `manual` waits
+Herdr session and workspace. New cards default to Pi; the built-in catalog is `pi`, `claude`, `codex`,
+`opencode`, `antigravity` (in that order), then any config-defined `[harness.NAME]`. **Columns** are pipeline stages: `manual` waits
 for a person and `auto` dispatches a visible agent run on entry. Each canonical Git root (or exact
 non-Git CWD) is a **project** holding named boards (every project's first board is `main`); the
 preserved `Global` project remains available. Agents report
@@ -141,6 +141,13 @@ config and is never derived from the permission field). Codex mints its own conv
 the board never invents one — and captures the integration-reported id after launch, so later stages
 can `resume`/`fork` the same conversation; a minted run whose id was never reported cannot be
 reopened by id (`card run focus` refuses; use `card run retry` for a new run).
+`--harness antigravity` selects the built-in Antigravity CLI adapter (Herdr kind/executable `agy`):
+models come from the live `agy --output-format json models` catalog (free-form when the catalog is
+unavailable), efforts are `low|medium|high` per model (a fixed-effort model offers none), `--permission`
+takes `sandbox|always-proceed` (no permission set keeps your own configured default), and resume/retry
+re-attach to the SAME conversation with `--conversation <id>` — antigravity has no fork. The id is
+self-minted by the CLI and captured from the Herdr integration after launch, so it must be installed
+(`herdr integration install antigravity-cli`) for reuse/rescue to work.
 `new-workspace` requires both `--space-ref` and `--space-cwd`.
 Creating directly in an `auto` column dispatches immediately. `card list` defaults to active cards;
 `all` includes archived cards and `archived` returns only archived cards. `card show` includes current
@@ -206,8 +213,9 @@ rescue never re-sends the card task and never writes to the database, so the reo
 ephemeral: it has no run row and is not watched or timed out. It gets `BOARD_CARD_ID`/`BOARD_SOCKET`
 but deliberately **no** `BOARD_RUN_ID`, so from inside it `board comment` still records on the card
 (as a human comment) while `board done` does not apply — the run stays closed. Closing the pane is up
-to you. Resuming requires an explicit per-harness capability (`pi`, `claude`, and
-`codex` have it; a `[harness.NAME]` harness needs `resume = true`) and a recorded conversation id;
+to you. Resuming requires an explicit per-harness capability (all five built-ins — `pi`, `claude`,
+`codex`, `opencode`, and `antigravity` — have it; a `[harness.NAME]` harness needs `resume = true`)
+and a recorded conversation id;
 without either, focus is refused explicitly — use `card run retry` for a new run instead.
 
 Done/cancel/retry return `{run, card}` in JSON. Retry creates a new run while preserving history.

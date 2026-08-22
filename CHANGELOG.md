@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-08-22
+
+### Added
+- [#33](https://github.com/nelsonPires5/herdr-board/pull/33) feat: archive and restore boards and projects with visibility filters and guarded restores.
+- [#97](https://github.com/nelsonPires5/herdr-board/pull/97) feat: run the full gate set and live E2E in an isolated Docker sandbox (`scripts/sandbox.sh`), with opt-in real-provider agent runs.
+
+### Changed
+- [#99](https://github.com/nelsonPires5/herdr-board/pull/99) docs: harness lists now name all five built-ins, including Antigravity (agy) install, resume, and model guidance.
+- [#102](https://github.com/nelsonPires5/herdr-board/pull/102) feat(herdr): support Herdr 0.8.2 / socket protocol 20 (additive over 19; no dispatch-path change) (thanks to @montionugera).
+
+### Fixed
+- [#103](https://github.com/nelsonPires5/herdr-board/pull/103) fix: managed Pi and Claude runs wait for harness session readiness before sending the initial prompt.
+- [#104](https://github.com/nelsonPires5/herdr-board/pull/104) fix: `board card edit` accepts `--space-kind`, restoring parity with the TUI edit form.
+
 ## [0.15.0] - 2026-08-16
 
 ### Added
@@ -396,7 +410,8 @@ a visible herdr pane. Ships as a single `board` binary (TUI + daemon + CLI) and 
 - **Packaging.** `herdr-plugin.toml` manifest, and `scripts/` for build, install (guarded behind
   `--yes`), the open-or-focus launcher, a raw protocol client, and a live-herdr e2e smoke test.
 
-[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.16.0
 [0.15.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.15.0
 [0.14.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.14.0
 [0.13.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.13.0

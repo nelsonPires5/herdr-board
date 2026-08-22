@@ -547,3 +547,90 @@ fn parse_timestamp_round_trips_wire_datetimes_and_rejects_junk() {
         assert_eq!(parse_timestamp(junk), None, "expected {junk:?} to fail");
     }
 }
+
+#[test]
+fn board_and_project_archive_and_visibility_types_roundtrip() {
+    use board_core::protocol::{
+        BoardArchiveParams, BoardListParams, ProjectArchiveParams, ProjectGetParams,
+        ProjectListParams, Visibility,
+    };
+
+    let p = BoardArchiveParams {
+        board_id: 3,
+        archived: true,
+    };
+    roundtrip(&p);
+    assert_eq!(
+        serde_json::to_string(&p).unwrap(),
+        r#"{"board_id":3,"archived":true}"#
+    );
+    let alias: BoardArchiveParams =
+        serde_json::from_value(json!({"id": 3, "archived": false})).unwrap();
+    assert_eq!(alias.board_id, 3);
+    assert!(!alias.archived);
+
+    let pp = ProjectArchiveParams {
+        scope_path: "/repo".into(),
+        archived: true,
+    };
+    roundtrip(&pp);
+
+    // Visibility params: omitted mens None (server defaults to active).
+    let bl: BoardListParams = serde_json::from_value(json!({})).unwrap();
+    assert_eq!(bl.project_id, None);
+    assert_eq!(bl.visibility, None);
+    let bl: BoardListParams = serde_json::from_value(json!({"visibility": "archived"})).unwrap();
+    assert_eq!(bl.visibility, Some(Visibility::Archived));
+    let bl: BoardListParams =
+        serde_json::from_value(json!({"project_id": 2, "visibility": "all"})).unwrap();
+    assert_eq!(bl.visibility, Some(Visibility::All));
+
+    let pl: ProjectListParams = serde_json::from_value(json!({})).unwrap();
+    assert_eq!(pl.visibility, None);
+    let pl: ProjectListParams = serde_json::from_value(json!({"visibility": "archived"})).unwrap();
+    assert_eq!(pl.visibility, Some(Visibility::Archived));
+
+    let pg: ProjectGetParams = serde_json::from_value(json!({"scope_path": "/r"})).unwrap();
+    assert_eq!(pg.scope_path, "/r");
+    assert_eq!(pg.visibility, None);
+    let pg: ProjectGetParams =
+        serde_json::from_value(json!({"scope_path": "/r", "visibility": "all"})).unwrap();
+    assert_eq!(pg.visibility, Some(Visibility::All));
+
+    // Visibility alias: same vocabulary as cards.
+    assert_eq!(Visibility::Active.as_str(), "active");
+    assert_eq!(
+        Visibility::parse_str("archived"),
+        Some(Visibility::Archived)
+    );
+
+    // New event reasons are snake_case and round-trip.
+    for (reason, expected) in [
+        (BoardChangedReason::BoardArchived, "board_archived"),
+        (BoardChangedReason::BoardRestored, "board_restored"),
+        (BoardChangedReason::ProjectArchived, "project_archived"),
+        (BoardChangedReason::ProjectRestored, "project_restored"),
+    ] {
+        let ev = Event::BoardChanged {
+            reason,
+            board_id: Some(3),
+            card_id: None,
+            column_id: None,
+        };
+        roundtrip(&ev);
+        let s = serde_json::to_string(&ev).unwrap();
+        assert!(s.contains(expected), "{s}");
+    }
+    // Coarse project event (no board_id).
+    let coarse = Event::BoardChanged {
+        reason: BoardChangedReason::ProjectArchived,
+        board_id: None,
+        card_id: None,
+        column_id: None,
+    };
+    assert_eq!(
+        serde_json::to_string(&coarse).unwrap(),
+        r#"{"event":"board_changed","reason":"project_archived"}"#
+    );
+    roundtrip(&coarse);
+}

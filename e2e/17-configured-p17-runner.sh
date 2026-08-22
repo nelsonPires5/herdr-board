@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 17-configured-p17-runner.sh — unmanaged protocol-19/current harness contract.
+# 17-configured-p17-runner.sh — unmanaged protocol-20/current harness contract.
 # The p17 filename is retained as a historical catalog name for compatibility.
 # The disposable runner records startup/env evidence and never invokes a provider.
 set -euo pipefail
@@ -63,7 +63,7 @@ print(cwds[0])
 printf '  disposable workspace pane cwd: %s\n' "$EXPECTED_PANE_CWD"
 EXEC_ID="$(col_create '{"name":"P17 Runner","trigger":"auto"}')"
 
-step "Dispatch configured harness through the protocol-19/current runner bridge"
+step "Dispatch configured harness through the protocol-20/current runner bridge"
 card_json="$($BOARD_BIN card new --title 'P17 configured' \
   --description $'configured prompt with spaces\nand a newline' --harness p17-runner --effort low \
   --space-kind workspace --space-ref "$WS_ID" --json)"

@@ -90,7 +90,7 @@ about whether the document is valid.
 ### Herdr compatibility and launch boundary
 
 The public boardd socket protocol remains **v1**. That is independent of the upstream Herdr socket
-contract: this version supports **exactly Herdr 0.8.0 / protocol 19**. The daemon opens a fresh
+contract: this version supports **exactly Herdr 0.8.2 / protocol 20**. The daemon opens a fresh
 Herdr request connection per operation, so compatibility is checked at each boundary rather than
 only once at startup:
 
@@ -135,7 +135,7 @@ narrow terminals so the anchor remains reusable) and uses live geometry thereaft
 closed below the minimum of 24x6 for the shell and 12x8 for the agent; it never launches an agent
 on an undersized root or child.
 
-**Managed tabs are deliberately anchorless.** After a *successful* managed (Pi/Claude/Codex/OpenCode) launch —
+**Managed tabs are deliberately anchorless.** After a *successful* managed (Pi/Claude/Codex/OpenCode/Antigravity) launch —
 fresh, same-conversation reuse, or a `run.focus` rescue — the daemon closes the anchor pane, which
 is live-verified safe
 for its split child, so the tab holds exactly the one harness pane. The promoted run then persists
@@ -153,7 +153,7 @@ anchor unchanged: `pane run` exits close their child, so the anchor is what the 
 from. Old live anchors from earlier releases converge on the next successful managed launch;
 old durable child evidence remains valid tab proof.
 Herdr labels are not unique, so neither tab nor anchor ownership is inferred from one. The current
-schema v14 retains the exact anchor pane id introduced by v12 with each promoted run; after restart,
+schema v15 retains the exact anchor pane id introduced by v12 with each promoted run; after restart,
 the daemon reconstructs the exact tab and anchor only from scoped durable pane identities in the same
 session and workspace.
 A renamed anchor remains owned by identity. If that exact anchor was closed, it is recreated only by
@@ -204,8 +204,8 @@ runs(id, card_id, column_id, harness, argv_json, prompt_snapshot,
      result_summary, log_path)
 ```
 
-Schema is versioned via `PRAGMA user_version` (current = **v14**). A fresh DB is built straight from
-`schema.sql` and stamped v14. Existing v1→v4 migrations retain their space/session, archive, and Pi
+Schema is versioned via `PRAGMA user_version` (current = **v15**). A fresh DB is built straight from
+`schema.sql` and stamped v15. Existing v1→v4 migrations retain their space/session, archive, and Pi
 effort behavior. v5 adds unique non-null `boards.scope_path`, preserves board `id=1` plus every
 related row as `Global`, and leaves existing card harnesses unchanged. v6 rebuilds `cards` to admit
 the `awaiting`/`done` statuses and adds `cards.awaiting_reason` (NULL outside `awaiting`). v7 adds
@@ -239,7 +239,7 @@ to NULL, but serialization always omits `system_prompt_snapshot` and its content
 responses. `launch_spec_json` is likewise internal and omitted in full from boardd wire responses.
 
 Source ownership is explicit: `schema.sql` is the fresh schema source, `board-core::db` owns ordered
-upgrades through v14, and `board-core::protocol` owns the v1 wire DTOs and additive compatibility
+upgrades through v15, and `board-core::protocol` owns the v1 wire DTOs and additive compatibility
 rules. The CLI and TUI use typed `BoardClient` wrappers; only boardd reads or writes SQLite. New
 v1 fields such as `BoardSnapshot.active_runs` and RPC error `kind`/`details` are additive, so older
 clients can continue decoding the existing fields.
@@ -284,8 +284,8 @@ Cards target a **herdr session** plus a space in it. Because two sessions can ea
 
 ### new_workspace flow
 
-On first dispatch of a `new_workspace` card: preflight the selected socket for exact Herdr 0.8.0 /
-protocol 19, then list the session's workspaces; if one's label matches `space_ref`
+On first dispatch of a `new_workspace` card: preflight the selected socket for exact Herdr 0.8.2 /
+protocol 20, then list the session's workspaces; if one's label matches `space_ref`
 (case-insensitive) reuse it, else `workspace.create {label:space_ref, cwd:space_cwd, focus:false}`.
 Then proceed identically to a `workspace` card (cwd snapshot, pane-first per-card tab placement). If the reused or existing workspace snapshot fails, or contains no live cwd, dispatch fails; it never falls back to process cwd or a stale snapshot. A workspace this dispatch **created** additionally
 threads its exact initial tab/root pane as a one-shot bootstrap hint: the first card-tab
@@ -368,7 +368,7 @@ trigger = "manual"
 ```
 
 Notes:
-- Column `system_prompt` is combined with the mandatory board-protocol trailer and snapshotted at enqueue. For managed Pi it is delivered through a temporary file passed to `--append-system-prompt`; for managed Claude the file flag is `--append-system-prompt-file`; codex and opencode have **no system-prompt file equivalent**, so their system instructions are delivered inside the single Mint `agent.prompt` block (see [Prompt assembly](#5-prompt-assembly)). Neither replaces harness defaults/context files, and neither puts the system text directly in startup argv. It can invoke skills (`/quick-planner`, `/code-review`) — that's how "column triggers a skill" works, no special mechanism needed.
+- Column `system_prompt` is combined with the mandatory board-protocol trailer and snapshotted at enqueue. For managed Pi it is delivered through a temporary file passed to `--append-system-prompt`; for managed Claude the file flag is `--append-system-prompt-file`; codex, opencode, and antigravity have **no system-prompt file equivalent**, so their system instructions are delivered inside the single Mint `agent.prompt` block (see [Prompt assembly](#5-prompt-assembly)). Neither replaces harness defaults/context files, and neither puts the system text directly in startup argv. It can invoke skills (`/quick-planner`, `/code-review`) — that's how "column triggers a skill" works, no special mechanism needed.
 - `on_fail = "Execute"` from Review + comments-as-context gives the fix loop for free: the re-entered Execute run sees the reviewer's findings in its prompt.
 
 ### Cross-board / cross-project card move (prototype)
@@ -604,7 +604,7 @@ execution, not to resurrect it as a run. Two consequences follow and are not wor
   title (`Board [<scope> · ACTIVE|ALL|ARCHIVED]`); the board has no persistent footer hint row, and transient toasts remain available above the action rail. Archived cards are
   inert until restored and render dimmed with `▣ ARCHIVED` when visible.
 - **Content-sized overlays (Regular/Wide):** within the `sheet_area` centered popup, card/column forms, move pickers, and help panels shrink to their content on large terminals and clamp to the available viewport on small terminals; Compact always gets the fullscreen sheet described above instead.
-- **Guided card & column forms** share one metadata source: both fetch `harness.capabilities` (models/efforts/permissions via the daemon-side `HarnessMeta` adapter trait) and `harness.list` (built-ins + config-defined harnesses). For cards: Pi is selected for new cards; Claude remains selectable. On open/harness change the form also fetches `space.list`. Model starts at the daemon-sent `default model` option (unset), then catalog aliases and `(custom)` when free-form is supported. Effort follows the selected model's declared set, or the catalog default for omitted/free-form models. For Pi, that declared set comes from its documented `thinkingLevelMap` tri-state contract: omitted standard levels (`off`–`high`) remain supported, omitted extended levels (`xhigh`/`max`) do not, strings opt levels in, and `null` opts them out. Codex models and per-model efforts come from `$CODEX_HOME/models_cache.json`, with free-form fallback; its permission selector labels the three stable wire presets as `Ask for approval`, `Approve for me`, and `Full access`. OpenCode models are free-form, with the daemon's live `opencode models --verbose` discovery (`$OPENCODE_BIN` else `opencode` on PATH) overlaying a static fallback that truthfully lists OpenCode Zen Nemotron 3 Ultra Free (which declares no variants and therefore offers no effort) plus a fixture model `opencode/deepseek-v4-flash-free` (low/high/max); its effort selector follows the selected model's discovered variants — empty for a variant-less model — or the full ladder for omitted/free-form models, with `off` mapped to the opencode variant `none` only when building the process-local agent config (the root/TUI has no `--variant` flag), and its permission selector offers exactly the two verified modes `Default` and `Auto-approve` (`--auto`). Permission is hidden and submits `None` for Pi; Claude shows its modes. The rule is one predicate — `!permission_modes.is_empty()` against the effective capabilities — never a harness-name comparison, so it holds in the *not-yet-fetched* case too: a harness board-core does not know answers with an empty permission vocabulary, and the selector stays hidden until `harness.capabilities` returns. Inventing another CLI's enum is never safe; the old fallback guessed a six-item list that included a value the daemon rejects. Switching harness resets only incompatible values. Workspace labels are shown but ids are persisted. Fetch failures degrade to free text with a warning. For column config the same source drives the override fields: `harness_override` is a **select** over the available harnesses (`(none)` = no override), `effort_override` follows the override harness's catalog, and `permission_override` is **hidden** when the driving harness has no permission modes (e.g. Pi); changing the override harness refetches capabilities and resets only overrides that became invalid. The column `system_prompt` field is **hidden when the trigger is `manual`** (a manual column never launches a run, so the prompt is unused) and reappears when the trigger is switched to `auto`; it is hidden from the UI, not omitted, so submit still sends a `system_prompt` Patch that preserves whatever the column already stores.
+- **Guided card & column forms** share one metadata source: both fetch `harness.capabilities` (models/efforts/permissions via the daemon-side `HarnessMeta` adapter trait) and `harness.list` (built-ins + config-defined harnesses). For cards: Pi is selected for new cards; Claude remains selectable. On open/harness change the form also fetches `space.list`. Model starts at the daemon-sent `default model` option (unset), then catalog aliases and `(custom)` when free-form is supported. Effort follows the selected model's declared set, or the catalog default for omitted/free-form models. For Pi, that declared set comes from its documented `thinkingLevelMap` tri-state contract: omitted standard levels (`off`–`high`) remain supported, omitted extended levels (`xhigh`/`max`) do not, strings opt levels in, and `null` opts them out. Codex models and per-model efforts come from `$CODEX_HOME/models_cache.json`, with free-form fallback; its permission selector labels the three stable wire presets as `Ask for approval`, `Approve for me`, and `Full access`. OpenCode models are free-form, with the daemon's live `opencode models --verbose` discovery (`$OPENCODE_BIN` else `opencode` on PATH) overlaying a static fallback that truthfully lists OpenCode Zen Nemotron 3 Ultra Free (which declares no variants and therefore offers no effort) plus a fixture model `opencode/deepseek-v4-flash-free` (low/high/max); its effort selector follows the selected model's discovered variants — empty for a variant-less model — or the full ladder for omitted/free-form models, with `off` mapped to the opencode variant `none` only when building the process-local agent config (the root/TUI has no `--variant` flag), and its permission selector offers exactly the two verified modes `Default` and `Auto-approve` (`--auto`). Antigravity models come from the live `agy --output-format json models` catalog (free-form when the catalog is unavailable); its effort selector follows the selected model's catalog efforts — empty for a fixed-effort model, or the three agy levels `low|medium|high` for omitted/free-form models — and its permission selector offers exactly the two verified modes `sandbox` and `always-proceed`. Permission is hidden and submits `None` for Pi; Claude shows its modes. The rule is one predicate — `!permission_modes.is_empty()` against the effective capabilities — never a harness-name comparison, so it holds in the *not-yet-fetched* case too: a harness board-core does not know answers with an empty permission vocabulary, and the selector stays hidden until `harness.capabilities` returns. Inventing another CLI's enum is never safe; the old fallback guessed a six-item list that included a value the daemon rejects. Switching harness resets only incompatible values. Workspace labels are shown but ids are persisted. Fetch failures degrade to free text with a warning. For column config the same source drives the override fields: `harness_override` is a **select** over the available harnesses (`(none)` = no override), `effort_override` follows the override harness's catalog, and `permission_override` is **hidden** when the driving harness has no permission modes (e.g. Pi); changing the override harness refetches capabilities and resets only overrides that became invalid. The column `system_prompt` field is **hidden when the trigger is `manual`** (a manual column never launches a run, so the prompt is unused) and reappears when the trigger is switched to `auto`; it is hidden from the UI, not omitted, so submit still sends a `system_prompt` Patch that preserves whatever the column already stores.
 - Long text (card description, column system prompt): modal textarea, `Ctrl+E` suspends the TUI into `$EDITOR`. The form's multiline field value now renders as a real wrapped paragraph (`Wrap { trim: false }`) with the same strong focused reverse treatment and white unfocused readability as title/name values; windowed field scrolling keeps the focused field wholly visible, and `Ctrl+J`/`Shift+Enter` remain newline paths; it previously joined the textarea's lines with a literal `"  ⏎  "` separator and hard-truncated the result to one line with `…` at every width, so most multiline content was unreadable. Returning from `$EDITOR` now forces a full terminal repaint (`terminal.clear()`) before the next draw, and so does a terminal resize; `RealEditor` re-entering the alternate screen behind `ratatui::Terminal`'s back previously left the next frame diffing against a stale cached buffer, so the screen stayed blank until some other full redraw happened to occur.
 - **Every destructive action confirms, and the confirmation is gated on the action being possible.** `x` (cancel a run) only opens the confirm sheet when the card actually has an open run, and otherwise toasts — `run.cancel` on a finished card is refused by the daemon, so "cancel the running run?" was a question with no true answer. `r` (retry) now confirms too: it relaunches a real agent, which is strictly more consequential than the cancel that already confirmed. Deleting a column with cards asks where to move them **and then confirms** — picking a destination is not consent to the delete, and that riskier path was the one left unguarded while the empty-column path had always confirmed. A running card's column can't be deleted at all. Both answers land on `Confirm::return_to`, the screen recorded on the way in.
 - Optional: apply a board template (e.g. the example pipeline above) onto an empty board — `T` on the
@@ -638,6 +638,10 @@ Codex:  codex [--model M] [-c model_reasoning_effort=E]
                (resume <id> | fork <id>)        # Mint: no session tokens at all
 OpenCode: opencode [--agent herdr-board | -m M] [--auto]
                (-s <id> | -s <id> --fork)       # Mint: no session flag at all
+Antigravity: agy [--model M] [--effort low|medium|high]
+               [--sandbox | --dangerously-skip-permissions]
+               (--conversation <id>)            # Mint: no session flag; Fork degrades
+                                               #   to the Resume spelling (no fork)
 ```
 
 Codex notes: board effort `off` maps to `model_reasoning_effort=none` while building argv (every
@@ -660,19 +664,37 @@ other value is rejected by engine capability validation. An OpenCode Mint likewi
 `session_id = NULL` — the TUI mints its own `ses_…` id, so the board never invents one — and the
 integration-reported session id is captured after launch and promoted atomically onto run+card.
 
+Antigravity notes: the model is the normalized base id from the live
+`agy --output-format json models` catalog (no static fallback; an unavailable catalog only makes
+selection free-form), and the effort
+is `--effort low|medium|high` only when the model carries it (fixed-effort models never send one).
+Permission modes are the two verified presets: `sandbox` emits `--sandbox`, `always-proceed` emits
+`--dangerously-skip-permissions`, and no permission keeps the user's configured `toolPermission`.
+Antigravity has no fork: resume and retry share the `--conversation <id>` spelling (a retry
+re-attaches to the SAME conversation in a fresh pane), and every `--conversation` hop launches a
+fresh pane by design. A Mint persists `session_id = NULL` — the TUI mints its own conversation id
+— and the `antigravity_cli`-reported id (source pinned) is captured after the first prompt and
+promoted atomically onto run+card; when the CLI started a new conversation because the recorded
+one no longer exists, the daemon persists the new id with a visible warning.
+
 After pane-first placement, boardd writes `system_prompt` to a temporary mode-`0600` file and calls
 the supported managed-agent interface as follows:
 
 ```
 agent.start {
-  name, kind:"pi"|"claude"|"codex"|"opencode", pane_id,
-  args:<startup argv without executable> +       # codex/opencode: exactly the
-       ["--append-system-prompt", FILE]          #   startup tail, no prompt file,
+  name, kind:"pi"|"claude"|"codex"|"opencode"|"agy", pane_id,
+  args:<startup argv without executable> +       # codex/opencode/agy: exactly the
+       ["--append-system-prompt", FILE],        #   startup tail, no prompt file,
        ["--append-system-prompt-file", FILE],    #   no `--`, no task
   timeout_ms:30000
 }
 agent.get {target:pane_id}       # bounded polling until interactive_ready && !launch_pending
+agent.get {target:pane_id}       # pi/claude (and same-pane reuse) only: bounded poll until
+                                 #   agent_session carries a non-empty value — at most 5 probes
+                                 #   spread over 10s; degrade-with-warning, never blocks launch
 agent.prompt {target:pane_id, text:task_prompt}
+agent.get {target:pane_id}       # bounded delivery confirmation, diagnostics only — the daemon
+                                 #   never re-sends the prompt from this check
 ```
 
 If Herdr returns typed `agent_pane_busy`, boardd retries the exact `agent.start` parameters—including
@@ -686,12 +708,31 @@ placement once. The temporary file is removed before spawn returns, on success o
 prompt is never part of `agent.start`; it is submitted only after readiness. An `agent_name_taken`
 response retries once on the same owned pane with `card-<id>-<column-slug>-r<run>`.
 
-**Self-minting prompt transport** (codex and opencode; neither has a system-prompt file): after
+**Two-stage readiness and prompt delivery.** `interactive_ready && !launch_pending` only proves the
+pane's terminal is ready — a CLI still resolving provider credentials (for example a Pi provider
+whose `apiKey` is a shell command) is not reading its tty yet, and a prompt sent in that window is
+dropped, which used to surface as a silent `idle_expired` (issue #98). Readiness therefore has a
+second stage for pi/claude (and same-pane reuse): the daemon polls `agent.get` until
+`agent_session` carries a non-empty value — the integrations report it only once the CLI finished
+initialising — bounded to 5 probes spread over 10s; a timeout degrades with a warning (harness
+category, pane id, probe count — never prompt text) and proceeds to the prompt anyway, so a
+no-session harness mode never blocks launch. Self-minting harnesses skip this stage (their
+`agent_session` is minted by the first prompt). Delivery itself retries the exact same
+`agent.prompt` only on a typed `agent_pane_busy` refusal — at most five times, 100ms backoff
+doubling, re-checking between attempts that the pane is still interactive — while every other
+error propagates immediately, because a prompt that may have landed must never be re-sent.
+After a successful prompt the daemon starts a bounded delivery confirmation (5 probes over 10s)
+on a detached diagnostics connection, so it never delays spawn return, run promotion, or an early
+`board done`: confirmed when the agent leaves `idle` or its `agent_session` appears/changes; on
+timeout it logs a distinct warning that a later `idle_expired` is suspect — diagnostics only, no
+automatic re-send.
+
+**Self-minting prompt transport** (codex, opencode, and antigravity; none has a system-prompt file): after
 readiness the daemon runs the bounded `agent.get.agent_session` capture (at most 5 probes, 10s
 cap; accepts an `id`-kind reference owned by the expected agent with a non-empty `value` — opencode
-additionally pins the exact source the current Herdr opencode integration reports; anything else
+and antigravity additionally pin the exact source the current Herdr integration reports; anything else
 degrades to `None` with a warning and the launch continues), ordered per harness: **codex captures
-before the prompt**, while **opencode captures after it** — real OpenCode mints its `ses_…` id and
+before the prompt**, while **opencode and antigravity capture after it** — real OpenCode mints its `ses_…` id and
 reports `agent_session` only once the first `agent.prompt` lands, so a pre-prompt capture would
 lose the id, and a prompt-less opencode rescue reduces to capture-after-readiness. The prompt goes
 through `agent.prompt`: a Mint receives one delimited block — `## herdr-board system instructions`
@@ -726,9 +767,9 @@ opens the script, the residual configured-script orphan is an accepted asynchron
 2. **User drags card → Plan** (TUI → boardd `card.move`).
 3. Column engine: *Plan* is `trigger=auto` → **enqueue run** on the card's space queue.
 4. Dispatcher (respecting per-space serial queue + global cap):
-   a. Resolve the card's session socket and `ping` it. Anything except exact Herdr 0.8.0 / protocol 19 fails before workspace discovery/creation. Then reuse workspace `w4`, or create/reuse the card's labeled `new_workspace`; repository worktree isolation remains an agent prompt responsibility.
+   a. Resolve the card's session socket and `ping` it. Anything except exact Herdr 0.8.2 / protocol 20 fails before workspace discovery/creation. Then reuse workspace `w4`, or create/reuse the card's labeled `new_workspace`; repository worktree isolation remains an agent prompt responsibility.
    b. Preflight the selected socket again at the spawner boundary. For a new durable run, the card's **`card-<id>` tab** is resolved by exact owned id (reconstructed from the newest matching durable pane in the same session/workspace when boardd restarts), or `tab.create {workspace_id,cwd,env,…}` supplies a new shell anchor — unless the dispatch just created the workspace, in which case the workspace's own initial tab is adopted (verified, then renamed) instead of leaving an unused tab. The anchor is labeled `card-<id>-anchor`, its exact id is persisted on the promoted run (NULL for managed runs, whose anchor is closed after a successful launch), and the run child is always created by `pane.split` from that anchor; `agent.start`/`pane run` never target the root. A renamed anchor is still selected only by exact identity; a closed anchor is recreated only from a durable board-run child in the exact proven tab, and missing proof creates a fresh tab without selecting a duplicate-label user tab. Exact ended children may be reclaimed before a later split so the anchor keeps usable geometry. The child receives the run env; the anchor receives only stable card identity. If multiple historical panes are live, newest run id wins; legacy rows retain their old lookup. Placement, cwd, and environment are not `agent.start` fields; the call receives neither the workspace placement nor the anchor pane id.
-    c. For Pi/Claude, write the snapshotted system prompt to a mode-`0600` temporary file; issue `agent.start {name,kind,pane_id,args}` on the split child with prompt-free startup args; a typed `agent_pane_busy` retries the exact request on that same child with bounded 100ms/200ms backoff (never another split); poll `agent.get` for readiness; then send only the task snapshot through `agent.prompt`. Remove the file. For codex/opencode, no prompt file exists: after the same readiness poll the daemon bounded-polls `agent.get.agent_session` (at most 5 probes / 10s) for the integration-reported id (expected agent, `kind:"id"`, non-empty `value`; opencode also pins the integration source) and persists it atomically with the promotion — **codex captures before delivering the prompt, opencode after it** (real OpenCode mints `agent_session` only once the first `agent.prompt` lands) — and the prompt is a delimited `system + task` block on a Mint, the task alone on a resume/fork fresh pane. Card status → `running`; record the exact child pane/workspace ids. The pane is **visible** — you can watch or type into it anytime.
+    c. For Pi/Claude, write the snapshotted system prompt to a mode-`0600` temporary file; issue `agent.start {name,kind,pane_id,args}` on the split child with prompt-free startup args; a typed `agent_pane_busy` retries the exact request on that same child with bounded 100ms/200ms backoff (never another split); poll `agent.get` for readiness; then send only the task snapshot through `agent.prompt`. Remove the file. For codex/opencode/antigravity, no prompt file exists: after the same readiness poll the daemon bounded-polls `agent.get.agent_session` (at most 5 probes / 10s) for the integration-reported id (expected agent, `kind:"id"`, non-empty `value`; opencode and antigravity also pin the integration source, `herdr:opencode` / `herdr:antigravity_cli`) and persists it atomically with the promotion — **codex captures before delivering the prompt, opencode and antigravity after it** (real OpenCode mints `agent_session` only once the first `agent.prompt` lands; antigravity likewise reports its conversation id only after the first prompt) — and the prompt is a delimited `system + task` block on a Mint, the task alone on a resume/fork fresh pane. Card status → `running`; record the exact child pane/workspace ids. The pane is **visible** — you can watch or type into it anytime.
 
    **Pane naming and ownership**: the managed agent name is `card-<id>-<column-slug>` (e.g. `card-42-plan`, `card-42-execute`). Herdr names are exclusive while a pane is open, so `agent_name_taken` retries once on the same pane with `card-<id>-<column-slug>-r<run>`. A persistent `agent_pane_busy` closes only the board-owned child and leaves the pre-existing anchor. If a placement target disappears, boardd closes only the pane it created (a missing pane is already clean), restarts discovery from `tab.list`, and retries the complete placement once. A terminal launch error also closes only that board-owned pane; pre-existing user panes are never cleanup targets.
 5. Agent plans, writes `docs/plans/meli-retry.md`, then calls `board comment 42 "Plan ready at docs/plans/meli-retry.md …"` and `board done 42 --outcome ok`. From a run, the CLI forwards `BOARD_RUN_ID`; manual/TUI completion omits it and remains compatible.
@@ -880,6 +921,6 @@ herdr panes are fully drivable from the CLI (`pane send-keys` with named keys, `
 | 1. Unit | column engine, prompt assembly, queue, transitions | plain Rust tests, in-memory SQLite; no herdr |
 | 2. TUI snapshot | every view/modal/keybind incl. `?` help | ratatui `TestBackend` + fed `KeyEvent`s + `insta` snapshots; no herdr, no terminal |
 | 3. Daemon integration | dispatch → run → done → auto-move, without tokens | config fake harness plus built-in Pi adapter tests; real boardd paths, no provider call |
-| 4. Full E2E | real Herdr wiring | collision-resistant ephemeral named Herdr session plus disposable workspace; the standard suite uses checked-in fake Pi/Claude/Codex/OpenCode/configured harnesses and asserts pane-first placement/prompt/argv contracts against the current Herdr 0.8.0 / protocol 19 gate with zero provider cost. Separate opt-in real-Claude Haiku/low, real-Codex low, and real-OpenCode low smokes are never in `run-all.sh`; each intended contract is one authorized attempt with no retry or fallback (and may incur cost). |
+| 4. Full E2E | real Herdr wiring | collision-resistant ephemeral named Herdr session plus disposable workspace; the standard suite uses checked-in fake Pi/Claude/Codex/OpenCode/Antigravity (`agy`)/configured harnesses and asserts pane-first placement/prompt/argv contracts against the current Herdr 0.8.2 / protocol 20 gate with zero provider cost. Separate opt-in real-Claude Haiku/low, real-Codex low, and real-OpenCode low smokes are never in `run-all.sh`; each intended contract is one authorized attempt with no retry or fallback (and may incur cost). |
 
 Isolation rules for level 3–4: `BOARD_DB=/tmp/…` + dedicated daemon socket per test run so tests never touch the real board; every interactive/live test must create and use a collision-resistant ephemeral named Herdr session plus a disposable workspace, never a user's session, workspace, or tab. The session may run headlessly in CI, but it must retain the same named-session and workspace requirements.

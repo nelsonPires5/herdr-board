@@ -1,5 +1,6 @@
 ---
 source: crates/board-tui/tests/snapshots.rs
+assertion_line: 842
 expression: "render(&mut wide, 120, 35)"
 ---
 " ◈ herdr-board ● 1 running          [ Global ▾ ]                   [ main ▾ ]            [ Active ] [ All ] [ Archived ]"
@@ -17,12 +18,12 @@ expression: "render(&mut wide, 120, 35)"
 "│                            ││                            ││└──────────────────────────┘││└──────────────────────────┘│"
 "│                            ││                            ││                            ││                            │"
 "│                            ││                            ││                            ││                            │"
-"│                            ││          ┌ Switch board · Global ──────[ X ]─┐           ││                            │"
-"│                            ││          │›main                              │           ││                            │"
-"│                            ││          │ ⇄ Other projects…                 │           ││                            │"
-"│                            ││          │ ＋ New board                      │           ││                            │" Hidden by multi-width symbols: [(44, " ")]
-"│                            ││          └───────────────────────────────────┘           ││                            │"
-"│                            ││                            ││                            ││                            │"
+"│                            ││      ┌ Switch board · Global [ACTIVE] ──────[ X ]─┐      ││                            │"
+"│                            ││      │›main                                       │      ││                            │"
+"│                            ││      │ ⇄ Other projects…                          │      ││                            │"
+"│                            ││      │ ＋ New board                               │      ││                            │" Hidden by multi-width symbols: [(40, " ")]
+"│                            ││      │    v:cycle a:archive r:restore [ACTIVE]    │      ││                            │"
+"│                            ││      └────────────────────────────────────────────┘      ││                            │"
 "│                            ││                            ││                            ││                            │"
 "│                            ││                            ││                            ││                            │"
 "│                            ││                            ││                            ││                            │"

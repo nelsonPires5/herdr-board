@@ -1,8 +1,8 @@
 use super::*;
 use board_core::db::{ColumnTarget, ColumnWiring, BOARD_ID};
 use board_core::protocol::{
-    BoardChangedReason, BoardCreateParams, BoardListParams, BoardSelectParams, ColumnCreateParams,
-    TemplateApplyParams, Trigger,
+    BoardArchiveParams, BoardChangedReason, BoardCreateParams, BoardGetParams, BoardListParams,
+    BoardSelectParams, ColumnCreateParams, TemplateApplyParams, Trigger,
 };
 pub(super) fn daemon_status(d: &Arc<Daemon>) -> Result<Value> {
     let (active_runs, queued_runs) = {
@@ -47,10 +47,20 @@ pub(super) fn board_open(d: &Arc<Daemon>, p: BoardOpenParams) -> Result<Value> {
 pub(super) fn board_list(d: &Arc<Daemon>, p: BoardListParams) -> Result<Value> {
     let db = d.store.lock();
     let boards = match p.project_id {
-        Some(project_id) => db.list_boards_for_project(project_id)?,
-        None => db.list_boards()?,
+        Some(project_id) => db.list_boards_for_project_filtered(project_id, p.visibility)?,
+        None => db.list_boards_filtered(p.visibility)?,
     };
     Ok(json!(BoardListResult { boards }))
+}
+
+pub(super) fn board_archive(d: &Arc<Daemon>, p: BoardArchiveParams) -> Result<Value> {
+    let board = d.store.lock().set_board_archived(p.board_id, p.archived)?;
+    if p.archived {
+        d.emit_changed_board(BoardChangedReason::BoardArchived, board.id, None, None);
+    } else {
+        d.emit_changed_board(BoardChangedReason::BoardRestored, board.id, None, None);
+    }
+    Ok(json!(board))
 }
 
 /// `board.create`: a named board in a project, auto-selected (creation is an
@@ -63,6 +73,24 @@ pub(super) fn board_create(d: &Arc<Daemon>, p: BoardCreateParams) -> Result<Valu
 
 /// `board.select`: persist this board — and its project — as the context.
 pub(super) fn board_select(d: &Arc<Daemon>, p: BoardSelectParams) -> Result<Value> {
+    // Archived boards/projects cannot be selected; restore first.
+    {
+        let db = d.store.lock();
+        let board = db.get_board(p.board_id)?;
+        if board.archived_at.is_some() {
+            return Err(Error::InvalidState(format!(
+                "archived board must be restored first: `board board restore {}`",
+                board.id
+            )));
+        }
+        let project = db.get_project(board.project_id)?;
+        if project.archived_at.is_some() {
+            return Err(Error::InvalidState(format!(
+                "archived project must be restored first: `board project restore {}`",
+                project.scope_path.as_deref().unwrap_or("(Global)")
+            )));
+        }
+    }
     let (_, board) = d.store.lock().select_board(p.board_id)?;
     Ok(json!(board_snapshot(d, board.id)?))
 }
@@ -77,6 +105,8 @@ pub(super) fn board_rename(d: &Arc<Daemon>, p: BoardRenameParams) -> Result<Valu
 }
 
 pub(super) fn board_get(d: &Arc<Daemon>, p: BoardGetParams) -> Result<Value> {
+    // board.get is an explicit read that always succeeds even for archived
+    // boards — restore needs to inspect it.
     Ok(json!(board_snapshot(d, p.board_id.unwrap_or(BOARD_ID))?))
 }
 
@@ -107,6 +137,22 @@ pub(super) fn template_apply(d: &Arc<Daemon>, p: TemplateApplyParams) -> Result<
         return Err(Error::BadRequest(format!("unknown template: {}", p.name)));
     }
     let board_id = p.board_id.unwrap_or(BOARD_ID);
+    {
+        let db = d.store.lock();
+        let board = db.get_board(board_id)?;
+        if board.archived_at.is_some() {
+            return Err(Error::InvalidState(format!(
+                "archived board must be restored first: `board board restore {board_id}`"
+            )));
+        }
+        let project = db.get_project(board.project_id)?;
+        if project.archived_at.is_some() {
+            return Err(Error::InvalidState(format!(
+                "archived project must be restored first: `board project restore {}`",
+                project.scope_path.as_deref().unwrap_or("(Global)")
+            )));
+        }
+    }
     let columns = {
         let _sched = d.sched.lock().unwrap();
         let db = d.store.lock();

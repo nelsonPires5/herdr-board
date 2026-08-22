@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 36-managed-antigravity.sh — managed Antigravity CLI (agy) protocol-19/current
+# 36-managed-antigravity.sh — managed Antigravity CLI (agy) protocol-20/current
 # launch contract, provider-free through e2e/fake-bin/agy.
 #
 # Contract exercised end to end against a real Herdr:

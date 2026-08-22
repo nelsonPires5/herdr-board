@@ -144,3 +144,39 @@ pub(crate) const IMMEDIATE_READINESS_PROBES: usize = 3;
 /// polling forever, so a late or missing thread report never stalls launch.
 pub(crate) const SESSION_CAPTURE_PROBES: usize = 5;
 pub(crate) const SESSION_CAPTURE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Wall-clock bound for the pi/claude session-readiness gate. After
+/// `await_interactive_ready`, `await_session_ready` polls `agent.get` until
+/// `AgentInfo.agent_session` carries a non-empty value (any kind/source) or
+/// this bound elapses. The gate degrades with a warning and proceeds to the
+/// prompt, never blocking launch; fast providers confirm on the first
+/// immediate probe, slow ones are re-checked across the bound through the
+/// injected [`super::herdr::managed::DelayFn`].
+pub(crate) const SESSION_READY_TIMEOUT: Duration = Duration::from_secs(10);
+/// Total `agent.get` probes for the session-readiness gate. The probes are
+/// spread evenly across [`SESSION_READY_TIMEOUT`] (the same pacing as the
+/// post-launch session capture: `SESSION_READY_TIMEOUT / (probes - 1)`
+/// between attempts) so the gate really covers its full wall-clock bound —
+/// a provider resolving credentials through a shell command needs seconds,
+/// not a tight loop. When the budget or the deadline is exhausted the gate
+/// degrades with a warning and proceeds to the prompt; the injected
+/// [`super::herdr::managed::DelayFn`] keeps unit tests deterministic.
+pub(crate) const SESSION_READY_PROBES: usize = 5;
+/// How many `agent_pane_busy` refusals `agent.prompt` may retry on the same
+/// pane before the launch fails. Mirrors [`AGENT_START_BUSY_RETRIES`]: the
+/// backoff doubles per retry (100/200/400/800/1600ms), so the delivery window
+/// stays bounded while tolerating a brief Herdr pane-busy refusal without
+/// risking duplicate delivery on non-retryable errors.
+pub(crate) const AGENT_PROMPT_BUSY_RETRIES: usize = 5;
+/// Initial backoff for `agent.prompt` busy retries; doubles each attempt.
+pub(crate) const AGENT_PROMPT_BUSY_BACKOFF: Duration = Duration::from_millis(100);
+/// Wall-clock bound for post-prompt delivery confirmation. After a
+/// successful `agent.prompt`, the daemon polls `agent.get` until the agent
+/// leaves `Idle` (`Working`/`Blocked`/`Done`) or `agent_session` appears or
+/// changes; on timeout it logs a distinct warning (never re-sends). Uses the
+/// same immediate-probe-then-backoff pattern as the session gate.
+pub(crate) const PROMPT_CONFIRM_TIMEOUT: Duration = Duration::from_secs(10);
+/// Total `agent.get` probes for prompt-delivery confirmation. The probes
+/// are spread evenly across [`PROMPT_CONFIRM_TIMEOUT`] (capture pacing), so
+/// the diagnostic window really is that wide; on exhaustion the poll logs
+/// its distinct dropped-prompt-suspect warning.
+pub(crate) const PROMPT_CONFIRM_PROBES: usize = 5;

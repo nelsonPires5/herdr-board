@@ -17,6 +17,7 @@ fn pane_titles_include_scope_filter_and_sanitize_long_labels() {
         project_id: 1,
         name: "Global".into(),
         scope_path: None,
+        archived_at: None,
     };
     assert_eq!(
         pane_title(&global, CardFilter::Active),
@@ -28,6 +29,7 @@ fn pane_titles_include_scope_filter_and_sanitize_long_labels() {
         project_id: 2,
         name: "/tmp/repo".into(),
         scope_path: Some("/tmp/a[unsafe]/abcdefghijklmnopqrstuvwxyz0123456789".into()),
+        archived_at: None,
     };
     let title = pane_title(&scoped, CardFilter::Archived);
     assert!(title.starts_with("Board [abcdefghijklmnopqrstuvwxyz01234"));
@@ -41,6 +43,7 @@ fn project_labels_name_global_and_scope_with_full_path() {
         id: 1,
         name: "Global".into(),
         scope_path: None,
+        archived_at: None,
     };
     assert_eq!(project_label(&global), "Global");
 
@@ -48,6 +51,7 @@ fn project_labels_name_global_and_scope_with_full_path() {
         id: 2,
         name: "abcdefghijklmnopqrstuvwxyz0123456789".into(),
         scope_path: Some("/tmp/a[unsafe]/abcdefghijklmnopqrstuvwxyz0123456789".into()),
+        archived_at: None,
     };
     // The folder-name title truncates like the legacy scope label; the path
     // stays whole and sanitized so picker rows remain distinct.

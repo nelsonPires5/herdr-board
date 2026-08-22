@@ -2,7 +2,7 @@
 # 15-awaiting.sh — a live Herdr agent-status signal parks a run in `awaiting`;
 # explicit board confirmation then closes it as `done` in the same column.
 #
-# Herdr 0.8.0 / protocol 19 and Pi integration v8 were verified before
+# Herdr 0.8.2 / protocol 20 and Pi integration v8 were verified before
 # pinning the argv below:
 #   herdr pane report-agent <pane_id> --source ID --agent LABEL
 #     --state idle|working|blocked|unknown [--seq N]

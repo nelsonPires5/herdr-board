@@ -1,5 +1,6 @@
 ---
 source: crates/board-tui/tests/snapshots.rs
+assertion_line: 846
 expression: "render(&mut narrow, 80, 24)"
 ---
 " ◈ herdr-board ● 1 running [ Glo… ▾ ][ main ▾ ]  [ Active ] [ All ] [ Archived ]"
@@ -11,12 +12,12 @@ expression: "render(&mut narrow, 80, 24)"
 "││claude                 ││││claude · eff: high     ││││claude                ││"
 "│└───────────────────────┘││└───────────────────────┘││└──────────────────────┘│"
 "│                         ││                         ││┌──────────────────────┐│"
-"│                    ┌ Switch board · Global ──────[ X ]─┐ Investigate crash  ││"
-"│                    │›main                              │blocked             ││"
-"│                    │ ⇄ Other projects…                 │aude                ││"
-"│                    │ ＋ New board                      │────────────────────┘│" Hidden by multi-width symbols: [(24, " ")]
-"│                    └───────────────────────────────────┘                     │"
-"│                         ││                         ││                        │"
+"│                ┌ Switch board · Global [ACTIVE] ──────[ X ]─┐stigate crash  ││"
+"│                │›main                                       │ed             ││"
+"│                │ ⇄ Other projects…                          │               ││"
+"│                │ ＋ New board                               │───────────────┘│" Hidden by multi-width symbols: [(20, " ")]
+"│                │    v:cycle a:archive r:restore [ACTIVE]    │                │"
+"│                └────────────────────────────────────────────┘                │"
 "│                         ││                         ││                        │"
 "│                         ││                         ││                        │"
 "│                         ││                         ││                        │"

@@ -78,6 +78,39 @@ pub(super) fn card_create(d: &Arc<Daemon>, p: CardCreateParams) -> Result<Value>
         p.space_cwd.as_deref(),
         &antigravity_validation_config(d, harness),
     )?;
+    // Archived destination guard.
+    {
+        let db = d.store.lock();
+        let board_id = p.board_id.unwrap_or(BOARD_ID);
+        // Only guard when board_id is explicit or resolves to existing default.
+        if let Ok(board) = db.get_board(board_id) {
+            if board.archived_at.is_some() {
+                return Err(Error::InvalidState(format!(
+                    "archived board must be restored first: `board board restore {board_id}`"
+                )));
+            }
+            if let Ok(project) = db.get_project(board.project_id) {
+                if project.archived_at.is_some() {
+                    return Err(Error::InvalidState(format!(
+                        "archived project must be restored first: `board project restore {}`",
+                        project.scope_path.as_deref().unwrap_or("(Global)")
+                    )));
+                }
+            }
+        } else if p.board_id.is_some() {
+            // get_board will later surface NotFound; keep that path.
+        } else {
+            // Default-board path without explicit board_id: check selected project context.
+            if let Ok(Some(proj)) = db.selected_project() {
+                if proj.archived_at.is_some() {
+                    return Err(Error::InvalidState(format!(
+                        "archived project must be restored first: `board project restore {}`",
+                        proj.scope_path.as_deref().unwrap_or("(Global)")
+                    )));
+                }
+            }
+        }
+    }
 
     let (mut card, enqueue) = {
         // Scheduler state and card creation/enqueue share one critical
@@ -117,6 +150,24 @@ pub(super) fn card_create(d: &Arc<Daemon>, p: CardCreateParams) -> Result<Value>
 /// or runs it. The insert and column renumber are one transaction, and the
 /// normal `CardCreated` notification is emitted for the new card.
 pub(super) fn card_duplicate(d: &Arc<Daemon>, p: CardIdParams) -> Result<Value> {
+    {
+        let db = d.store.lock();
+        let card = db.require_card(p.id)?;
+        let board = db.get_board(card.board_id)?;
+        if board.archived_at.is_some() {
+            return Err(Error::InvalidState(format!(
+                "archived board must be restored first: `board board restore {}`",
+                board.id
+            )));
+        }
+        let project = db.get_project(board.project_id)?;
+        if project.archived_at.is_some() {
+            return Err(Error::InvalidState(format!(
+                "archived project must be restored first: `board project restore {}`",
+                project.scope_path.as_deref().unwrap_or("(Global)")
+            )));
+        }
+    }
     let mut card = {
         let _sched = d.sched.lock().unwrap();
         let db = d.store.lock();
@@ -208,7 +259,34 @@ pub(super) fn card_move(d: &Arc<Daemon>, p: CardMoveParams) -> Result<Value> {
                 "archived card must be restored before moving".into(),
             ));
         }
+        // Source board archived guard.
+        {
+            let src_board = db.get_board(current.board_id)?;
+            if src_board.archived_at.is_some() {
+                return Err(Error::InvalidState(format!(
+                    "archived board must be restored first: `board board restore {}`",
+                    src_board.id
+                )));
+            }
+        }
         let target = db.require_column(p.column_id)?;
+        // Destination board/project archived guard.
+        {
+            let dest_board = db.get_board(target.board_id)?;
+            if dest_board.archived_at.is_some() {
+                return Err(Error::InvalidState(format!(
+                    "archived board must be restored first: `board board restore {}`",
+                    dest_board.id
+                )));
+            }
+            let dest_project = db.get_project(dest_board.project_id)?;
+            if dest_project.archived_at.is_some() {
+                return Err(Error::InvalidState(format!(
+                    "archived project must be restored first: `board project restore {}`",
+                    dest_project.scope_path.as_deref().unwrap_or("(Global)")
+                )));
+            }
+        }
         // Moving a card within its own column is a pure reorder: it never
         // enqueues, never changes status, and never triggers the column's
         // automatic dispatch — even on an auto column with an

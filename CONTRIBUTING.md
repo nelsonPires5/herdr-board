@@ -6,8 +6,8 @@ welcome. For the full cross-agent contributor guide (crate ownership, herdr gotc
 
 ## Development setup
 
-Requirements: a **Rust toolchain** (stable, edition 2021) and exactly **Herdr 0.8.0 with
-socket protocol 19** on `PATH` for the end-to-end path (unit and integration tests need neither
+Requirements: a **Rust toolchain** (stable, edition 2021) and exactly **Herdr 0.8.2 with
+socket protocol 20** on `PATH` for the end-to-end path (unit and integration tests need neither
 herdr nor an agent harness).
 
 ```bash
@@ -16,6 +16,11 @@ cd herdr-board
 cargo build            # or ./scripts/build.sh for the release binary herdr's [[build]] step runs
 cargo run -p board-cli -- tui   # run the board locally
 ```
+
+Prefer not to run Herdr and the test suite against your own machine? The Docker sandbox gives an
+agent-friendly edit-test loop in an isolated container (works with Colima on macOS and Docker
+Engine on Linux): `./scripts/sandbox.sh prepare` once, then `./scripts/sandbox.sh gates` — see
+[`docs/sandbox.md`](docs/sandbox.md).
 
 ## Architecture
 

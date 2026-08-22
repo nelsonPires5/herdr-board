@@ -213,6 +213,7 @@ impl HerdrSpawner {
                     &owned.pane_id,
                     reused,
                     self.agent_start_delay.as_ref(),
+                    &selected_socket,
                 ),
                 None => launch_configured(
                     &mut client,

@@ -9,10 +9,10 @@ rm -rf "$EXPORT_DIR"
 mkdir -m 700 "$EXPORT_DIR"
 exec > >(tee "$EXPORT_DIR/runner.log") 2>&1
 
-HERDR_VERSION=0.8.0
-HERDR_PROTOCOL=19
-HERDR_URL=https://github.com/herdrdev/herdr/releases/download/v0.8.0/herdr-linux-x86_64
-HERDR_SHA256=b872ea7e40fa2cb17e857ac9b62b1bf26db7b403c622f5d2f3f5b35f6e9acd28
+HERDR_VERSION=0.8.2
+HERDR_PROTOCOL=20
+HERDR_URL=https://github.com/herdrdev/herdr/releases/download/v0.8.2/herdr-linux-x86_64
+HERDR_SHA256=976150a14d490c94b243ea2e1a7eb2dfb67f12e36b182db90936f6728e6aecf4
 CACHE_DIR="${HERDR_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/herdr-board/herdr-$HERDR_VERSION-linux-x86_64}"
 HERDR_BIN="$CACHE_DIR/herdr"
 mkdir -p "$CACHE_DIR"

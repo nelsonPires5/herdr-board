@@ -3,23 +3,42 @@ use std::path::Path;
 use anyhow::{anyhow, Result};
 use board_core::client::BoardClient;
 use board_core::model::Board;
-use board_core::protocol::BoardSnapshot;
+use board_core::protocol::{BoardSnapshot, Visibility};
 
 use crate::args::BoardCmd;
 use crate::context::Ctx;
 use crate::render::{emit, emit_line};
 use crate::scope::{current_scope_path, resolved_scope_path};
 
+fn parse_visibility(s: Option<&str>) -> Result<Option<Visibility>> {
+    match s {
+        None => Ok(None),
+        Some(v) => Visibility::parse_str(v)
+            .map(Some)
+            .ok_or_else(|| anyhow!("unknown visibility: {v}")),
+    }
+}
+
 pub(crate) fn cmd_board(sub: BoardCmd, ctx: &mut Ctx) -> Result<()> {
     let json = ctx.json();
     match sub {
-        BoardCmd::List { all, project } => {
+        BoardCmd::List {
+            all,
+            project,
+            visibility,
+        } => {
+            let vis = parse_visibility(visibility.as_deref())?;
             if all {
-                let boards = ctx.client()?.board_list()?.boards;
+                let boards = ctx.client()?.board_list_visible(None, vis)?.boards;
                 return emit(&boards, json);
             }
             let project_id = project_id_for(ctx, project.as_deref())?;
-            let boards = ctx.client()?.board_list_for_project(project_id)?.boards;
+            // When visibility filter is used without --all, we must scope to that project but
+            // apply the requested visibility. board_list_visible with project_id does that.
+            let boards = ctx
+                .client()?
+                .board_list_visible(Some(project_id), vis)?
+                .boards;
             emit(&boards, json)
         }
         BoardCmd::Show { selector: local } => {
@@ -90,6 +109,30 @@ pub(crate) fn cmd_board(sub: BoardCmd, ctx: &mut Ctx) -> Result<()> {
                 format!("Renamed board #{} to {}", renamed.id, renamed.name),
             )
         }
+        BoardCmd::Archive { selector } => {
+            let board_id = match selector.as_deref() {
+                Some(local) => resolve_board(ctx, local)?.board.id,
+                None => ctx.board_id()?,
+            };
+            let board = ctx.client()?.board_archive(board_id, true)?;
+            emit_line(
+                &board,
+                json,
+                format!("Archived board #{} {}", board.id, board.name),
+            )
+        }
+        BoardCmd::Restore { selector } => {
+            let board_id = match selector.as_deref() {
+                Some(local) => resolve_board_for_restore(ctx, local)?.board.id,
+                None => ctx.board_id()?,
+            };
+            let board = ctx.client()?.board_archive(board_id, false)?;
+            emit_line(
+                &board,
+                json,
+                format!("Restored board #{} {}", board.id, board.name),
+            )
+        }
     }
 }
 
@@ -125,6 +168,25 @@ fn resolve_board(ctx: &mut Ctx, value: &str) -> Result<BoardSnapshot> {
     }
     let project_id = project_id_for(ctx, None)?;
     let boards = ctx.client()?.board_list_for_project(project_id)?.boards;
+    let board = resolve_board_in_list(&boards, value, &format!("project {project_id}"))?;
+    ctx.client()?.board_get_by_id(board.id)
+}
+
+fn resolve_board_for_restore(ctx: &mut Ctx, value: &str) -> Result<BoardSnapshot> {
+    if let Ok(id) = value.parse::<i64>() {
+        return ctx.client()?.board_get_by_id(id);
+    }
+    let path = Path::new(value);
+    if value.contains('/') || path.exists() {
+        let scope = resolved_scope_path(value)?;
+        return ctx.client()?.board_open(&scope);
+    }
+    let project_id = project_id_for(ctx, None)?;
+    // Include archived boards so a by-name restore can find them.
+    let boards = ctx
+        .client()?
+        .board_list_visible(Some(project_id), Some(Visibility::All))?
+        .boards;
     let board = resolve_board_in_list(&boards, value, &format!("project {project_id}"))?;
     ctx.client()?.board_get_by_id(board.id)
 }

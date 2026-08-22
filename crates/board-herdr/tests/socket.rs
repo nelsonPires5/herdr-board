@@ -124,16 +124,16 @@ fn protocol_gate_accepts_exact_supported_contract() {
         assert_eq!(req["method"], "ping");
         reply_for(
             req,
-            r#"{"type":"pong","version":"0.8.0","protocol":19,"capabilities":{}}"#,
+            r#"{"type":"pong","version":"0.8.2","protocol":20,"capabilities":{}}"#,
         )
     });
 
     let mut c = HerdrClient::connect(&path).unwrap();
     let pong = c
         .require_supported_protocol()
-        .expect("Herdr 0.8.0 with protocol 19 must be accepted");
-    assert_eq!(SUPPORTED_HERDR_VERSION, "0.8.0");
-    assert_eq!(SUPPORTED_HERDR_PROTOCOL, 19);
+        .expect("Herdr 0.8.2 with protocol 20 must be accepted");
+    assert_eq!(SUPPORTED_HERDR_VERSION, "0.8.2");
+    assert_eq!(SUPPORTED_HERDR_PROTOCOL, 20);
     assert_eq!(pong.version, SUPPORTED_HERDR_VERSION);
     assert_eq!(pong.protocol, SUPPORTED_HERDR_PROTOCOL);
 }
@@ -145,14 +145,14 @@ fn deprecated_protocol_adapter_accepts_only_the_supported_protocol() {
         assert_eq!(req["method"], "ping");
         reply_for(
             req,
-            r#"{"type":"pong","version":"0.8.0","protocol":19,"capabilities":{}}"#,
+            r#"{"type":"pong","version":"0.8.2","protocol":20,"capabilities":{}}"#,
         )
     });
 
     let mut client = HerdrClient::connect(&path).unwrap();
     let pong = client
         .require_protocol(SUPPORTED_HERDR_PROTOCOL)
-        .expect("the compatibility adapter must accept protocol 19");
+        .expect("the compatibility adapter must accept the supported protocol");
 
     assert_eq!(pong.version, SUPPORTED_HERDR_VERSION);
     assert_eq!(pong.protocol, SUPPORTED_HERDR_PROTOCOL);
@@ -170,7 +170,13 @@ fn deprecated_protocol_adapter_rejects_a_different_requested_protocol() {
         .require_protocol(SUPPORTED_HERDR_PROTOCOL - 1)
         .expect_err("the compatibility adapter must not select another protocol");
 
-    assert!(error.to_string().contains("protocol 18"), "{error}");
+    assert!(
+        error.to_string().contains(&format!(
+            "requested protocol {}",
+            SUPPORTED_HERDR_PROTOCOL - 1
+        )),
+        "{error}"
+    );
 }
 
 #[test]
@@ -233,7 +239,7 @@ fn is_live_true_on_pong() {
     let path = serve_calls(|req| {
         reply_for(
             req,
-            r#"{"type":"pong","version":"0.8.0","protocol":19,"capabilities":{}}"#,
+            r#"{"type":"pong","version":"0.8.2","protocol":20,"capabilities":{}}"#,
         )
     });
     let mut c = HerdrClient::connect(&path).unwrap();

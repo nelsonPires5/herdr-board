@@ -1,16 +1,23 @@
 //! Managed Herdr launch: `agent.start` on a board-owned pane, with the
-//! name/busy retry taxonomy, the wait for the agent to become interactive,
-//! and — for self-minting harnesses like codex, opencode and agy — the
-//! bounded capture of the integration-reported conversation/session id,
-//! ordered per harness: codex captures after readiness and before the prompt,
-//! opencode and agy after the prompt (real OpenCode mints `agent_session`
-//! only once its first prompt lands, and the agy integration reports its
-//! conversation id the same way; a prompt-less rescue reduces to
-//! capture-after-readiness).
+//! name/busy retry taxonomy, the two-stage readiness gate (terminal
+//! interactive, then agent session identity for pi/claude and reuse), the
+//! bounded `agent.prompt` busy retry, and delivery confirmation — plus, for
+//! self-minting harnesses like codex, opencode and agy, the bounded capture
+//! of the integration-reported conversation/session id, ordered per harness:
+//! codex captures after readiness and before the prompt, opencode and agy
+//! after the prompt (real OpenCode mints `agent_session` only once its first
+//! prompt lands, and the agy integration reports its conversation id the same
+//! way; a prompt-less rescue reduces to capture-after-readiness). Readiness
+//! now has two stages: `interactive_ready && !launch_pending` (pane shell)
+//! and `agent_session` presence (pi/claude CLI initialised); the prompt is
+//! retried only on explicit `agent_pane_busy` with a bounded doubling backoff
+//! and an inter-attempt `is_interactive` check, then confirmation polls
+//! `agent.get` until the agent leaves `Idle` or its session appears/changes.
 
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -22,9 +29,11 @@ use board_herdr::{
 
 use super::super::placement::{RetryablePlacementRace, ERR_PANE_NOT_FOUND};
 use super::super::{
-    HerdrLaunchPlan, AGENT_START_BUSY_BACKOFF, AGENT_START_BUSY_RETRIES, AGENT_START_TIMEOUT_MS,
-    IMMEDIATE_READINESS_PROBES, READINESS_BACKOFF, READINESS_TIMEOUT, SESSION_CAPTURE_PROBES,
-    SESSION_CAPTURE_TIMEOUT,
+    HerdrLaunchPlan, AGENT_PROMPT_BUSY_BACKOFF, AGENT_PROMPT_BUSY_RETRIES,
+    AGENT_START_BUSY_BACKOFF, AGENT_START_BUSY_RETRIES, AGENT_START_TIMEOUT_MS,
+    IMMEDIATE_READINESS_PROBES, PROMPT_CONFIRM_PROBES, PROMPT_CONFIRM_TIMEOUT, READINESS_BACKOFF,
+    READINESS_TIMEOUT, SESSION_CAPTURE_PROBES, SESSION_CAPTURE_TIMEOUT, SESSION_READY_PROBES,
+    SESSION_READY_TIMEOUT,
 };
 
 const ERR_AGENT_NAME_TAKEN: &str = "agent_name_taken";
@@ -52,6 +61,7 @@ pub(crate) fn launch_managed(
     pane_id: &str,
     reuse: bool,
     delay: &DelayFn,
+    socket: &Path,
 ) -> anyhow::Result<Option<String>> {
     // A same-conversation resume hop reuses the prior run's agent pane. The
     // conversation + agent are already live there, so there is nothing to
@@ -65,14 +75,10 @@ pub(crate) fn launch_managed(
     // persisted on the card).
     if reuse {
         await_reuse_ready(client, pane_id)?;
-        if let Some(text) = &req.initial_prompt {
-            client
-                .agent_prompt(&AgentPromptParams {
-                    target: pane_id.to_string(),
-                    text: text.clone(),
-                    wait: None,
-                })
-                .with_context(|| format!("herdr agent.prompt (reuse) for {}", req.name))?;
+        if let Some(text) = req.initial_prompt.clone() {
+            let initial_session = await_session_ready(client, pane_id, delay);
+            agent_prompt_with_busy_retry(client, pane_id, text, &req.name, delay)?;
+            confirm_delivery_after_prompt(socket, client, pane_id, delay, initial_session);
         }
         return Ok(None);
     }
@@ -83,12 +89,12 @@ pub(crate) fn launch_managed(
         // and the reported id is captured through the same gated connection
         // after readiness — codex before the prompt, opencode and agy after
         // it (C5/C7/O7/A7).
-        "codex" => launch_managed_codex(client, req, pane_id, delay),
-        "opencode" => launch_managed_opencode(client, req, pane_id, delay),
-        "agy" => launch_managed_agy(client, req, pane_id, delay),
+        "codex" => launch_managed_codex(client, req, pane_id, delay, socket),
+        "opencode" => launch_managed_opencode(client, req, pane_id, delay, socket),
+        "agy" => launch_managed_agy(client, req, pane_id, delay, socket),
         // Pi/Claude keep the authoritative 0600 startup system-prompt file.
         "pi" | "claude" => {
-            launch_managed_prompt_file(client, req, kind, pane_id, delay)?;
+            launch_managed_prompt_file(client, req, kind, pane_id, delay, socket)?;
             Ok(None)
         }
         other => bail!("unsupported managed harness kind: {other}"),
@@ -106,12 +112,14 @@ fn launch_managed_codex(
     req: &HerdrLaunchPlan,
     pane_id: &str,
     delay: &DelayFn,
+    socket: &Path,
 ) -> anyhow::Result<Option<String>> {
     launch_managed_self_minting(
         client,
         req,
         pane_id,
         delay,
+        socket,
         codex_prompt_text,
         capture_codex_session,
         CaptureTiming::BeforePrompt,
@@ -129,12 +137,14 @@ fn launch_managed_opencode(
     req: &HerdrLaunchPlan,
     pane_id: &str,
     delay: &DelayFn,
+    socket: &Path,
 ) -> anyhow::Result<Option<String>> {
     launch_managed_self_minting(
         client,
         req,
         pane_id,
         delay,
+        socket,
         opencode_prompt_text,
         capture_opencode_session,
         CaptureTiming::AfterPrompt,
@@ -153,12 +163,14 @@ fn launch_managed_agy(
     req: &HerdrLaunchPlan,
     pane_id: &str,
     delay: &DelayFn,
+    socket: &Path,
 ) -> anyhow::Result<Option<String>> {
     launch_managed_self_minting(
         client,
         req,
         pane_id,
         delay,
+        socket,
         agy_prompt_text,
         capture_agy_session,
         CaptureTiming::AfterPrompt,
@@ -223,11 +235,13 @@ enum CaptureTiming {
 /// argv (no prompt file, no `--` delimiter), readiness polling, the bounded
 /// session capture, and then the prompt — or the prompt and then the capture,
 /// per [`CaptureTiming`].
+#[allow(clippy::too_many_arguments)]
 fn launch_managed_self_minting(
     client: &mut HerdrClient,
     req: &HerdrLaunchPlan,
     pane_id: &str,
     delay: &DelayFn,
+    socket: &Path,
     prompt_text: fn(&HerdrLaunchPlan) -> Option<String>,
     capture: fn(&mut HerdrClient, &str, &DelayFn) -> Option<String>,
     capture_timing: CaptureTiming,
@@ -265,13 +279,13 @@ fn launch_managed_self_minting(
     };
 
     if let Some(text) = prompt_text(req) {
-        client
-            .agent_prompt(&AgentPromptParams {
-                target: pane_id.to_string(),
-                text,
-                wait: None,
-            })
-            .with_context(|| format!("herdr agent.prompt for {}", req.name))?;
+        let initial_for_confirm = if capture_after_prompt {
+            None
+        } else {
+            captured_session_id.clone()
+        };
+        agent_prompt_with_busy_retry(client, pane_id, text, &req.name, delay)?;
+        confirm_delivery_after_prompt(socket, client, pane_id, delay, initial_for_confirm);
     }
 
     let captured_session_id = if capture_after_prompt {
@@ -455,6 +469,7 @@ fn launch_managed_prompt_file(
     kind: &str,
     pane_id: &str,
     delay: &DelayFn,
+    socket: &Path,
 ) -> anyhow::Result<()> {
     let flag = match kind {
         "pi" => "--append-system-prompt",
@@ -502,14 +517,10 @@ fn launch_managed_prompt_file(
         let started = agent_start_retry_name(client, &params, req.name_fallback.as_deref(), delay)
             .map_err(|error| map_start_error(req, error))?;
         await_interactive_ready(client, &started)?;
-        if let Some(text) = &req.initial_prompt {
-            client
-                .agent_prompt(&AgentPromptParams {
-                    target: pane_id.to_string(),
-                    text: text.clone(),
-                    wait: None,
-                })
-                .with_context(|| format!("herdr agent.prompt for {}", req.name))?;
+        if let Some(text) = req.initial_prompt.clone() {
+            let initial_session = await_session_ready(client, pane_id, delay);
+            agent_prompt_with_busy_retry(client, pane_id, text, &req.name, delay)?;
+            confirm_delivery_after_prompt(socket, client, pane_id, delay, initial_session);
         }
         Ok(())
     })();
@@ -621,6 +632,262 @@ fn agent_start_retry_busy(
 
 fn is_interactive(agent: &AgentInfo) -> bool {
     agent.interactive_ready && !agent.launch_pending
+}
+
+/// Bounded poll until Herdr reports an `agent_session` with a non-empty
+/// trimmed value (any agent/kind/source — pi/claude report a path-kind
+/// reference). Reuses the immediate-probe-then-backoff pattern via the
+/// injected [`DelayFn`]. On timeout or `agent.get` failure, logs a
+/// `warn!` with `error_category = "harness"`/`"herdr"`, pane id and probe
+/// count (never prompt text or secrets) and returns `None` so the caller can
+/// degrade and proceed to the prompt without blocking launch.
+fn await_session_ready(client: &mut HerdrClient, pane_id: &str, delay: &DelayFn) -> Option<String> {
+    let deadline = Instant::now() + SESSION_READY_TIMEOUT;
+    let mut probes = 0_usize;
+    loop {
+        match client.agent_get(pane_id) {
+            Ok(agent) => {
+                if let Some(session) = agent.agent_session {
+                    let value = session.value.trim().to_string();
+                    if !value.is_empty() {
+                        return Some(value);
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    pane_id,
+                    error = %format!("{error:#}"),
+                    error_category = "herdr",
+                    "agent.get failed while waiting for session readiness; proceeding to prompt"
+                );
+                return None;
+            }
+        }
+        probes += 1;
+        if probes >= SESSION_READY_PROBES || Instant::now() >= deadline {
+            tracing::warn!(
+                pane_id,
+                probes,
+                error_category = "harness",
+                "no agent_session within the readiness bound; proceeding to prompt"
+            );
+            return None;
+        }
+        // Spread the remaining probes across the wall-clock bound exactly as
+        // the post-launch session capture does: a provider resolving
+        // credentials through a shell command needs seconds, not a tight
+        // 100ms loop, and the injected delay keeps unit tests deterministic.
+        let interval = SESSION_READY_TIMEOUT / (SESSION_READY_PROBES as u32 - 1);
+        delay(interval.min(deadline.saturating_duration_since(Instant::now())));
+    }
+}
+
+struct AgentPromptBusyRetryBudget {
+    retries_remaining: usize,
+    backoff: Duration,
+}
+
+impl AgentPromptBusyRetryBudget {
+    fn new() -> Self {
+        Self {
+            retries_remaining: AGENT_PROMPT_BUSY_RETRIES,
+            backoff: AGENT_PROMPT_BUSY_BACKOFF,
+        }
+    }
+
+    fn take_retry(&mut self) -> Option<Duration> {
+        let delay = self
+            .retries_remaining
+            .checked_sub(1)
+            .map(|_| self.backoff)?;
+        self.retries_remaining -= 1;
+        self.backoff = self.backoff.saturating_mul(2);
+        Some(delay)
+    }
+}
+
+/// Deliver `agent.prompt` with bounded retry on explicit Herdr refusal.
+///
+/// The exact same `text` is re-sent only when Herdr returns a typed
+/// `agent_pane_busy` protocol error. Between attempts the pane is re-checked
+/// via `agent.get` for `is_interactive`; a pane that went non-interactive
+/// is treated as a non-retryable failure. All other errors (including
+/// `Io`/`Deadline`/`Disconnected`/`internal_error`) propagate immediately
+/// without retry to avoid duplicate delivery of a prompt that may have
+/// landed. Preserves the `with_context("herdr agent.prompt for {name}")`
+/// error wrapping.
+fn agent_prompt_with_busy_retry(
+    client: &mut HerdrClient,
+    pane_id: &str,
+    text: String,
+    name: &str,
+    delay: &DelayFn,
+) -> anyhow::Result<()> {
+    let mut budget = AgentPromptBusyRetryBudget::new();
+    loop {
+        let result = client.agent_prompt(&AgentPromptParams {
+            target: pane_id.to_string(),
+            text: text.clone(),
+            wait: None,
+        });
+        match result {
+            Ok(_) => return Ok(()),
+            Err(error) => {
+                let is_busy = matches!(
+                    &error,
+                    HerdrError::Protocol { code, .. } if code == ERR_AGENT_PANE_BUSY
+                );
+                if is_busy {
+                    match client.agent_get(pane_id) {
+                        Ok(agent) if is_interactive(&agent) => {}
+                        _ => {
+                            return Err(anyhow::Error::new(error))
+                                .with_context(|| format!("herdr agent.prompt for {name}"));
+                        }
+                    }
+                    if let Some(backoff) = budget.take_retry() {
+                        delay(backoff);
+                        continue;
+                    } else {
+                        return Err(anyhow::Error::new(error))
+                            .with_context(|| format!("herdr agent.prompt for {name}"));
+                    }
+                } else {
+                    return Err(anyhow::Error::new(error))
+                        .with_context(|| format!("herdr agent.prompt for {name}"));
+                }
+            }
+        }
+    }
+}
+
+/// Post-prompt delivery confirmation (diagnostics only).
+///
+/// After a successful `agent.prompt`, polls `agent.get` for a bounded
+/// window (`PROMPT_CONFIRM_TIMEOUT` / `PROMPT_CONFIRM_PROBES`) with the same
+/// immediate-then-backoff pattern via the injected `DelayFn`. Confirmed when
+/// `agent_status` leaves `Idle` (`Working`/`Blocked`/`Done`) or
+/// `agent_session` appears (None -> Some) or changes value compared to
+/// `initial_session`. On timeout logs a distinct `tracing::warn!` with
+/// `error_category = "harness"` that the prompt was delivered but the
+/// agent never left idle within the bound, so a later `idle_expired` is
+/// suspect. Never re-sends and never fails the launch.
+/// Launch the post-prompt delivery confirmation without delaying the launch.
+///
+/// In production the poll runs on a detached diagnostics connection of its
+/// own: the confirmation must never hold the spawn (and with it run
+/// promotion) open, because an agent's first `board done` can land seconds
+/// after the prompt. Under `cfg(test)` it runs inline on the launch's own
+/// recorded connection instead, so method-sequence assertions stay
+/// deterministic.
+fn confirm_delivery_after_prompt(
+    socket: &Path,
+    client: &mut HerdrClient,
+    pane_id: &str,
+    delay: &DelayFn,
+    initial_session: Option<String>,
+) {
+    #[cfg(test)]
+    {
+        let _ = socket;
+        confirm_prompt_delivery(client, pane_id, delay, initial_session);
+    }
+    #[cfg(not(test))]
+    {
+        let _ = (client, delay);
+        let pane = pane_id.to_string();
+        let socket = socket.to_path_buf();
+        let spawned = std::thread::Builder::new()
+            .name("hb-prompt-confirm".to_string())
+            .spawn(move || {
+                let mut diagnostics = match HerdrClient::connect(&socket) {
+                    Ok(client) => client,
+                    Err(error) => {
+                        tracing::warn!(
+                            pane_id = %pane,
+                            error = %format!("{error:#}"),
+                            error_category = "herdr",
+                            "opening the prompt-delivery diagnostics connection failed"
+                        );
+                        return;
+                    }
+                };
+                confirm_prompt_delivery(
+                    &mut diagnostics,
+                    &pane,
+                    &(thread::sleep as fn(Duration)),
+                    initial_session,
+                );
+            });
+        if let Err(error) = spawned {
+            tracing::warn!(
+                pane_id,
+                error = %error.to_string(),
+                error_category = "daemon",
+                "spawning the prompt-delivery diagnostics poll failed"
+            );
+        }
+    }
+}
+
+fn confirm_prompt_delivery(
+    client: &mut HerdrClient,
+    pane_id: &str,
+    delay: &DelayFn,
+    initial_session: Option<String>,
+) {
+    let deadline = Instant::now() + PROMPT_CONFIRM_TIMEOUT;
+    let mut probes = 0_usize;
+    loop {
+        match client.agent_get(pane_id) {
+            Ok(agent) => {
+                let status_confirms = matches!(
+                    agent.agent_status,
+                    AgentStatus::Working | AgentStatus::Blocked | AgentStatus::Done
+                );
+                let session_value = agent
+                    .agent_session
+                    .as_ref()
+                    .map(|s| s.value.trim().to_string())
+                    .filter(|v| !v.is_empty());
+                let session_confirms = match (&initial_session, &session_value) {
+                    (None, Some(_)) => true,
+                    (Some(initial), Some(current)) if initial != current => true,
+                    _ => false,
+                };
+                if status_confirms || session_confirms {
+                    return;
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    pane_id,
+                    error = %format!("{error:#}"),
+                    error_category = "herdr",
+                    "agent.get failed while confirming prompt delivery; diagnostics only"
+                );
+                return;
+            }
+        }
+        probes += 1;
+        if probes >= PROMPT_CONFIRM_PROBES || Instant::now() >= deadline {
+            tracing::warn!(
+                pane_id,
+                probes,
+                error_category = "harness",
+                "prompt delivered to pane {pane_id} but the agent never left idle within {}s; if this run ends idle_expired suspect a dropped prompt",
+                PROMPT_CONFIRM_TIMEOUT.as_secs()
+            );
+            return;
+        }
+        // Spread the remaining probes across the wall-clock bound (same
+        // pacing as the session capture) so the diagnostic window really is
+        // [`PROMPT_CONFIRM_TIMEOUT`] wide, while the injected delay keeps
+        // unit tests free of wall sleeps.
+        let interval = PROMPT_CONFIRM_TIMEOUT / (PROMPT_CONFIRM_PROBES as u32 - 1);
+        delay(interval.min(deadline.saturating_duration_since(Instant::now())));
+    }
 }
 
 /// Wait for a reused pane's already-running agent to be quiescent and

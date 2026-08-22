@@ -25,10 +25,10 @@ Rule of thumb (mirrors [AGENTS.md](../AGENTS.md)): **never assume a herdr
 command, flag, or JSON shape from memory — verify against `api schema` /
 `--help`, and pin the argv you verified in a test comment.**
 
-## Compatibility gate: Herdr 0.8.0 / socket protocol 19
+## Compatibility gate: Herdr 0.8.2 / socket protocol 20
 
-The supported matrix is exact: **Herdr 0.8.0**, **socket protocol 19**, board protocol
-v1, and SQLite schema v14. `board-herdr` rejects a different Herdr version or
+The supported matrix is exact: **Herdr 0.8.2**, **socket protocol 20**, board protocol
+v1, and SQLite schema v15. `board-herdr` rejects a different Herdr version or
 protocol before the daemon performs workspace discovery, pane placement, an agent
 launch, a configured runner action, or a notification mutation. This is a policy
 gate, not a protocol-negotiation fallback.
@@ -36,9 +36,9 @@ gate, not a protocol-negotiation fallback.
 Use these read-only probes before changing a wire call or debugging a live session:
 
 ```bash
-test "$(herdr --version)" = "herdr 0.8.0"
+test "$(herdr --version)" = "herdr 0.8.2"
 herdr api schema --json | python3 -c \
-  'import json, sys; s=json.load(sys.stdin); assert s["protocol"] == 19, s'
+  'import json, sys; s=json.load(sys.stdin); assert s["protocol"] == 20, s'
 herdr api snapshot
 herdr integration status
 ```
@@ -57,7 +57,7 @@ live agent status (idle / working / blocked / done) back to herdr. Manage them w
 - `herdr integration install <name>` / `herdr integration uninstall <name>`
 - `herdr integration status [--outdated-only]`
 
-Herdr 0.8.0's installable integration targets are: **pi, omp, claude, codex,
+Herdr 0.8.2's installable integration targets are: **pi, omp, claude, codex,
 copilot, devin, droid, kimi, opencode, kilo, hermes, qodercli, cursor,
 mastracode, antigravity-cli, grok**. Get the authoritative spelling and current
 list from `herdr integration install --help`; the socket schema uses
@@ -65,7 +65,7 @@ list from `herdr integration install --help`; the socket schema uses
 update, `herdr integration status` reports Pi **current (v8)** and Claude
 **current (v7)**.
 
-Herdr 0.8.0 also provides `herdr --skill`, which prints Herdr's own agent-driving
+Herdr 0.8.2 also provides `herdr --skill`, which prints Herdr's own agent-driving
 skill. It is distinct from this repository's `board skill` / `skill/SKILL.md`.
 
 Installing one **writes into that harness's own config** (`pi` installs
@@ -83,7 +83,7 @@ reopened by id.
 
 ### 0.8.0 lifecycle implications
 
-Herdr 0.8.0 tightened lifecycle ownership around confirmed process exit. A known
+Herdr 0.8.2 tightened lifecycle ownership around confirmed process exit. A known
 agent can restart with the same saved session and retain lifecycle state; nested
 or ephemeral Codex sessions do not replace the owning pane's resumable session;
 and Pi RPC/JSON/print processes do not claim lifecycle authority intended for a
@@ -115,7 +115,7 @@ to exercise watcher status mapping deterministically rather than changing integr
 
 ## Protocol 19 delta: additive upstream surface
 
-The Herdr 0.8.0/protocol-19 schema keeps the RPC shapes herdr-board uses unchanged.
+The Herdr 0.8.2/protocol-20 schema keeps the RPC shapes herdr-board uses unchanged.
 The board's typed calls still use the same request/result envelopes for `ping`,
 `session.snapshot`, workspace list/create/close, tab create/list/rename, pane
 split/list/get/focus/rename/read/send-text/send-keys/close/layout, agent
@@ -143,7 +143,7 @@ The delta is additive and outside the board client surface:
   `{agent, kind, source, value}` with `kind` ∈ {`id`, `path`} — for panes whose
   integration reported a session. It is absent on panes without one. `board-herdr`
   decodes it (`AgentInfo.agent_session`) because the self-minting built-in
-  harnesses need the reported id: a codex/opencode Mint persists `session_id =
+  harnesses need the reported id: a codex/opencode/antigravity Mint persists `session_id =
   NULL` at enqueue, and the daemon's bounded post-launch `agent.get` capture
   accepts only an `id`-kind reference owned by the expected agent with a
   non-empty value — codex leaves `source` unconstrained, while opencode and
@@ -167,8 +167,8 @@ copying them from this page.
 
 The stable transport rule is pane-first and intentionally independent of a
 protocol number: create or split the target pane with its cwd/environment first,
-then start the agent in that existing pane. Under the exact Herdr 0.8.0 / socket
-protocol 19 gate, herdr-board first creates a shell root for a new durable card
+then start the agent in that existing pane. Under the exact Herdr 0.8.2 / socket
+protocol 20 gate, herdr-board first creates a shell root for a new durable card
 tab and reserves it as `card-<id>-anchor`. When the dispatch itself just created
 the workspace (`new_workspace` with no matching open workspace), the workspace's
 own initial tab/root is adopted instead: the exact bootstrap ids are verified
@@ -197,7 +197,20 @@ launch never closes the anchor.
 After start, `agent.get <target>` exposes `interactive_ready` and
 `launch_pending`. herdr-board waits for `interactive_ready=true` and
 `launch_pending=false`, then submits the exact card task with `agent.prompt`
-instead of startup argv or synthetic keystrokes. A newly allocated child can
+instead of startup argv or synthetic keystrokes. Those two flags only prove the
+pane's terminal is ready, though — a CLI still resolving provider credentials
+(a Pi provider whose `apiKey` is a shell command) is not reading its tty yet and
+drops a prompt sent in that window (issue #98) — so for pi/claude (and
+same-pane reuse) the board additionally waits for `agent.get` to report a
+non-empty `agent_session`, the signal the integration emits once the CLI
+finished initialising: at most 5 probes spread over 10s, degrading with a
+warning and proceeding on timeout so launch is never blocked. Delivery retries
+the exact `agent.prompt` only on a typed `agent_pane_busy` refusal (at most
+five times, 100ms backoff doubling, pane re-checked interactive between
+attempts; every other error propagates so a prompt that may have landed is
+never re-sent), then confirms delivery with a bounded diagnostics-only poll on
+a detached connection. That poll distinguishes a dropped prompt from genuine
+idle in the logs without delaying run promotion or an early `board done`. A newly allocated child can
 briefly retain prior agent state — or a slow login shell can still be booting — and return typed
 `agent_pane_busy`; the board
 retries the exact `agent.start` request on that same child at most five times, with
@@ -225,7 +238,7 @@ reuse the task alone, a rescue nothing. Around the prompt, the daemon
 bounded-polls `agent.get.agent_session` (5 probes / 10s) for the
 integration-reported id (expected agent, `kind:"id"`, non-empty value; opencode
 also pins the integration's source) and persists it atomically with the run
-promotion; a missing or unusable report degrades to `None` (see the protocol-19
+promotion; a missing or unusable report degrades to `None` (see the protocol-20
 delta above). The capture is ordered per harness: **codex captures between
 readiness and the prompt**, while **opencode captures after the prompt** — real
 OpenCode mints its `ses_…` id and reports `agent_session` only once the first
@@ -244,7 +257,7 @@ shapes: a pane label set with `pane.rename` must survive a subsequent
 `PaneInfo.agent` while keeping the pane open as a plain shell (label included).
 The second is why "does this pane still have a registered agent" is a sound
 liveness test and a label match alone is not. The current validation target is
-Herdr 0.8.0/protocol 19; do not infer either behavior from the schema alone.
+Herdr 0.8.2/protocol 20; do not infer either behavior from the schema alone.
 `PaneInfo.agent` is also not the exclusive name passed to `agent.start` — the
 schema carries `agent` and `name` separately — so it is only ever tested for
 presence, never compared to a board-chosen name.
@@ -329,8 +342,8 @@ workspace, tab, pane, agent, notification, session, and events. The upstream wor
 DTOs are not part of this crate's public surface; repository isolation belongs in the agent prompt.
 The checked-in schema fixture is regenerated from the installed Herdr contract and
 is not rewritten during unrelated API cleanup. The board fixture and typed client
-are currently pinned to **Herdr 0.8.0 / protocol 19**; board protocol v1 and DB
-schema v14 remain independent and unchanged.
+are currently pinned to **Herdr 0.8.2 / protocol 20**; board protocol v1 and DB
+schema v15 remain independent and unchanged.
 
 This repo's current Herdr facts — [`docs/research.md`](research.md),
 [`docs/design.md`](design.md), and the wire shapes hard-coded in `board-herdr` —

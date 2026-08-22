@@ -48,6 +48,14 @@ pub enum Effect {
         id: i64,
         archived: bool,
     },
+    BoardArchive {
+        board_id: i64,
+        archived: bool,
+    },
+    ProjectArchive {
+        project_id: i64,
+        archived: bool,
+    },
     CardMove(CardMoveParams),
     ColumnCreate(board_core::protocol::ColumnCreateParams),
     ColumnUpdate(board_core::protocol::ColumnUpdateParams),
@@ -88,7 +96,9 @@ pub enum Effect {
     /// card form and populate its guided selectors. Emitted on form open and on
     /// harness/session change (the latter re-scopes the workspace list).
     LoadFormOptions,
-    /// Keep the Herdr pane border title in sync with the archive filter.
+    /// Keep the Herdr pane border title in sync with the archive filters.
     SetPaneTitle(CardFilter),
+    /// Reload the project and board pickers with the given visibilities.
+    ReloadPickers,
     Quit,
 }

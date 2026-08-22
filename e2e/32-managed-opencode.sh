@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 32-managed-opencode.sh — managed OpenCode TUI protocol-19/current launch
+# 32-managed-opencode.sh — managed OpenCode TUI protocol-20/current launch
 # contract, provider-free through e2e/fake-bin/opencode.
 #
 # Contract exercised end to end against a real Herdr:

@@ -6,7 +6,7 @@ The current contract is the typed code plus [`docs/README.md`](README.md), `docs
 
 Condensed output of three research passes: local Herdr introspection, prior art, and technical building blocks.
 
-## A. Herdr capability map (Herdr 0.8.0, socket protocol 19; local introspection)
+## A. Herdr capability map (Herdr 0.8.2, socket protocol 20; local introspection)
 
 JSON request/response and events use the Unix socket at
 `~/.config/herdr/herdr.sock` (or `HERDR_SOCKET_PATH` for a named session).
@@ -14,14 +14,14 @@ The captured `herdr api schema --json` contains **90 request methods, 26 emitted
 kinds, and 27 event-subscription selectors**. `herdr api snapshot` exposes live
 workspaces/tabs/panes/agents, with IDs shaped like `w3`, `w3:t1`, and `w3:p1`.
 
-| Need | Herdr 0.8.0 command / current socket API |
+| Need | Herdr 0.8.2 command / current socket API |
 |---|---|
 | Create workspace | `herdr workspace create --cwd PATH --label TEXT --env K=V --no-focus` |
 | Worktree per card | `herdr worktree create --workspace ID\|--cwd PATH --branch NAME --base REF --json` (+ open/remove/list) |
 | Place a pane first | Use `tab.create` or `pane.split {workspace_id, target_pane_id, cwd, env, direction, ratio, focus}`. Placement, cwd, and environment are established before managed launch. |
 | Start a managed agent | `herdr agent start NAME --kind KIND --pane ID [--timeout MS] -- [AGENT_ARG…]`; the socket `agent.start` request is `{name, kind, pane_id, args, timeout_ms}`. `kind` selects the canonical executable and `args` excludes it. Board-side launch therefore stays pane-first rather than embedding placement in the agent request. |
 | Inspect readiness | `herdr agent get TARGET` / `agent.get {target}` returns `interactive_ready` and `launch_pending`; readiness is `interactive_ready=true && launch_pending=false`. `agent.wait` waits for agent status, not this startup predicate. |
-| Capture a reported session | `agent.get` → `AgentInfo.agent_session` (`AgentSessionInfo | null` in the protocol-19 schema): `{agent, kind, source, value}` with `kind` ∈ {`id`, `path`}; the field is absent when no session was reported. The codex integration reports its self-minted thread id here and the opencode integration its `ses_…` session id; board-herdr decodes the field and the daemon's bounded post-launch capture accepts only the expected agent + `kind:"id"` + non-empty `value` (opencode additionally pins the integration's `source`), promoting it atomically onto run+card. |
+| Capture a reported session | `agent.get` → `AgentInfo.agent_session` (`AgentSessionInfo | null` in the protocol-20 schema): `{agent, kind, source, value}` with `kind` ∈ {`id`, `path`}; the field is absent when no session was reported. The codex integration reports its self-minted thread id here and the opencode integration its `ses_…` session id; board-herdr decodes the field and the daemon's bounded post-launch capture accepts only the expected agent + `kind:"id"` + non-empty `value` (opencode additionally pins the integration's `source`), promoting it atomically onto run+card. |
 | Submit a card task | `herdr agent prompt TARGET TEXT`; `agent.prompt {target,text,wait?}` preserves multiline text and optionally waits for status. Herdr handles the short send-text/Enter settling delay; no synthetic keystroke/Enter pair is needed. |
 | Read output | `herdr agent read TARGET --source recent-unwrapped --lines N` / `agent.read` reads terminal screen/scrollback, not a semantic result. Read responses include `truncated`; `true` means older terminal rows were omitted. |
 | Run an unmanaged command | `herdr pane run PANE_ID COMMAND…` remains a CLI-only boundary: the current socket schema has no `pane.run` method. It schedules the command, so herdr-board uses a temporary self-cleaning runner and a board callback for silent child exit. |
@@ -29,7 +29,7 @@ workspaces/tabs/panes/agents, with IDs shaped like `w3`, `w3:t1`, and `w3:p1`.
 | Notify human | `herdr notification show TITLE --body … --sound none\|done\|request` |
 | Integration input | `herdr pane report-agent PANE --source ID --agent LABEL --state idle\|working\|blocked\|unknown [--seq N]`; `done` is an output status, not an accepted report input. |
 
-### The protocol-19 delta
+### The protocol-20 delta
 
 The board-used RPC shapes are unchanged between the earlier capture and the current
 contract: `ping`, `session.snapshot`, workspace list/create/close, tab create/list,
@@ -44,7 +44,8 @@ request fields, result envelopes, and event forms. The delta is additive:
   `workspace_ids`, `workspaces`, and an optional `before_workspace_id`.
 - The integration target vocabulary adds `antigravity_cli` (CLI spelling
   `antigravity-cli`) and `grok`, including their session-reporting/native-restore
-  support. They are not board built-in harnesses.
+  support. `antigravity_cli` now backs the board built-in `antigravity` harness
+  (Herdr kind/executable `agy`); `grok` is not a board built-in harness.
 
 - `AgentInfo.agent_session` is `AgentSessionInfo | null` (`{agent, kind,
   source, value}`, `kind` ∈ {`id`, `path`}) and absent when a pane reported no
@@ -109,14 +110,14 @@ output `done` from the integration's terminal end-of-turn idle report.
 `board done` remains terminal truth, while agent `done` parks the card in
 `awaiting` for review.
 
-**Plugin architecture** (learned from installed `herdr-file-viewer`): manifest `herdr-plugin.toml` with `id/name/version/min_herdr_version`, `[[build]]` (install-time command), `[[panes]]` (id, title, placement=split/tab/overlay, command argv → Herdr spawns the TUI in a pane), `[[actions]]` (shell commands, invocable via `herdr plugin action invoke` or `[[keys.command]]` keybindings, receive `PluginInvocationContext`: focused pane/cwd/agent, workspace/tab, selected text). Install from GitHub or local → `~/.config/herdr/plugins/…`, registry `plugins.json`. Herdr 0.8.0 resolves relative command paths from the plugin root. Runtime env: `HERDR_BIN_PATH`, `HERDR_PLUGIN_CONFIG_DIR`, `HERDR_PLUGIN_CONTEXT_JSON`. Plugins have no special powers — they shell out to the same CLI/socket.
+**Plugin architecture** (learned from installed `herdr-file-viewer`): manifest `herdr-plugin.toml` with `id/name/version/min_herdr_version`, `[[build]]` (install-time command), `[[panes]]` (id, title, placement=split/tab/overlay, command argv → Herdr spawns the TUI in a pane), `[[actions]]` (shell commands, invocable via `herdr plugin action invoke` or `[[keys.command]]` keybindings, receive `PluginInvocationContext`: focused pane/cwd/agent, workspace/tab, selected text). Install from GitHub or local → `~/.config/herdr/plugins/…`, registry `plugins.json`. Herdr 0.8.2 resolves relative command paths from the plugin root. Runtime env: `HERDR_BIN_PATH`, `HERDR_PLUGIN_CONFIG_DIR`, `HERDR_PLUGIN_CONTEXT_JSON`. Plugins have no special powers — they shell out to the same CLI/socket.
 
 **Gaps to design around**: Herdr has no per-agent model/effort abstraction (the adapter layer is ours); configured commands need a CLI bridge because `pane.run` is absent from the socket schema; terminal reads are bounded screen/scrollback observations and may be truncated, so agents should write files/comments; and `events.subscribe` needs a persistent raw-socket client with one concrete status subscription per watched pane.
 
 > **Historical comparison only — not support policy:** the earlier Herdr 0.7.5 / protocol-17
 > capture had 89 request methods, 25 emitted event kinds, 26 subscription selectors, and Pi
-> integration v6. It is retained solely to explain the additive protocol-19 delta above; all
-> current gates and integration instructions use Herdr 0.8.0 / protocol 19, Pi v8, and Claude v7.
+> integration v6. It is retained solely to explain the additive protocol-20 delta above; all
+> current gates and integration instructions use Herdr 0.8.2 / protocol 20, Pi v8, and Claude v7.
 
 ## B. Prior art
 
@@ -139,7 +140,7 @@ The flags below describe direct/local CLI capabilities and historical adapter re
 **not** the shipped managed-launch transport. For a shipped managed run, herdr-board creates a
 pane first, starts the explicit agent kind with prompt-free startup args, supplies the system prompt
 through a temporary `0600` file, waits for `interactive_ready`, and sends the card prompt only via
-`agent.prompt` under the exact Herdr 0.8.0/protocol-19 gate described above.
+`agent.prompt` under the exact Herdr 0.8.2/protocol-20 gate described above.
 
 **Pi Coding Agent 0.80.10**: `--model <provider/model>`; `--thinking off|minimal|low|medium|high|xhigh|max`; direct CLI supports `--append-system-prompt <text>` and positional prompts; exact mint/resume via `--session-id <id>`; retry fork via `--fork <source-id> --session-id <new-id>`. Pi has no per-tool permission prompts; `--approve`/`--no-approve` controls project trust and must not be mapped to the board permission field. Models are runtime provider/auth/user configuration, so the board does not persist a parsed `--list-models` catalog. At verification time the user default was `openai-codex/gpt-5.6-sol`, thinking `xhigh`; the isolated smoke detects this at runtime and overrides only the invocation to `low`.
 
@@ -150,6 +151,7 @@ through a temporary `0600` file, waits for `interactive_ready`, and sends the ca
 - codex headless: `codex exec "p"` — `-m`, `--sandbox …`, `--json`, `--output-last-message <path>`, resume `codex exec resume <id>`. Not a built-in: configure it under another harness name (e.g. `[harness.codex-exec]`) to keep it unmanaged.
 - gemini: `gemini -p "p"` — `-m`, `--approval-mode default|auto_edit|yolo|plan`; `-o json` (unverified spelling).
 - opencode (TUI, the managed built-in; verified against opencode 1.18.15): the TUI is `opencode [project]` with `-m/--model provider/model` (free-form), `--auto` (auto-approve), and `-s/--session <id>` with `--fork` (only with `--session`). The root/TUI has **no `--variant` flag** — `--variant` is the `opencode run` subcommand's per-model "model variant" spelling — so a board effort never rides argv: it is applied through a process-local `OPENCODE_CONFIG_CONTENT` config defining a stable custom agent `herdr-board` with exactly `model` + `variant` (the board calls this dimension effort and maps board `off` to opencode's `none`), selected with `--agent herdr-board` (verified: the TUI accepts `--agent`, and the backend applies the agent's `variant` when its model matches). A fresh TUI session mints its own `ses_…` id — there is **no way to pre-allocate one**, so a Mint carries no session flag and the board persists `NULL` until the integration reports the id via `agent_session`; resume/fork are `-s <id>` / `-s <id> --fork`. Model/effort discovery runs `opencode models --verbose`: each `provider/model` header line is followed by a JSON object whose `variants` map holds the per-model reasoning-effort variants (mapped onto the board ladder, `none`→`off`, unknown keys filtered), with a static fallback catalog when the CLI is missing or yields nothing — it truthfully lists OpenCode Zen Nemotron 3 Ultra Free (`opencode/nemotron-3-ultra-free`, which declares `variants: {}` for real and so offers **no** board effort) plus the fixture model `opencode/deepseek-v4-flash-free` (low/high/max); valid models with no recognized variants stay listed with empty efforts. There is no system-prompt-file equivalent and no reliable per-session/system-prompt flag: the managed prompt channels (`agent.prompt`) are the only prompt transport, never startup argv. For completeness, headless `opencode run --variant <effort>` does accept the variant spelling — a configured `[harness.…-run]` wrapper may use it.
+- antigravity (TUI, the managed built-in; verified against `agy --help` 1.1.13/1.1.14): the TUI is `agy` with `--model <base>`, `--effort (low|medium|high)`, `--sandbox` (restricted execution), `--dangerously-skip-permissions` (auto-approve), and `--conversation <id>` ("Resume a previous conversation by ID"). There is no permission-mode flag and no fork: the user's `toolPermission` setting stays theirs, and resume and retry share the one `--conversation <id>` spelling (a retry re-attaches to the SAME conversation in a fresh pane). Models come from a live catalog only — `agy --output-format json models` (root flag) is normalized to base ids with per-model efforts (variants like `gemini-3.7-flash-high` run as `--model gemini-3.7-flash --effort high`; fixed-effort models never send `--effort`) with **no static fallback** (a missing catalog only makes selection free-form). A fresh TUI session mints its own conversation id (a UUID printed at startup: "Resume with -c …: agy --conversation=<id>") — there is no way to pre-allocate one, so a Mint carries no conversation flag and the board persists `NULL` until the `antigravity_cli` integration reports the id via `agent_session` (source pinned to `herdr:antigravity_cli`). There is no system-prompt-file equivalent and the task never rides startup argv: the managed prompt channels (`initial_prompt`/`system_prompt`, one delimited block on Mint) are the only prompt transport.
 
 **Agent SDK** (`@anthropic-ai/claude-agent-sdk` / `claude-agent-sdk` py): `query()` with systemPrompt/permissionMode/model/resume + programmatic `canUseTool`. Beats CLI when you want per-tool-call permission decisions in code; loses when the orchestrator must be harness-agnostic (our case → CLI subprocess).
 

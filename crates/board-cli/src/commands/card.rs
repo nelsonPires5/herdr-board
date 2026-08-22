@@ -80,6 +80,7 @@ pub(crate) fn cmd_card(sub: CardCmd, ctx: &mut Ctx) -> Result<()> {
             clear_permission,
             session,
             clear_session,
+            space_kind,
             space_ref,
             clear_space_ref,
             space_cwd,
@@ -101,7 +102,7 @@ pub(crate) fn cmd_card(sub: CardCmd, ctx: &mut Ctx) -> Result<()> {
                 effort: Patch::from_flags(clear_effort, parse_effort(effort)?),
                 permission_mode: Patch::from_flags(clear_permission, permission),
                 session: Patch::from_flags(clear_session, session),
-                space_kind: None,
+                space_kind: space_kind.as_deref().map(parse_space_kind).transpose()?,
                 space_ref: Patch::from_flags(clear_space_ref, space_ref),
                 space_cwd: Patch::from_flags(clear_space_cwd, space_cwd),
             };
