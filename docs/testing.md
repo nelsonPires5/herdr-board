@@ -1,7 +1,8 @@
 # Testing
 
 How herdr-board is tested, and how to add tests for a change. The final contract is board
-protocol v1, SQLite schema v15, and Herdr 0.8.2 / protocol 20. Four layers, cheap and hermeticfirst, expensive and live last:
+protocol v1, SQLite schema v15, and Herdr 0.8.2 / protocol 20. Four layers, cheap and hermetic
+first, expensive and live last:
 
 ```
 unit / pure (per crate)                 no I/O, no daemon        — cargo test
