@@ -13,7 +13,7 @@ The reference detail behind the [root README](../README.md). Start here to find 
 | Herdr integrations | Pi v8; Claude v7; Antigravity CLI v1 for the agy conversation capture (installed and updated by the user) | [herdr.md](herdr.md), [install.md](install.md) |
 | Runtime launch | daemon-owned `Spawner`, placement, process/pane handles | [implementation.md](implementation.md) |
 | Config | typed `RootConfig`, one parse, environment overrides after parse | [configuration.md](configuration.md), [design.md](design.md) |
-| Live catalog | scenarios 01–38; provider-free fake/safe harness boundary | [e2e/README.md](../e2e/README.md) |
+| Live catalog | scenarios 01–39; provider-free fake/safe harness boundary | [e2e/README.md](../e2e/README.md) |
 | Branches | `dev` integration; `main` production (PR-only, merge-commit, signed); action-owned promotion; tags only from green `main` | [releasing.md](releasing.md) |
 
 Keep these links as navigation, not duplicate wire definitions: serde types and migrations are the
@@ -37,7 +37,7 @@ isolation is an agent prompt concern, not a board space primitive.
 The [`schema.sql`](../schema.sql) at the repo root is the fresh SQLite schema; migration behavior
 and upgrade tests live in `board-core::db`. Before handoff, check that docs still point to existing
 schema v15
-the scenario catalog lists every `e2e/NN-*.sh` from 01 through 38.
+the scenario catalog lists every `e2e/NN-*.sh` from 01 through 39.
 
 ## Test gates (single source)
 

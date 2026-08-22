@@ -197,7 +197,20 @@ launch never closes the anchor.
 After start, `agent.get <target>` exposes `interactive_ready` and
 `launch_pending`. herdr-board waits for `interactive_ready=true` and
 `launch_pending=false`, then submits the exact card task with `agent.prompt`
-instead of startup argv or synthetic keystrokes. A newly allocated child can
+instead of startup argv or synthetic keystrokes. Those two flags only prove the
+pane's terminal is ready, though — a CLI still resolving provider credentials
+(a Pi provider whose `apiKey` is a shell command) is not reading its tty yet and
+drops a prompt sent in that window (issue #98) — so for pi/claude (and
+same-pane reuse) the board additionally waits for `agent.get` to report a
+non-empty `agent_session`, the signal the integration emits once the CLI
+finished initialising: at most 5 probes spread over 10s, degrading with a
+warning and proceeding on timeout so launch is never blocked. Delivery retries
+the exact `agent.prompt` only on a typed `agent_pane_busy` refusal (at most
+five times, 100ms backoff doubling, pane re-checked interactive between
+attempts; every other error propagates so a prompt that may have landed is
+never re-sent), then confirms delivery with a bounded diagnostics-only poll on
+a detached connection. That poll distinguishes a dropped prompt from genuine
+idle in the logs without delaying run promotion or an early `board done`. A newly allocated child can
 briefly retain prior agent state — or a slow login shell can still be booting — and return typed
 `agent_pane_busy`; the board
 retries the exact `agent.start` request on that same child at most five times, with

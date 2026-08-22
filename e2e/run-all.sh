@@ -81,6 +81,7 @@ SCENARIOS=(
   30-pane-reuse.sh 31-managed-codex.sh 32-managed-opencode.sh
   33-reorder-card-tui.sh 34-duplicate.sh 35-rescue-dead-workspace.sh
   36-managed-antigravity.sh 37-multi-project.sh 38-board-project-archive.sh
+  39-managed-slow-provider.sh
 )
 run_this() {
   [ "${#FILTERS[@]}" -eq 0 ] && return 0

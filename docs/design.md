@@ -684,12 +684,17 @@ the supported managed-agent interface as follows:
 agent.start {
   name, kind:"pi"|"claude"|"codex"|"opencode"|"agy", pane_id,
   args:<startup argv without executable> +       # codex/opencode/agy: exactly the
-       ["--append-system-prompt", FILE]          #   startup tail, no prompt file,
+       ["--append-system-prompt", FILE],        #   startup tail, no prompt file,
        ["--append-system-prompt-file", FILE],    #   no `--`, no task
   timeout_ms:30000
 }
 agent.get {target:pane_id}       # bounded polling until interactive_ready && !launch_pending
+agent.get {target:pane_id}       # pi/claude (and same-pane reuse) only: bounded poll until
+                                 #   agent_session carries a non-empty value — at most 5 probes
+                                 #   spread over 10s; degrade-with-warning, never blocks launch
 agent.prompt {target:pane_id, text:task_prompt}
+agent.get {target:pane_id}       # bounded delivery confirmation, diagnostics only — the daemon
+                                 #   never re-sends the prompt from this check
 ```
 
 If Herdr returns typed `agent_pane_busy`, boardd retries the exact `agent.start` parameters—including
@@ -702,6 +707,25 @@ that error closes the owned child when present, rediscovers from `tab.list`, and
 placement once. The temporary file is removed before spawn returns, on success or failure. The card
 prompt is never part of `agent.start`; it is submitted only after readiness. An `agent_name_taken`
 response retries once on the same owned pane with `card-<id>-<column-slug>-r<run>`.
+
+**Two-stage readiness and prompt delivery.** `interactive_ready && !launch_pending` only proves the
+pane's terminal is ready — a CLI still resolving provider credentials (for example a Pi provider
+whose `apiKey` is a shell command) is not reading its tty yet, and a prompt sent in that window is
+dropped, which used to surface as a silent `idle_expired` (issue #98). Readiness therefore has a
+second stage for pi/claude (and same-pane reuse): the daemon polls `agent.get` until
+`agent_session` carries a non-empty value — the integrations report it only once the CLI finished
+initialising — bounded to 5 probes spread over 10s; a timeout degrades with a warning (harness
+category, pane id, probe count — never prompt text) and proceeds to the prompt anyway, so a
+no-session harness mode never blocks launch. Self-minting harnesses skip this stage (their
+`agent_session` is minted by the first prompt). Delivery itself retries the exact same
+`agent.prompt` only on a typed `agent_pane_busy` refusal — at most five times, 100ms backoff
+doubling, re-checking between attempts that the pane is still interactive — while every other
+error propagates immediately, because a prompt that may have landed must never be re-sent.
+After a successful prompt the daemon starts a bounded delivery confirmation (5 probes over 10s)
+on a detached diagnostics connection, so it never delays spawn return, run promotion, or an early
+`board done`: confirmed when the agent leaves `idle` or its `agent_session` appears/changes; on
+timeout it logs a distinct warning that a later `idle_expired` is suspect — diagnostics only, no
+automatic re-send.
 
 **Self-minting prompt transport** (codex, opencode, and antigravity; none has a system-prompt file): after
 readiness the daemon runs the bounded `agent.get.agent_session` capture (at most 5 probes, 10s

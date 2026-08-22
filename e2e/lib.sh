@@ -1746,6 +1746,9 @@ e2e_ws_create() {
     if [ -n "${FAKE_PI_SLEEP:-}" ]; then
       extra_env+=(--env "FAKE_PI_SLEEP=$FAKE_PI_SLEEP")
     fi
+    if [ -n "${FAKE_PI_SLOW_PROVIDER:-}" ]; then
+      extra_env+=(--env "FAKE_PI_SLOW_PROVIDER=$FAKE_PI_SLOW_PROVIDER")
+    fi
   fi
   e2e_session_target_verify "$pid" "$identity" "${sock:-${E2E_SESSION_SOCKET:-}}" \
     || fail "refusing workspace create: session identity/socket does not match"
