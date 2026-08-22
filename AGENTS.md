@@ -75,7 +75,7 @@ Full layering, test placement, harness details, and how to add tests live in
   | | `dispatch/` | queue lifecycle; `launch_plan.rs` builds the launch spec, `ownership.rs` decides what this daemon may claim |
   | | `spawner/` | launch and placement; `placement/` (alloc/geometry/race), `herdr/` (managed + configured), `error.rs` |
   | | `watchers/` | timeout/liveness/Herdr observation |
-  | | `herdr_conn.rs` | the gated connect: normalize the socket path, connect, run the 0.8.0/protocol-20 check, in one place. New placement, discovery, and mutation paths go through it. The two space-resolution sites that still connect directly (`ops/cards.rs`, `dispatch/launch_plan.rs`) run the same gate inside `dispatch/space.rs`; cleanup/observation retain an ungated client only for panes this daemon already owns |
+  | | `herdr_conn.rs` | the gated connect: normalize the socket path, connect, run the 0.8.2/protocol-20 check, in one place. New placement, discovery, and mutation paths go through it. The two space-resolution sites that still connect directly (`ops/cards.rs`, `dispatch/launch_plan.rs`) run the same gate inside `dispatch/space.rs`; cleanup/observation retain an ungated client only for panes this daemon already owns |
   | | `rescue.rs`, `recovery.rs`, `logging.rs`, `testkit.rs` | run rescue, per-session recovery, tracing setup, and the `cfg(test)` daemon/fake-Herdr builders |
   | `board-tui` | `app/` | the pure reducer — `state`/`effect`/`nav`/`drag` plus one module per screen |
   | | `driver/` | the effect loop (`dispatch`, `load`); `runtime.rs` owns terminal setup/teardown, `origin.rs` the Herdr-plugin origin context |

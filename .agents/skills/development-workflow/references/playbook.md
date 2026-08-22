@@ -24,7 +24,7 @@ cd "$REPO"
 git status --short
 test "$(herdr --version)" = "herdr 0.8.2"
 herdr status
-herdr api schema --json | jq -e 'select(.protocol == 19) | {protocol,schema_version}'
+herdr api schema --json | jq -e 'select(.protocol == 20) | {protocol,schema_version}'
 herdr plugin list --plugin herdr-board --json | jq '.result.plugins[0] | {version,plugin_root,source}'
 ~/.cargo/bin/cargo test -p board-tui --features fake-client --test snapshots
 ```

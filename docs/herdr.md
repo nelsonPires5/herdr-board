@@ -38,7 +38,7 @@ Use these read-only probes before changing a wire call or debugging a live sessi
 ```bash
 test "$(herdr --version)" = "herdr 0.8.2"
 herdr api schema --json | python3 -c \
-  'import json, sys; s=json.load(sys.stdin); assert s["protocol"] == 19, s'
+  'import json, sys; s=json.load(sys.stdin); assert s["protocol"] == 20, s'
 herdr api snapshot
 herdr integration status
 ```

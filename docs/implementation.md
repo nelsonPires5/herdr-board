@@ -34,7 +34,7 @@ sole SQLite writer. The complete live use-case catalog
 is [`../e2e/README.md`](../e2e/README.md), scenarios **01–39** (through `e2e/39-managed-slow-provider.sh`); the safe
 static harness is `e2e/test-harness.sh`, while `e2e/run-all.sh` is the opt-in live gate.
 
-The current Herdr boundary is deliberately narrower than the upstream schema. The 0.8.0/protocol-20
+The current Herdr boundary is deliberately narrower than the upstream schema. The 0.8.2/protocol-20
 fixture adds `workspace.move_block` and the `workspace.reordered` event/subscription for
 atomic workspace/worktree-group reordering, plus the `antigravity_cli` and `grok` integration
 targets. Those are additive and are not board dependencies;

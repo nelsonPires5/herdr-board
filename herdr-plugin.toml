@@ -7,7 +7,7 @@
 #
 # Field reference validated against `herdr plugin` in Herdr 0.8.2. The manifest
 # enforces the install-time version floor; runtime also requires exactly 0.8.2
-# and rejects every socket protocol other than 19.
+# and rejects every socket protocol other than 20.
 id = "herdr-board"
 name = "Herdr Board"
 version = "0.15.0"

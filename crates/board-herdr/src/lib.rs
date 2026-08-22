@@ -13,7 +13,7 @@
 //!   [`HerdrEvent`]s via `events.subscribe`.
 //!
 //! Method and field names are verified against `herdr api schema --json`
-//! (Herdr 0.8.0, protocol 19), captured in `tests/fixtures/schema.json`.
+//! (Herdr 0.8.2, protocol 20), captured in `tests/fixtures/schema.json`.
 
 mod client;
 mod envelope;
