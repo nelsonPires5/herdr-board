@@ -230,7 +230,8 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
       `new-workspace` as an alias so `board card create --space-kind new-workspace` resolves through
       board-core instead of a hand-rolled match in the CLI, and the CLI then emits the canonical
       underscored form. `parse_str` is also what reads the value back out of SQLite, where only the
-      canonical form is ever stored.
+      canonical form is ever stored. The same CLI spelling applies to `card edit --space-kind`, whose
+      omitted flag leaves the kind unchanged.
   - creating directly into an `auto` column dispatches immediately (same as move)
   - In the legacy v1→v2 migration, `cwd`/`worktree` kinds and `worktree_base` were removed;
     current schema v15 treats worktree isolation as the agent's job via prompt instructions, not a
