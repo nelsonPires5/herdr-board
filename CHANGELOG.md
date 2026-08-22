@@ -6,9 +6,17 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
-### Changed
+### Added
+- [#33](https://github.com/nelsonPires5/herdr-board/pull/33) feat: archive and restore boards and projects with visibility filters and guarded restores.
+- [#97](https://github.com/nelsonPires5/herdr-board/pull/97) feat: run the full gate set and live E2E in an isolated Docker sandbox (`scripts/sandbox.sh`), with opt-in real-provider agent runs.
 
+### Changed
+- [#99](https://github.com/nelsonPires5/herdr-board/pull/99) docs: harness lists now name all five built-ins, including Antigravity (agy) install, resume, and model guidance.
 - [#102](https://github.com/nelsonPires5/herdr-board/pull/102) feat(herdr): support Herdr 0.8.2 / socket protocol 20 (additive over 19; no dispatch-path change).
+
+### Fixed
+- [#103](https://github.com/nelsonPires5/herdr-board/pull/103) fix: managed Pi and Claude runs wait for harness session readiness before sending the initial prompt.
+- [#104](https://github.com/nelsonPires5/herdr-board/pull/104) fix: `board card edit` accepts `--space-kind`, restoring parity with the TUI edit form.
 
 ## [0.15.0] - 2026-08-16
 

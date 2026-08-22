@@ -1,5 +1,6 @@
 ---
 source: crates/board-tui/tests/snapshots.rs
+assertion_line: 1436
 expression: "render_sized(&mut d, w, h)"
 ---
 "[ Project: Gl… ] [ Act ] [ All ] [ Arc ]"
@@ -17,7 +18,7 @@ expression: "render_sized(&mut d, w, h)"
 "│                                      │"
 "│                                      │"
 "│                                      │"
-"│                                      │"
+"│ v:cycle a:archive r:restore [ACTIVE] │"
 "└──────────────────────────────────────┘"
 " [ + Card ]  [ Open card ]  [ Archive ] "
 "[ + Column ]  [ Edit col ]  [ Del col ] "

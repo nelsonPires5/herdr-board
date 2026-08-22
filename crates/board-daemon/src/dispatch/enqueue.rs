@@ -52,6 +52,30 @@ fn enqueue_run_inner(d: &Arc<Daemon>, card_id: i64, column_id: i64, is_retry: bo
             "archived card must be restored before starting a run".into(),
         ));
     }
+    // Archived destination guard.
+    {
+        let board = db.get_board(card.board_id)?;
+        if board.archived_at.is_some() {
+            return Err(Error::InvalidState(format!(
+                "archived board must be restored first: `board board restore {}`",
+                board.id
+            )));
+        }
+        let project = db.get_project(board.project_id)?;
+        if project.archived_at.is_some() {
+            return Err(Error::InvalidState(format!(
+                "archived project must be restored first: `board project restore {}`",
+                project.scope_path.as_deref().unwrap_or("(Global)")
+            )));
+        }
+        let target_board = db.get_board(db.require_column(column_id)?.board_id)?;
+        if target_board.archived_at.is_some() && target_board.id != board.id {
+            return Err(Error::InvalidState(format!(
+                "archived board must be restored first: `board board restore {}`",
+                target_board.id
+            )));
+        }
+    }
     if db.open_run_for_card(card_id)?.is_some() {
         return Err(Error::InvalidState(
             "card has an open run; complete or cancel it before starting another".into(),

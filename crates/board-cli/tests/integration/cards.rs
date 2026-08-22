@@ -4,10 +4,10 @@
 use std::process::Output;
 
 use board_core::client::BoardClient;
-use board_core::protocol::{CardCreateParams, Effort};
+use board_core::protocol::{CardCreateParams, Effort, SpaceKind};
 use serde_json::Value;
 
-use super::{json_output, old_card, TestDaemon};
+use super::{json_error, json_output, old_card, TestDaemon};
 
 fn json_card_ids(out: &Output) -> Vec<i64> {
     json_output(out)
@@ -210,6 +210,91 @@ fn card_edit_sets_and_explicitly_clears_nullable_patches() {
     assert_eq!(cleared["session"], Value::Null);
     assert_eq!(cleared["title"], "patched card");
     assert_eq!(cleared["description"], "patched description");
+}
+
+#[test]
+fn card_edit_changes_space_kind() {
+    let td = TestDaemon::start(&[]);
+    let card = td
+        .client()
+        .card_create(&CardCreateParams {
+            title: "space-kind card".into(),
+            harness: Some("fake".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    let id = card.id.to_string();
+
+    // Switch to a new-workspace space with the hyphenated CLI spelling; the
+    // ref/cwd set in the same edit must satisfy the merged-space validation.
+    let switched = json_output(&td.board(&[
+        "card",
+        "edit",
+        &id,
+        "--space-kind",
+        "new-workspace",
+        "--space-ref",
+        "widget-build",
+        "--space-cwd",
+        "/tmp/widget",
+        "--json",
+    ]));
+    assert_eq!(switched["space_kind"], "new_workspace");
+    assert_eq!(switched["space_ref"], "widget-build");
+    assert_eq!(switched["space_cwd"], "/tmp/widget");
+
+    // The canonical underscored spelling is accepted too.
+    let underscored = json_output(&td.board(&[
+        "card",
+        "edit",
+        &id,
+        "--space-kind",
+        "new_workspace",
+        "--json",
+    ]));
+    assert_eq!(underscored["space_kind"], "new_workspace");
+
+    // Switch back to workspace while clearing the now-inert fields — a
+    // transition that was impossible from the CLI before --space-kind.
+    let back = json_output(&td.board(&[
+        "card",
+        "edit",
+        &id,
+        "--space-kind",
+        "workspace",
+        "--clear-space-ref",
+        "--clear-space-cwd",
+        "--json",
+    ]));
+    assert_eq!(back["space_kind"], "workspace");
+    assert_eq!(back["space_ref"], Value::Null);
+    assert_eq!(back["space_cwd"], Value::Null);
+
+    // Persisted, not just echoed.
+    let stored = td.client().card_get(card.id).unwrap().card;
+    assert_eq!(stored.space_kind, SpaceKind::Workspace);
+    assert_eq!(stored.space_ref, None);
+    assert_eq!(stored.space_cwd, None);
+
+    // A merged-invalid request (new_workspace without ref/cwd) is rejected
+    // without mutation; a bogus spelling is rejected by the CLI parser.
+    let invalid = td.board(&[
+        "card",
+        "edit",
+        &id,
+        "--space-kind",
+        "new-workspace",
+        "--json",
+    ]);
+    let error = json_error(&invalid);
+    assert_eq!(
+        error["error"]["code"], 1,
+        "validation failure surfaces as protocol code 1"
+    );
+    let bogus = td.board(&["card", "edit", &id, "--space-kind", "bogus", "--json"]);
+    assert!(!bogus.status.success(), "unknown kind must be refused");
+    let stored = td.client().card_get(card.id).unwrap().card;
+    assert_eq!(stored.space_kind, SpaceKind::Workspace);
 }
 
 #[test]

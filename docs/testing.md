@@ -1,8 +1,7 @@
 # Testing
 
 How herdr-board is tested, and how to add tests for a change. The final contract is board
-protocol v1, SQLite schema v14, and Herdr 0.8.2 / protocol 20. Four layers, cheap and hermetic
-first, expensive and live last:
+protocol v1, SQLite schema v15, and Herdr 0.8.2 / protocol 20. Four layers, cheap and hermeticfirst, expensive and live last:
 
 ```
 unit / pure (per crate)                 no I/O, no daemon        — cargo test
@@ -127,15 +126,17 @@ The current parity/schema-v14 change is specified test-first:
 - **CLI/E2E boundary:** scenarios 01, 04, 06, 08, 09, 11, 16, and 17 exercise CLI comment
   creation, transition/silent-exit/timeout system comments, comment context in later prompts, and
   managed/configured comment completion against disposable Herdr. Scenarios 12 and 26 were updated
-  for the project/board selector flow, and scenario 36 covers project create/select, selection and
+  for the project/board selector flow, scenario 37 covers project create/select, selection and
   recency persistence across a daemon restart, per-project board isolation, and a cross-project
-  card move that leaves the selection untouched. The managed and configured
+  card move that leaves the selection untouched, and scenario 36 covers the managed Antigravity
+  launch contract (self-minted conversation capture, `--conversation` retry/rescue, pinned
+  permission modes, fixed-effort models, anchorless tabs). The managed and configured
   scenarios use the current Herdr 0.8.2 / protocol 20 contract; their files,
   `16-managed-p17.sh` and `17-configured-p17-runner.sh`, retain the historical `p17` names.
   CRUD/audit semantics stay in hermetic core/daemon/CLI tests; the live suite does not duplicate
   every management RPC.
 
-The authoritative [`e2e/README.md`](../e2e/README.md) catalog currently covers scenarios 01–37,
+The authoritative [`e2e/README.md`](../e2e/README.md) catalog currently covers scenarios 01–39,
 and `e2e/run-all.sh` includes every numbered script. Scenarios 18–32 extend the live coverage with
 nullable/validation, late-start and recovery, active-run timing, TUI layout and board transfers,
 pane rescue, Pi catalog behavior, diagnostics, pane reuse, the managed Codex launch contract
@@ -143,7 +144,12 @@ pane rescue, Pi catalog behavior, diagnostics, pane reuse, the managed Codex lau
 rescue), and the managed OpenCode TUI launch contract (self-minted `ses_…` session capture,
 `--agent herdr-board`/`--auto`/`-s`/`--fork` argv plus the exact `OPENCODE_CONFIG_CONTENT`
 agent-config env — the root/TUI has no `--variant` — delimited mint prompt, fork/reuse/rescue,
-fail-closed missing-report rescue). This document describes the intended coverage
+fail-closed missing-report rescue). Scenario 36 covers the managed Antigravity CLI (agy) launch
+contract: self-minted conversation capture from `agent.get.agent_session` (mint persists NULL at
+enqueue, the captured id atomically at promotion), one delimited system+task `agent.prompt` block
+on mint, `--conversation <id>` retry in a fresh pane (agy has no fork) and rescue without
+re-sending the task, the lost-conversation fallback with a visible warning, and pinned permission
+modes. This document describes the intended coverage
 and gate configuration; it does **not** claim that the full live E2E suite has passed.
 
 Nullable update coverage in `board-core` is table-driven across every column/card nullable:
@@ -328,7 +334,7 @@ state is copied. Its intended contract is one authorized Haiku/low attempt with 
   rc files, `PATH`, and exported fake-provider functions; it never sources user rc files. It
   resolves the Herdr executable to an absolute path before narrowing the managed pane `PATH`.
   Built-in managed agents see checked-in `e2e/fake-bin/pi`, `e2e/fake-bin/claude`,
-  `e2e/fake-bin/codex`, and `e2e/fake-bin/opencode` only inside
+  `e2e/fake-bin/codex`, `e2e/fake-bin/opencode`, and `e2e/fake-bin/agy` only inside
   the disposable Herdr server/workspaces. The fixtures record argv/readiness/prompt evidence
   under the scenario temp dir and call only the isolated `board comment`/`board done`; they never
   replace user installations or make model calls.
@@ -423,7 +429,7 @@ Checklist:
 | **done-race** | Managed built-ins still require a registered pane, so an instant `board done` for a queued built-in run is rejected. A configured harness is different: its exact `board done` is accepted even before runner registration, and the fake agent still sleeps `FAKE_AGENT_SLEEP` (default 1.5s) before reporting in ordinary scenarios. |
 | **A pane dies with its process** | A herdr pane closes when its command exits. To inspect a live layout, keep the process alive — set `FAKE_AGENT_HOLD` (e.g. 300) so the agent sleeps **after** `board done`. Cleanup closes the workspace to end it. |
 | **herdr closes the socket per request** | herdr serves one request per connection. `hrpc.py` (and `board-herdr`'s client) open a fresh connection every call — don't try to reuse one. |
-| **Tab labels are not unique** | New runs resolve `card-<id>` tabs and shell anchors only by exact ids reconstructed from scoped durable panes; schema v14 retains the anchor id introduced in v12. Duplicate tab/anchor labels and legacy `kanban` are never adopted as ownership proof. A renamed exact anchor remains owned; a missing anchor is recovered only from an exact durable child, otherwise a fresh tab is created. Managed tabs are deliberately anchorless: a successful managed launch — and a successful managed `run.focus` rescue — closes the anchor (`pane_not_found` counts as closed; any other close failure warns and keeps the successful launch/rescue), so the next fresh run recovers from the exact durable child with a temporary anchor that is closed again after launch. Legacy rows retain their historical lookup. |
+| **Tab labels are not unique** | New runs resolve `card-<id>` tabs and shell anchors only by exact ids reconstructed from scoped durable panes; schema v15 retains the anchor id introduced in v12. Duplicate tab/anchor labels and legacy `kanban` are never adopted as ownership proof. A renamed exact anchor remains owned; a missing anchor is recovered only from an exact durable child, otherwise a fresh tab is created. Managed tabs are deliberately anchorless: a successful managed launch — and a successful managed `run.focus` rescue — closes the anchor (`pane_not_found` counts as closed; any other close failure warns and keeps the successful launch/rescue), so the next fresh run recovers from the exact durable child with a temporary anchor that is closed again after launch. Legacy rows retain their historical lookup. |
 | **Agent names are exclusive** | While a pane is open its agent name is reserved. A collision (e.g. the session already has a `card-1-execute` pane) makes the daemon retry as `card-1-execute-r<run>`. Assertions must accept the optional `-r<n>` suffix. |
 | **A newly split pane can be busy** | Herdr may return typed `agent_pane_busy` while the child still drains prior state or its login shell has not reached the interactive prompt yet. The daemon retries the exact managed `agent.start` request up to five times on that same owned child with 100ms backoff doubling per retry (≈3.1s window); persistent busy closes only that child and leaves the shell anchor. Do not treat it as `pane_not_found`: that error triggers one bounded full placement rediscovery from `tab.list`. |
 | **Managed and configured pane identity differ** | Pane-first managed Pi/Claude panes expose the managed kind in `pane.agent`; configured panes are renamed to the daemon-assigned `card-<id>-<column>` label and remain unmanaged. Match the appropriate field and still accept the optional `-r<n>` name suffix. |
@@ -441,6 +447,8 @@ bash e2e/ci.sh                  # CI-equivalent pin/verify/run/export wrapper (L
 e2e/run-all.sh 04 07            # only scenarios matching a filename filter
 scripts/e2e.sh                  # compat wrapper -> run-all.sh
 bash e2e/test-harness.sh         # static Linux/macOS safety gate; no Herdr
+scripts/sandbox.sh gates        # the whole gate set + all scenarios in an isolated container
+                                 # (Docker/Colima; see docs/sandbox.md)
 bash e2e/01-core.sh             # a single scenario (boots its own ephemeral session)
 E2E_REAL_PI=1 e2e/real-pi-smoke.sh  # explicit real-provider opt-in; may incur cost
 E2E_REAL_PI=1 E2E_REAL_PI_MODEL=openai-codex/gpt-5.3 E2E_REAL_PI_EFFORT=high e2e/real-pi-smoke.sh  # model/effort overrides; model must exist in `pi --list-models`

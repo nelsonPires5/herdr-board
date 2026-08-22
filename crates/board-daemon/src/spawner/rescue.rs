@@ -394,6 +394,7 @@ fn launch_rescue(
             pane_id,
             false,
             DEFAULT_AGENT_START_DELAY,
+            plan.socket,
         )
         .map(|_captured| {
             // A rescue persists nothing: the captured id (when the resumed

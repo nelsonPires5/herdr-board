@@ -145,6 +145,8 @@ pub enum ConfirmPurpose {
     /// expensive, hence the confirmation.
     RetryRun(i64),
     DeleteComment(i64),
+    ArchiveBoard(i64),
+    ArchiveProject(i64),
 }
 
 /// In-progress "move column" mini-mode state (entered with `M`).

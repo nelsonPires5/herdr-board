@@ -133,10 +133,20 @@ impl Render for Vec<Board> {
         let rows: Vec<Vec<String>> = self
             .iter()
             .map(|board| {
+                let name = if board.archived_at.is_some() {
+                    format!("{} (archived)", board.name)
+                } else {
+                    board.name.clone()
+                };
                 vec![
                     format!("#{}", board.id),
-                    board.name.clone(),
+                    name,
                     board.scope_path.clone().unwrap_or_default(),
+                    board
+                        .archived_at
+                        .as_deref()
+                        .map(|ts| format!("archived={ts}"))
+                        .unwrap_or_default(),
                 ]
             })
             .collect();
@@ -146,7 +156,13 @@ impl Render for Vec<Board> {
 
 impl Render for BoardSnapshot {
     fn render(&self, out: &mut dyn Write) -> io::Result<()> {
-        writeln!(out, "#{}  {}", self.board.id, self.board.name)?;
+        let archived = self
+            .board
+            .archived_at
+            .as_deref()
+            .map(|ts| format!(" archived={ts}"))
+            .unwrap_or_default();
+        writeln!(out, "#{}  {}{}", self.board.id, self.board.name, archived)?;
         if let Some(path) = &self.board.scope_path {
             writeln!(out, "scope: {path}")?;
         }
@@ -165,11 +181,23 @@ impl Render for ProjectListResult {
             .projects
             .iter()
             .map(|info| {
+                let name = if info.project.archived_at.is_some() {
+                    format!("{} (archived)", info.project.name)
+                } else {
+                    info.project.name.clone()
+                };
+                let archived = info
+                    .project
+                    .archived_at
+                    .as_deref()
+                    .map(|ts| format!("archived={ts}"))
+                    .unwrap_or_default();
                 vec![
                     format!("#{}", info.project.id),
-                    info.project.name.clone(),
+                    name,
                     info.project.scope_path.clone().unwrap_or_default(),
                     format!("boards:{}", info.boards.len()),
+                    archived,
                 ]
             })
             .collect();
@@ -179,12 +207,19 @@ impl Render for ProjectListResult {
 
 impl Render for ProjectDetail {
     fn render(&self, out: &mut dyn Write) -> io::Result<()> {
+        let archived = self
+            .project
+            .archived_at
+            .as_deref()
+            .map(|ts| format!(" archived={ts}"))
+            .unwrap_or_default();
         writeln!(
             out,
-            "#{}  {}  {}",
+            "#{}  {}  {}{}",
             self.project.id,
             self.project.name,
-            self.project.scope_path.as_deref().unwrap_or_default()
+            self.project.scope_path.as_deref().unwrap_or_default(),
+            archived
         )?;
         match &self.selected_board {
             Some(board) => writeln!(
@@ -196,7 +231,12 @@ impl Render for ProjectDetail {
             None => writeln!(out, "boards: {}", self.boards.len())?,
         }
         for board in &self.boards {
-            writeln!(out, "#{}  {}", board.id, board.name)?;
+            let suffix = board
+                .archived_at
+                .as_deref()
+                .map(|ts| format!(" (archived {})", ts))
+                .unwrap_or_default();
+            writeln!(out, "#{}  {}{}", board.id, board.name, suffix)?;
         }
         Ok(())
     }

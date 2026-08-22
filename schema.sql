@@ -1,6 +1,6 @@
 -- herdr-board SQLite schema (WAL mode; boardd is the only writer).
--- This file is the CURRENT (schema v14) shape: a fresh DB is created directly
--- from it and stamped `PRAGMA user_version = 14`. Existing databases are upgraded
+-- This file is the CURRENT (schema v15) shape: a fresh DB is created directly
+-- from it and stamped `PRAGMA user_version = 15`. Existing databases are upgraded
 -- by migrations in board-core/src/db/migrations.rs (kept in sync with this file).
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -8,10 +8,13 @@ PRAGMA foreign_keys = ON;
 -- A Project is a named collection of boards, identified by a canonical
 -- filesystem path (a Git root or a plain existing directory). The special
 -- Global project (id=1, scope_path NULL) preserves the pre-v14 flat boards.
+-- archived_at is NULL while the project is active; archiving is reversible
+-- and never deletes boards, cards, history, or the reserved scope path.
 CREATE TABLE projects (
-  id         INTEGER PRIMARY KEY,
-  scope_path TEXT,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  id          INTEGER PRIMARY KEY,
+  scope_path  TEXT,
+  archived_at TEXT,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- Canonical path identity is unique for scoped projects while allowing exactly
@@ -21,11 +24,14 @@ CREATE UNIQUE INDEX idx_projects_scope_path ON projects(scope_path) WHERE scope_
 -- Boards belong to exactly one project. Names are unique case-insensitively
 -- within the same project (COLLATE NOCASE on the UNIQUE index); the same name
 -- on a different project is legal. Every project's first board is named 'main'.
+-- archived_at is NULL while the board is active; archiving is reversible and
+-- never deletes columns, cards, comments, runs, or the reserved name.
 CREATE TABLE boards (
-  id         INTEGER PRIMARY KEY,
-  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  name       TEXT NOT NULL COLLATE NOCASE,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  id          INTEGER PRIMARY KEY,
+  project_id  INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name        TEXT NOT NULL COLLATE NOCASE,
+  archived_at TEXT,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE (project_id, name)
 );
 

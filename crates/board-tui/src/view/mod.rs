@@ -109,20 +109,29 @@ pub fn board_scope_label(board: &Board) -> String {
 
 /// The board picker / move-form label for one board: its name.
 pub fn board_label(board: &Board) -> String {
-    board.name.clone()
+    if board.archived_at.is_some() {
+        format!("{} (archived)", board.name)
+    } else {
+        board.name.clone()
+    }
 }
 
 /// The project picker / header label for one project: `Global` for the
 /// special project, otherwise `name — /full/path` (name truncated like the
 /// legacy scope label; the path stays whole so picker rows remain distinct).
 pub fn project_label(project: &Project) -> String {
-    match project.scope_path.as_deref() {
+    let base = match project.scope_path.as_deref() {
         None => "Global".into(),
         Some(path) => format!(
             "{} — {}",
             truncate(&sanitize(&project.name), MAX_SCOPE_LABEL),
             sanitize(path)
         ),
+    };
+    if project.archived_at.is_some() {
+        format!("{base} (archived)")
+    } else {
+        base
     }
 }
 
@@ -249,8 +258,23 @@ pub const HELP_KEYS: &[(Screen, &str, &str)] = &[
     (Screen::Picker, "--", "-- picker / confirm --"),
     (Screen::Picker, "↑/↓ k/j", "move selection"),
     (Screen::Picker, "Enter", "choose"),
+    (Screen::Picker, "v", "cycle active/all/archived"),
+    (Screen::Picker, "a", "archive board/project"),
+    (Screen::Picker, "r", "restore board/project"),
+    (Screen::ProjectPicker, "↑/↓ k/j", "move selection"),
+    (Screen::ProjectPicker, "Enter", "choose"),
+    (Screen::ProjectPicker, "v", "cycle active/all/archived"),
+    (Screen::ProjectPicker, "a", "archive board/project"),
+    (Screen::ProjectPicker, "r", "restore board/project"),
+    (Screen::BoardPicker, "↑/↓ k/j", "move selection"),
+    (Screen::BoardPicker, "Enter", "choose"),
+    (Screen::BoardPicker, "v", "cycle active/all/archived"),
+    (Screen::BoardPicker, "a", "archive board/project"),
+    (Screen::BoardPicker, "r", "restore board/project"),
     (Screen::Confirm, "y / n", "confirm / decline"),
     (Screen::Picker, "q / Esc", "cancel"),
+    (Screen::ProjectPicker, "q / Esc", "cancel"),
+    (Screen::BoardPicker, "q / Esc", "cancel"),
     (Screen::MoveColumn, "--", "-- move column (M) --"),
     (Screen::MoveColumn, "←/→ h/l", "stage the reorder"),
     (Screen::MoveColumn, "Enter", "commit the reorder"),

@@ -12,6 +12,9 @@ pub(crate) enum BoardCmd {
         /// Select a project by path instead of the selected one.
         #[arg(long, value_name = "PATH")]
         project: Option<String>,
+        /// Filter by archive state: active (default), all, or archived.
+        #[arg(long, value_parser = ["active", "all", "archived"])]
+        visibility: Option<String>,
     },
     /// Show one board by id, path, or the selected/current board.
     Show { selector: Option<String> },
@@ -36,6 +39,10 @@ pub(crate) enum BoardCmd {
         #[arg(required = true, num_args = 1..=2)]
         values: Vec<String>,
     },
+    /// Archive a board (hidden by default; reversible).
+    Archive { selector: Option<String> },
+    /// Restore an archived board.
+    Restore { selector: Option<String> },
 }
 
 #[derive(Subcommand)]

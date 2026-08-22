@@ -22,7 +22,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use board_core::engine::{validate_card_archive, ValidationError};
-use board_core::protocol::{BoardSnapshot, CardDetail, CardStatus};
+use board_core::protocol::{BoardSnapshot, CardDetail, CardStatus, Visibility};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use ratatui::layout::Rect;
 
@@ -147,6 +147,7 @@ pub struct App {
     pub sel_col: usize,
     pub sel_card: usize,
     pub card_filter: CardFilter,
+    pub picker_visibility: Visibility,
     pub detail: Option<CardDetail>,
     /// Card detail opens as a contextual popup; users can expand it in place.
     pub detail_fullscreen: bool,
@@ -213,6 +214,7 @@ impl App {
             id: board.board.project_id,
             name: board_core::model::Project::display_name(board.board.scope_path.as_deref()),
             scope_path: board.board.scope_path.clone(),
+            archived_at: board.board.archived_at.clone(),
         };
         App {
             board,
@@ -223,6 +225,7 @@ impl App {
             sel_col: 0,
             sel_card: 0,
             card_filter: CardFilter::Active,
+            picker_visibility: Visibility::Active,
             detail: None,
             detail_fullscreen: false,
             form_fullscreen: false,
@@ -270,6 +273,7 @@ impl App {
                         board.board.scope_path.as_deref(),
                     ),
                     scope_path: board.board.scope_path.clone(),
+                    archived_at: board.board.archived_at.clone(),
                 };
             }
         }

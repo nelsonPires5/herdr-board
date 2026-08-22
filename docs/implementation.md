@@ -22,16 +22,16 @@ in root Cargo.toml. Never edit another crate. Phase A creates all five crates co
 
 ## Contract versions and source ownership
 
-The final compatibility matrix is: board protocol **v1**, SQLite schema **v14**, and exactly
-Herdr **0.8.0 / socket protocol 20**. The versioned source of truth is `schema.sql` for fresh
+The final compatibility matrix is: board protocol **v1**, SQLite schema **v15**, and exactly
+Herdr **0.8.2 / socket protocol 20**. The versioned source of truth is `schema.sql` for fresh
 SQLite databases and `board-core::db` migrations for upgrades; `board-core::protocol` owns the
 board wire DTOs; `board-herdr` owns only the verified Herdr socket surface; and `docs/design.md`
-and `docs/protocol.md` explain behavior rather than defining duplicate serde shapes. Schema v14 adds
+and `docs/protocol.md` explain behavior rather than defining duplicate serde shapes. Schema v15 adds
 projects (canonical-path identity, Global as the special project), per-project named boards,
 persistent selection, and capped recency on top of v13's soft-deleted comments and immutable
 comment-history snapshots; the CLI exposes the project/board subcommands while boardd remains the
 sole SQLite writer. The complete live use-case catalog
-is [`../e2e/README.md`](../e2e/README.md), scenarios **01–37** (through `e2e/37-multi-project.sh`); the safe
+is [`../e2e/README.md`](../e2e/README.md), scenarios **01–39** (through `e2e/39-managed-slow-provider.sh`); the safe
 static harness is `e2e/test-harness.sh`, while `e2e/run-all.sh` is the opt-in live gate.
 
 The current Herdr boundary is deliberately narrower than the upstream schema. The 0.8.0/protocol-20
@@ -142,7 +142,7 @@ responses. Every canonical-path board independently seeds one manual `Todo` colu
 The completion race is harness-specific: `RunDoneParams.run_id` is optional so manual/TUI
 completion remains compatible, while the CLI forwards `BOARD_RUN_ID` when present. An immediate
 configured-harness `board done` may finalize only its exact queued run before runner registration;
-a queued built-in Pi/Claude run is rejected until its managed pane is registered. A supplied
+a queued built-in (Pi/Claude/Codex/OpenCode/Antigravity) run is rejected until its managed pane is registered. A supplied
 mismatched id is rejected unless `actor_pane_id` exactly identifies the managed pane shared with the
 current open resume run; that pane credential resolves the process's immutable first-stage
 `BOARD_RUN_ID` to the current stage. A different/missing pane never grants that remap. The
@@ -183,7 +183,7 @@ A (core+scaffold) → B (herdr client) ∥ C (TUI) → D (daemon+CLI+integration
 - C: insta snapshots via `ratatui::backend::TestBackend` + synthetic key events + FakeBoardClient: empty board (Todo only + hints), board with example pipeline & cards (status glyphs), new-card modal, column form, card detail w/ comments+runs, `?` help, delete-column prompt, move flow.
 - Restart recovery (`board-daemon::supervisor`) is a conservative one-pass classifier. Session resolution and snapshot I/O are injectable and happen before mutation. `Alive` adopts scheduler/watch intent and replays terminal status, `Gone` uses the existing pane-exit finalizer, and `Unknown` does nothing. The apply phase re-reads the open run/card, making duplicate passes idempotent and rejecting stale observations. Startup constructs/runs this pass for the Herdr spawner regardless of whether its initial best-effort client connected. The always-on supervisor then maintains independent per-socket streams and backoff, subscribes before taking a fresh bounded snapshot, and periodically reconciles missed events without resetting healthy sockets.
 - D: integration test (no herdr): start daemon on temp socket + temp DB with LocalSpawner + fake harness script → create card → move to auto column → fake agent comments + done → assert auto-transition, comments, run rows, statuses; timeout path; cancel path; queue serialization (two cards same space key run serially). The daemon comment suite also checks actor ownership, system-comment immutability, soft deletion, audit history, and event routing.
-- E: scenarios `e2e/01-core.sh` through `e2e/37-multi-project.sh` (real Herdr 0.8.2 / socket
+- E: scenarios `e2e/01-core.sh` through `e2e/39-managed-slow-provider.sh` (real Herdr 0.8.2 / socket
   protocol 20, fake harnesses): disposable workspaces, pane-first placement, typed prompt delivery,
   bounded same-pane `agent_pane_busy` retry, supervisor recovery, timer refresh, and
   identity-gated cleanup. The managed fixtures use Pi integration v8 and Claude integration v7

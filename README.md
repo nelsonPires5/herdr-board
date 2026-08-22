@@ -2,7 +2,7 @@
 
 ![Rust](https://img.shields.io/badge/rust-edition%202021-orange.svg)
 ![herdr 0.8.2](https://img.shields.io/badge/herdr-0.8.2-8a2be2)
-![board protocol v1 · schema v14](https://img.shields.io/badge/board-protocol%20v1%20%C2%B7%20schema%20v14-blue.svg)
+![board protocol v1 · schema v15](https://img.shields.io/badge/board-protocol%20v1%20%C2%B7%20schema%20v15-blue.svg)
 ![platforms: linux, macOS](https://img.shields.io/badge/platforms-linux%2C%20macOS-informational)
 
 **Turn a kanban card into a real AI coding agent running in a visible Herdr pane.** Cards hold
@@ -132,6 +132,7 @@ prefix is `ctrl+a`, it is `Ctrl+A Shift+K`). Do not reuse `prefix+k` — it is H
 | **Claude Code** | `herdr integration install claude` | [anthropics/claude-code](https://github.com/anthropics/claude-code) |
 | **Codex** | `herdr integration install codex` | [openai/codex](https://github.com/openai/codex) |
 | **OpenCode** | `herdr integration install opencode` | [anomalyco/opencode](https://github.com/anomalyco/opencode) |
+| **Antigravity** (CLI `agy`) | `herdr integration install antigravity-cli` | [google-antigravity/antigravity-cli](https://github.com/google-antigravity/antigravity-cli) |
 
 <details>
 <summary><strong>Requirements and details</strong></summary>
@@ -139,7 +140,7 @@ prefix is `ctrl+a`, it is `Ctrl+A Shift+K`). Do not reuse `prefix+k` — it is H
 - Requires exactly **Herdr 0.8.2 (socket protocol 20)**, Git, and a Rust toolchain with `cargo`;
   Linux and macOS are supported. The daemon rejects any other Herdr version or protocol before
   workspace discovery and pane launch.
-- Board protocol **v1**, SQLite schema **v14** (`schema.sql`; upgrades via `board-core::db`).
+- Board protocol **v1**, SQLite schema **v15** (`schema.sql`; upgrades via `board-core::db`).
 - The installer copies the `board` CLI to `~/.local/bin` — make sure that directory is on your
   `PATH` (`HERDR_BOARD_CLI_INSTALL_DIR` overrides it before installing).
 - Without the harness integration the board still dispatches and accepts `board done`, but runs in
@@ -154,6 +155,17 @@ prefix is `ctrl+a`, it is `Ctrl+A Shift+K`). Do not reuse `prefix+k` — it is H
   [`docs/install.md`](docs/install.md).
 
 </details>
+
+## Developing in the Docker sandbox
+
+Contributors and coding agents can run the complete test gates — including every live E2E scenario
+against a container-local Herdr — without touching the host's active Herdr, board daemon, or
+sessions: `./scripts/sandbox.sh prepare` once, then `./scripts/sandbox.sh gates` after every edit.
+It also opens shells, runs `board` CLI commands and the interactive TUI against the isolated
+environment, and gates real-provider agent dispatches (pi/codex/antigravity) behind an explicit
+opt-in with the provider credentials mounted read-only. Works with Docker
+Engine on Linux and Colima on macOS, on amd64 and arm64. See
+[`docs/sandbox.md`](docs/sandbox.md).
 
 ## Quickstart
 
@@ -289,7 +301,7 @@ The exit status carries the same number, so scripts branch on `$?` instead of pa
 
 - [`docs/README.md`](docs/README.md) — the documentation index (design, protocol, herdr facts,
   testing, releasing), the single source of the
-  [test gates](docs/README.md#test-gates-single-source), and the `e2e/` catalog (scenarios 01–37);
+  [test gates](docs/README.md#test-gates-single-source), and the `e2e/` catalog (scenarios 01–39);
 - [`docs/configuration.md`](docs/configuration.md) — `config.toml`, `[daemon]` settings,
   config-defined harnesses, and every environment variable;
 - [`docs/operations.md`](docs/operations.md) — update, uninstall, and local-development

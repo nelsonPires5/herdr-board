@@ -132,24 +132,44 @@ fn finalize_run_inner(
             if let Some(target_id) = dec.target_column_id {
                 card.column_id = target_id;
                 if dec.enqueue {
-                    let current_hops = sched.chain_hops.get(&card.id).copied().unwrap_or(0);
-                    match decide_auto_hop(current_hops, &dec) {
-                        AutoHopDecision::Continue { hop } => {
-                            next_hops = Some(hop);
-                            next = Some(prepare_enqueue_values(d, &db, &card, target_id, false)?);
-                        }
-                        AutoHopDecision::Stop { message } => {
-                            comments.push(message);
-                            final_status = CardStatus::Failed;
-                        }
-                        // `decide_auto_hop` only resets when `dec.enqueue` is
-                        // false, which this branch already excludes. The variant
-                        // lives in another crate, so a future one must not
-                        // panic the daemon.
-                        AutoHopDecision::Reset => {
-                            return Err(Error::InvalidState(format!(
-                                "run {run_id}: auto-hop decision reset an enqueueing transition"
-                            )))
+                    // Archived destination backstop: if the card or its
+                    // target board/project is archived, do not auto-enqueue.
+                    let board_archived = db
+                        .get_board(card.board_id)
+                        .map(|b| b.archived_at.is_some())
+                        .unwrap_or(false);
+                    let project_archived = db
+                        .get_board(card.board_id)
+                        .and_then(|b| db.get_project(b.project_id))
+                        .map(|p| p.archived_at.is_some())
+                        .unwrap_or(false);
+                    let card_archived = card.archived_at.is_some();
+                    if card_archived || board_archived || project_archived {
+                        comments.push(
+                            "archived board must be restored first: auto-hop suppressed".into(),
+                        );
+                        final_status = CardStatus::Failed;
+                    } else {
+                        let current_hops = sched.chain_hops.get(&card.id).copied().unwrap_or(0);
+                        match decide_auto_hop(current_hops, &dec) {
+                            AutoHopDecision::Continue { hop } => {
+                                next_hops = Some(hop);
+                                next =
+                                    Some(prepare_enqueue_values(d, &db, &card, target_id, false)?);
+                            }
+                            AutoHopDecision::Stop { message } => {
+                                comments.push(message);
+                                final_status = CardStatus::Failed;
+                            }
+                            // `decide_auto_hop` only resets when `dec.enqueue` is
+                            // false, which this branch already excludes. The variant
+                            // lives in another crate, so a future one must not
+                            // panic the daemon.
+                            AutoHopDecision::Reset => {
+                                return Err(Error::InvalidState(format!(
+                                    "run {run_id}: auto-hop decision reset an enqueueing transition"
+                                )))
+                            }
                         }
                     }
                 } else if let Some(target) = cols

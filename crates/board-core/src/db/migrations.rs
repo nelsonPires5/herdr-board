@@ -8,7 +8,7 @@ use crate::{Error, Result};
 const SCHEMA_SQL: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../schema.sql"));
 
 /// The latest schema version embedded in [`SCHEMA_SQL`].
-const SCHEMA_VERSION: i64 = 14;
+const SCHEMA_VERSION: i64 = 15;
 
 /// v1 → v2 migration. SQLite cannot alter a CHECK constraint or drop a column
 /// in place, so `cards` is rebuilt. Legacy `space_kind` values `cwd`/`worktree`
@@ -295,6 +295,14 @@ BEGIN
 END;
 ";
 
+/// v14 → v15 migration: durable archive state for projects and boards. Two
+/// plain `ALTER TABLE`s — no rebuild, no rewrite; every existing row keeps
+/// its bytes and reads `archived_at IS NULL` (active). Applied per table,
+/// guarded on the column's presence, so a replay over an already-upgraded
+/// shape (stale stamp) or a crash between the two statements stays stable:
+/// `user_version` only advances after both columns exist.
+const V15_MIGRATION_TABLES: [&str; 2] = ["projects", "boards"];
+
 impl Db {
     /// Apply migrations gated on `PRAGMA user_version`. Idempotent.
     ///
@@ -524,6 +532,26 @@ impl Db {
                 )?;
                 if !has_projects {
                     self.conn.execute_batch(V14_MIGRATION_SQL)?;
+                }
+            }
+            // v15 runs after the v14 rebuild (which recreates `boards`): each
+            // guarded ALTER is idempotent on replay, and a failure aborts the
+            // open without advancing `user_version`.
+            if version < 15 {
+                for table in V15_MIGRATION_TABLES {
+                    let has_archived_at: bool = self.conn.query_row(
+                        &format!(
+                            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}')
+                             WHERE name='archived_at')"
+                        ),
+                        [],
+                        |r| r.get(0),
+                    )?;
+                    if !has_archived_at {
+                        self.conn.execute_batch(&format!(
+                            "ALTER TABLE {table} ADD COLUMN archived_at TEXT"
+                        ))?;
+                    }
                 }
             }
             self.conn

@@ -102,6 +102,9 @@ jobs:
       - name: Claude config staging
         run: python3 -m unittest discover -s scripts/tests -p 'test_stage_claude_config.py'
 
+      - name: Docker sandbox wrapper
+        run: python3 -m unittest discover -s scripts/tests -p 'test_sandbox.py'
+
   e2e-safety:
     name: e2e-safety
     runs-on: ubuntu-latest

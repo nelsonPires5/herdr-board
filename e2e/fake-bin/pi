@@ -87,6 +87,7 @@ with open(path, "w", encoding="utf-8") as target:
         "board_socket": board_socket, "herdr_socket": herdr_socket,
         "model": model, "thinking": thinking, "session_id": session_id,
         "fork_id": fork_id or None, "argv": argv,
+        "slow_provider_env": os.environ.get("FAKE_PI_SLOW_PROVIDER"),
         "system_prompt_file": system_file,
         "system_prompt_exists_at_read": True,
         "system_prompt_mode": mode,
@@ -115,8 +116,156 @@ os.chmod(path, 0o600)
 PY
 printf '\033]0;π - %s\007' "$(basename "$PWD")"
 printf '\n /help\n\n──────────────────────────────────────────────────────\n\n──────────────────────────────────────────────────────\n%s\n' "$PWD"
-python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/managed-agent-report.py" \
-  "$record" pi "" "$session_path" startup
+if [ -n "${FAKE_PI_SLOW_PROVIDER:-}" ]; then
+  # Issue #98: slow-provider repro — model a Pi still resolving provider credentials
+  # when the prompt lands. Real Pi resolves apiKey via shell command and is not
+  # yet reading its tty; bytes delivered via agent.prompt before session identity
+  # are dropped (raw-mode discard). Deterministic provider-free repro:
+  #   1) report idle lifecycle FIRST so Herdr flips interactive_ready/launch_pending,
+  #   2) sleep FAKE_PI_SLOW_PROVIDER seconds (window where early prompt would land),
+  #   3) drain-and-discard any tty bytes that arrived during the sleep (dropped pre-init input),
+  #   4) report session identity (pane.report_agent_session) — the true readiness signal — only then,
+  #   5) proceed to the existing prompt shim which now sees only prompts delivered AFTER session.
+  # The fixture record must still prove exactly one prompt was received and matched AFTER session.
+  python3 - "$record" "$session_path" <<'PY'
+import json, os, socket, sys, time
+record_path, session_path = sys.argv[1:]
+pane_id = os.environ.get("HERDR_PANE_ID", "")
+socket_path = os.environ.get("HERDR_SOCKET_PATH", "")
+source = "herdr:pi"
+seq = time.time_ns()
+common = {"pane_id": pane_id, "source": source, "agent": "pi"}
+session_ref = {"agent_session_path": session_path}
+def _update(path, **fields):
+    with open(path, encoding="utf-8") as f:
+        r = json.load(f)
+    r.update(fields)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as t:
+        json.dump(r, t, ensure_ascii=False, indent=2)
+        t.write("\n")
+    os.replace(tmp, path)
+def _request(sock, envelope):
+    c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    c.settimeout(2.0)
+    try:
+        c.connect(sock)
+        c.sendall((json.dumps(envelope, separators=(",", ":")) + "\n").encode())
+        chunks = bytearray()
+        while b"\n" not in chunks:
+            chunk = c.recv(65536)
+            if not chunk:
+                break
+            chunks.extend(chunk)
+    finally:
+        c.close()
+    line = bytes(chunks).splitlines()[0] if chunks else b""
+    if not line:
+        raise RuntimeError("Herdr closed the report socket without a reply")
+    return json.loads(line)
+reports = []
+_update(record_path, herdr_pane_id=pane_id, report_socket=socket_path, agent_session_id=None, agent_session_path=session_path, session_start_source="startup", reports=reports, readiness_report="reporting")
+params = {**common, **session_ref, "seq": seq, "session_start_source": "startup", "state": "idle"}
+envelope = {"id": f"e2e:{source}:{os.getpid()}:0", "method": "pane.report_agent", "params": params}
+result = {"phase": "idle_lifecycle", "request": envelope}
+try:
+    reply = _request(socket_path, envelope)
+    result["reply"] = reply
+    result["ok"] = "result" in reply and "error" not in reply
+except Exception as e:
+    result["ok"] = False
+    result["error"] = f"{type(e).__name__}: {e}"
+reports.append(result)
+_update(record_path, reports=reports)
+if not result["ok"]:
+    _update(record_path, readiness_report="failed:idle_lifecycle")
+    print(f"managed-agent-report (slow-provider): idle report failed: {result}", file=sys.stderr)
+    sys.exit(2)
+PY
+  sleep "$FAKE_PI_SLOW_PROVIDER"
+  if [ -t 0 ]; then
+    # Drain from the REAL tty: `python3 -c` keeps stdin attached to the pane's
+    # terminal — a `python3 - <<'PY'` heredoc would redirect stdin to the script
+    # pipe and drain nothing, silently breaking the repro.
+    python3 -c 'import os, select, fcntl
+fd = 0
+flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+try:
+    while True:
+        r, _, _ = select.select([fd], [], [], 0)
+        if not r:
+            break
+        try:
+            data = os.read(fd, 65536)
+        except BlockingIOError:
+            break
+        if not data:
+            break
+finally:
+    fcntl.fcntl(fd, fcntl.F_SETFL, flags)' || true
+  fi
+  python3 - "$record" "$session_path" <<'PY'
+import json, os, socket, sys, time
+record_path, session_path = sys.argv[1:]
+pane_id = os.environ.get("HERDR_PANE_ID", "")
+socket_path = os.environ.get("HERDR_SOCKET_PATH", "")
+source = "herdr:pi"
+seq = time.time_ns()
+common = {"pane_id": pane_id, "source": source, "agent": "pi"}
+session_ref = {"agent_session_path": session_path}
+def _update(path, **fields):
+    with open(path, encoding="utf-8") as f:
+        r = json.load(f)
+    r.update(fields)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as t:
+        json.dump(r, t, ensure_ascii=False, indent=2)
+        t.write("\n")
+    os.replace(tmp, path)
+def _request(sock, envelope):
+    c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    c.settimeout(2.0)
+    try:
+        c.connect(sock)
+        c.sendall((json.dumps(envelope, separators=(",", ":")) + "\n").encode())
+        chunks = bytearray()
+        while b"\n" not in chunks:
+            chunk = c.recv(65536)
+            if not chunk:
+                break
+            chunks.extend(chunk)
+    finally:
+        c.close()
+    line = bytes(chunks).splitlines()[0] if chunks else b""
+    if not line:
+        raise RuntimeError("Herdr closed the report socket without a reply")
+    return json.loads(line)
+with open(record_path, encoding="utf-8") as f:
+    rec = json.load(f)
+reports = rec.get("reports", [])
+params = {**common, **session_ref, "seq": seq, "session_start_source": "startup"}
+envelope = {"id": f"e2e:{source}:{os.getpid()}:1", "method": "pane.report_agent_session", "params": params}
+result = {"phase": "session_identity", "request": envelope}
+try:
+    reply = _request(socket_path, envelope)
+    result["reply"] = reply
+    result["ok"] = "result" in reply and "error" not in reply
+except Exception as e:
+    result["ok"] = False
+    result["error"] = f"{type(e).__name__}: {e}"
+reports.append(result)
+_update(record_path, reports=reports)
+if not result["ok"]:
+    _update(record_path, readiness_report="failed:session_identity")
+    print(f"managed-agent-report (slow-provider): session report failed: {result}", file=sys.stderr)
+    sys.exit(2)
+_update(record_path, readiness_report="ok")
+PY
+else
+  python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/managed-agent-report.py" \
+    "$record" pi "" "$session_path" startup
+fi
 
 # A rescued pane resumes an existing conversation, so the daemon deliberately
 # sends NO agent.prompt (re-sending the card task would re-run it). Skip the

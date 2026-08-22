@@ -100,7 +100,15 @@ pub(super) fn draw_picker(app: &App, f: &mut Frame, area: Rect) {
         .iter()
         .map(|row| wrapped_row_count(label(row), content_w.saturating_sub(3).max(1)))
         .sum();
-    let content_h = (desired_rows as u16).saturating_add(2).max(5);
+    let has_hint = matches!(
+        picker.purpose,
+        crate::app::PickerPurpose::SwitchProject | crate::app::PickerPurpose::SwitchBoard
+    );
+    let hint_h: u16 = if has_hint { 1 } else { 0 };
+    let content_h = (desired_rows as u16)
+        .saturating_add(2)
+        .saturating_add(hint_h)
+        .max(5);
     let box_area = sheet_area_for_app(app, mode, content_w, content_h, area);
     f.render_widget(Clear, box_area);
 
@@ -120,7 +128,16 @@ pub(super) fn draw_picker(app: &App, f: &mut Frame, area: Rect) {
         "X",
         &mut hit_map,
     );
-    let picker_area = inner;
+    // Split hint row from picker rows when applicable
+    let (picker_area, hint_area) = if has_hint && inner.height > 1 {
+        let picker_h = inner.height.saturating_sub(1);
+        (
+            Rect::new(inner.x, inner.y, inner.width, picker_h),
+            Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+        )
+    } else {
+        (inner, Rect::new(inner.x, inner.y, 0, 0))
+    };
 
     if picker.rows.is_empty() {
         f.render_widget(
@@ -206,6 +223,15 @@ pub(super) fn draw_picker(app: &App, f: &mut Frame, area: Rect) {
             heights.iter().map(|&h| h as usize).sum(),
             heights[..start].iter().map(|&h| h as usize).sum(),
             picker_area.height as usize,
+        );
+    }
+    if has_hint && hint_area.width > 0 {
+        let vis = app.picker_visibility.as_str().to_ascii_uppercase();
+        let hint = format!("v:cycle a:archive r:restore [{}]", vis);
+        let hint_style = Style::default().fg(Color::DarkGray);
+        f.render_widget(
+            Paragraph::new(Span::styled(hint, hint_style)).alignment(Alignment::Center),
+            hint_area,
         );
     }
 }

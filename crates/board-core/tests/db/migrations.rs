@@ -38,10 +38,246 @@ fn scheduler_index_sql(conn: &Connection, name: &str) -> Option<String> {
     .ok()
 }
 
+// ---------------------------------------------------------------------------
+// Schema-v15 archive state: fresh shape, upgrade, and replay safety.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fresh_schema_stamps_v15_with_nullable_archive_columns() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("board.db");
+    drop(Db::open(&path).unwrap());
+    let conn = Connection::open(path).unwrap();
+    assert_eq!(
+        conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        15
+    );
+    for table in ["projects", "boards"] {
+        let shape: (String, String, i64, Option<String>) = conn
+            .query_row(
+                &format!(
+                    "SELECT name,type,\"notnull\",dflt_value FROM pragma_table_info('{table}')
+                     WHERE name='archived_at'"
+                ),
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap_or_else(|_| panic!("{table}.archived_at missing"));
+        assert_eq!(
+            shape,
+            ("archived_at".into(), "TEXT".into(), 0, None),
+            "{table}.archived_at must be a nullable TEXT with no default"
+        );
+    }
+}
+
+/// A schema-v14 database upgrades to v15 by gaining `archived_at` on projects
+/// and boards while every existing row — boards, cards, comments, runs,
+/// selection, and recency — survives untouched.
+#[test]
+fn v14_to_v15_migration_preserves_all_project_and_board_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v14.db");
+    let (project_id, board_id, card_id, run_id) = {
+        let db = Db::open(&path).unwrap();
+        let project = db.get_or_create_project("/tmp/kept-scope").unwrap();
+        let board = db.create_board(project.id, "extra").unwrap();
+        db.select_board(board.id).unwrap();
+        let card = db
+            .create_card(&CardCreateParams {
+                title: "kept".into(),
+                board_id: Some(board.id),
+                ..Default::default()
+            })
+            .unwrap();
+        db.add_comment(card.id, "user", "kept comment").unwrap();
+        let run = db
+            .enqueue_run_uow(&enqueue(card.id, card.column_id))
+            .unwrap();
+        drop(db);
+        let conn = Connection::open(&path).unwrap();
+        let before = (
+            raw_rows(&conn, "projects"),
+            raw_rows(&conn, "boards"),
+            raw_rows(&conn, "columns"),
+            raw_rows(&conn, "cards"),
+            raw_rows(&conn, "comments"),
+            raw_rows(&conn, "runs"),
+            // selection/board_selection/recency have no uniform `id` column;
+            // pin them by their meaningful fields instead.
+            conn.query_row("SELECT project_id FROM selection WHERE id=1", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap(),
+            conn.query_row(
+                "SELECT board_id FROM board_selection WHERE project_id=?1",
+                [project.id],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap(),
+            conn.query_row("SELECT count(*) FROM project_recents", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap(),
+            conn.query_row(
+                "SELECT count(*) FROM board_recents WHERE project_id=?1",
+                [project.id],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap(),
+        );
+        conn.execute_batch(
+            "ALTER TABLE projects DROP COLUMN archived_at;
+             ALTER TABLE boards DROP COLUMN archived_at;
+             PRAGMA user_version = 14;",
+        )
+        .unwrap();
+        drop(conn);
+        // Reopen twice: the upgrade must be stable across reopen.
+        for reopen in 0..2 {
+            let db = Db::open(&path).unwrap();
+            assert_eq!(db.user_version().unwrap(), 15, "reopen {reopen}");
+            assert_eq!(
+                db.get_project(project.id).unwrap().archived_at,
+                None,
+                "reopen {reopen}"
+            );
+            assert_eq!(
+                db.get_board(board.id).unwrap().archived_at,
+                None,
+                "reopen {reopen}"
+            );
+            drop(db);
+        }
+        let conn = Connection::open(&path).unwrap();
+        // The v15 ALTERs add trailing nullable columns, so the untouched
+        // prefix bytes of every pre-existing row compare equal via raw_rows on
+        // the tables the migration rewrites (none — it is pure ALTER).
+        assert_eq!(
+            (
+                raw_rows(&conn, "columns"),
+                raw_rows(&conn, "cards"),
+                raw_rows(&conn, "comments"),
+                raw_rows(&conn, "runs"),
+                conn.query_row("SELECT project_id FROM selection WHERE id=1", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .unwrap(),
+                conn.query_row(
+                    "SELECT board_id FROM board_selection WHERE project_id=?1",
+                    [project.id],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap(),
+                conn.query_row("SELECT count(*) FROM project_recents", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .unwrap(),
+                conn.query_row(
+                    "SELECT count(*) FROM board_recents WHERE project_id=?1",
+                    [project.id],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap(),
+            ),
+            (
+                before.2.clone(),
+                before.3.clone(),
+                before.4.clone(),
+                before.5.clone(),
+                before.6,
+                before.7,
+                before.8,
+                before.9,
+            ),
+            "v15 must not rewrite a single related row"
+        );
+        // project/board rows keep their identity columns byte for byte (the
+        // new trailing column reads NULL for every pre-existing row).
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM projects WHERE archived_at IS NOT NULL",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM boards WHERE archived_at IS NOT NULL",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0
+        );
+        drop(conn);
+        (project.id, board.id, card.id, run.id)
+    };
+    // Sanity: the fixture data is fully readable through the Db API.
+    let db = Db::open(&path).unwrap();
+    assert_eq!(db.get_project(project_id).unwrap().name, "kept-scope");
+    assert_eq!(db.get_board(board_id).unwrap().name, "extra");
+    assert_eq!(db.get_card(card_id).unwrap().unwrap().title, "kept");
+    assert_eq!(db.list_comments(card_id).unwrap()[0].body, "kept comment");
+    assert_eq!(db.get_run(run_id).unwrap().id, run_id);
+    assert_eq!(
+        db.selected_board_for(project_id).unwrap().unwrap().id,
+        board_id
+    );
+}
+
+/// Replaying the v15 step over an already-upgraded shape (a stale stamp) must
+/// be a guarded no-op, and a hard failure must leave `user_version` untouched
+/// and stay stable on retry.
+#[test]
+fn v15_migration_replay_and_failure_are_stable() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("replay.db");
+    drop(Db::open(&path).unwrap());
+    // Replay: rewind the stamp over the finished shape.
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch("PRAGMA user_version = 14;")
+        .unwrap();
+    let db = Db::open(&path).unwrap();
+    assert_eq!(db.user_version().unwrap(), 15);
+    drop(db);
+
+    // Failure: `projects` cannot take a column (a view), so the upgrade
+    // aborts without advancing the stamp and retries behave identically.
+    let dir2 = tempfile::tempdir().unwrap();
+    let path2 = dir2.path().join("malformed-v14.db");
+    drop(Db::open(&path2).unwrap());
+    let conn = Connection::open(&path2).unwrap();
+    conn.execute_batch(
+        "DROP TABLE projects;
+         CREATE VIEW projects AS SELECT 1 AS id;
+         PRAGMA user_version = 14;",
+    )
+    .unwrap();
+    drop(conn);
+    for attempt in 0..2 {
+        let error = match Db::open(&path2) {
+            Ok(_) => panic!("attempt {attempt}: malformed v14 unexpectedly migrated"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("view"), "{error}");
+        let conn = Connection::open(&path2).unwrap();
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            14
+        );
+    }
+}
+
 #[test]
 fn migration_seeds_board_and_todo_column() {
     let db = mem();
-    assert_eq!(db.user_version().unwrap(), 14);
+    assert_eq!(db.user_version().unwrap(), 15);
     let board = db.get_board(BOARD_ID).unwrap();
     // The Global project keeps the legacy board id 1, renamed `main` by v14;
     // the Global identity now lives on the project itself.
@@ -123,7 +359,7 @@ fn v11_rows_gain_nullable_anchor_column_without_backfill() {
         .unwrap();
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 14);
+    assert_eq!(db.user_version().unwrap(), 15);
     assert_eq!(db.list_runs(1).unwrap()[0].herdr_anchor_pane_id, None);
 }
 
@@ -138,7 +374,7 @@ fn migration_idempotent_on_reopen() {
     // Reopen: must not re-seed (still exactly one board, one column).
     {
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.user_version().unwrap(), 14);
+        assert_eq!(db.user_version().unwrap(), 15);
         assert_eq!(db.list_columns(BOARD_ID).unwrap().len(), 1);
         assert_eq!(db.get_board(BOARD_ID).unwrap().name, "main");
     }
@@ -228,7 +464,7 @@ fn migration_v2_upgrades_v1_database() {
     }
     // Open via Db → runs the v2 through v14 migrations.
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 14);
+    assert_eq!(db.user_version().unwrap(), 15);
     let cards = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(cards.len(), 2);
     for c in &cards {
@@ -371,7 +607,7 @@ fn migration_v4_preserves_claude_cards_and_accepts_pi_efforts() {
     }
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 14);
+    assert_eq!(db.user_version().unwrap(), 15);
     let existing = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(existing[0].harness, "claude");
     assert_eq!(db.list_comments(existing[0].id).unwrap().len(), 1);
@@ -399,7 +635,7 @@ fn migration_does_not_downgrade_future_schema_version() {
     let path = tmp.path().to_path_buf();
     let card_id = {
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.user_version().unwrap(), 14);
+        assert_eq!(db.user_version().unwrap(), 15);
         db.create_card(&CardCreateParams {
             title: "written by a newer board".into(),
             ..Default::default()
@@ -462,14 +698,14 @@ fn migration_replay_from_a_past_version_stamp_is_a_no_op() {
     let path = tmp.path().to_path_buf();
     {
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.user_version().unwrap(), 14);
+        assert_eq!(db.user_version().unwrap(), 15);
     }
     {
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch("PRAGMA user_version = 8;").unwrap();
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 14);
+    assert_eq!(db.user_version().unwrap(), 15);
     assert_eq!(db.list_columns(BOARD_ID).unwrap().len(), 1);
     assert_eq!(db.get_board(BOARD_ID).unwrap().name, "main");
 }
@@ -497,7 +733,7 @@ fn migration_v3_adds_archived_at_to_v2_database() {
         .unwrap();
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 14);
+    assert_eq!(db.user_version().unwrap(), 15);
     let cards = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(cards.len(), 1);
     assert!(cards[0].archived_at.is_none());
@@ -597,7 +833,7 @@ fn v6_to_v7_migration_preserves_legacy_queued_run_byte_for_byte() {
         .unwrap();
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 14);
+    assert_eq!(db.user_version().unwrap(), 15);
     let run = &db.list_runs(1).unwrap()[0];
     assert_eq!(run.argv_json, argv);
     assert_eq!(run.prompt_snapshot, prompt);
@@ -650,7 +886,7 @@ fn migration_v5_preserves_global_data_and_renames_it() {
 
     let db = Db::open(&path).unwrap();
     let global = db.get_board(BOARD_ID).unwrap();
-    assert_eq!(db.user_version().unwrap(), 14);
+    assert_eq!(db.user_version().unwrap(), 15);
     // v5 still renames the legacy board to Global; v14 moves that identity
     // onto the Global project and renames the board itself back to `main`.
     assert_eq!(db.get_project(1).unwrap().name, "Global");
@@ -747,7 +983,7 @@ fn migration_v6_rebuilds_cards_check_and_preserves_data() {
     }
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 14);
+    assert_eq!(db.user_version().unwrap(), 15);
     let cards = db.list_cards(BOARD_ID).unwrap();
     assert_eq!(cards.len(), 2);
     let kept = &cards[0];
@@ -950,7 +1186,7 @@ fn fresh_v12_has_exact_partial_scheduler_indexes_and_query_plans() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("board.db");
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 14);
+    assert_eq!(db.user_version().unwrap(), 15);
     drop(db);
     let conn = Connection::open(path).unwrap();
     for (name, expected) in [
@@ -1024,7 +1260,7 @@ fn v9_file_fixture_upgrades_through_v14_without_changing_existing_bytes() {
     drop(conn);
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 14);
+    assert_eq!(db.user_version().unwrap(), 15);
     // v14 rebuilds `boards` (id preserved, name becomes `main`); cards and
     // runs keep every byte.
     assert_eq!(db.get_board(BOARD_ID).unwrap().id, BOARD_ID);
@@ -1040,7 +1276,7 @@ fn v9_file_fixture_upgrades_through_v14_without_changing_existing_bytes() {
         assert_eq!(
             conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            14
+            15
         );
         assert_eq!(
             scheduler_index_sql(&conn, "idx_runs_queued_fifo").as_deref(),
@@ -1203,7 +1439,7 @@ fn v8_upgrade_retains_a_single_open_run_byte_for_byte() {
         .unwrap();
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.user_version().unwrap(), 14);
+    assert_eq!(db.user_version().unwrap(), 15);
     assert_eq!(db.get_run(before.id).unwrap(), before);
 }
 
@@ -1221,7 +1457,7 @@ fn fresh_and_v7_upgrade_install_exact_partial_unique_index_sql() {
                 .unwrap();
         }
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.user_version().unwrap(), 14);
+        assert_eq!(db.user_version().unwrap(), 15);
         drop(db);
         let sql: String = Connection::open(&path)
             .unwrap()

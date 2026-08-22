@@ -300,7 +300,7 @@ PY_BIN=/tmp/hb-venv/bin/python3
 an exact size, drives keys, and renders the final screen with `pyte`.
 
 ```bash
-CAP="$REPO/.agents/skills/herdr-board-visual-validation/references/pty-capture.py"
+CAP="$REPO/.agents/skills/development-workflow/references/pty-capture.py"
 mkdir -p "$TMP/shots"
 BOARD_BIN="$TARGET/release/board" "$PY_BIN" "$CAP" "$TMP" 120 40 "$TMP/shots/wide"
 BOARD_BIN="$TARGET/release/board" "$PY_BIN" "$CAP" "$TMP" 80 24 "$TMP/shots/narrow"

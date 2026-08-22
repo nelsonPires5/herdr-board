@@ -49,7 +49,7 @@ pub(crate) fn materialize_local_argv(req: &HerdrLaunchPlan) -> anyhow::Result<Ve
             let insert_at = argv
                 .iter()
                 .position(|arg| arg == "--session-id" || arg == "--fork")
-                .map_or(argv.len(), |index| index);
+                .unwrap_or(argv.len());
             argv.splice(
                 insert_at..insert_at,
                 ["--append-system-prompt".to_string(), system_prompt.clone()],

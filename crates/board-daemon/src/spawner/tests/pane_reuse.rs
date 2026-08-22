@@ -12,13 +12,20 @@ use serde_json::json;
 // A reused pane is already interactive and quiescent: Herdr may expose the
 // prior turn as either idle or derived done. `agent_status` defaults to unknown
 // in `testkit::agent_info`, so reuse readiness is asserted explicitly here.
+// The pane also still carries the prior run's `agent_session` — the
+// integration reported it when that run launched — so the session-readiness
+// gate confirms on its first probe and reuse stays a tight get+prompt.
 fn reuse_agent_ready(req: &Value, pane_id: &str, kind: &str, status: &str) -> Value {
     reply(
         req,
         json!({"type":"agent_info","agent":{
             "pane_id": pane_id, "agent": kind, "agent_status": status,
             "interactive_ready": true, "launch_pending": false,
-            "focused": false, "revision": 2
+            "focused": false, "revision": 2,
+            "agent_session": {
+                "agent": kind, "kind": "path", "source": format!("herdr:{kind}"),
+                "value": "/tmp/hb-sessions/42.jsonl"
+            }
         }}),
     )
 }
@@ -69,7 +76,15 @@ fn resume_hop_reuses_the_harness_pane_in_an_anchorless_managed_tab() {
         .collect();
     assert_eq!(
         methods,
-        ["ping", "tab.list", "pane.list", "agent.get", "agent.prompt"],
+        [
+            "ping",
+            "tab.list",
+            "pane.list",
+            "agent.get",
+            "agent.get",
+            "agent.prompt",
+            "agent.get"
+        ],
         "anchorless reuse must re-prompt the live agent without splitting"
     );
     assert_eq!(
@@ -145,7 +160,9 @@ fn resume_hop_reuses_the_prior_run_pane_without_split_or_agent_start() {
             "tab.list",
             "pane.list",
             "agent.get",
+            "agent.get",
             "agent.prompt",
+            "agent.get",
             "pane.close"
         ],
         "reuse re-prompts the live agent; the anchor is closed afterwards"
