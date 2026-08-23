@@ -205,7 +205,11 @@ fn subscribe_rejects_an_event_streamed_before_the_ack() {
             .unwrap()
         )
         .unwrap();
-        writeln!(stream, r#"{{"id":"sub","result":{{"subscribed":true}}}}"#).unwrap();
+        // The client rejects the subscription as soon as it sees the non-ack
+        // first line and drops the stream, so this ack write can race the
+        // disconnect (EPIPE) on a loaded machine. Best-effort is enough: the
+        // contract under test is the client-side rejection.
+        let _ = writeln!(stream, r#"{{"id":"sub","result":{{"subscribed":true}}}}"#);
     });
 
     let mut client = UnixClient::connect(&socket).unwrap();
