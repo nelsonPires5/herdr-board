@@ -167,12 +167,14 @@ fn card_archive(ctx: &mut Ctx, id: i64, archived: bool) -> Result<()> {
 ///
 /// Destination precedence: `--to-project` (with an optional `--to-board`
 /// id-or-name within it), else an explicit `--destination-board`, else the
-/// global `--board` selector (deprecated — it warns), else the global
-/// `--project` (deprecated — it warns), else the card's own board. Every arm
+/// global `--board` selector (deprecated — it warns only when it actually
+/// crosses boards), else the global `--project` (deprecated — it warns only
+/// when it actually leaves the project), else the card's own board. Every arm
 /// is non-selecting: card moves never touch the daemon's selection or recency.
 /// A named destination costs two RPCs (`project.get`/`board.open`/`board.get`
-/// plus `card.move`); the "stay on the card's board" case needs three, because
-/// protocol v1 has no way to learn a card's board without `card.get` and no
+/// plus `card.move`); a fallback that ends up crossing boards or projects,
+/// and the "stay on the card's board" case, need one extra `card.get`,
+/// because protocol v1 has no way to learn a card's board without it and no
 /// way to move a card by column *name*. A `card.move` that accepted a column
 /// name would collapse every case to one round-trip.
 pub(crate) fn cmd_move(
@@ -196,21 +198,29 @@ pub(crate) fn cmd_move(
             Some(selector) => destination_board_legacy(ctx.client()?, selector)?,
             None => match ctx.selector() {
                 Some(selector) => {
-                    eprintln!(
-                        "board: warning: `move` is using the global --board {selector} as the move \
-                         destination; this fallback is deprecated, pass --destination-board \
-                         {selector} to cross boards"
-                    );
-                    destination_board_legacy(ctx.client()?, selector)?
+                    let board = destination_board_legacy(ctx.client()?, selector)?;
+                    let source_board_id = ctx.client()?.card_get(card_id)?.card.board_id;
+                    if source_board_id != board.board.id {
+                        eprintln!(
+                            "board: warning: `move` is using the global --board {selector} as the move \
+                             destination; this fallback is deprecated, pass --destination-board \
+                             {selector} to cross boards"
+                        );
+                    }
+                    board
                 }
                 None => match ctx.project_selector() {
                     Some(path) => {
-                        eprintln!(
-                            "board: warning: `move` is using the global --project as the move \
-                             destination; pass --to-project to cross projects"
-                        );
                         let scope = resolved_scope_path(path)?;
-                        destination_board_in_project(ctx.client()?, &scope, None)?
+                        let board = destination_board_in_project(ctx.client()?, &scope, None)?;
+                        let source_board_id = ctx.client()?.card_get(card_id)?.card.board_id;
+                        if source_board_id != board.board.id {
+                            eprintln!(
+                                "board: warning: `move` is using the global --project as the move \
+                                 destination; pass --to-project to cross projects"
+                            );
+                        }
+                        board
                     }
                     None => {
                         let board_id = ctx.client()?.card_get(card_id)?.card.board_id;
