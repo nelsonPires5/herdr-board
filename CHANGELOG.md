@@ -9,6 +9,7 @@ All notable changes to this project are documented here. The format is based on
 ### Fixed
 
 - [#74](https://github.com/nelsonPires5/herdr-board/pull/74) fix: E2E scenario 31 no longer stalls on hosts where a real Codex is installed (thanks to @v9yrbcgkyt-spec).
+- [#79](https://github.com/nelsonPires5/herdr-board/pull/79) fix: Restrict the daemon socket to owner-only mode and fail startup when securing fails (thanks to @v9yrbcgkyt-spec).
 
 ## [0.16.0] - 2026-08-22
 
@@ -57,7 +58,6 @@ All notable changes to this project are documented here. The format is based on
 ### Fixed
 
 - [#81](https://github.com/nelsonPires5/herdr-board/pull/81) fix: `f` types normally in form text fields; the popup/fullscreen toggle now works only on picker fields.
-- [#79](https://github.com/nelsonPires5/herdr-board/pull/79) fix: Restrict the board daemon socket to its owner and fail startup if owner-only permissions cannot be applied.
 
 ## [0.13.0] - 2026-08-10
 
