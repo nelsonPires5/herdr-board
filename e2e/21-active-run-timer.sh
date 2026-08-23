@@ -176,6 +176,47 @@ TIMER_AFTER="$(wait_for_timer)" || fail "active card timer was not rendered afte
 [ "$TIMER_AFTER" -le 180 ] \
   || fail "post-edit timer sample outside broad bound: ${TIMER_AFTER}s"
 
+step "Crash and restart boardd; require the live TUI to reconnect and refetch"
+e2e_daemon_kill_owned
+
+# Change the fixture while no daemon exists, so no event can possibly carry
+# the update. The replacement subscription's forced full refetch is therefore
+# the only path by which the live TUI can learn this title.
+python3 - "$BOARD_DB" "$CARD_ID" <<'PY'
+import sqlite3, sys
+db_path, card_id = sys.argv[1:]
+with sqlite3.connect(db_path) as db:
+    changed = db.execute(
+        "UPDATE cards SET title = ?, updated_at = datetime('now') WHERE id = ?",
+        ("Reconnect restored", int(card_id)),
+    ).rowcount
+assert changed == 1
+PY
+e2e_daemon_start
+[ "$(card_field "$CARD_ID" card.title)" = "Reconnect restored" ] \
+  || fail "outage-window fixture update was not persisted"
+
+wait_for_reconnected_title() {
+  local screen
+  for _ in $(seq 1 150); do
+    screen="$("$HERDR_BIN" pane read "$TUI_PANE" --source recent-unwrapped --lines 200 2>/dev/null || true)"
+    # Herdr's unwrapped replay can interleave ratatui cell diffs, so assert the
+    # unique stable word rather than a contiguous multi-word paint.
+    printf '%s\n' "$screen" | grep -Fq 'Reconnect' && return 0
+    sleep 0.1
+  done
+  return 1
+}
+if ! wait_for_reconnected_title; then
+  "$HERDR_BIN" pane read "$TUI_PANE" --source recent-unwrapped --lines 300 \
+    >"$E2E_SCENARIO_ARTIFACT_DIR/reconnect-pane.txt" 2>&1 || true
+  "$BOARD_BIN" card show "$CARD_ID" --json \
+    >"$E2E_SCENARIO_ARTIFACT_DIR/reconnect-card.json" 2>&1 || true
+  cp "$E2E_TMP/daemon.log" "$E2E_SCENARIO_ARTIFACT_DIR/reconnect-daemon.log" 2>/dev/null || true
+  fail "real TUI did not reconnect/refetch after boardd restart"
+fi
+assert_run_identity
+
 step "Complete the run through the identity-gated board done channel"
 e2e_board_herdr_mutate -- done "$CARD_ID" --outcome ok --summary 'timer lifecycle complete' --json >/dev/null
 

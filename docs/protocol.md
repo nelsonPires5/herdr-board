@@ -8,7 +8,8 @@ protocol version.
 ## Transport
 
 - Unix socket. Path resolution (both daemon and clients): `$BOARD_SOCKET` if set, else
-  `~/.local/share/herdr-board/boardd.sock`.
+  `~/.local/share/herdr-board/boardd.sock`. The daemon sets the socket to mode `0600`; local socket
+  access is the protocol's authentication boundary.
 - DB path resolution (daemon only): `$BOARD_DB` if set, else `~/.local/share/herdr-board/board.db`.
 - Log directory resolution (daemon only): `$BOARD_LOG_DIR` if set, else `<data>/logs`.
 - Newline-delimited JSON (NDJSON), UTF-8. One JSON object per line, both directions.
@@ -176,7 +177,7 @@ first board-aware command bootstraps it from the current directory.
 - `column.create {name, board_id?, position?, system_prompt?, trigger?, on_success_column_id?, on_fail_column_id?, fresh_session?, harness_override?, model_override?, effort_override?, permission_override?, timeout_minutes?}` → `Column`; omitted `board_id` means `Global`.
 - `column.update {id, …any subset of the above}` → `Column` (name/trigger/etc.; nullable update fields use the tri-state encoding below)
 - `column.reorder {id, position}` → `[Column…]`
-- `column.delete {id, move_cards_to?}` → `{deleted:true}`; destination must belong to the same board; error 3 if cards lack a destination or any card has an open run (`queued|running|blocked|awaiting`; `done` is not open).
+- `column.delete {id, move_cards_to?}` → `{deleted:true}`; destination must belong to the same board; error 3 if cards lack a destination or any card has an open run (`queued|running|blocked|awaiting`; `done` is not open). With a destination, the bulk move includes archived cards; unlike `card.move`, they do not need to be restored first.
 - `template.apply {name:"pipeline", board_id?}` → the requested board's full column set (omitted = `Global`; error 3 unless it has only seed `Todo` and no cards).
 
 The store enforces board boundaries: card create, column-delete destinations,
@@ -222,7 +223,7 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
 - `card.create {title, board_id?, description?, column_id?(default Todo), harness?(default "pi"), model?, effort?, permission_mode?, session?, space_kind?("workspace"|"new_workspace"), space_ref?, space_cwd?, position?}` → `Card`; omitted `board_id` means `Global`, and an explicit column must belong to that board.
   - Pi rejects a non-null `permission_mode` with error 1; Pi has no board-level tool permission mode.
   - `space_kind`:
-    - `workspace` — an ALREADY-OPEN workspace in the session; `space_ref` = its workspace id (a case-insensitive label is also accepted at dispatch).
+    - `workspace` — an ALREADY-OPEN workspace in the session; `space_ref` = its workspace id (a case-insensitive label is also accepted at dispatch). An optional non-empty `space_cwd` is an explicit launch-directory override. Without it, all non-empty cwd values in the workspace's live panes must agree; heterogeneous values fail dispatch with the pane/cwd candidates instead of choosing by snapshot order.
     - `new_workspace` — the daemon creates the workspace on first dispatch (label = `space_ref`, cwd = `space_cwd`), reusing an open workspace with that label if one exists. **Requires** non-empty `space_ref` and `space_cwd` on create (else error 1).
     - The wire vocabulary is exactly `"workspace"` and `"new_workspace"`: `SpaceKind` is serde
       `snake_case`, so a hyphenated `"new-workspace"` on the socket is still rejected (error 1,
@@ -309,7 +310,10 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
   exception is a configured harness: its `board done` must provide the exact queued run id and may
   arrive before runner registration. A queued built-in (pi/claude/codex/opencode/antigravity) run is rejected because
   managed completion requires a registered pane. A mismatched id/pane, missing id for the queued
-  exception, or otherwise ineligible run returns an error.
+  exception, or otherwise ineligible run returns an error. Error precedence is deliberate: an
+  unknown card returns `not found: card <id>` before run lookup; an existing idle card in a manual
+  column returns `no active run` with `board move <id> <column>` guidance; and a configured run that
+  is queued without `run_id` returns `queued run for card <id> requires run_id`.
 - `run.cancel {card_id}` → `{run, card}` — kills the pane (herdr `pane.close`), outcome `cancelled`, card status `failed`, no transition.
 - `run.retry {card_id}` → `{run, card}` — re-enqueue in the current column as a fresh run. Claude
   resumes with `--fork-session`; Pi uses `--fork <old-id> --session-id <new-id>` and persists it;
@@ -544,7 +548,7 @@ parks the card in `awaiting` instead of failing the run.
 
 Coarse by design — the TUI refetches only its selected `board.get {board_id}` on any event; payload is for logs/toasts.
 
-- `{"event":"board_changed","reason":"card_moved|card_created|card_updated|card_deleted|card_archived|column_changed|comment_added|run_started|run_ended|run_blocked","board_id"?:N,"card_id"?:N,"column_id"?:N}` — `board_id` scopes the change to a specific board; a cross-board card transfer emits one event per affected board (source + destination). Omitted `board_id` means a coarse, board-agnostic refresh.
+- `{"event":"board_changed","reason":"card_moved|card_created|card_updated|card_deleted|card_archived|column_changed|comment_added|run_started|run_ended|run_blocked","board_id"?:N,"card_id"?:N,"column_id"?:N}` — `board_id` scopes the change to a specific board; a same-board move reports the destination `column_id`, while a cross-board transfer emits a source-board event with the source column and a destination-board event with the destination column. Omitted `board_id` means a coarse, board-agnostic refresh.
 - `{"event":"run_ended","card_id":N,"run_id":N,"outcome":"ok|fail|cancelled|lost"}` (also emitted as board_changed; `lost` is legacy — no longer produced, see Card statuses)
 
 ## Dispatch semantics (column engine — lives in board-core, pure; daemon executes effects)

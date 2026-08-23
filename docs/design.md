@@ -287,7 +287,7 @@ Cards target a **herdr session** plus a space in it. Because two sessions can ea
 On first dispatch of a `new_workspace` card: preflight the selected socket for exact Herdr 0.8.2 /
 protocol 20, then list the session's workspaces; if one's label matches `space_ref`
 (case-insensitive) reuse it, else `workspace.create {label:space_ref, cwd:space_cwd, focus:false}`.
-Then proceed identically to a `workspace` card (cwd snapshot, pane-first per-card tab placement). If the reused or existing workspace snapshot fails, or contains no live cwd, dispatch fails; it never falls back to process cwd or a stale snapshot. A workspace this dispatch **created** additionally
+Then proceed identically to a `workspace` card (cwd snapshot, pane-first per-card tab placement). An existing `workspace` card may provide `space_cwd` as an explicit override; otherwise its non-empty live pane cwd values must all agree, and heterogeneous candidates fail closed instead of depending on snapshot order. Reused `new_workspace` cards still verify the live workspace rather than treating their creation cwd as an override. If the reused or existing workspace snapshot fails, or contains no live cwd, dispatch fails; it never falls back to process cwd or a stale snapshot. A workspace this dispatch **created** additionally
 threads its exact initial tab/root pane as a one-shot bootstrap hint: the first card-tab
 allocation adopts that tab (renamed to `card-<id>`, root renamed to `card-<id>-anchor`) instead
 of leaving an unused initial tab beside a fresh one. Verification is exact (workspace/tab/root
@@ -595,7 +595,10 @@ execution, not to resurrect it as a run. Two consequences follow and are not wor
   cycles `ACTIVE` / `ALL` / `ARCHIVED`; `c` comment, with `e`/`d`/`h` managing the focused one in
   card detail; `Enter` card detail; `o` focuses the **selected** run's
   pane when it belongs to the current Herdr session (help: `o  jump to selected run pane`); `r` refreshes the selected board
-  on demand); `?` help overlay listing **all** keybinds; column config form (rename, system prompt,
+  on demand). The live subscription reconnects with bounded backoff after boardd is replaced,
+  replaces its stale request connection, and immediately refetches the currently selected board so
+  changes from the outage window cannot leave the TUI stale. `?` opens the help overlay listing
+  **all** keybinds; column config form (rename, system prompt,
   trigger, on_success/on_fail, overrides, reorder, delete). **Column reorder** is reachable by mouse
   drag or the `M` (Shift+m) mini-mode: it mirrors the move-card picker's stage→commit→cancel shape —
   `←`/`→` (or `h`/`l`) slide the focused column locally, `Enter` commits a single `column.reorder`,

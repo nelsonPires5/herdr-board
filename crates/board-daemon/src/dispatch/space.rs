@@ -1,5 +1,6 @@
 use board_core::protocol::SpaceKind;
 use board_herdr::{HerdrClient, WorkspaceCreateParams, WorkspaceInfo};
+use std::collections::BTreeSet;
 
 use crate::spawner::WorkspaceBootstrapHint;
 
@@ -19,7 +20,8 @@ pub(crate) struct ResolvedSpace {
 /// `(workspace_id, cwd, bootstrap)`.
 ///
 /// - [`SpaceKind::Workspace`]: `space_ref` is an existing workspace id or a
-///   case-insensitive label; cwd comes from the workspace's pane snapshot.
+///   case-insensitive label; an explicit `space_cwd` wins, otherwise every
+///   live pane cwd in the workspace must agree.
 /// - [`SpaceKind::NewWorkspace`]: reuse an open workspace whose label matches
 ///   `space_ref`, else `workspace.create {label, cwd}`; in either case cwd is
 ///   verified from the resulting workspace's live pane snapshot. A freshly
@@ -45,7 +47,10 @@ pub(crate) fn resolve_space(
             let ws_ref =
                 space_ref.ok_or_else(|| anyhow::anyhow!("workspace space requires a space_ref"))?;
             let id = resolve_workspace_ref(&workspaces, ws_ref).map_err(|m| anyhow::anyhow!(m))?;
-            let cwd = workspace_cwd(client, &id)?;
+            let cwd = match space_cwd.filter(|cwd| !cwd.trim().is_empty()) {
+                Some(cwd) => cwd.to_owned(),
+                None => workspace_cwd(client, &id)?,
+            };
             Ok(ResolvedSpace {
                 workspace_id: id,
                 cwd,
@@ -65,7 +70,17 @@ pub(crate) fn resolve_space(
                 // workspace cwd, so the card's original create cwd is not a
                 // safe fallback here.
                 Some(id) => {
-                    let live = workspace_cwd(client, &id)?;
+                    let live = workspace_cwd(client, &id).map_err(|error| {
+                        // A reused `new_workspace` card deliberately does NOT
+                        // apply its `space_cwd` to the live workspace, so the
+                        // generic "set an explicit space_cwd" advice would be
+                        // unusable here — point at the real remedy instead.
+                        anyhow::anyhow!(
+                            "reused new_workspace workspace '{id}' has no usable cwd from its live \
+                             panes ({error:#}); make the live pane cwds consistent — a reused \
+                             new_workspace card's space_cwd is deliberately not applied"
+                        )
+                    })?;
                     Ok(ResolvedSpace {
                         workspace_id: id,
                         cwd: live,
@@ -98,12 +113,11 @@ pub(crate) fn resolve_space(
     }
 }
 
-/// Look up a workspace's cwd via one of its live panes in the session snapshot.
+/// Resolve a workspace cwd from its live panes in the session snapshot.
 ///
 /// The supported Herdr placement contract is pane-first and never inherits a
-/// workspace cwd, so failure to read this value must stop dispatch rather than
-/// launch from an
-/// implicit daemon/Herdr fallback directory.
+/// workspace cwd. Multiple panes may agree on one cwd, but distinct candidates
+/// are ambiguous and must stop dispatch rather than depend on snapshot order.
 pub(crate) fn workspace_cwd(
     client: &mut HerdrClient,
     workspace_id: &str,
@@ -118,14 +132,35 @@ pub(crate) fn workspace_cwd(
             "session snapshot unavailable while reading cwd for workspace '{workspace_id}': {cause}"
         ))
     })?;
-    snapshot
+    let panes: Vec<_> = snapshot
         .panes
         .iter()
-        .find(|pane| pane.workspace_id == workspace_id)
-        .and_then(|pane| pane.cwd.as_deref())
-        .filter(|cwd| !cwd.trim().is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| anyhow::anyhow!("workspace '{workspace_id}' has no live pane cwd"))
+        .filter(|pane| pane.workspace_id == workspace_id)
+        .filter_map(|pane| {
+            pane.cwd
+                .as_deref()
+                .filter(|cwd| !cwd.trim().is_empty())
+                .map(|cwd| (pane.pane_id.as_str(), cwd))
+        })
+        .collect();
+    if panes.is_empty() {
+        anyhow::bail!("workspace '{workspace_id}' has no live pane cwd");
+    }
+
+    let distinct: BTreeSet<_> = panes.iter().map(|(_, cwd)| *cwd).collect();
+    if distinct.len() == 1 {
+        return Ok((*distinct.first().expect("one distinct cwd")).to_owned());
+    }
+
+    let mut candidates: Vec<_> = panes
+        .iter()
+        .map(|(pane_id, cwd)| format!("{pane_id}={cwd}"))
+        .collect();
+    candidates.sort();
+    anyhow::bail!(
+        "workspace '{workspace_id}' has multiple live pane cwd candidates: {}; set an explicit space_cwd for the card",
+        candidates.join(", ")
+    )
 }
 
 /// Resolve a `workspace` space_ref (id, else case-insensitive label) to a

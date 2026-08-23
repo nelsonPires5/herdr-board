@@ -200,6 +200,13 @@ fn cross_board_move_prefers_destination_board_and_deprecates_the_selector() {
             ..Default::default()
         })
         .unwrap();
+    let same_board = client
+        .card_create(&CardCreateParams {
+            board_id: Some(beta.id),
+            title: "same-board selector".into(),
+            ..Default::default()
+        })
+        .unwrap();
 
     let out = td.board(&[
         "move",
@@ -221,6 +228,21 @@ fn cross_board_move_prefers_destination_board_and_deprecates_the_selector() {
         "--board",
         &beta.id.to_string(),
         "move",
+        &same_board.id.to_string(),
+        "Done",
+        "--json",
+    ]);
+    let moved = json_output(&out);
+    assert_eq!(moved["column_id"], beta_done.id);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).is_empty(),
+        "the global selector must stay quiet when the card is already on that board"
+    );
+
+    let out = td.board(&[
+        "--board",
+        &beta.id.to_string(),
+        "move",
         &fallback.id.to_string(),
         "Done",
         "--json",
@@ -231,5 +253,55 @@ fn cross_board_move_prefers_destination_board_and_deprecates_the_selector() {
     assert!(
         warning.contains("deprecated") && warning.contains("--destination-board"),
         "the fallback must warn: {warning}"
+    );
+}
+
+/// The global `--project` fallback warns only when the move actually leaves
+/// the project; a same-project move stays quiet.
+#[test]
+fn same_project_move_via_global_project_selector_stays_quiet() {
+    let td = TestDaemon::start(&[]);
+    let proj_path = td._dir.path().join("proj-move");
+    std::fs::create_dir_all(&proj_path).unwrap();
+    let proj = proj_path.canonicalize().unwrap();
+
+    td.board(&["project", "create", proj.to_str().unwrap(), "--json"]);
+
+    let mut client = td.client();
+    let board = client
+        .project_get(proj.to_str().unwrap())
+        .unwrap()
+        .boards
+        .into_iter()
+        .find(|board| board.name == "main")
+        .unwrap();
+    let done = client
+        .column_create(&ColumnCreateParams {
+            board_id: Some(board.id),
+            name: "Done".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let card = client
+        .card_create(&CardCreateParams {
+            board_id: Some(board.id),
+            title: "same-project selector".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let out = td.board(&[
+        "--project",
+        proj.to_str().unwrap(),
+        "move",
+        &card.id.to_string(),
+        "Done",
+        "--json",
+    ]);
+    let moved = json_output(&out);
+    assert_eq!(moved["column_id"], done.id);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).is_empty(),
+        "the global --project selector must stay quiet when the card is already in that project"
     );
 }

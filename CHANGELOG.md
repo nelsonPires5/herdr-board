@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-08-23
+
+### Fixed
+
+- [#74](https://github.com/nelsonPires5/herdr-board/pull/74) fix: E2E scenario 31 no longer stalls on hosts where a real Codex is installed (thanks to @v9yrbcgkyt-spec).
+- [#79](https://github.com/nelsonPires5/herdr-board/pull/79) fix: Restrict the daemon socket to owner-only mode and fail startup when securing fails (thanks to @v9yrbcgkyt-spec).
+- [#77](https://github.com/nelsonPires5/herdr-board/pull/77) fix: Clarify run completion errors for unknown cards, idle manual cards, and queued runs missing run ids (thanks to @v9yrbcgkyt-spec).
+- [#76](https://github.com/nelsonPires5/herdr-board/pull/76) fix: Workspace dispatch honors an explicit card cwd or fails closed on conflicting pane directories (thanks to @v9yrbcgkyt-spec).
+- [#75](https://github.com/nelsonPires5/herdr-board/pull/75) fix: Reconnect an open TUI to a restarted board daemon and refetch changes missed during the outage (thanks to @v9yrbcgkyt-spec).
+- [#78](https://github.com/nelsonPires5/herdr-board/pull/78) fix: Card moves via a global selector warn only when they cross boards or projects (thanks to @v9yrbcgkyt-spec).
+
 ## [0.16.0] - 2026-08-22
 
 ### Added
@@ -53,6 +64,7 @@ All notable changes to this project are documented here. The format is based on
 ### Fixed
 
 - [#81](https://github.com/nelsonPires5/herdr-board/pull/81) fix: `f` types normally in form text fields; the popup/fullscreen toggle now works only on picker fields.
+- [#76](https://github.com/nelsonPires5/herdr-board/pull/76) fix: Make workspace dispatch use an explicit cwd or fail on conflicting live pane directories, and correct Codex permission presets.
 
 ## [0.13.0] - 2026-08-10
 
@@ -410,7 +422,8 @@ a visible herdr pane. Ships as a single `board` binary (TUI + daemon + CLI) and 
 - **Packaging.** `herdr-plugin.toml` manifest, and `scripts/` for build, install (guarded behind
   `--yes`), the open-or-focus launcher, a raw protocol client, and a live-herdr e2e smoke test.
 
-[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.16.1...HEAD
+[0.16.1]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.16.1
 [0.16.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.16.0
 [0.15.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.15.0
 [0.14.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.14.0
