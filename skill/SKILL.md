@@ -136,8 +136,9 @@ focused card from the board or card detail.
 effort uses the harness default. `--harness codex` selects the built-in Codex adapter: models are
 free-form (`--model` any string), every effort level is accepted (`off|minimal|low|medium|high|xhigh|max`;
 `off` is delivered to codex as `model_reasoning_effort=none`), and `--permission` takes
-`untrusted|on-request|never` (codex's `--ask-for-approval`; its `--sandbox` stays your own codex
-config and is never derived from the permission field). Codex mints its own conversation thread id —
+`ask-for-approval|approve-for-me|full-access`. These are board-facing presets: ask on request in a
+workspace-write sandbox, automatic review in a workspace-write sandbox, or bypass approvals and
+sandbox respectively. Codex mints its own conversation thread id —
 the board never invents one — and captures the integration-reported id after launch, so later stages
 can `resume`/`fork` the same conversation; a minted run whose id was never reported cannot be
 reopened by id (`card run focus` refuses; use `card run retry` for a new run).
@@ -148,7 +149,9 @@ takes `sandbox|always-proceed` (no permission set keeps your own configured defa
 re-attach to the SAME conversation with `--conversation <id>` — antigravity has no fork. The id is
 self-minted by the CLI and captured from the Herdr integration after launch, so it must be installed
 (`herdr integration install antigravity-cli`) for reuse/rescue to work.
-`new-workspace` requires both `--space-ref` and `--space-cwd`.
+`new-workspace` requires both `--space-ref` and `--space-cwd`. For an existing `workspace`, set
+`--space-cwd` when its live panes intentionally use different directories; without it, dispatch
+requires all non-empty live pane cwd values to agree and fails closed when they differ.
 Creating directly in an `auto` column dispatches immediately. `card list` defaults to active cards;
 `all` includes archived cards and `archived` returns only archived cards. `card show` includes current
 comments and run history; soft-deleted comments are omitted.
