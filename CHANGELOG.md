@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- [#74](https://github.com/nelsonPires5/herdr-board/pull/74) fix: E2E scenario 31 no longer stalls on hosts where a real Codex is installed (thanks to @v9yrbcgkyt-spec).
+
 ## [0.16.0] - 2026-08-22
 
 ### Added
