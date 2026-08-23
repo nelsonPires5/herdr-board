@@ -165,6 +165,14 @@ impl Client {
     /// The `id` of the next response line, or a clear failure if the server
     /// never answered within the socket read timeout.
     fn response_id(&mut self, what: &str) -> String {
+        let line = self.next_line(what);
+        let value: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        value["id"].as_str().unwrap().to_string()
+    }
+
+    /// The next raw line from the server, or a clear failure if the server
+    /// never answered within the socket read timeout.
+    fn next_line(&mut self, what: &str) -> String {
         use std::io::BufRead;
         let mut line = String::new();
         match self.reader.read_line(&mut line) {
@@ -172,9 +180,44 @@ impl Client {
             Ok(_) => {}
             Err(e) => panic!("timed out waiting for {what}: {e}"),
         }
-        let value: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
-        value["id"].as_str().unwrap().to_string()
+        line
     }
+}
+
+#[test]
+fn subscribe_ack_arrives_only_after_the_event_receiver_is_registered() {
+    // Ordering anchor for `subscribe_ack_after_receiver_registration`: the ack
+    // must not exist before the event receiver is active, because the client
+    // refetches the full snapshot the moment it sees the ack and would
+    // otherwise miss mutations between that refetch and receiver activation.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let d = test_daemon();
+    let (_dir, socket) = serve_on_tempdir(&rt, d.clone());
+    let mut client = Client::connect(&socket);
+
+    client.send("sub", "events.subscribe");
+    let ack_line = client.next_line("subscribe ack");
+    assert!(
+        ack_line.contains("\"subscribed\":true"),
+        "ack must carry subscribed=true: {ack_line}"
+    );
+    assert!(
+        d.events_tx.receiver_count() >= 1,
+        "the event receiver must be registered by the time the ack is delivered"
+    );
+
+    // A mutation after the ack must be delivered on this subscription — the
+    // end-to-end property the ordering exists to guarantee.
+    d.events_tx.send(changed(7)).unwrap();
+    let event_line = client.next_line("event after ack");
+    assert!(
+        event_line.contains("\"card_id\":7"),
+        "a post-ack mutation must be delivered: {event_line}"
+    );
 }
 
 /// Pipelined requests answer in request order even though every handler now

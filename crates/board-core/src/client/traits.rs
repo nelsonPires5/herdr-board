@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+use std::path::PathBuf;
 
 use crate::capability::HarnessCapabilities;
 
@@ -29,6 +30,15 @@ pub trait BoardClient {
 
     /// Open an event subscription (usually a dedicated connection).
     fn subscribe(&mut self) -> anyhow::Result<Box<dyn Iterator<Item = Event> + Send>>;
+
+    /// Reconnect hint for clients backed by a restartable local transport.
+    ///
+    /// The TUI uses this to reopen both its event subscription and its request
+    /// connection after boardd is replaced. In-memory and embedded clients
+    /// return `None` and retain the existing action-driven refresh fallback.
+    fn reconnect_path(&self) -> Option<PathBuf> {
+        None
+    }
 
     // -- typed wrappers ------------------------------------------------------
 

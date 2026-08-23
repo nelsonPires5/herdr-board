@@ -12,6 +12,7 @@ All notable changes to this project are documented here. The format is based on
 - [#79](https://github.com/nelsonPires5/herdr-board/pull/79) fix: Restrict the daemon socket to owner-only mode and fail startup when securing fails (thanks to @v9yrbcgkyt-spec).
 - [#77](https://github.com/nelsonPires5/herdr-board/pull/77) fix: Clarify run completion errors for unknown cards, idle manual cards, and queued runs missing run ids (thanks to @v9yrbcgkyt-spec).
 - [#76](https://github.com/nelsonPires5/herdr-board/pull/76) fix: Workspace dispatch honors an explicit card cwd or fails closed on conflicting pane directories (thanks to @v9yrbcgkyt-spec).
+- [#75](https://github.com/nelsonPires5/herdr-board/pull/75) fix: Reconnect an open TUI to a restarted board daemon and refetch changes missed during the outage (thanks to @v9yrbcgkyt-spec).
 
 ## [0.16.0] - 2026-08-22
 
