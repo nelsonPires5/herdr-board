@@ -1,14 +1,17 @@
 use anyhow::{anyhow, bail, Result};
 use board_core::client::BoardClient;
 use board_core::protocol::{
-    BoardSnapshot, CardCreateParams, CardMoveParams, CardUpdateParams, Patch,
+    BoardSnapshot, CardAdoptParams, CardCreateParams, CardMoveParams, CardUpdateParams, Patch,
 };
 
 use crate::args::CardCmd;
 use crate::commands::board::resolve_board_in_list;
 use crate::commands::run::{cmd_card_comment, cmd_card_run};
 use crate::context::Ctx;
-use crate::helpers::{confirm_action, parse_effort, parse_space_kind, parse_visibility};
+use crate::helpers::{
+    confirm_action, origin_socket as resolve_origin_socket, parse_effort, parse_space_kind,
+    parse_visibility,
+};
 use crate::render::{emit, emit_line};
 use crate::scope::{resolve_column_in, resolved_scope_path};
 
@@ -26,6 +29,37 @@ pub(crate) fn cmd_card(sub: CardCmd, ctx: &mut Ctx) -> Result<()> {
 
     let json = ctx.json();
     match sub {
+        CardCmd::Adopt {
+            title,
+            description,
+            column,
+            pane,
+            origin_socket,
+            session,
+        } => {
+            let column_id = ctx.optional_column_id(column.as_deref())?;
+            let params = CardAdoptParams {
+                title,
+                board_id: Some(ctx.board_id()?),
+                description,
+                column_id,
+                pane_id: pane,
+                origin_socket: resolve_origin_socket(origin_socket)?,
+                session,
+                position: None,
+            };
+            let adopted = ctx.client()?.card_adopt(&params)?;
+            emit_line(
+                &adopted,
+                json,
+                format!(
+                    "Linked pane {} as card #{} \"{}\"",
+                    adopted.run.herdr_pane_id.as_deref().unwrap_or("unknown"),
+                    adopted.card.id,
+                    adopted.card.title
+                ),
+            )
+        }
         CardCmd::Create {
             title,
             description,

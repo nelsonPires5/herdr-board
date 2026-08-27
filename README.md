@@ -187,6 +187,16 @@ board card create --title "Add retry to the uploader" \
 board move <new-card-id> Execute
 ```
 
+To show an agent that is already running in Herdr, link its exact pane:
+
+```bash
+board --board 1 card adopt --title "existing-agent" --pane w7:p1
+```
+
+Run this inside Herdr, or pass `--origin-socket`. The board watches the linked
+agent but does not own it. Cancel, timeout, or pane recovery never stops or
+restarts the external agent.
+
 ### Everyday controls
 
 | Key | Action | Key | Action |
@@ -301,7 +311,7 @@ The exit status carries the same number, so scripts branch on `$?` instead of pa
 
 - [`docs/README.md`](docs/README.md) — the documentation index (design, protocol, herdr facts,
   testing, releasing), the single source of the
-  [test gates](docs/README.md#test-gates-single-source), and the `e2e/` catalog (scenarios 01–39);
+  [test gates](docs/README.md#test-gates-single-source), and the `e2e/` catalog (scenarios 01–40);
 - [`docs/configuration.md`](docs/configuration.md) — `config.toml`, `[daemon]` settings,
   config-defined harnesses, and every environment variable;
 - [`docs/operations.md`](docs/operations.md) — update, uninstall, and local-development

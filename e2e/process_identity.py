@@ -127,10 +127,13 @@ def _parse_linux_cmdline(raw: bytes) -> list[str]:
 
 def _linux_snapshot(pid: int) -> Snapshot:
     try:
-        raw_stat = open(f"/proc/{pid}/stat", encoding="utf-8").read()
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as stat_file:
+            raw_stat = stat_file.read()
         fields = raw_stat[raw_stat.rfind(")") + 2 :].split()
-        cmdline = _parse_linux_cmdline(open(f"/proc/{pid}/cmdline", "rb").read())
-        environ = frozenset(open(f"/proc/{pid}/environ", "rb").read().split(b"\0"))
+        with open(f"/proc/{pid}/cmdline", "rb") as cmdline_file:
+            cmdline = _parse_linux_cmdline(cmdline_file.read())
+        with open(f"/proc/{pid}/environ", "rb") as environ_file:
+            environ = frozenset(environ_file.read().split(b"\0"))
         exe = os.readlink(f"/proc/{pid}/exe")
         return Snapshot(
             str(pid), fields[19], fields[1], fields[0], exe, cmdline, environ

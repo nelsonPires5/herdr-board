@@ -5,6 +5,41 @@
 # interactive tty until Herdr's agent.prompt delivers the card task on stdin.
 set -euo pipefail
 
+if [ "${FAKE_PI_EXTERNAL:-0}" = "1" ]; then
+  : "${HERDR_PANE_ID:?HERDR_PANE_ID required}"
+  : "${HERDR_SOCKET_PATH:?HERDR_SOCKET_PATH required}"
+  session_path="$(dirname "$HERDR_SOCKET_PATH")/external-pi-$$.jsonl"
+  printf '{"type":"session","id":"external-%s"}\n' "$$" >"$session_path"
+  chmod 600 "$session_path"
+  printf '\033]0;π - external\007\n /help\n\n──────────────────────────────────────────────────────\n%s\n' "$PWD"
+  python3 - "$HERDR_SOCKET_PATH" "$HERDR_PANE_ID" "$session_path" <<'PY'
+import json, os, socket, sys, time
+socket_path, pane_id, session_path = sys.argv[1:]
+request = {
+    "id": f"external-pi:{os.getpid()}",
+    "method": "pane.report_agent",
+    "params": {
+        "pane_id": pane_id,
+        "source": "herdr:pi",
+        "agent": "pi",
+        "agent_session_path": session_path,
+        "session_start_source": "startup",
+        "state": "idle",
+        "seq": time.time_ns(),
+    },
+}
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+    client.settimeout(2)
+    client.connect(socket_path)
+    client.sendall((json.dumps(request, separators=(",", ":")) + "\n").encode())
+    reply = client.recv(65536)
+if b'"error"' in reply or b'"result"' not in reply:
+    raise SystemExit(f"external Pi report failed: {reply!r}")
+PY
+  sleep "${FAKE_PI_SLEEP:-300}"
+  exit 0
+fi
+
 : "${BOARD_CARD_ID:?BOARD_CARD_ID required}"
 : "${BOARD_SOCKET:?BOARD_SOCKET required}"
 : "${HERDR_SOCKET_PATH:?HERDR_SOCKET_PATH required}"

@@ -1,5 +1,6 @@
 use super::*;
 use crate::dispatch::{antigravity_validation_config, prepare_enqueue_values};
+use board_core::db::EnqueueRun;
 use board_core::db::{Db, BOARD_ID};
 use board_core::engine::{
     decide_entry, merge_card_update, validate_card_archive, validate_card_edit,
@@ -7,7 +8,9 @@ use board_core::engine::{
 };
 use board_core::harness::DEFAULT_HARNESS;
 use board_core::labels::card_labels;
+use board_core::launch::{ExecutionSpec, RunLaunchSpec};
 use board_core::model::Card;
+use std::path::Path;
 
 /// Stamp the daemon-owned display labels onto a card (ready strings; the
 /// clients render them verbatim). The session label resolves an unset session
@@ -140,6 +143,105 @@ pub(super) fn card_create(d: &Arc<Daemon>, p: CardCreateParams) -> Result<Value>
     }
     stamp_card_labels(d, &mut card);
     Ok(json!(card))
+}
+
+pub(super) fn card_adopt(d: &Arc<Daemon>, p: CardAdoptParams) -> Result<Value> {
+    let pane_id = p.pane_id.trim();
+    if pane_id.is_empty() {
+        return Err(Error::BadRequest("pane_id must not be empty".into()));
+    }
+    let socket = crate::herdr_conn::normalize_socket(Path::new(&p.origin_socket), "origin")?;
+    let mut herdr = crate::herdr_conn::connect_checked(&socket)
+        .map_err(|error| Error::HerdrUnavailable(format!("connecting to Herdr: {error}")))?;
+    let agent = herdr
+        .agent_get(pane_id)
+        .map_err(|error| Error::HerdrUnavailable(format!("agent.get {pane_id}: {error}")))?;
+    if agent.pane_id != pane_id || agent.workspace_id.trim().is_empty() {
+        return Err(Error::InvalidState(
+            "Herdr returned an incomplete or different agent identity".into(),
+        ));
+    }
+    let agent_kind = agent
+        .agent
+        .as_deref()
+        .ok_or_else(|| Error::InvalidState(format!("pane {pane_id} has no agent")))?;
+    let harness = match agent_kind {
+        "pi" | "claude" | "codex" | "opencode" => agent_kind,
+        "agy" | "antigravity" => "antigravity",
+        other => {
+            return Err(Error::BadRequest(format!(
+                "unsupported Herdr agent kind: {other}"
+            )))
+        }
+    };
+    let session_id = agent.agent_session.as_ref().and_then(|reported| {
+        (reported.kind == "id" && reported.agent == agent_kind && !reported.value.trim().is_empty())
+            .then(|| reported.value.clone())
+    });
+    let session = p
+        .session
+        .or_else(|| board_core::paths::session_name_from_socket(socket.to_str()));
+    let launch_spec = serde_json::to_string(&RunLaunchSpec::external_v2(ExecutionSpec {
+        argv: Vec::new(),
+        env: Vec::new(),
+        agent_kind: Some(agent_kind.to_string()),
+        initial_prompt: None,
+        system_prompt: None,
+    }))
+    .map_err(|error| Error::InvalidState(format!("serializing external run: {error}")))?;
+    let create = CardCreateParams {
+        title: p.title,
+        board_id: p.board_id,
+        description: p.description,
+        column_id: p.column_id,
+        harness: Some(harness.to_string()),
+        session,
+        space_kind: Some(SpaceKind::Workspace),
+        space_ref: Some(agent.workspace_id.clone()),
+        position: p.position,
+        ..Default::default()
+    };
+
+    let (mut card, run) = {
+        let mut sched = d.sched.lock().unwrap();
+        let db = d.store.lock();
+        if db.active_runs_with_cards()?.iter().any(|(run, _)| {
+            run.herdr_pane_id.as_deref() == Some(pane_id) && run.session == create.session
+        }) {
+            return Err(Error::InvalidState(format!(
+                "pane {pane_id} is already linked to an open run"
+            )));
+        }
+        let column_id = create
+            .column_id
+            .unwrap_or(db.default_column_id(create.board_id.unwrap_or(BOARD_ID))?);
+        let adopted = db.create_card_and_adopt_uow(
+            &create,
+            &EnqueueRun {
+                card_id: 0,
+                column_id,
+                harness,
+                argv_json: "[]",
+                prompt_snapshot: create.description.as_deref().unwrap_or_default(),
+                system_prompt_snapshot: None,
+                launch_spec_json: Some(&launch_spec),
+                session_id: session_id.as_deref(),
+                session: create.session.as_deref(),
+            },
+            &agent.workspace_id,
+            pane_id,
+        )?;
+        sched.chain_hops.remove(&adopted.0.id);
+        adopted
+    };
+    crate::supervisor::adopt_external_run(d, run.clone(), card.clone(), socket, agent.agent_status);
+    d.emit_changed(
+        BoardChangedReason::CardCreated,
+        Some(card.id),
+        Some(card.column_id),
+    );
+    stamp_card_labels(d, &mut card);
+    Ok(json!(CardAdoptResult { card, run }))
 }
 
 /// `card.duplicate`: copy `id` into a fresh idle card directly below it.

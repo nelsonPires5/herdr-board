@@ -7,6 +7,21 @@ use super::{ConfirmArgs, RunCmd};
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum CardCmd {
+    /// Link an already-running Herdr agent without moving or restarting it.
+    Adopt {
+        #[arg(long)]
+        title: String,
+        #[arg(long, short = 'd')]
+        description: Option<String>,
+        #[arg(long)]
+        column: Option<String>,
+        #[arg(long)]
+        pane: String,
+        #[arg(long)]
+        origin_socket: Option<String>,
+        #[arg(long)]
+        session: Option<String>,
+    },
     /// Create a card (`new` is retained as an alias).
     #[command(alias = "new")]
     Create {

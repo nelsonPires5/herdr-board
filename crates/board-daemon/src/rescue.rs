@@ -100,6 +100,13 @@ pub(crate) fn focus_run(d: &Arc<Daemon>, p: RunFocusParams) -> Result<Value> {
         }));
     }
 
+    if run.is_external() {
+        return Err(Error::InvalidState(
+            "linked external agent pane is no longer available; the board will not restart it"
+                .into(),
+        ));
+    }
+
     // Dead-end #2 (and #1): there is no live pane for this run. Rescue it by
     // resuming its harness conversation in a brand-new, ephemeral pane. Nothing
     // is written to the database — see `rescue_run`.

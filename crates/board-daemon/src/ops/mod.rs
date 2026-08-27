@@ -95,6 +95,7 @@ routes!(d, params, {
     "column.delete" => columns::column_delete(d, from(params)?),
     "template.apply" => boards::template_apply(d, from(params)?),
     "card.create" => cards::card_create(d, from(params)?),
+    "card.adopt" => cards::card_adopt(d, from(params)?),
     "card.duplicate" => cards::card_duplicate(d, from(params)?),
     "card.update" => cards::card_update(d, from(params)?),
     "card.delete" => cards::card_delete(d, from(params)?),

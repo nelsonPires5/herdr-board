@@ -687,6 +687,31 @@ pub struct CardCreateParams {
     pub position: Option<i64>,
 }
 
+/// `card.adopt` params. Links a live Herdr agent without taking ownership of
+/// its pane or process.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CardAdoptParams {
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column_id: Option<i64>,
+    pub pane_id: String,
+    pub origin_socket: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CardAdoptResult {
+    pub card: crate::model::Card,
+    pub run: crate::model::Run,
+}
+
 /// `card.update` params — any subset; `id` required.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CardUpdateParams {

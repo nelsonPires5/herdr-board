@@ -31,7 +31,7 @@ projects (canonical-path identity, Global as the special project), per-project n
 persistent selection, and capped recency on top of v13's soft-deleted comments and immutable
 comment-history snapshots; the CLI exposes the project/board subcommands while boardd remains the
 sole SQLite writer. The complete live use-case catalog
-is [`../e2e/README.md`](../e2e/README.md), scenarios **01–39** (through `e2e/39-managed-slow-provider.sh`); the safe
+is [`../e2e/README.md`](../e2e/README.md), scenarios **01–40** (through `e2e/40-adopt-existing-agent.sh`); the safe
 static harness is `e2e/test-harness.sh`, while `e2e/run-all.sh` is the opt-in live gate.
 
 The current Herdr boundary is deliberately narrower than the upstream schema. The 0.8.2/protocol-20

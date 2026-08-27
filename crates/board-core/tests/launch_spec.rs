@@ -24,9 +24,19 @@ fn v1_launch_spec_has_explicit_tag_and_roundtrips_exactly() {
 }
 
 #[test]
+fn external_v2_launch_spec_roundtrips_and_keeps_ownership_marker() {
+    let spec = RunLaunchSpec::external_v2(execution());
+    let encoded = serde_json::to_value(&spec).unwrap();
+    assert_eq!(encoded["version"], json!(2));
+    let decoded = serde_json::from_value::<RunLaunchSpec>(encoded).unwrap();
+    assert!(decoded.is_external());
+    assert_eq!(decoded.execution(), &execution());
+}
+
+#[test]
 fn unsupported_launch_spec_version_is_rejected() {
     let error = serde_json::from_value::<RunLaunchSpec>(json!({
-        "version": 2,
+        "version": 3,
         "execution": {
             "argv": [], "env": [], "agent_kind": null,
             "initial_prompt": null, "system_prompt": null

@@ -212,7 +212,7 @@ fn finalize_run_inner(
 
     // Post-commit effects are deliberately ordered and contain no DB writes.
     d.refresh_watch();
-    if kill {
+    if kill && !effects.finished_run.is_external() {
         if let Some(active) = &removed {
             if d.spawner.kill(&active.handle).is_err() {
                 tracing::warn!(run_id, error_category = "runtime", "kill run failed");

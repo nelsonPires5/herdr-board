@@ -1748,6 +1748,9 @@ e2e_ws_create() {
     if [ -n "${FAKE_PI_SLEEP:-}" ]; then
       extra_env+=(--env "FAKE_PI_SLEEP=$FAKE_PI_SLEEP")
     fi
+    if [ "${FAKE_PI_EXTERNAL:-0}" = "1" ]; then
+      extra_env+=(--env "FAKE_PI_EXTERNAL=1")
+    fi
     if [ -n "${FAKE_PI_SLOW_PROVIDER:-}" ]; then
       extra_env+=(--env "FAKE_PI_SLOW_PROVIDER=$FAKE_PI_SLOW_PROVIDER")
     fi
