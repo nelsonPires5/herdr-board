@@ -23,12 +23,26 @@ pub struct RunLaunchSpec {
 
 impl RunLaunchSpec {
     pub const VERSION: u32 = 1;
+    pub const EXTERNAL_VERSION: u32 = 2;
 
     pub fn v1(execution: ExecutionSpec) -> Self {
         Self {
             version: Self::VERSION,
             execution,
         }
+    }
+
+    /// A live process observed and linked by the board, but not started or
+    /// owned by it. External runs are watched, never killed or rescued.
+    pub fn external_v2(execution: ExecutionSpec) -> Self {
+        Self {
+            version: Self::EXTERNAL_VERSION,
+            execution,
+        }
+    }
+
+    pub fn is_external(&self) -> bool {
+        self.version == Self::EXTERNAL_VERSION
     }
 
     pub fn execution(&self) -> &ExecutionSpec {
@@ -48,12 +62,15 @@ impl<'de> Deserialize<'de> for RunLaunchSpec {
         }
 
         let spec = DurableSpec::deserialize(deserializer)?;
-        if spec.version != Self::VERSION {
+        if !matches!(spec.version, Self::VERSION | Self::EXTERNAL_VERSION) {
             return Err(serde::de::Error::custom(format!(
                 "unsupported launch spec version {}",
                 spec.version
             )));
         }
-        Ok(Self::v1(spec.execution))
+        Ok(Self {
+            version: spec.version,
+            execution: spec.execution,
+        })
     }
 }

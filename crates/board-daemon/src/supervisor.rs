@@ -316,11 +316,29 @@ fn adopt_alive(
         AgentStatus::Done => Some(AgentSignal::Done),
         AgentStatus::Blocked => Some(AgentSignal::Blocked),
         AgentStatus::Working => Some(AgentSignal::Working),
+        AgentStatus::Idle if run.is_external() => Some(AgentSignal::IdleExpired),
         _ => None,
     };
     if let Some(signal) = signal {
         crate::watchers::apply_signal(d, run.id, card.id, signal);
     }
+}
+
+pub(crate) fn adopt_external_run(
+    d: &Arc<Daemon>,
+    run: Run,
+    card: Card,
+    socket: PathBuf,
+    status: AgentStatus,
+) {
+    adopt_alive(
+        d,
+        run,
+        card,
+        SessionTarget::Resolved(socket),
+        status,
+        &SystemClock,
+    );
 }
 
 #[cfg(test)]

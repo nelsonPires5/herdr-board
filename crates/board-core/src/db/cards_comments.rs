@@ -226,6 +226,86 @@ impl Db {
         Ok((self.require_card(card_id)?, self.get_run(run_id)?))
     }
 
+    /// Create a card and link an already-running external pane in one commit.
+    /// The caller must verify the live Herdr identity before entering this UoW.
+    pub fn create_card_and_adopt_uow(
+        &self,
+        p: &CardCreateParams,
+        run: &EnqueueRun<'_>,
+        workspace_id: &str,
+        pane_id: &str,
+    ) -> Result<(Card, crate::model::Run)> {
+        let board_id = p.board_id.unwrap_or(BOARD_ID);
+        self.get_board(board_id)?;
+        let column_id = p.column_id.unwrap_or(self.default_column_id(board_id)?);
+        let column = self.require_column(column_id)?;
+        if column.board_id != board_id || run.column_id != column_id {
+            return Err(Error::InvalidState(
+                "adopted run column does not match new card board".into(),
+            ));
+        }
+
+        let end: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(position)+1, 0) FROM cards WHERE column_id=?1",
+            params![column_id],
+            |row| row.get(0),
+        )?;
+        let description = p.description.clone().unwrap_or_default();
+        let harness = p
+            .harness
+            .clone()
+            .unwrap_or_else(|| crate::harness::DEFAULT_HARNESS.to_string());
+        let space_kind = p.space_kind.unwrap_or(SpaceKind::Workspace).as_str();
+        let effort = p.effort.map(|value| value.as_str());
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO cards
+             (board_id,column_id,position,title,description,harness,model,effort,permission_mode,
+              session,space_kind,space_ref,space_cwd,status,session_id)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'idle',?14)",
+            params![
+                board_id,
+                column_id,
+                end,
+                p.title,
+                description,
+                harness,
+                p.model,
+                effort,
+                p.permission_mode,
+                p.session,
+                space_kind,
+                p.space_ref,
+                p.space_cwd,
+                run.session_id,
+            ],
+        )?;
+        let card_id = tx.last_insert_rowid();
+        if p.position.is_some() {
+            Self::place_card_in_column_tx(&tx, card_id, column_id, p.position)?;
+        }
+        let run_id = self.enqueue_run_tx(&tx, card_id, run)?;
+        tx.execute(
+            "UPDATE runs SET started_at=datetime('now'),herdr_workspace_id=?1,herdr_pane_id=?2
+             WHERE id=?3 AND started_at IS NULL AND ended_at IS NULL",
+            params![workspace_id, pane_id, run_id],
+        )?;
+        tx.execute(
+            "UPDATE cards SET status='running',awaiting_reason=NULL,updated_at=datetime('now')
+             WHERE id=?1",
+            params![card_id],
+        )?;
+        tx.execute(
+            "INSERT INTO comments(card_id,author,body) VALUES (?1,'system',?2)",
+            params![
+                card_id,
+                format!("Linked existing Herdr agent in pane {pane_id}")
+            ],
+        )?;
+        tx.commit()?;
+        Ok((self.require_card(card_id)?, self.get_run(run_id)?))
+    }
+
     /// Duplicate `id` into a fresh idle card inserted immediately below it.
     ///
     /// The copy inherits the full run configuration (title with a ` (copy)`

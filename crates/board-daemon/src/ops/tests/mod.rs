@@ -717,6 +717,7 @@ fn fake_rescue_herdr(faults: RescueFakeFaults) -> RescueFake {
     }
 }
 
+mod adoption;
 mod boards;
 mod cards;
 mod comments;

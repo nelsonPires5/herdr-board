@@ -7,17 +7,17 @@ use crate::model::{Card, Column, Comment, CommentHistory, CommentRecord};
 
 use crate::protocol::{
     BoardArchiveParams, BoardCreateParams, BoardGetParams, BoardListParams, BoardListResult,
-    BoardOpenParams, BoardRenameParams, BoardSelectParams, BoardSnapshot, CardArchiveParams,
-    CardCreateParams, CardDetail, CardListParams, CardMoveParams, CardUpdateParams, CardVisibility,
-    ColumnCreateParams, ColumnDeleteParams, ColumnReorderParams, ColumnUpdateParams,
-    CommentAddParams, CommentDeleteParams, CommentGetParams, CommentHistoryParams,
-    CommentUpdateParams, DaemonStatus, DeletedResult, Event, HarnessCapabilitiesParams,
-    HarnessListResult, PaneSetTitleParams, PaneSetTitleResult, ProjectArchiveParams,
-    ProjectCreateParams, ProjectDetail, ProjectGetParams, ProjectListParams, ProjectListResult,
-    ProjectOpenParams, ProjectOpenResult, ProjectSelectParams, ProjectSelectedResult,
-    RunActionResult, RunCardParams, RunDoneParams, RunFocusParams, RunFocusResult, RunOutcome,
-    RunPaneExitedParams, SessionListResult, SpaceListParams, SpaceListResult, StopResult,
-    TemplateApplyParams, Visibility,
+    BoardOpenParams, BoardRenameParams, BoardSelectParams, BoardSnapshot, CardAdoptParams,
+    CardAdoptResult, CardArchiveParams, CardCreateParams, CardDetail, CardListParams,
+    CardMoveParams, CardUpdateParams, CardVisibility, ColumnCreateParams, ColumnDeleteParams,
+    ColumnReorderParams, ColumnUpdateParams, CommentAddParams, CommentDeleteParams,
+    CommentGetParams, CommentHistoryParams, CommentUpdateParams, DaemonStatus, DeletedResult,
+    Event, HarnessCapabilitiesParams, HarnessListResult, PaneSetTitleParams, PaneSetTitleResult,
+    ProjectArchiveParams, ProjectCreateParams, ProjectDetail, ProjectGetParams, ProjectListParams,
+    ProjectListResult, ProjectOpenParams, ProjectOpenResult, ProjectSelectParams,
+    ProjectSelectedResult, RunActionResult, RunCardParams, RunDoneParams, RunFocusParams,
+    RunFocusResult, RunOutcome, RunPaneExitedParams, SessionListResult, SpaceListParams,
+    SpaceListResult, StopResult, TemplateApplyParams, Visibility,
 };
 
 /// Blocking client to boardd. Object-safe so the TUI can hold `Box<dyn BoardClient>`.
@@ -50,6 +50,12 @@ pub trait BoardClient {
     fn daemon_stop(&mut self) -> anyhow::Result<StopResult> {
         Ok(serde_json::from_value(
             self.call("daemon.stop", json!({}))?,
+        )?)
+    }
+
+    fn card_adopt(&mut self, params: &CardAdoptParams) -> anyhow::Result<CardAdoptResult> {
+        Ok(serde_json::from_value(
+            self.call("card.adopt", serde_json::to_value(params)?)?,
         )?)
     }
 

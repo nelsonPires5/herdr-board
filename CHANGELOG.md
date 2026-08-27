@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- [#115](https://github.com/nelsonPires5/herdr-board/pull/115) feat: Link already-running Herdr agents to board cards without transferring pane ownership.
+
 ## [0.16.1] - 2026-08-23
 
 ### Fixed

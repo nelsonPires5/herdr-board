@@ -87,7 +87,14 @@ class PortableProcessIdentityTests(unittest.TestCase):
             [sys.executable, "-c", "import time; time.sleep(30)", "odd value", ""]
         )
         try:
-            current = identity.snapshot(child.pid)
+            current = None
+            for _ in range(50):
+                try:
+                    current = identity.snapshot(child.pid)
+                    break
+                except identity.IdentityError:
+                    time.sleep(0.02)
+            self.assertIsNotNone(current)
             self.assertEqual(current.cmdline[-2:], ["odd value", ""])
         finally:
             child.terminate()
@@ -120,7 +127,7 @@ class PortableProcessIdentityTests(unittest.TestCase):
             "exe": "/bin/false",
             "cmdline": ["/bin/false"],
             "owner_token": "wrong",
-            "parent_pid": "1",
+            "parent_pid": str(int(stable["parent_pid"]) + 1),
         }
         for field, value in mutations.items():
             with self.subTest(field=field):

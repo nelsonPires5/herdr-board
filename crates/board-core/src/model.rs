@@ -227,3 +227,11 @@ pub struct Run {
     pub result_summary: Option<String>,
     pub log_path: Option<String>,
 }
+
+impl Run {
+    pub fn is_external(&self) -> bool {
+        self.launch_spec
+            .as_ref()
+            .is_some_and(crate::launch::RunLaunchSpec::is_external)
+    }
+}

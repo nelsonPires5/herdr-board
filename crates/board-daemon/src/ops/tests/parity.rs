@@ -28,7 +28,10 @@ use crate::ops::ROUTED_METHODS;
 ///   DB-only fake with no dispatcher cannot honestly model.
 /// - `run.pane_exited` — the internal configured-harness wrapper callback; no
 ///   client, and therefore no fake, ever sends it.
+/// - `card.adopt` - requires a verified live Herdr agent; the DB-only fake has
+///   no honest runtime identity to adopt.
 const KNOWN_UNIMPLEMENTED: &[&str] = &[
+    "card.adopt",
     "daemon.status",
     "daemon.stop",
     "harness.capabilities",

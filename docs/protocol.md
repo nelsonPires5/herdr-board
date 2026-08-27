@@ -221,6 +221,7 @@ enqueue boundary, including for legacy rows.
 ### cards
 A card selects a **herdr session** (`session`, `null` = the daemon's default session) AND a **space** within it.
 - `card.create {title, board_id?, description?, column_id?(default Todo), harness?(default "pi"), model?, effort?, permission_mode?, session?, space_kind?("workspace"|"new_workspace"), space_ref?, space_cwd?, position?}` → `Card`; omitted `board_id` means `Global`, and an explicit column must belong to that board.
+- `card.adopt {title, board_id?, description?, column_id?, pane_id, origin_socket, session?, position?}` → `{card,run}`; verifies the exact live Herdr agent, infers its harness, workspace and conversation id, then creates a started external run. It sends no Herdr mutation. External runs are watched but never killed or rescued by the board. The same pane cannot back two open runs in one session.
   - Pi rejects a non-null `permission_mode` with error 1; Pi has no board-level tool permission mode.
   - `space_kind`:
     - `workspace` — an ALREADY-OPEN workspace in the session; `space_ref` = its workspace id (a case-insensitive label is also accepted at dispatch). An optional non-empty `space_cwd` is an explicit launch-directory override. Without it, all non-empty cwd values in the workspace's live panes must agree; heterogeneous values fail dispatch with the pane/cwd candidates instead of choosing by snapshot order.
