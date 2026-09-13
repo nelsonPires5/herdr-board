@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+
+- [#117](https://github.com/nelsonPires5/herdr-board/pull/117) feat: Board now supports the Herdr 0.9.0 release and verifies its connection before automatic dispatch.
+
 ## [0.16.1] - 2026-08-23
 
 ### Fixed

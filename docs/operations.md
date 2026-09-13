@@ -27,6 +27,58 @@ serving the old code, use your platform's process manager to stop that specific 
 (after verifying its PID and command) before reinstalling. Do not remove the socket or use a broad
 process-name kill.
 
+### Compatibility-safe upgrade
+
+Treat a Herdr upgrade and a board upgrade as one compatibility change. Do not dispatch a live card
+while changing either component.
+
+1. Read the active-run counts first. Both must be zero before stopping the daemon:
+
+   ```bash
+   board daemon status --json
+   ```
+
+   Wait for or explicitly cancel any active or queued run through its card workflow. Never stop a
+   daemon merely to clear an open run.
+2. Stop the exact board daemon gracefully, then confirm the command succeeded:
+
+   ```bash
+   board daemon stop --json
+   ```
+
+3. Upgrade Herdr through its documented update/install path. Select the exact Herdr version and
+   socket protocol supported by the board release you intend to install; the compatibility matrix is
+   authoritative in [`herdr.md`](herdr.md).
+4. Verify the installed Herdr binary and socket protocol against that exact compatibility contract.
+   The binary and live schema are the evidence:
+
+   ```bash
+   herdr --version
+   herdr api schema --json
+   ```
+
+   A mismatch means this board release must not dispatch cards. Install a compatible tagged board
+   release; do not weaken or bypass the compatibility gate.
+5. Check out the exact tag or commit whose artifact will be installed, then validate that checkout
+   in the isolated, disposable Herdr session using the sandbox workflow in [`sandbox.md`](sandbox.md).
+   The smoke must prove one disposable card can dispatch, complete, and clean up without touching a
+   user session, workspace, or board database.
+6. Install the artifact built from that same validated tag or commit in the operational session,
+   then run:
+
+   ```bash
+   board daemon status --json
+   ```
+
+   Do not move a card into an automatic column until `herdr_connected` is `true` and the daemon
+   reports no unexpected active or queued runs.
+
+If only the board reinstall failed and Herdr is unchanged, leave the board stopped and return to the
+previous tagged board release only when it supports the installed Herdr pair. After a Herdr change,
+install a board release compatible with the current Herdr pair, or perform a documented, verified
+rollback of the complete Herdr-and-board pair. Never downgrade Herdr, delete a daemon socket, or
+broad-kill processes as a compatibility shortcut.
+
 ## Diagnostic logs
 
 boardd writes one JSON object per line to private daily files in the XDG data directory:

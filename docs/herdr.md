@@ -113,7 +113,7 @@ is being dispatched. Without it, the board continues in the degraded mode descri
 standard E2E uses checked-in fake Pi and Claude executables and is designed
 to exercise watcher status mapping deterministically rather than changing integrations or calling a provider.
 
-## Protocol 19 delta: additive upstream surface
+## Protocol 22 delta: additive upstream surface
 
 The Herdr 0.9.0/protocol-22 schema keeps the RPC shapes herdr-board uses unchanged.
 The board's typed calls still use the same request/result envelopes for `ping`,

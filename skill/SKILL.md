@@ -279,6 +279,15 @@ board skill
   value is `null`/`unavailable` when boardd is offline; use daemon status for liveness and run counts.
 - `board skill` prints this exact checked-in `skill/SKILL.md` file, byte-for-byte, with no JSON wrapper.
 
+### Update preflight
+
+After a Herdr or board update, run `board daemon status --json` before any action that can enqueue
+automatic work: direct create in an auto column, move, retry, queued work, or an automatic
+transition. Continue only when `herdr_connected` is `true`. If it is `false`, stop automatic
+dispatch, inspect the installed exact compatibility contract, and install a compatible tagged board
+release. Do not bypass the gate. The complete operator sequence is in
+[`docs/operations.md`](../docs/operations.md).
+
 ### JSON and errors
 
 Successful `--json` output goes to stdout. JSON errors go to stderr, leave stdout empty, and use the

@@ -321,8 +321,8 @@ fn load_from_cli_bounded_times_out_and_kills_the_child() {
         assert!(models.is_none(), "a hung CLI must yield None");
         if let Some(pid) = wait_for_pid_file(&pid_file) {
             assert!(
-                elapsed < Duration::from_secs(30),
-                "the child must be killed on timeout, not left to finish its sleep (took {elapsed:?})"
+                elapsed < deadline + Duration::from_secs(5),
+                "the child must be killed near its {deadline:?} timeout, not left to finish its sleep (took {elapsed:?})"
             );
             assert!(
                 !process_alive(pid),

@@ -145,6 +145,12 @@ facts are pinned to exactly **Herdr 0.9.0 / protocol 22**. herdr-board intention
 other Herdr version and protocol; re-verify against `api schema` before changing that gate or any
 wire behavior. **See [`docs/herdr.md`](docs/herdr.md).**
 
+**Herdr compatibility changes are one release contract.** Change the exact version/protocol gate,
+schema fixture, tests, documentation, and operational skill together; prove the result in the
+disposable stack before release. The runtime preflight and upgrade sequence live in
+[`skill/SKILL.md`](skill/SKILL.md) and [`docs/operations.md`](docs/operations.md), rather than
+being duplicated here.
+
 - **Never run destructive herdr commands against a user's workspaces/sessions.** Mutations only
   against disposable workspaces you created (see `e2e/`). Read-only probes otherwise.
 - **Agent names are exclusive** while a pane is open. Names are `card-<id>-<column-slug>`; on an
