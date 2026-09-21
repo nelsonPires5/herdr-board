@@ -312,17 +312,17 @@ pub use overlays::{
 
 // -- glyphs ------------------------------------------------------------------
 
-fn status_glyph(status: CardStatus) -> (char, Color) {
+fn status_glyph(status: CardStatus, theme: crate::theme::Theme) -> (char, Color) {
     match status {
-        CardStatus::Running => ('▶', Color::LightGreen),
-        CardStatus::Blocked => ('⏸', Color::LightYellow),
-        CardStatus::Failed => ('✗', Color::LightRed),
-        CardStatus::Queued => ('⧗', Color::LightCyan),
+        CardStatus::Running => ('▶', theme.success),
+        CardStatus::Blocked => ('⏸', theme.warning),
+        CardStatus::Failed => ('✗', theme.error),
+        CardStatus::Queued => ('⧗', theme.info),
         // awaiting = agent finished(?) without `board done`; pending review.
-        CardStatus::Awaiting => ('?', Color::Yellow),
+        CardStatus::Awaiting => ('?', theme.warning),
         // done = completion confirmed; final state.
-        CardStatus::Done => ('✓', Color::Green),
-        CardStatus::Idle => ('·', Color::Gray),
+        CardStatus::Done => ('✓', theme.success),
+        CardStatus::Idle => ('·', theme.muted),
     }
 }
 
@@ -342,30 +342,40 @@ fn status_label(card: &Card) -> String {
 // -- entry point -------------------------------------------------------------
 
 pub fn view(app: &App, f: &mut Frame) {
-    app.hit_map.borrow_mut().clear();
-    let area = f.area();
-    board::draw_board(app, f, area);
+    crate::theme::with_render_theme(app.theme, || {
+        app.hit_map.borrow_mut().clear();
+        let area = f.area();
+        f.render_widget(
+            ratatui::widgets::Block::default().style(
+                ratatui::style::Style::default()
+                    .fg(app.theme.text)
+                    .bg(app.theme.background),
+            ),
+            area,
+        );
+        board::draw_board(app, f, area);
 
-    match app.screen {
-        Screen::Board => {}
-        Screen::CardDetail => detail::draw_detail(app, f, area),
-        Screen::CardForm | Screen::ColumnForm => {
-            if let Some(form) = &app.form {
-                form::draw_form(app, form, f, area);
+        match app.screen {
+            Screen::Board => {}
+            Screen::CardDetail => detail::draw_detail(app, f, area),
+            Screen::CardForm | Screen::ColumnForm => {
+                if let Some(form) = &app.form {
+                    form::draw_form(app, form, f, area);
+                }
             }
+            Screen::Picker | Screen::ProjectPicker | Screen::BoardPicker => {
+                overlays::draw_picker(app, f, area)
+            }
+            Screen::MoveColumn => overlays::draw_move_column(app, f, area),
+            Screen::ReorderCard => overlays::draw_reorder_card(app, f, area),
+            Screen::Confirm => overlays::draw_confirm(app, f, area),
+            Screen::Help => overlays::draw_help(app, f, area),
+            Screen::Switcher => board::draw_switcher(app, f, area),
+            Screen::CommentHistory => overlays::draw_comment_history(app, f, area),
         }
-        Screen::Picker | Screen::ProjectPicker | Screen::BoardPicker => {
-            overlays::draw_picker(app, f, area)
-        }
-        Screen::MoveColumn => overlays::draw_move_column(app, f, area),
-        Screen::ReorderCard => overlays::draw_reorder_card(app, f, area),
-        Screen::Confirm => overlays::draw_confirm(app, f, area),
-        Screen::Help => overlays::draw_help(app, f, area),
-        Screen::Switcher => board::draw_switcher(app, f, area),
-        Screen::CommentHistory => overlays::draw_comment_history(app, f, area),
-    }
 
-    overlays::draw_footer(app, f, area);
+        overlays::draw_footer(app, f, area);
+    });
 }
 
 // -- helpers -----------------------------------------------------------------

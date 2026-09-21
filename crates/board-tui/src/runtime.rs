@@ -10,6 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use board_core::client::{BoardClient, UnixClient};
+use board_core::config::RootConfig;
 use board_core::protocol::{BoardSnapshot, Event};
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event as CtEvent, KeyEventKind};
 use crossterm::terminal::{
@@ -22,7 +23,7 @@ use ratatui::Terminal;
 use crate::app::Msg;
 use crate::editor::RealEditor;
 use crate::view::view;
-use crate::{Driver, OriginContext};
+use crate::{Driver, OriginContext, Theme};
 
 const RECONNECT_BACKOFF_MIN: Duration = Duration::from_millis(100);
 const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(5);
@@ -51,6 +52,7 @@ fn epoch_millis() -> u128 {
 /// thread, and run the draw/input loop until quit.
 pub fn run(client: Box<dyn BoardClient>) -> Result<()> {
     let mut driver = Driver::new(client)?;
+    load_theme(&mut driver)?;
     run_driver(&mut driver)
 }
 
@@ -61,7 +63,14 @@ pub fn run_with_board(client: Box<dyn BoardClient>, board: BoardSnapshot) -> Res
         board,
         OriginContext::from_environment(),
     )?;
+    load_theme(&mut driver)?;
     run_driver(&mut driver)
+}
+
+fn load_theme(driver: &mut Driver) -> Result<()> {
+    let config = RootConfig::load()?;
+    driver.app.theme = Theme::from_config(&config.theme)?;
+    Ok(())
 }
 
 fn run_driver(driver: &mut Driver) -> Result<()> {

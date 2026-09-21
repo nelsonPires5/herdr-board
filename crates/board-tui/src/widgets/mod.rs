@@ -7,7 +7,7 @@
 //! is untouched.
 
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
 use ratatui::widgets::{
     Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
@@ -185,7 +185,7 @@ impl HitMap {
 }
 
 /// Semantic intent retained by callers; it deliberately does not recolor a
-/// button. Every rendered action uses the same transparent white chip style.
+/// button. Every rendered action uses the same transparent theme-text chip style.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActionTone {
     Normal,
@@ -235,10 +235,10 @@ fn action_button_text(button: &ActionButton<'_>, max_width: u16) -> Option<Strin
 
 fn chip_style(modifier: Modifier) -> Style {
     // Chips are deliberately transparent: the surrounding card, border, or
-    // sheet remains visible through the hit target. White is the one action
+    // sheet remains visible through the hit target. Theme text is the one action
     // color; status colors belong to status glyphs/borders, not controls.
     Style::default()
-        .fg(Color::White)
+        .fg(crate::theme::render_theme().text)
         .add_modifier(Modifier::BOLD | modifier)
 }
 
@@ -569,12 +569,13 @@ pub fn windowed_rows(heights: &[u16], focus_pos: usize, avail: u16) -> (usize, u
 #[cfg(test)]
 mod tests {
     use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
     use ratatui::Terminal;
 
     use super::*;
 
     #[test]
-    fn action_strip_paints_exact_transparent_white_button_chips() {
+    fn action_strip_paints_exact_transparent_theme_text_button_chips() {
         let buttons = [
             ActionButton {
                 label: "Create a new card",
@@ -604,7 +605,7 @@ mod tests {
         let expected_bg = Color::Rgb(7, 22, 34);
         let button_cells: Vec<_> = (0..40)
             .map(|x| &buffer[(x, 0)])
-            .filter(|cell| cell.fg == Color::White)
+            .filter(|cell| cell.fg == crate::theme::Theme::default().text)
             .collect();
         assert_eq!(
             button_cells.len(),
@@ -642,7 +643,7 @@ mod tests {
         let chip_x = (width - button_text(label).chars().count() as u16) / 2;
         for x in chip_x..chip_x + button_text(label).chars().count() as u16 {
             let cell = &buffer[(x, 0)];
-            assert_eq!(cell.fg, Color::White);
+            assert_eq!(cell.fg, crate::theme::Theme::default().text);
             assert_eq!(cell.bg, Color::Rgb(7, 22, 34));
             assert!(cell.modifier.contains(Modifier::UNDERLINED));
         }

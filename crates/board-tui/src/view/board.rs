@@ -46,13 +46,13 @@ pub(super) fn draw_board(app: &App, f: &mut Frame, area: Rect) {
             .map(|d| d.hover_col == col.idx)
             .unwrap_or(false);
         let border_style = if hover {
-            Style::default().fg(Color::Magenta)
+            Style::default().fg(app.theme.accent_alt)
         } else if is_sel_col && focused {
             Style::default()
-                .fg(Color::LightBlue)
+                .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::Gray)
+            Style::default().fg(app.theme.muted)
         };
         let card_count = app.cards_of(column.id).len();
         if !compact {
@@ -65,7 +65,7 @@ pub(super) fn draw_board(app: &App, f: &mut Frame, area: Rect) {
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(border_style)
-                .style(Style::default().bg(Color::Rgb(3, 13, 22)))
+                .style(Style::default().bg(app.theme.background))
                 .title(Span::styled(
                     title,
                     border_style.add_modifier(Modifier::BOLD),
@@ -137,8 +137,8 @@ fn draw_board_header(app: &App, f: &mut Frame, area: Rect, compact_header: Optio
     f.render_widget(
         Block::default()
             .borders(Borders::BOTTOM)
-            .border_style(Style::default().fg(Color::Rgb(67, 91, 105)))
-            .style(Style::default().bg(Color::Rgb(3, 13, 22))),
+            .border_style(Style::default().fg(app.theme.border))
+            .style(Style::default().bg(app.theme.background)),
         header_area,
     );
 
@@ -244,6 +244,13 @@ fn board_dropdown_label(name: &str, max_width: u16) -> String {
     format!("{}{}", truncate(name, name_width), CHEVRON)
 }
 
+fn product_brand() -> &'static str {
+    match std::env::var("STEM_PLUGIN_ID").as_deref() {
+        Ok("stem-board") => " ◈ stem-board",
+        _ => " ◈ herdr-board",
+    }
+}
+
 fn draw_desktop_header(app: &App, f: &mut Frame, area: Rect) {
     if area.is_empty() {
         return;
@@ -251,7 +258,7 @@ fn draw_desktop_header(app: &App, f: &mut Frame, area: Rect) {
     let chips = desktop_filter_options(area.width);
     let filters_w = filter_chips_width(&chips).min(area.width);
     let filters_x = area.right().saturating_sub(filters_w);
-    let brand = " ◈ herdr-board";
+    let brand = product_brand();
     let brand_w = brand.chars().count() as u16;
     let running = running_label(app);
     let running_w = running.chars().count() as u16;
@@ -264,7 +271,7 @@ fn draw_desktop_header(app: &App, f: &mut Frame, area: Rect) {
         Paragraph::new(Span::styled(
             truncate(brand, brand_w.min(left_w) as usize),
             Style::default()
-                .fg(Color::LightCyan)
+                .fg(app.theme.info)
                 .add_modifier(Modifier::BOLD),
         )),
         Rect::new(area.x, area.y, brand_w.min(left_w), 1),
@@ -278,7 +285,7 @@ fn draw_desktop_header(app: &App, f: &mut Frame, area: Rect) {
                     area.x.saturating_add(left_w).saturating_sub(running_x) as usize,
                 ),
                 Style::default()
-                    .fg(Color::LightGreen)
+                    .fg(app.theme.success)
                     .add_modifier(Modifier::BOLD),
             )),
             Rect::new(
@@ -499,19 +506,19 @@ fn draw_compact_header(app: &App, f: &mut Frame, header: &CompactHeader) {
 fn draw_card(app: &App, f: &mut Frame, card: &Card, r: Rect, selected: bool, compact: bool) {
     let archived = card.archived_at.is_some();
     let (glyph, color) = if archived {
-        ('▣', Color::DarkGray)
+        ('▣', app.theme.muted)
     } else {
-        status_glyph(card.status)
+        status_glyph(card.status, app.theme)
     };
     let background = if selected {
-        Color::Rgb(8, 33, 51)
+        app.theme.selection
     } else {
-        Color::Rgb(7, 22, 34)
+        app.theme.panel
     };
     let border = if selected {
-        Color::LightCyan
+        app.theme.accent
     } else if archived {
-        Color::DarkGray
+        app.theme.muted
     } else {
         color
     };
@@ -571,17 +578,19 @@ fn draw_card(app: &App, f: &mut Frame, card: &Card, r: Rect, selected: bool, com
         // The first row is deliberately neutral. Semantic status color is
         // reserved for the status row (and the existing card border); it must
         // never leak into the card id or title.
-        let title_style = Style::default().fg(Color::White).add_modifier(if selected {
-            Modifier::BOLD
-        } else {
-            Modifier::empty()
-        });
+        let title_style = Style::default()
+            .fg(app.theme.text)
+            .add_modifier(if selected {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            });
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(
                     title_prefix,
                     Style::default()
-                        .fg(Color::White)
+                        .fg(app.theme.text)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(card.title.clone(), title_style),
@@ -631,16 +640,18 @@ fn draw_card(app: &App, f: &mut Frame, card: &Card, r: Rect, selected: bool, com
         Span::styled(
             title_prefix,
             Style::default()
-                .fg(Color::White)
+                .fg(app.theme.text)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             truncate(&card.title, inner.width.saturating_sub(prefix_w) as usize),
-            Style::default().fg(Color::White).add_modifier(if selected {
-                Modifier::BOLD
-            } else {
-                Modifier::empty()
-            }),
+            Style::default()
+                .fg(app.theme.text)
+                .add_modifier(if selected {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
         ),
     ]);
     f.render_widget(
@@ -665,27 +676,28 @@ fn draw_card(app: &App, f: &mut Frame, card: &Card, r: Rect, selected: bool, com
     f.render_widget(
         Paragraph::new(Span::styled(
             truncate(&meta, inner.width as usize),
-            Style::default().fg(Color::Gray),
+            Style::default().fg(app.theme.muted),
         ))
         .style(Style::default().bg(background)),
         Rect::new(inner.x, metadata_row, inner.width, 1),
     );
 }
 
-/// One left/right data row inside a card: white text on the left, grey on the
-/// right, each truncated to half the row.
+/// One left/right data row inside a card: primary text on the left, muted text
+/// on the right, each truncated to half the row.
 fn draw_card_pair_row(f: &mut Frame, area: Rect, left: &str, right: &str, bg: Color) {
+    let theme = crate::theme::render_theme();
     let half = area.width.saturating_sub(2) as usize / 2;
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
                 crate::view::truncate(left, half.max(1)),
-                Style::default().fg(Color::White),
+                Style::default().fg(theme.text),
             ),
             Span::raw(" "),
             Span::styled(
                 crate::view::truncate(right, half.max(1)),
-                Style::default().fg(Color::Gray),
+                Style::default().fg(theme.muted),
             ),
         ]))
         .alignment(Alignment::Left)
@@ -727,7 +739,7 @@ pub(super) fn draw_switcher(app: &App, f: &mut Frame, area: Rect) {
         mode == LayoutMode::Compact,
         full_title,
         compact_title,
-        Style::default().fg(Color::LightBlue),
+        Style::default().fg(app.theme.accent),
         &mut hit_map,
     );
     if mode != LayoutMode::Compact {
@@ -745,10 +757,10 @@ pub(super) fn draw_switcher(app: &App, f: &mut Frame, area: Rect) {
             let count = app.cards_of(c.id).len();
             let style = if i == state.sel {
                 Style::default()
-                    .fg(Color::White)
+                    .fg(app.theme.text)
                     .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
             } else {
-                Style::default().fg(Color::White)
+                Style::default().fg(app.theme.text)
             };
             (format!(" {}  {} ", c.name, count), style)
         })
@@ -756,22 +768,22 @@ pub(super) fn draw_switcher(app: &App, f: &mut Frame, area: Rect) {
     let trailing_idx = app.board.columns.len();
     let trailing_style = if state.sel == trailing_idx {
         Style::default()
-            .fg(Color::White)
+            .fg(app.theme.text)
             .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
     } else {
-        Style::default().fg(Color::White)
+        Style::default().fg(app.theme.text)
     };
     rows.push((" ⇄  Switch board  → ".into(), trailing_style));
     let template_idx = trailing_idx + 1;
     let template_enabled = app.is_empty_board();
     let template_style = if state.sel == template_idx {
         Style::default()
-            .fg(Color::White)
+            .fg(app.theme.text)
             .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
     } else if template_enabled {
-        Style::default().fg(Color::White)
+        Style::default().fg(app.theme.text)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(app.theme.muted)
     };
     rows.push((" ⊞  Apply template  ".into(), template_style));
     let total = rows.len();

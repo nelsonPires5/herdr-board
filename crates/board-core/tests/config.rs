@@ -1,6 +1,6 @@
 //! Config defaults + parsing.
 
-use board_core::config::{Config, DaemonConfig, RootConfig, SpawnerKind};
+use board_core::config::{Config, DaemonConfig, RootConfig, SpawnerKind, ThemeConfig};
 use board_core::Error;
 
 #[test]
@@ -92,6 +92,38 @@ fn root_config_defaults_missing_sections() {
     assert_eq!(root.daemon.timeout_unit_secs, 60);
     assert_eq!(root.daemon.local_poll_ms, 2000);
     assert_eq!(root.daemon.tick_ms, 1000);
+    assert_eq!(root.theme, ThemeConfig::default());
+}
+
+#[test]
+fn root_config_parses_board_owned_theme() {
+    let root = RootConfig::from_toml(
+        r##"
+[theme]
+name = "light"
+
+[theme.custom]
+accent = "#6841a5"
+panel_bg = "reset"
+"##,
+    )
+    .unwrap();
+
+    assert_eq!(root.theme.name, "light");
+    assert_eq!(root.theme.custom.accent.as_deref(), Some("#6841a5"));
+    assert_eq!(root.theme.custom.panel_bg.as_deref(), Some("reset"));
+}
+
+#[test]
+fn root_config_rejects_unknown_theme_roles() {
+    assert!(matches!(
+        RootConfig::from_toml("[theme.custom]\nmade_up = \"#ffffff\"\n"),
+        Err(Error::Config(_))
+    ));
+    assert!(matches!(
+        RootConfig::from_toml("[theme]\nmade_up = \"#ffffff\"\n"),
+        Err(Error::Config(_))
+    ));
 }
 
 #[test]

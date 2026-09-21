@@ -30,9 +30,11 @@ pub mod origin;
 pub mod runtime;
 #[cfg(feature = "fake-client")]
 pub mod testkit;
+pub mod theme;
 pub mod view;
 pub mod widgets;
 
 pub use driver::Driver;
 pub use origin::OriginContext;
 pub use runtime::{run, run_with_board};
+pub use theme::Theme;

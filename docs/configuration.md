@@ -24,6 +24,46 @@ argv = ["mytool", "--model", "{model}"]
 resume = false             # can this harness resume a recorded conversation? default false
 ```
 
+## Theme
+
+The Board TUI owns its theme independently from Herdr, Stem, or another terminal host. Choose a
+built-in palette in the same configuration file:
+
+```toml
+[theme]
+name = "light"
+```
+
+Built-in names are `board` (the compatibility default), `stem`, `light`, `terminal`, `dracula`,
+`gruvbox`, and `nord`. `terminal` keeps backgrounds transparent and uses the host terminal's ANSI
+palette. Close and reopen the Board overlay after changing its theme; the daemon and active runs can
+keep running.
+
+Override individual semantic colors when a built-in is close but not exact:
+
+```toml
+[theme]
+name = "stem"
+
+[theme.custom]
+background = "#11111b"
+panel_bg = "#181826"
+selection_bg = "#222031"
+border = "#313142"
+text = "#cecde1"
+muted = "#8c8da2"
+accent = "#bea0eb"
+accent_alt = "#d6a5ef"
+green = "#a7cf91"
+blue = "#89b4fa"
+yellow = "#e7d196"
+red = "#eb8b8b"
+```
+
+Colors accept terminal color names, `#RRGGBB`, `rgb(r,g,b)`, and reset aliases (`reset`,
+`default`, `none`, or `transparent`). Unknown theme names, fields, and invalid colors fail with an
+explicit startup error instead of partially applying a palette.
+
 Custom harness prompts are delivered through `$BOARD_PROMPT`. The placeholders `{model}`, `{effort}`,
 and `{permission_mode}` are available in `argv`. Optional keys `models`, `efforts`, and
 `permission_modes` declare the harness's capability catalog.

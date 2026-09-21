@@ -108,7 +108,6 @@ fn card_title_and_id_are_neutral_in_compact_and_desktop_cards() {
     use board_core::client::BoardClient;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
-    use ratatui::style::Color;
     use ratatui::Terminal;
 
     let mut client = crate::testkit::demo_client().unwrap();
@@ -145,8 +144,7 @@ fn card_title_and_id_are_neutral_in_compact_and_desktop_cards() {
                 let cell = &buffer[(x, y)];
                 if !cell.symbol().trim().is_empty() {
                     assert_eq!(
-                        cell.fg,
-                        Color::White,
+                        cell.fg, app.theme.text,
                         "title/id cell at ({x},{y}) must be neutral at {width}x{height}"
                     );
                 }
@@ -158,11 +156,40 @@ fn card_title_and_id_are_neutral_in_compact_and_desktop_cards() {
             .find(|cell| cell.symbol() == "▶")
             .expect("running status glyph");
         assert_eq!(
-            status.fg,
-            Color::LightGreen,
+            status.fg, app.theme.success,
             "semantic status color belongs on the status row"
         );
     }
+}
+
+#[cfg(feature = "fake-client")]
+#[test]
+fn configured_light_theme_reaches_the_rendered_board() {
+    use board_core::client::BoardClient;
+    use board_core::config::ThemeConfig;
+    use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
+    use ratatui::Terminal;
+
+    let mut client = crate::testkit::demo_client().unwrap();
+    let mut app = crate::app::App::new(client.board_get().unwrap());
+    app.theme = crate::theme::Theme::from_config(&ThemeConfig {
+        name: "light".into(),
+        ..ThemeConfig::default()
+    })
+    .unwrap();
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 35)).unwrap();
+    terminal.draw(|f| super::view(&app, f)).unwrap();
+    let buffer = terminal.backend().buffer();
+
+    assert_eq!(buffer[(0, 0)].bg, app.theme.background);
+    let brand = (0..20)
+        .map(|x| &buffer[(x, 0)])
+        .find(|cell| cell.symbol() == "◈")
+        .expect("rendered board brand");
+    assert_eq!(brand.fg, app.theme.info);
+    assert_ne!(app.theme.text, Color::White);
 }
 
 #[cfg(feature = "fake-client")]
@@ -177,9 +204,9 @@ fn reorder_mini_mode_keeps_selection_chrome_on_the_staged_card() {
     use ratatui::style::Color;
     use ratatui::Terminal;
 
-    // Two idle cards in a manual column: idle borders are Gray, so the
-    // LightCyan selection outline is unambiguous. (The demo board's queued
-    // card already renders LightCyan, which would mask the assertion.)
+    // Two idle cards in a manual column make the accent selection outline
+    // unambiguous. (The demo board's queued card already uses an info color,
+    // which could mask a hardcoded-color assertion.)
     let mut client = FakeBoardClient::new().unwrap();
     let list = client
         .column_create(&ColumnCreateParams {
@@ -220,14 +247,14 @@ fn reorder_mini_mode_keeps_selection_chrome_on_the_staged_card() {
         terminal.backend().buffer()[(rect.x, rect.y + 1)].fg
     };
 
-    // O enters the mini-mode; the card keeps its LightCyan selection outline
+    // O enters the mini-mode; the card keeps its accent selection outline
     // so the card being moved stays identifiable under the sheet.
     let effects = crate::app::update(&mut app, crate::testkit::key(KeyCode::Char('O')));
     assert!(effects.is_empty());
     assert_eq!(app.screen, Screen::ReorderCard);
     assert_eq!(
         border_fg(&app, first),
-        Color::LightCyan,
+        app.theme.accent,
         "selected card outline must survive entering the reorder mini-mode"
     );
 
@@ -235,12 +262,12 @@ fn reorder_mini_mode_keeps_selection_chrome_on_the_staged_card() {
     let _ = crate::app::update(&mut app, crate::testkit::key(KeyCode::Char('j')));
     assert_ne!(
         border_fg(&app, first),
-        Color::LightCyan,
+        app.theme.accent,
         "unstaged card must not keep the selection outline"
     );
     assert_eq!(
         border_fg(&app, second),
-        Color::LightCyan,
+        app.theme.accent,
         "the staged card must carry the selection outline"
     );
 }
