@@ -1,5 +1,5 @@
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
@@ -132,7 +132,7 @@ pub(super) fn draw_form(app: &App, form: &Form, f: &mut Frame, area: Rect) {
         compact,
         &full_title,
         form.title(),
-        Style::default().fg(Color::LightBlue),
+        Style::default().fg(app.theme.accent),
         &mut hit_map,
     );
 
@@ -200,12 +200,12 @@ pub(super) fn draw_form(app: &App, form: &Form, f: &mut Frame, area: Rect) {
         };
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .style(Style::default().bg(Color::Rgb(10, 20, 30)))
+            .border_style(Style::default().fg(app.theme.border))
+            .style(Style::default().bg(app.theme.panel))
             .title(Span::styled(
                 format!(" {title} "),
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(app.theme.accent)
                     .add_modifier(Modifier::BOLD),
             ));
         let content = block.inner(row);
@@ -230,13 +230,13 @@ fn marker_width_for_label(label: &str) -> u16 {
 /// Text fields share one value treatment regardless of whether their buffer is
 /// one line or a wrapped textarea. In particular, a focused multiline editor
 /// gets the same unmistakable reverse selection as the title/name fields, and
-/// an unfocused buffer stays white/readable instead of falling back to the
+/// an unfocused buffer stays readable instead of falling back to the
 /// section's dim gray.
 fn text_field_value_style(is_focus: bool) -> Style {
     if is_focus {
         Style::default().add_modifier(Modifier::REVERSED)
     } else {
-        Style::default().fg(Color::White)
+        Style::default().fg(crate::theme::render_theme().text)
     }
 }
 
@@ -258,10 +258,10 @@ fn draw_form_field(app: &App, form: &Form, fi: usize, row_area: Rect, f: &mut Fr
             < marker_width_for_label(field.label) + button_text("$EDITOR").chars().count() as u16;
     let label_style = if is_focus {
         Style::default()
-            .fg(Color::Cyan)
+            .fg(app.theme.accent)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Gray)
+        Style::default().fg(app.theme.muted)
     };
     app.hit_map.borrow_mut().push(row_area, Zone::FormField(fi));
     let marker = if is_focus { "▌ " } else { "  " };
@@ -308,10 +308,10 @@ fn draw_form_field(app: &App, form: &Form, fi: usize, row_area: Rect, f: &mut Fr
         crate::forms::FieldKind::Choice { .. } => {
             let val_style = if is_focus {
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(app.theme.accent)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::White)
+                Style::default().fg(app.theme.text)
             };
             let text = choice_control(&field.display(), value_area.width as usize);
             let shown_w = text.chars().count() as u16;
@@ -394,6 +394,7 @@ fn form_label_line<'a>(
     width: usize,
     style: Style,
 ) -> Line<'a> {
+    let theme = crate::theme::render_theme();
     let marker_w = marker.chars().count();
     let trailing_w = trailing.map_or(0, |s| s.chars().count() + 1);
     let label_w = width.saturating_sub(marker_w + trailing_w);
@@ -404,7 +405,7 @@ fn form_label_line<'a>(
         spans.push(Span::styled(
             trailing,
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ));
     }
@@ -510,7 +511,7 @@ mod tests {
                 crate::forms::FieldId::Title
             )
             .fg,
-            Color::White,
+            crate::theme::render_theme().text,
             "unfocused multiline values must remain readable"
         );
     }

@@ -133,6 +133,9 @@ pub enum Msg {
 /// The whole TUI state.
 pub struct App {
     pub board: BoardSnapshot,
+    /// Plugin-owned semantic palette loaded from `[theme]` in the Board
+    /// configuration. Tests and embedders receive the compatibility default.
+    pub theme: crate::theme::Theme,
     /// The project the current board belongs to. Kept in sync from
     /// `project.list` (see `Driver::refresh_projects`) and used by the
     /// project picker and the header's project chip.
@@ -218,6 +221,7 @@ impl App {
         };
         App {
             board,
+            theme: crate::theme::Theme::default(),
             project,
             projects: Vec::new(),
             projects_loaded: false,

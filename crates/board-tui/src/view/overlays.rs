@@ -1,6 +1,6 @@
 use board_core::model::CommentHistory;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
@@ -124,7 +124,7 @@ pub(super) fn draw_picker(app: &App, f: &mut Frame, area: Rect) {
         box_area,
         compact,
         (&visual_title, compact_title),
-        Style::default().fg(Color::LightBlue),
+        Style::default().fg(app.theme.accent),
         "X",
         &mut hit_map,
     );
@@ -143,7 +143,7 @@ pub(super) fn draw_picker(app: &App, f: &mut Frame, area: Rect) {
         f.render_widget(
             Paragraph::new(Span::styled(
                 "(no choices available)",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(app.theme.muted),
             )),
             picker_area,
         );
@@ -191,17 +191,17 @@ pub(super) fn draw_picker(app: &App, f: &mut Frame, area: Rect) {
             Span::styled(
                 if selected { "›" } else { " " },
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(app.theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 label(row),
                 if selected {
                     Style::default()
-                        .fg(Color::White)
+                        .fg(app.theme.text)
                         .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
                 } else {
-                    Style::default().fg(Color::White)
+                    Style::default().fg(app.theme.text)
                 },
             ),
         ]);
@@ -228,7 +228,7 @@ pub(super) fn draw_picker(app: &App, f: &mut Frame, area: Rect) {
     if has_hint && hint_area.width > 0 {
         let vis = app.picker_visibility.as_str().to_ascii_uppercase();
         let hint = format!("v:cycle a:archive r:restore [{}]", vis);
-        let hint_style = Style::default().fg(Color::DarkGray);
+        let hint_style = Style::default().fg(app.theme.muted);
         f.render_widget(
             Paragraph::new(Span::styled(hint, hint_style)).alignment(Alignment::Center),
             hint_area,
@@ -256,7 +256,7 @@ pub(super) fn draw_move_column(app: &App, f: &mut Frame, area: Rect) {
         box_area,
         mode == LayoutMode::Compact,
         ("Move column", "Move column"),
-        Style::default().fg(Color::Magenta),
+        Style::default().fg(app.theme.accent_alt),
         "X",
         &mut hit_map,
     );
@@ -322,7 +322,7 @@ pub(super) fn draw_confirm(app: &App, f: &mut Frame, area: Rect) {
         box_area,
         mode == LayoutMode::Compact,
         ("Confirm", "Confirm"),
-        Style::default().fg(Color::Red),
+        Style::default().fg(app.theme.error),
         "X",
         &mut hit_map,
     );
@@ -376,7 +376,7 @@ pub(super) fn draw_reorder_card(app: &App, f: &mut Frame, area: Rect) {
         box_area,
         mode == LayoutMode::Compact,
         ("Reorder card", "Reorder card"),
-        Style::default().fg(Color::Magenta),
+        Style::default().fg(app.theme.accent_alt),
         "X",
         &mut hit_map,
     );
@@ -571,10 +571,11 @@ fn draw_help_section_cards(
     scroll: usize,
     card_w: u16,
 ) {
+    let theme = crate::theme::render_theme();
     let window_lo = scroll;
     let window_hi = scroll.saturating_add(area.height as usize);
     let text_w = card_w.saturating_sub(2).max(1);
-    let border_style = Style::default().fg(Color::DarkGray);
+    let border_style = Style::default().fg(theme.border);
     let mut top = 0usize;
     for section in sections {
         let card_h = section_card_height(section, text_w);
@@ -619,7 +620,7 @@ fn draw_help_section_cards(
                 .iter()
                 .map(|(_, k, d)| {
                     Line::from(vec![
-                        Span::styled(format!("{:<11} ", k), Style::default().fg(Color::Yellow)),
+                        Span::styled(format!("{:<11} ", k), Style::default().fg(theme.warning)),
                         Span::raw(*d),
                     ])
                 })
@@ -668,7 +669,7 @@ pub(super) fn draw_help(app: &App, f: &mut Frame, area: Rect) {
         box_area,
         false,
         ("Help — all keybindings", "Help"),
-        Style::default().fg(Color::LightBlue),
+        Style::default().fg(app.theme.accent),
         "X",
         &mut hit_map,
     );
@@ -704,7 +705,7 @@ fn draw_help_wrapped(app: &App, f: &mut Frame, area: Rect) {
         box_area,
         app.layout_mode() == LayoutMode::Compact,
         ("Help — all keybindings", "Help"),
-        Style::default().fg(Color::LightBlue),
+        Style::default().fg(app.theme.accent),
         "X",
         &mut hit_map,
     );
@@ -800,7 +801,7 @@ pub(super) fn draw_comment_history(app: &App, f: &mut Frame, area: Rect) {
         box_area,
         mode == LayoutMode::Compact,
         ("Comment history (j/k scroll)", "History"),
-        Style::default().fg(Color::LightBlue),
+        Style::default().fg(app.theme.accent),
         "X",
         &mut hit_map,
     );
@@ -814,7 +815,7 @@ pub(super) fn draw_comment_history(app: &App, f: &mut Frame, area: Rect) {
         f.render_widget(
             Paragraph::new(Span::styled(
                 "(no history)",
-                Style::default().fg(Color::Gray),
+                Style::default().fg(app.theme.muted),
             )),
             content,
         );
@@ -825,7 +826,7 @@ pub(super) fn draw_comment_history(app: &App, f: &mut Frame, area: Rect) {
         lines.push(Line::from(Span::styled(
             comment_history_header(i, e),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(app.theme.warning)
                 .add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(e.body.as_str()));
@@ -870,9 +871,13 @@ pub(super) fn draw_footer(app: &App, f: &mut Frame, area: Rect) {
     let y = area.bottom().saturating_sub(action_h + 1);
     let rect = Rect::new(area.x, y, area.width, 1);
     let style = if toast.is_error {
-        Style::default().fg(Color::White).bg(Color::Red)
+        Style::default()
+            .fg(app.theme.on(app.theme.error))
+            .bg(app.theme.error)
     } else {
-        Style::default().fg(Color::Black).bg(Color::Yellow)
+        Style::default()
+            .fg(app.theme.on(app.theme.warning))
+            .bg(app.theme.warning)
     };
     f.render_widget(
         Paragraph::new(Span::styled(

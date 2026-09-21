@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- [#123](https://github.com/nelsonPires5/herdr-board/pull/123) feat: Choose a built-in Board theme or customize its semantic colors.
+
 ## [0.17.0] - 2026-09-13
 
 ### Added

@@ -1,7 +1,7 @@
 use board_core::engine::{format_duration, run_elapsed};
 use board_core::protocol::{parse_timestamp, CardDetail};
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
@@ -683,18 +683,15 @@ pub(super) fn detail_section_title(
 }
 
 fn section_block<'a>(title: &'a str, focused: bool) -> Block<'a> {
-    let style = if focused {
-        Color::LightBlue
-    } else {
-        Color::DarkGray
-    };
+    let theme = crate::theme::render_theme();
+    let style = if focused { theme.accent } else { theme.border };
     Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(style))
         .title(Span::styled(
             title,
             Style::default()
-                .fg(Color::Gray)
+                .fg(theme.muted)
                 .add_modifier(Modifier::BOLD),
         ))
 }
@@ -722,14 +719,15 @@ fn metadata_line(label: &'static str, value: String, width: u16, max_rows: u16) 
             )
         }
     };
+    let theme = crate::theme::render_theme();
     Line::from(vec![
         Span::styled(
             label,
             Style::default()
-                .fg(Color::LightBlue)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(value, Style::default().fg(Color::White)),
+        Span::styled(value, Style::default().fg(theme.text)),
     ])
 }
 
@@ -771,7 +769,7 @@ pub(super) fn draw_detail(app: &App, f: &mut Frame, area: Rect) {
     f.render_widget(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::LightBlue))
+            .border_style(Style::default().fg(app.theme.accent))
             .title(format!("{}{}", left, " ".repeat(gap))),
         panel,
     );
@@ -806,7 +804,7 @@ pub(super) fn draw_detail(app: &App, f: &mut Frame, area: Rect) {
     );
     drop(hit_map);
 
-    let (glyph, color) = status_glyph(card.status);
+    let (glyph, color) = status_glyph(card.status, app.theme);
     let mut status = format!("{glyph} {}", status_label(card));
     if card.archived_at.is_some() {
         status.push_str(" · ARCHIVED");
@@ -964,7 +962,7 @@ fn draw_comments(app: &App, f: &mut Frame, detail: &CardDetail, layout: &DetailL
     if detail.comments.is_empty() {
         f.render_widget(
             Paragraph::new("(no comments)")
-                .style(Style::default().fg(Color::Gray))
+                .style(Style::default().fg(app.theme.muted))
                 .block(section_block(&title, active)),
             layout.comments,
         );
@@ -981,7 +979,7 @@ fn draw_comments(app: &App, f: &mut Frame, detail: &CardDetail, layout: &DetailL
                 gutter,
                 Span::styled(
                     format!("[{}] ", c.author),
-                    Style::default().fg(Color::LightCyan),
+                    Style::default().fg(app.theme.info),
                 ),
                 Span::styled(c.body.clone(), style),
             ])
@@ -1090,7 +1088,7 @@ fn draw_runs(app: &App, f: &mut Frame, detail: &CardDetail, layout: &DetailLayou
     } else if detail.runs.is_empty() {
         vec![ListItem::new(Span::styled(
             "(no runs)",
-            Style::default().fg(Color::Gray),
+            Style::default().fg(app.theme.muted),
         ))]
     } else {
         detail
@@ -1132,18 +1130,16 @@ fn draw_runs(app: &App, f: &mut Frame, detail: &CardDetail, layout: &DetailLayou
 /// style that goes with it. The single definition shared by the comments list
 /// and the runs list, so both mark their cursor identically.
 ///
-/// The arrow is **bright** blue (`LightBlue`, the terminal's intense blue),
-/// matching the blue used for the focused section's divider and the status
-/// labels. Plain `Color::Blue` would be the dark navy of the 256-colour palette
-/// and would lose contrast against a dark terminal background, which is the
-/// opposite of the point.
+/// The arrow uses the theme accent, matching the focused section divider while
+/// remaining readable in both dark and light palettes.
 fn focus_row_marker(focused: bool) -> (Span<'static>, Style) {
+    let theme = crate::theme::render_theme();
     if focused {
         (
             Span::styled(
                 "▸",
                 Style::default()
-                    .fg(Color::LightBlue)
+                    .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
             Style::default().add_modifier(Modifier::BOLD),

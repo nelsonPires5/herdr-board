@@ -23,6 +23,9 @@ fn default_local_poll_ms() -> u64 {
 fn default_tick_ms() -> u64 {
     1000
 }
+fn default_theme_name() -> String {
+    "board".to_string()
+}
 
 /// The kind of process spawner used by the daemon.
 ///
@@ -61,6 +64,49 @@ impl Default for DaemonConfig {
             tick_ms: default_tick_ms(),
         }
     }
+}
+
+/// Visual settings used by the interactive board TUI.
+///
+/// The plugin owns this palette independently from the terminal host. The
+/// `terminal` theme deliberately uses ANSI/default terminal colors, while the
+/// other built-ins are complete palettes. Individual semantic colors can be
+/// replaced under `[theme.custom]`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThemeConfig {
+    #[serde(default = "default_theme_name")]
+    pub name: String,
+    #[serde(default)]
+    pub custom: ThemeOverrides,
+}
+
+impl Default for ThemeConfig {
+    fn default() -> Self {
+        Self {
+            name: default_theme_name(),
+            custom: ThemeOverrides::default(),
+        }
+    }
+}
+
+/// Optional semantic color replacements. Values accept ratatui color names,
+/// `#RRGGBB`, `rgb(r,g,b)`, and reset aliases such as `reset`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThemeOverrides {
+    pub background: Option<String>,
+    pub panel_bg: Option<String>,
+    pub selection_bg: Option<String>,
+    pub border: Option<String>,
+    pub text: Option<String>,
+    pub muted: Option<String>,
+    pub accent: Option<String>,
+    pub accent_alt: Option<String>,
+    pub green: Option<String>,
+    pub blue: Option<String>,
+    pub yellow: Option<String>,
+    pub red: Option<String>,
 }
 
 /// Board configuration (the top-level fields and `[harness.*]` tables).
@@ -192,6 +238,8 @@ pub struct RootConfig {
     pub board: Config,
     #[serde(default)]
     pub daemon: DaemonConfig,
+    #[serde(default)]
+    pub theme: ThemeConfig,
 }
 
 impl RootConfig {
