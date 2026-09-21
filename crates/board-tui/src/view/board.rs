@@ -244,6 +244,13 @@ fn board_dropdown_label(name: &str, max_width: u16) -> String {
     format!("{}{}", truncate(name, name_width), CHEVRON)
 }
 
+fn product_brand() -> &'static str {
+    match std::env::var("STEM_PLUGIN_ID").as_deref() {
+        Ok("stem-board") => " ◈ stem-board",
+        _ => " ◈ herdr-board",
+    }
+}
+
 fn draw_desktop_header(app: &App, f: &mut Frame, area: Rect) {
     if area.is_empty() {
         return;
@@ -251,7 +258,7 @@ fn draw_desktop_header(app: &App, f: &mut Frame, area: Rect) {
     let chips = desktop_filter_options(area.width);
     let filters_w = filter_chips_width(&chips).min(area.width);
     let filters_x = area.right().saturating_sub(filters_w);
-    let brand = " ◈ herdr-board";
+    let brand = product_brand();
     let brand_w = brand.chars().count() as u16;
     let running = running_label(app);
     let running_w = running.chars().count() as u16;
