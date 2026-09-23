@@ -8,7 +8,7 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
-- [#121](https://github.com/nelsonPires5/herdr-board/issues/121) / [#124](https://github.com/nelsonPires5/herdr-board/pull/124): Gate Herdr compatibility on socket protocol 22 rather than the 0.9.0 reference version; accept compatible later releases such as 0.9.1 with a warning.
+- [#124](https://github.com/nelsonPires5/herdr-board/pull/124) fix: Accept Herdr 0.9.1 on protocol 22 with a version warning (issue #121).
 
 ## [0.17.0] - 2026-09-13
 
