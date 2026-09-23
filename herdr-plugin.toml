@@ -6,8 +6,8 @@
 # TUI into herdr as an overlay pane plus a keybindable action to summon it.
 #
 # Field reference validated against `herdr plugin` in Herdr 0.9.0. The manifest
-# enforces the install-time version floor; runtime also requires exactly 0.9.0
-# and rejects every socket protocol other than 22.
+# enforces the install-time version floor; runtime requires socket protocol 22
+# and accepts any Herdr version that speaks it (0.9.0 is the reference).
 id = "herdr-board"
 name = "Herdr Board"
 version = "0.17.0"

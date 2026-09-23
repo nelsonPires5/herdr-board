@@ -42,11 +42,10 @@ fn herdr_protocol_gate_rejects_mismatches_before_any_spawn_or_placement_call() {
         let text = err.to_string();
         assert!(
             text.contains(&format!(
-                "Herdr {} with protocol {} is required",
-                board_herdr::SUPPORTED_HERDR_VERSION,
+                "Herdr socket protocol {} is required",
                 board_herdr::SUPPORTED_HERDR_PROTOCOL
             )),
-            "mismatch must explain the required Herdr version/protocol: {text}"
+            "mismatch must explain the required protocol: {text}"
         );
         assert_eq!(
             fake.requests

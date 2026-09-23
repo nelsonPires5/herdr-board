@@ -35,7 +35,7 @@ fn trace_notification_error(error: &HerdrError) {
     );
 }
 
-/// Probe the exact supported Herdr contract immediately before the cosmetic
+/// Probe the supported Herdr socket protocol immediately before the cosmetic
 /// notification mutation. Keeping this synchronous helper separate from the
 /// detached wrapper makes the gate and request ordering deterministic in tests.
 fn send_notification(

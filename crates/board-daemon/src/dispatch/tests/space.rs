@@ -291,8 +291,7 @@ fn new_workspace_selected_socket_preflights_protocol_before_resolution() {
     assert_eq!(herdr.methods(), vec!["ping"]);
     let err = result.expect_err("protocol mismatch must stop workspace resolution");
     assert!(err.to_string().contains(&format!(
-        "Herdr {} with protocol {} is required",
-        board_herdr::SUPPORTED_HERDR_VERSION,
+        "Herdr socket protocol {} is required",
         board_herdr::SUPPORTED_HERDR_PROTOCOL
     )));
 }

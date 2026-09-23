@@ -118,7 +118,7 @@ async fn async_main(db_path: PathBuf, socket_path: PathBuf) -> anyhow::Result<()
     // Herdr handle (best effort): used for notifications, liveness, status, and
     // the default-session event stream. Keep any reachable socket handle even
     // when its current contract is incompatible; status and notifications
-    // probe the exact supported contract at operation time, so a server that
+    // probe the supported protocol at operation time, so a server that
     // upgrades in place can recover without restarting boardd. Dispatch,
     // events, and mutations retain their own checked gates.
     let herdr: Option<HerdrClient> = match settings.spawner {

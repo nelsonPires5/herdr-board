@@ -241,8 +241,7 @@ impl HerdrClient {
             return Err(HerdrError::Protocol {
                 code: "incompatible_protocol".to_string(),
                 message: format!(
-                    "Herdr {} with protocol {} is required (found Herdr {} with protocol {})",
-                    crate::SUPPORTED_HERDR_VERSION,
+                    "Herdr socket protocol {} is required (found Herdr {} with protocol {})",
                     crate::SUPPORTED_HERDR_PROTOCOL,
                     pong.version,
                     pong.protocol
@@ -278,8 +277,7 @@ impl HerdrClient {
             return Err(HerdrError::Protocol {
                 code: "incompatible_protocol".to_string(),
                 message: format!(
-                    "Herdr {} with protocol {} is the only supported contract (requested protocol {})",
-                    crate::SUPPORTED_HERDR_VERSION,
+                    "Herdr socket protocol {} is the only supported contract (requested protocol {})",
                     crate::SUPPORTED_HERDR_PROTOCOL,
                     expected
                 ),
@@ -289,8 +287,8 @@ impl HerdrClient {
     }
 
     /// True if a raw `ping` currently succeeds, indicating reachability only.
-    /// This does not enforce the supported Herdr version or socket protocol
-    /// contract; use [`Self::require_supported_protocol`] for that check.
+    /// This does not enforce the supported Herdr socket protocol; use
+    /// [`Self::require_supported_protocol`] for that check.
     pub fn is_live(&mut self) -> bool {
         self.ping().is_ok()
     }

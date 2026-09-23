@@ -224,7 +224,7 @@ fn protocol_gate_rejects_mismatches_with_exact_diagnostics() {
             .require_supported_protocol()
             .expect_err("a mismatched Herdr contract must be rejected");
         let expected_message = format!(
-            "Herdr {SUPPORTED_HERDR_VERSION} with protocol {SUPPORTED_HERDR_PROTOCOL} is required (found Herdr {version} with protocol {protocol})"
+            "Herdr socket protocol {SUPPORTED_HERDR_PROTOCOL} is required (found Herdr {version} with protocol {protocol})"
         );
         assert!(matches!(
             &err,
@@ -934,7 +934,9 @@ fn calls_and_subscriptions_emit_metadata_only_completion_records() {
     let text = captured.text();
     assert!(
         text.lines().any(|line| {
-            line.contains("Herdr version mismatch")
+            line.contains("WARN")
+                && line.contains("herdr_rpc")
+                && line.contains("Herdr version mismatch")
                 && line.contains("found_version=0.9.1")
                 && line.contains("protocol=22")
         }),
