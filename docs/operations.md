@@ -6,6 +6,16 @@ links here; release *policy* (how a version is cut and tagged) lives in
 
 ## Update
 
+For a Stem-managed installation pinned to a release, choose the newer tag explicitly:
+
+```bash
+stem plugin install nelsonPires5/herdr-board --ref v0.17.0 --yes
+```
+
+`stem plugin update stem-board` refreshes the recorded ref but intentionally keeps a pinned tag
+pinned. A tagged update therefore uses the install command above; it replaces the managed checkout
+and prefers the release's verified prebuilt for the current platform.
+
 Re-run the install command to update — Herdr has no separate update command, so reinstall over the
 existing plugin:
 

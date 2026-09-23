@@ -131,13 +131,13 @@ Release state is inspected before mutation:
 
 - the tag must be absent or point to the exact CI `head_sha`; a tag at another SHA is a hard
   error and is never moved;
-- a GitHub Release is checked for draft status and both exact asset names;
+- a GitHub Release is checked for draft status and the complete platform asset set;
 - an existing release with no tag fails closed. The workflow never recreates a missing tag from
   the current CI run;
 - a missing release is created as a **draft** after the tag exists;
 - existing drafts are reused;
-- both assets are uploaded with `gh release upload --clobber`, then the draft is published;
-- the only no-op is a release that is already published and has both expected assets.
+- all assets are uploaded with `gh release upload --clobber`, then the draft is published;
+- the only no-op is a release that is already published and has every expected asset.
 
 Therefore a failure after tag creation, draft creation, or one asset upload can be recovered by
 rerunning the same green `workflow_run`; the per-CI-commit lock serializes retries for that commit. A release with a
@@ -148,12 +148,15 @@ blocked, rerun the green `dev` CI run — the Promote workflow re-evaluates the 
 per-SHA lock and updates the PR; the maintainer merges it once the checks are green. If a
 promotion already landed, a rerun is a no-op (the dev tip is an ancestor of `main`).
 
-Expected assets:
+Expected assets for each of `aarch64-apple-darwin`, `aarch64-unknown-linux-gnu`, and
+`x86_64-unknown-linux-gnu`:
 
-- `board-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz`
-- `board-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz.sha256`
+- `board-X.Y.Z-TARGET` — the executable Stem installs from `[prebuilt]`;
+- `board-X.Y.Z-TARGET.tar.gz` — the self-contained Herdr distribution;
+- `board-X.Y.Z-TARGET.tar.gz.sha256` — the distribution checksum.
 
-The tarball contains the release binary, `herdr-plugin.toml`, `skill/`, packaging scripts,
+`SHA256SUMS` authenticates every raw executable and tarball for Stem and manual verification. Each
+tarball contains the matching release binary, `herdr-plugin.toml`, `skill/`, packaging scripts,
 `README.md`, and any license file present at build time.
 
 ## Tag policy

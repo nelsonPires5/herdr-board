@@ -93,8 +93,16 @@ state is never modified.
 
 ## Install
 
+With Herdr (builds from source):
+
 ```bash
 herdr plugin install nelsonPires5/herdr-board --ref v0.17.0
+```
+
+With Stem 0.1.0-beta.14 or newer (downloads a verified prebuilt when available):
+
+```bash
+stem plugin install nelsonPires5/herdr-board --ref v0.17.0 --yes
 ```
 
 Open the board:

@@ -15,6 +15,13 @@ description = "Kanban board for AI coding agents: cards are prompts, columns are
 min_herdr_version = "0.9.0"
 platforms = ["linux", "macos"]
 
+# Stem prefers this verified release executable and falls back to the build
+# commands below when the current release has no compatible target.
+[prebuilt]
+asset = "board-{version}-{target}"
+destination = "target/release/board"
+checksum = "SHA256SUMS"
+
 # Build the `board` binary at install time (idempotent: cargo no-ops when nothing
 # changed). Produces target/release/board, which the pane command below runs.
 [[build]]

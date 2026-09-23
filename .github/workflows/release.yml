@@ -6,32 +6,33 @@ on:
       - CI
     types:
       - completed
-    # dev pushes run the same CI, but only a green push to main may publish:
-    # the tag is created at the promotion commit merged into main. Never widen
-    # this filter to dev — a dev CI completion must not become a release path.
+    # dev pushes run the same CI, but only a green push to main may publish.
     branches:
       - main
 
-# Serialize retries for the same CI commit without dropping a pending release
-# when a later main commit completes CI.
 concurrency:
   group: release-${{ github.event.workflow_run.head_sha }}
   cancel-in-progress: false
-
-permissions:
-  contents: write
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  release:
-    name: release from green main CI
+  inspect:
+    name: inspect green main release
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'main'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      release_needed: ${{ steps.state.outputs.release_needed }}
+      version: ${{ steps.state.outputs.version }}
+      head_sha: ${{ steps.state.outputs.head_sha }}
+      tag_needed: ${{ steps.state.outputs.tag_needed }}
+      release_exists: ${{ steps.state.outputs.release_exists }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -55,12 +56,8 @@ jobs:
             echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
             echo "tag_needed=${3:-false}" >> "$GITHUB_OUTPUT"
             echo "release_exists=${4:-false}" >> "$GITHUB_OUTPUT"
-            echo "release_draft=${5:-false}" >> "$GITHUB_OUTPUT"
-            echo "release_has_assets=${6:-false}" >> "$GITHUB_OUTPUT"
-            echo "release_complete=${7:-false}" >> "$GITHUB_OUTPUT"
           }
 
-          # A root commit has no first parent and cannot be a release merge.
           if ! git rev-parse --verify --quiet "$HEAD_SHA^1^{commit}" >/dev/null; then
             echo "No first parent; release is a no-op."
             set_state false
@@ -74,7 +71,6 @@ jobs:
           head_version="$(cargo_version "$HEAD_SHA:Cargo.toml")"
           parent_version="$(cargo_version "$HEAD_SHA^1:Cargo.toml")"
           echo "Cargo.toml version: $parent_version -> $head_version"
-
           if [ "$head_version" = "$parent_version" ]; then
             echo "No release version bump; release is a no-op."
             set_state false "$head_version"
@@ -83,14 +79,11 @@ jobs:
 
           version="$head_version"
           tag="v$version"
-          tarball_name="board-$version-x86_64-unknown-linux-gnu.tar.gz"
-          checksum_name="$tarball_name.sha256"
           remote_tag_sha="$(git ls-remote --tags "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "refs/tags/$tag" "refs/tags/$tag^{}" | awk -v tag="$tag" '
             $2 == "refs/tags/" tag "^{}" { peeled = $1 }
             $2 == "refs/tags/" tag { direct = $1 }
             END { if (peeled != "") print peeled; else if (direct != "") print direct }
           ')"
-
           if [ -n "$remote_tag_sha" ] && [ "$remote_tag_sha" != "$HEAD_SHA" ]; then
             echo "::error::tag $tag points to $remote_tag_sha, not $HEAD_SHA" >&2
             exit 1
@@ -99,103 +92,159 @@ jobs:
           release_exists=false
           release_draft=false
           release_has_assets=false
-          release_json=""
           if release_json="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft,tagName,assets 2>/dev/null)"; then
             release_exists=true
             release_draft="$(printf '%s' "$release_json" | jq -r '.isDraft')"
             release_tag_name="$(printf '%s' "$release_json" | jq -r '.tagName')"
-            release_has_assets="$(printf '%s' "$release_json" | jq -r --arg tarball "$tarball_name" --arg checksum "$checksum_name" '[.assets[].name] | (index($tarball) != null and index($checksum) != null)')"
+            asset_names="$(printf '%s' "$release_json" | jq -r '.assets[].name')"
+            release_has_assets=true
+            printf '%s\n' "$asset_names" | grep -Fxq SHA256SUMS || release_has_assets=false
+            for target in aarch64-apple-darwin aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu; do
+              for name in \
+                "board-$version-$target" \
+                "board-$version-$target.tar.gz" \
+                "board-$version-$target.tar.gz.sha256"; do
+                printf '%s\n' "$asset_names" | grep -Fxq "$name" || release_has_assets=false
+              done
+            done
             echo "Found release $release_tag_name (draft=$release_draft, assets=$release_has_assets)."
           fi
 
-          # GitHub can retain a release object after its tag was deleted. Never
-          # recreate that tag from the current CI run: fail closed instead.
           if [ "$release_exists" = true ] && [ -z "$remote_tag_sha" ]; then
             echo "::error::release $tag exists but its tag is missing; repair it manually, refusing to create a tag" >&2
             exit 1
           fi
 
-          release_complete=false
           if [ "$release_exists" = true ] && [ "$release_draft" = false ] && [ "$release_has_assets" = true ]; then
-            release_complete=true
+            echo "Release $tag is published with every expected asset; no-op."
+            set_state false "$version" false true
+            exit 0
           fi
+
           tag_needed=false
-          if [ -z "$remote_tag_sha" ]; then
-            tag_needed=true
-          fi
+          [ -n "$remote_tag_sha" ] || tag_needed=true
+          set_state true "$version" "$tag_needed" "$release_exists"
+          echo "Release $tag needs creation or recovery."
 
-          release_needed=true
-          if [ "$release_complete" = true ]; then
-            release_needed=false
-          fi
-          echo "release_needed=$release_needed" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
-          echo "tag_needed=$tag_needed" >> "$GITHUB_OUTPUT"
-          echo "release_exists=$release_exists" >> "$GITHUB_OUTPUT"
-          echo "release_draft=$release_draft" >> "$GITHUB_OUTPUT"
-          echo "release_has_assets=$release_has_assets" >> "$GITHUB_OUTPUT"
-          echo "release_complete=$release_complete" >> "$GITHUB_OUTPUT"
+  build:
+    name: build ${{ matrix.target }}
+    needs: inspect
+    if: needs.inspect.outputs.release_needed == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.inspect.outputs.head_sha }}
+          persist-credentials: false
 
-          if [ "$release_complete" = true ]; then
-            echo "Release $tag is published with both expected assets; no-op."
-          else
-            echo "Release $tag needs creation or recovery."
-          fi
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
-      - name: Install stable Rust
-        if: steps.state.outputs.release_needed == 'true'
-        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
 
-      - name: Cache Rust build
-        if: steps.state.outputs.release_needed == 'true'
-        uses: Swatinem/rust-cache@v2
+      - name: Build native release executable
+        run: cargo build --locked --release -p board-cli --target "${{ matrix.target }}"
+
+      - name: Stage executable
+        shell: bash
+        env:
+          VERSION: ${{ needs.inspect.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "target/$TARGET/release/board" "dist/board-$VERSION-$TARGET"
+          chmod 755 "dist/board-$VERSION-$TARGET"
+          file "dist/board-$VERSION-$TARGET"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-binary-${{ matrix.target }}
+          path: dist/board-${{ needs.inspect.outputs.version }}-${{ matrix.target }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: publish release from green main CI
+    needs: [inspect, build]
+    if: needs.inspect.outputs.release_needed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.inspect.outputs.head_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-binary-*
+          path: dist
+          merge-multiple: true
 
       - name: Verify release files
-        if: steps.state.outputs.release_needed == 'true'
         env:
           REPO_URL: https://github.com/${{ github.repository }}
         run: python3 scripts/prepare-release.py --repo . verify --repo-url "$REPO_URL"
 
-      - name: Build release binary
-        if: steps.state.outputs.release_needed == 'true'
-        run: cargo build --locked --release -p board-cli
-
-      - name: Package release tarball
-        if: steps.state.outputs.release_needed == 'true'
-        id: package
+      - name: Package release distributions
         shell: bash
         env:
-          VERSION: ${{ steps.state.outputs.version }}
+          VERSION: ${{ needs.inspect.outputs.version }}
         run: |
           set -euo pipefail
-          triple="x86_64-unknown-linux-gnu"
-          name="board-$VERSION-$triple"
-          stage="dist/$name"
-          mkdir -p "$stage/target/release" "$stage/scripts"
+          targets="aarch64-apple-darwin aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu"
+          for target in $targets; do
+            executable="board-$VERSION-$target"
+            [ -f "dist/$executable" ] || { echo "missing $executable" >&2; exit 1; }
+            chmod 755 "dist/$executable"
+            file "dist/$executable"
 
-          cp target/release/board "$stage/target/release/board"
-          cp herdr-plugin.toml "$stage/herdr-plugin.toml"
-          cp -r skill "$stage/skill"
-          cp scripts/build.sh scripts/install-cli.sh scripts/open-board.sh scripts/install.sh "$stage/scripts/"
-          [ -f README.md ] && cp README.md "$stage/README.md"
-          for lic in LICENSE LICENSE.md LICENSE-MIT LICENSE.txt; do
-            [ -f "$lic" ] && cp "$lic" "$stage/$lic"
+            name="board-$VERSION-$target"
+            stage="dist/package/$name"
+            mkdir -p "$stage/target/release" "$stage/scripts"
+            cp "dist/$executable" "$stage/target/release/board"
+            cp herdr-plugin.toml "$stage/herdr-plugin.toml"
+            cp -r skill "$stage/skill"
+            cp scripts/build.sh scripts/install-cli.sh scripts/open-board.sh scripts/install.sh "$stage/scripts/"
+            [ -f README.md ] && cp README.md "$stage/README.md"
+            for lic in LICENSE LICENSE.md LICENSE-MIT LICENSE.txt; do
+              [ -f "$lic" ] && cp "$lic" "$stage/$lic"
+            done
+
+            tar -C dist/package -czf "dist/$name.tar.gz" "$name"
+            (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+            tar -tzf "dist/$name.tar.gz"
           done
 
-          tar -C dist -czf "dist/$name.tar.gz" "$name"
-          ( cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256" )
-          echo "tarball=dist/$name.tar.gz" >> "$GITHUB_OUTPUT"
-          echo "checksum=dist/$name.tar.gz.sha256" >> "$GITHUB_OUTPUT"
-          tar -tzf "dist/$name.tar.gz"
-          cat "dist/$name.tar.gz.sha256"
+          : > dist/SHA256SUMS
+          for target in $targets; do
+            (cd dist && sha256sum "board-$VERSION-$target" "board-$VERSION-$target.tar.gz") >> dist/SHA256SUMS
+          done
+          cat dist/SHA256SUMS
 
       - name: Extract release notes
-        if: steps.state.outputs.release_needed == 'true'
-        id: notes
         shell: bash
         env:
-          VERSION: ${{ steps.state.outputs.version }}
+          VERSION: ${{ needs.inspect.outputs.version }}
         run: |
           set -euo pipefail
           out=release-notes.md
@@ -209,15 +258,14 @@ jobs:
           if [ ! -s "$out" ]; then
             echo "_See the auto-generated notes below._" > "$out"
           fi
-          echo "file=$out" >> "$GITHUB_OUTPUT"
 
       - name: Create annotated tag
-        if: steps.state.outputs.release_needed == 'true' && steps.state.outputs.tag_needed == 'true'
+        if: needs.inspect.outputs.tag_needed == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: v${{ steps.state.outputs.version }}
-          HEAD_SHA: ${{ steps.state.outputs.head_sha }}
+          TAG: v${{ needs.inspect.outputs.version }}
+          HEAD_SHA: ${{ needs.inspect.outputs.head_sha }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
@@ -226,34 +274,32 @@ jobs:
           git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$TAG"
 
       - name: Create draft GitHub Release
-        if: steps.state.outputs.release_needed == 'true' && steps.state.outputs.release_exists == 'false'
+        if: needs.inspect.outputs.release_exists == 'false'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: v${{ steps.state.outputs.version }}
+          TAG: v${{ needs.inspect.outputs.version }}
         run: |
           gh release create "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --title "$TAG" \
-            --notes-file "${{ steps.notes.outputs.file }}" \
+            --notes-file release-notes.md \
             --draft \
             --verify-tag
 
-      - name: Upload release assets (recoverable)
-        if: steps.state.outputs.release_needed == 'true'
+      - name: Upload release assets
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.inspect.outputs.version }}
         run: |
-          gh release upload "v${{ steps.state.outputs.version }}" \
-            "${{ steps.package.outputs.tarball }}" \
-            "${{ steps.package.outputs.checksum }}" \
+          gh release upload "v$VERSION" \
+            dist/board-$VERSION-* \
+            dist/SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
 
       - name: Publish draft release
-        if: steps.state.outputs.release_needed == 'true'
-        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release edit "v${{ steps.state.outputs.version }}" --repo "$GITHUB_REPOSITORY" --draft=false
+        run: gh release edit "v${{ needs.inspect.outputs.version }}" --repo "$GITHUB_REPOSITORY" --draft=false

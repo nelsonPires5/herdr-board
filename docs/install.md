@@ -4,9 +4,12 @@ The install steps the [root README](../README.md) summarizes, plus everything op
 them: a custom CLI directory, a Herdr keybinding, the harness integration, the agent skill, and
 named Herdr sessions.
 
-Requires exactly **Herdr 0.9.0 (socket protocol 22)**, Git, and a Rust toolchain with `cargo`; Linux
-and macOS are supported. The board-side compatibility contract remains board protocol v1 and
-SQLite schema v15. See the README for the one-line install command itself.
+Linux and macOS are supported. Installing through Herdr requires exactly **Herdr 0.9.0 (socket
+protocol 22)**, Git, and a Rust toolchain with `cargo` because Herdr builds the plugin from source.
+Installing through Stem 0.1.0-beta.14 or newer uses a verified prebuilt executable for Apple
+silicon, Linux ARM64, or Linux x86_64 and needs Cargo only when no compatible release asset exists.
+The board-side compatibility contract remains board protocol v1 and SQLite schema v15. See the
+README for the one-line install commands.
 
 | Component | Required support level | How to verify |
 |---|---|---|
@@ -42,6 +45,18 @@ run still executes, but its conversation id is never captured. `herdr integratio
 source of truth for the installable target names; install only the harness integrations you use.
 
 ## Installation details and a custom CLI directory
+
+Stem installs the same plugin manifest but prefers the release executable declared by its
+`[prebuilt]` section:
+
+```bash
+stem plugin install nelsonPires5/herdr-board --ref v0.17.0 --yes
+```
+
+Stem verifies the matching asset against the release's `SHA256SUMS` before placing it at the
+plugin's `target/release/board` command path. If the release or current target is unavailable,
+Stem runs the source build commands instead. An advertised asset that cannot be downloaded or
+verified fails installation rather than silently compiling different code.
 
 Herdr 0.9.0 first shows an interactive trust preview of the plugin's build commands. Relative
 plugin commands resolve from the plugin root, so the manifest's build/action paths do not depend on
