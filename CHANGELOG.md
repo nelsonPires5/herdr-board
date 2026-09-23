@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-09-23
+
 ### Fixed
 
 - [#124](https://github.com/nelsonPires5/herdr-board/pull/124) fix: Accept Herdr 0.9.1 on protocol 22 with a version warning (issue #121).
@@ -436,7 +438,8 @@ a visible herdr pane. Ships as a single `board` binary (TUI + daemon + CLI) and 
 - **Packaging.** `herdr-plugin.toml` manifest, and `scripts/` for build, install (guarded behind
   `--yes`), the open-or-focus launcher, a raw protocol client, and a live-herdr e2e smoke test.
 
-[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/nelsonPires5/herdr-board/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.18.0
 [0.17.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.17.0
 [0.16.1]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.16.1
 [0.16.0]: https://github.com/nelsonPires5/herdr-board/releases/tag/v0.16.0
