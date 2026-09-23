@@ -25,18 +25,20 @@ Rule of thumb (mirrors [AGENTS.md](../AGENTS.md)): **never assume a herdr
 command, flag, or JSON shape from memory — verify against `api schema` /
 `--help`, and pin the argv you verified in a test comment.**
 
-## Compatibility gate: Herdr 0.9.0 / socket protocol 22
+## Compatibility gate: Herdr >= 0.9.0 speaking socket protocol 22
 
-The supported matrix is exact: **Herdr 0.9.0**, **socket protocol 22**, board protocol
-v1, and SQLite schema v15. `board-herdr` rejects a different Herdr version or
-protocol before the daemon performs workspace discovery, pane placement, an agent
-launch, a configured runner action, or a notification mutation. This is a policy
-gate, not a protocol-negotiation fallback.
+The supported socket contract is **protocol 22** (Herdr 0.9.0 and compatible
+later releases such as 0.9.1); board protocol v1 and SQLite schema v15 are
+independent. `board-herdr` rejects a different socket protocol before the daemon
+performs workspace discovery, pane placement, an agent launch, a configured
+runner action, or a notification mutation. A version different from the 0.9.0
+reference is logged as a warning, not rejected if it speaks protocol 22. This
+is a policy gate, not a protocol-negotiation fallback.
 
 Use these read-only probes before changing a wire call or debugging a live session:
 
 ```bash
-test "$(herdr --version)" = "herdr 0.9.0"
+herdr --version  # check the installed release; 0.9.0 and 0.9.1 speak protocol 22
 herdr api schema --json | python3 -c \
   'import json, sys; s=json.load(sys.stdin); assert s["protocol"] == 22, s'
 herdr api snapshot
@@ -167,8 +169,8 @@ copying them from this page.
 
 The stable transport rule is pane-first and intentionally independent of a
 protocol number: create or split the target pane with its cwd/environment first,
-then start the agent in that existing pane. Under the exact Herdr 0.9.0 / socket
-protocol 22 gate, herdr-board first creates a shell root for a new durable card
+then start the agent in that existing pane. Under the socket protocol 22 gate,
+herdr-board first creates a shell root for a new durable card
 tab and reserves it as `card-<id>-anchor`. When the dispatch itself just created
 the workspace (`new_workspace` with no matching open workspace), the workspace's
 own initial tab/root is adopted instead: the exact bootstrap ids are verified
@@ -342,8 +344,9 @@ workspace, tab, pane, agent, notification, session, and events. The upstream wor
 DTOs are not part of this crate's public surface; repository isolation belongs in the agent prompt.
 The checked-in schema fixture is regenerated from the installed Herdr contract and
 is not rewritten during unrelated API cleanup. The board fixture and typed client
-are currently pinned to **Herdr 0.9.0 / protocol 22**; board protocol v1 and DB
-schema v15 remain independent and unchanged.
+use **Herdr 0.9.0 as the reference version / protocol 22 as the compatibility gate**;
+compatible later releases (including 0.9.1) are accepted with a version warning.
+Board protocol v1 and DB schema v15 remain independent and unchanged.
 
 This repo's current Herdr facts — [`docs/research.md`](research.md),
 [`docs/design.md`](design.md), and the wire shapes hard-coded in `board-herdr` —

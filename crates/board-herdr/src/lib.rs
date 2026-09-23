@@ -24,9 +24,16 @@ mod params;
 mod transport;
 mod types;
 
-/// The only Herdr release supported by this client.
+/// The Herdr release this client's schema fixture was captured from.
+///
+/// This is a reference/display version, not a minimum-version check: any
+/// release speaking [`SUPPORTED_HERDR_PROTOCOL`] is accepted, with a warning
+/// when it differs from this reference.
 pub const SUPPORTED_HERDR_VERSION: &str = "0.9.0";
 /// The only Herdr socket protocol supported by this client.
+///
+/// This is the hard compatibility gate; a different protocol is rejected
+/// before any board operation touches the socket.
 pub const SUPPORTED_HERDR_PROTOCOL: u32 = 22;
 
 pub use client::HerdrClient;
