@@ -232,9 +232,9 @@ impl HerdrClient {
     /// compatibility gate is owned by [`crate::SUPPORTED_HERDR_PROTOCOL`]
     /// (22); any Herdr version that speaks protocol 22 is accepted. A
     /// version mismatch against [`crate::SUPPORTED_HERDR_VERSION`] is logged
-    /// as a warning but does not fail the gate, so the version constant
-    /// remains the display/min-version while the protocol is the hard
-    /// compatibility check.
+    /// as a warning but does not fail the gate. The version constant is a
+    /// reference/display version, not a minimum-version check; the protocol
+    /// is the only hard compatibility check.
     pub fn require_supported_protocol(&mut self) -> Result<Pong> {
         let pong = self.ping()?;
         if pong.protocol != crate::SUPPORTED_HERDR_PROTOCOL {
@@ -267,8 +267,8 @@ impl HerdrClient {
     /// Compatibility adapter for callers of the pre-0.8.0 API.
     ///
     /// The argument is retained so existing clients continue to compile, but
-    /// it is not a version selector: this crate supports only its exact pinned
-    /// Herdr 0.9.0 / protocol-22 contract. New callers should use
+    /// it is not a version selector: this crate requires protocol 22 (with
+    /// Herdr 0.9.0 as its reference version). New callers should use
     /// [`Self::require_supported_protocol`].
     #[deprecated(
         note = "use require_supported_protocol; the argument is retained only for source compatibility"
