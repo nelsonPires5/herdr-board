@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- [#125](https://github.com/nelsonPires5/herdr-board/pull/125) feat: publish verified Stem Board binaries for macOS ARM64 and Linux ARM64/x86_64, with source fallback when unavailable.
+
 ## [0.17.0] - 2026-09-13
 
 ### Added
