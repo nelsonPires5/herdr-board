@@ -17,8 +17,8 @@ use board_herdr::PaneRenameParams;
 /// the caller's own Herdr session. That session is named by `origin_socket`
 /// exactly as it is for `run.focus`, because only the caller knows which Herdr
 /// it is running inside; the socket is canonicalized and then opened through
-/// [`crate::herdr_conn`], so the pinned Herdr 0.9.0 / protocol 22 gate applies
-/// before the rename reaches it.
+/// [`crate::herdr_conn`], so the pinned protocol-22 gate applies before the
+/// rename reaches it.
 ///
 /// **A failure here is a real error (code 4), not a silent success.** The
 /// daemon must not answer `{renamed:true}` for a rename that did not happen:

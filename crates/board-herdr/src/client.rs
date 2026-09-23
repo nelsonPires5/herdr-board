@@ -228,25 +228,37 @@ impl HerdrClient {
         self.call_into("ping", json!({}))
     }
 
-    /// Require the exact Herdr release and socket protocol supported by this
-    /// client. The supported contract is owned by [`crate::SUPPORTED_HERDR_VERSION`]
-    /// and [`crate::SUPPORTED_HERDR_PROTOCOL`], so callers cannot accidentally
-    /// ask this gate to validate a different contract.
+    /// Require the Herdr socket protocol supported by this client. The
+    /// compatibility gate is owned by [`crate::SUPPORTED_HERDR_PROTOCOL`]
+    /// (22); any Herdr version that speaks protocol 22 is accepted. A
+    /// version mismatch against [`crate::SUPPORTED_HERDR_VERSION`] is logged
+    /// as a warning but does not fail the gate. The version constant is a
+    /// reference/display version, not a minimum-version check; the protocol
+    /// is the only hard compatibility check.
     pub fn require_supported_protocol(&mut self) -> Result<Pong> {
         let pong = self.ping()?;
-        if pong.version != crate::SUPPORTED_HERDR_VERSION
-            || pong.protocol != crate::SUPPORTED_HERDR_PROTOCOL
-        {
+        if pong.protocol != crate::SUPPORTED_HERDR_PROTOCOL {
             return Err(HerdrError::Protocol {
                 code: "incompatible_protocol".to_string(),
                 message: format!(
-                    "Herdr {} with protocol {} is required (found Herdr {} with protocol {})",
-                    crate::SUPPORTED_HERDR_VERSION,
+                    "Herdr socket protocol {} is required (found Herdr {} with protocol {})",
                     crate::SUPPORTED_HERDR_PROTOCOL,
                     pong.version,
                     pong.protocol
                 ),
             });
+        }
+        if pong.version != crate::SUPPORTED_HERDR_VERSION {
+            tracing::warn!(
+                target: "herdr_rpc",
+                expected_version = crate::SUPPORTED_HERDR_VERSION,
+                found_version = %pong.version,
+                protocol = pong.protocol,
+                "Herdr version mismatch: expected {} but found {} with compatible protocol {}; continuing",
+                crate::SUPPORTED_HERDR_VERSION,
+                pong.version,
+                pong.protocol
+            );
         }
         Ok(pong)
     }
@@ -254,8 +266,8 @@ impl HerdrClient {
     /// Compatibility adapter for callers of the pre-0.8.0 API.
     ///
     /// The argument is retained so existing clients continue to compile, but
-    /// it is not a version selector: this crate supports only its exact pinned
-    /// Herdr 0.9.0 / protocol-22 contract. New callers should use
+    /// it is not a version selector: this crate requires protocol 22 (with
+    /// Herdr 0.9.0 as its reference version). New callers should use
     /// [`Self::require_supported_protocol`].
     #[deprecated(
         note = "use require_supported_protocol; the argument is retained only for source compatibility"
@@ -265,8 +277,7 @@ impl HerdrClient {
             return Err(HerdrError::Protocol {
                 code: "incompatible_protocol".to_string(),
                 message: format!(
-                    "Herdr {} with protocol {} is the only supported contract (requested protocol {})",
-                    crate::SUPPORTED_HERDR_VERSION,
+                    "Herdr socket protocol {} is the only supported contract (requested protocol {})",
                     crate::SUPPORTED_HERDR_PROTOCOL,
                     expected
                 ),
@@ -276,8 +287,8 @@ impl HerdrClient {
     }
 
     /// True if a raw `ping` currently succeeds, indicating reachability only.
-    /// This does not enforce the supported Herdr version or socket protocol
-    /// contract; use [`Self::require_supported_protocol`] for that check.
+    /// This does not enforce the supported Herdr socket protocol; use
+    /// [`Self::require_supported_protocol`] for that check.
     pub fn is_live(&mut self) -> bool {
         self.ping().is_ok()
     }

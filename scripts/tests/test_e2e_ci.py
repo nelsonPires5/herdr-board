@@ -8,6 +8,7 @@ from _support import REPO_ROOT as ROOT
 
 
 HERDR_VERSION = "0.9.0"
+HERDR_COMPATIBLE_VERSIONS = ("0.9.0", "0.9.1")
 HERDR_PROTOCOL = 22
 HERDR_SHA256 = "4fa1a01158dd8043da92d31b270780b0dcc10603038d9b61cac4d81ab63fb71f"
 HERDR_URL = (
@@ -109,10 +110,16 @@ class LiveE2ECIContractTests(unittest.TestCase):
         )
         self.assertEqual(self.wrapper.count(command), 1)
 
-    def test_e2e_preflights_and_real_claude_pin_the_same_exact_contract(self) -> None:
-        self.assertIn(f'[ "$version" = "herdr {HERDR_VERSION}" ]', self.lib)
-        self.assertIn(f'[ "$reported_version" = "{HERDR_VERSION}" ]', self.lib)
+    def test_e2e_preflights_accept_compatible_versions_and_pin_protocol(self) -> None:
+        # The standard-suite preflight accepts the reference release and the
+        # next wire-compatible release; the real-provider smoke stays on the
+        # exact pinned binary. Protocol 22 is the shared hard gate.
+        for version in HERDR_COMPATIBLE_VERSIONS:
+            self.assertIn(f'"herdr {version}"', self.lib)
+        self.assertIn(" | ".join(HERDR_COMPATIBLE_VERSIONS) + ") ;;", self.lib)
         self.assertIn(f'[ "$protocol" = "{HERDR_PROTOCOL}" ]', self.lib)
+        self.assertNotIn(f'[ "$version" = "herdr {HERDR_VERSION}" ]', self.lib)
+        self.assertNotIn(f'[ "$reported_version" = "{HERDR_VERSION}" ]', self.lib)
         self.assertIn(
             f'[ "$HERDR_VERSION" = "herdr {HERDR_VERSION}" ]', self.real_claude
         )
@@ -176,7 +183,7 @@ class LiveE2ECIContractTests(unittest.TestCase):
             self.assertNotIn("0.7.5", source)
             self.assertNotIn("protocol-17", source)
             self.assertNotIn("protocol 17", source)
-        self.assertIn("Herdr 0.9.0 / socket protocol 22", readme)
+        self.assertIn("Herdr 0.9.0 or 0.9.1 speaking socket protocol 22", readme)
         self.assertIn("protocol-22/current", readme)
         self.assertIn("Pi integration v8", readme)
         self.assertIn("Pi integration v8", awaiting)

@@ -75,7 +75,7 @@ Full layering, test placement, harness details, and how to add tests live in
   | | `dispatch/` | queue lifecycle; `launch_plan.rs` builds the launch spec, `ownership.rs` decides what this daemon may claim |
   | | `spawner/` | launch and placement; `placement/` (alloc/geometry/race), `herdr/` (managed + configured), `error.rs` |
   | | `watchers/` | timeout/liveness/Herdr observation |
-  | | `herdr_conn.rs` | the gated connect: normalize the socket path, connect, run the 0.9.0/protocol-22 check, in one place. New placement, discovery, and mutation paths go through it. The two space-resolution sites that still connect directly (`ops/cards.rs`, `dispatch/launch_plan.rs`) run the same gate inside `dispatch/space.rs`; cleanup/observation retain an ungated client only for panes this daemon already owns |
+  | | `herdr_conn.rs` | the gated connect: normalize the socket path, connect, run the protocol-22 check, in one place. New placement, discovery, and mutation paths go through it. The two space-resolution sites that still connect directly (`ops/cards.rs`, `dispatch/launch_plan.rs`) run the same gate inside `dispatch/space.rs`; cleanup/observation retain an ungated client only for panes this daemon already owns |
   | | `rescue.rs`, `recovery.rs`, `logging.rs`, `testkit.rs` | run rescue, per-session recovery, tracing setup, and the `cfg(test)` daemon/fake-Herdr builders |
   | `board-tui` | `app/` | the pure reducer — `state`/`effect`/`nav`/`drag` plus one module per screen |
   | | `driver/` | the effect loop (`dispatch`, `load`); `runtime.rs` owns terminal setup/teardown, `origin.rs` the Herdr-plugin origin context |
@@ -141,9 +141,9 @@ Full layering, test placement, harness details, and how to add tests live in
 sources are the installed binary itself — `herdr api schema --json` (methods/types/events +
 protocol number), `herdr <cmd> --help`, `herdr api snapshot`. Never assume a herdr command,
 flag, or JSON shape from memory, and pin the argv you verified in a test comment. Repo herdr
-facts are pinned to exactly **Herdr 0.9.0 / protocol 22**. herdr-board intentionally rejects every
-other Herdr version and protocol; re-verify against `api schema` before changing that gate or any
-wire behavior. **See [`docs/herdr.md`](docs/herdr.md).**
+facts are pinned to **Herdr 0.9.0 / protocol 22** as the reference contract. herdr-board rejects
+any other socket protocol but accepts any Herdr version speaking protocol 22, warning when it
+differs from 0.9.0; re-verify against `api schema` before changing that gate or any wire behavior. **See [`docs/herdr.md`](docs/herdr.md).**
 
 - **Never run destructive herdr commands against a user's workspaces/sessions.** Mutations only
   against disposable workspaces you created (see `e2e/`). Read-only probes otherwise.
