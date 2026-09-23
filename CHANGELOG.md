@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- [#124](https://github.com/nelsonPires5/herdr-board/pull/124) fix: Accept Herdr 0.9.1 on protocol 22 with a version warning (issue #121).
+
 ## [0.17.0] - 2026-09-13
 
 ### Added

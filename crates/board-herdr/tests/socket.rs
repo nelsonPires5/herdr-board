@@ -139,6 +139,28 @@ fn protocol_gate_accepts_exact_supported_contract() {
 }
 
 #[test]
+fn protocol_gate_accepts_later_versions_with_supported_protocol() {
+    for version in ["0.9.1", "9.9.9"] {
+        let path = serve_calls(move |req| {
+            assert_eq!(req["method"], "ping");
+            reply_for(
+                req,
+                &format!(
+                    r#"{{"type":"pong","version":"{version}","protocol":22,"capabilities":{{}}}}"#
+                ),
+            )
+        });
+
+        let mut client = HerdrClient::connect(&path).unwrap();
+        let pong = client
+            .require_supported_protocol()
+            .expect("a different version speaking protocol 22 must be accepted");
+        assert_eq!(pong.version, version);
+        assert_eq!(pong.protocol, SUPPORTED_HERDR_PROTOCOL);
+    }
+}
+
+#[test]
 #[allow(deprecated)]
 fn deprecated_protocol_adapter_accepts_only_the_supported_protocol() {
     let path = serve_calls(|req| {
@@ -181,7 +203,13 @@ fn deprecated_protocol_adapter_rejects_a_different_requested_protocol() {
 
 #[test]
 fn protocol_gate_rejects_mismatches_with_exact_diagnostics() {
-    for (version, protocol) in [("0.7.5", 19), ("0.8.0", 17), ("0.7.5", 17), ("0.9.0", 20)] {
+    for (version, protocol) in [
+        ("0.7.5", 19),
+        ("0.8.0", 17),
+        ("0.7.5", 17),
+        ("0.9.0", 20),
+        ("0.9.1", 21),
+    ] {
         let path = serve_calls(move |req| {
             reply_for(
                 req,
@@ -196,7 +224,7 @@ fn protocol_gate_rejects_mismatches_with_exact_diagnostics() {
             .require_supported_protocol()
             .expect_err("a mismatched Herdr contract must be rejected");
         let expected_message = format!(
-            "Herdr {SUPPORTED_HERDR_VERSION} with protocol {SUPPORTED_HERDR_PROTOCOL} is required (found Herdr {version} with protocol {protocol})"
+            "Herdr socket protocol {SUPPORTED_HERDR_PROTOCOL} is required (found Herdr {version} with protocol {protocol})"
         );
         assert!(matches!(
             &err,
@@ -871,6 +899,20 @@ fn calls_and_subscriptions_emit_metadata_only_completion_records() {
     // rest of the socket suite runs in parallel. The arbitrary diagnostic
     // methods all collapse to the stable `<unknown>` label.
     tracing::subscriber::set_global_default(subscriber).expect("install test subscriber once");
+    // Capture the compatibility warning with the suite's global subscriber:
+    // scoped dispatches race callsite-interest caching in parallel tests.
+    let gate_path = serve_calls(|req| {
+        assert_eq!(req["method"], "ping");
+        reply_for(
+            req,
+            r#"{"type":"pong","version":"0.9.1","protocol":22,"capabilities":{}}"#,
+        )
+    });
+    let mut gate_client = HerdrClient::connect(&gate_path).unwrap();
+    assert_eq!(
+        gate_client.require_supported_protocol().unwrap().version,
+        "0.9.1"
+    );
     let mut client = HerdrClient::connect(&call_path).unwrap();
     assert!(client
         .call(
@@ -890,6 +932,16 @@ fn calls_and_subscriptions_emit_metadata_only_completion_records() {
     let _events = HerdrEvents::connect(&stream_path, &[Subscription::pane_exited()]).unwrap();
 
     let text = captured.text();
+    assert!(
+        text.lines().any(|line| {
+            line.contains("WARN")
+                && line.contains("herdr_rpc")
+                && line.contains("Herdr version mismatch")
+                && line.contains("found_version=0.9.1")
+                && line.contains("protocol=22")
+        }),
+        "missing compatible-version warning: {text}"
+    );
     let records: Vec<&str> = text
         .lines()
         .filter(|line| {

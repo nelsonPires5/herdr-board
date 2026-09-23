@@ -1,9 +1,10 @@
 //! The single gated way to open a Herdr request connection.
 //!
-//! The board-herdr client pins herdr-board to one supported Herdr release and
-//! socket protocol and rejects every other one. The daemon opens a fresh
-//! connection per operation,
-//! so the gate has to live at the connect, not at a single startup check.
+//! The board-herdr client pins herdr-board to the supported Herdr socket
+//! protocol (22) and rejects every other one. A Herdr version different from
+//! the 0.9.0 reference is accepted with a warning when it speaks protocol 22.
+//! The daemon opens a fresh connection per operation, so the gate has to live
+//! at the connect, not at a single startup check.
 
 use std::path::{Path, PathBuf};
 

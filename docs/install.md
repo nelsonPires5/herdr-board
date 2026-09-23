@@ -4,22 +4,23 @@ The install steps the [root README](../README.md) summarizes, plus everything op
 them: a custom CLI directory, a Herdr keybinding, the harness integration, the agent skill, and
 named Herdr sessions.
 
-Requires exactly **Herdr 0.9.0 (socket protocol 22)**, Git, and a Rust toolchain with `cargo`; Linux
-and macOS are supported. The board-side compatibility contract remains board protocol v1 and
+Requires **Herdr >= 0.9.0 speaking socket protocol 22** (including 0.9.1), Git, and a Rust
+toolchain with `cargo`; Linux and macOS are supported. The board-side compatibility contract remains board protocol v1 and
 SQLite schema v15. See the README for the one-line install command itself.
 
 | Component | Required support level | How to verify |
 |---|---|---|
-| Herdr binary | 0.9.0 | `herdr --version` → `herdr 0.9.0` |
- | Herdr socket | protocol 22 | `herdr api schema --json` → top-level `protocol: 22`; a running session's `herdr api snapshot` also reports `version` and `protocol` |
+| Herdr binary | >= 0.9.0 with protocol 22 | `herdr --version` (e.g. `herdr 0.9.0` or `herdr 0.9.1`) |
+| Herdr socket | protocol 22 | `herdr api schema --json` → top-level `protocol: 22`; a running session's `herdr api snapshot` also reports `version` and `protocol` |
 | Board socket | v1 | `docs/protocol.md` and `board-core::protocol` |
 | SQLite | schema v15 | `schema.sql` and `board-core::db` migrations |
 | Pi integration | v8 for precise Pi lifecycle/session signals | `herdr integration status` |
 | Claude integration | v7 for precise Claude lifecycle/session signals | `herdr integration status` |
 | Antigravity CLI integration | v1 for the `agy` conversation-id capture (resume/retry/rescue) | `herdr integration status` |
 
-The board rejects a different Herdr version or socket protocol before workspace discovery or pane
-placement; it does not silently fall back to an older wire contract. The integration versions are
+The board rejects a different socket protocol before workspace discovery or pane placement; a
+version differing from the 0.9.0 reference is warned about but accepted when the socket speaks
+protocol 22. It does not silently fall back to an older wire contract. The integration versions are
 user-managed prerequisites, not plugin files installed by herdr-board.
 
 ## Verify the installed Herdr before installing
@@ -27,7 +28,7 @@ user-managed prerequisites, not plugin files installed by herdr-board.
 These are read-only checks against the binary and session you are about to use:
 
 ```bash
-test "$(herdr --version)" = "herdr 0.9.0"
+herdr --version  # check the installed release; 0.9.0 and 0.9.1 speak protocol 22
 herdr api schema --json | python3 -c \
   'import json, sys; s=json.load(sys.stdin); assert s["protocol"] == 22, s'
 herdr api snapshot

@@ -24,7 +24,11 @@ fn daemon_status_reports_supported_pingable_herdr_as_connected() {
 
 #[test]
 fn daemon_status_does_not_report_incompatible_pingable_herdr_as_connected() {
-    let herdr = testkit::herdr_server().version("0.8.1").serve();
+    // Protocol is the hard gate: wrong protocol must be reported as not connected.
+    // Version 0.9.1 with protocol 22 would be compatible.
+    let herdr = testkit::herdr_server()
+        .protocol(board_herdr::SUPPORTED_HERDR_PROTOCOL - 1)
+        .serve();
     let client = board_herdr::HerdrClient::connect(&herdr.socket).unwrap();
     let d = testkit::daemon().herdr(client).build_daemon();
 
@@ -53,8 +57,8 @@ fn daemon_status_reprobes_a_reachable_handle_after_an_initial_mismatch() {
                 } else {
                     json!({
                         "type": "pong",
-                        "version": "0.8.1",
-                        "protocol": board_herdr::SUPPORTED_HERDR_PROTOCOL,
+                        "version": board_herdr::SUPPORTED_HERDR_VERSION,
+                        "protocol": board_herdr::SUPPORTED_HERDR_PROTOCOL - 1,
                         "capabilities": {}
                     })
                 },

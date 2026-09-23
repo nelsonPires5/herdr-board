@@ -5,9 +5,7 @@
 //! They self-skip (pass trivially) if no compatible socket is present, so the
 //! ignored run is safe on machines without the supported Herdr.
 
-use board_herdr::{
-    default_socket_path, HerdrClient, ReadSource, SUPPORTED_HERDR_PROTOCOL, SUPPORTED_HERDR_VERSION,
-};
+use board_herdr::{default_socket_path, HerdrClient, ReadSource, SUPPORTED_HERDR_PROTOCOL};
 
 fn client_or_skip() -> Option<HerdrClient> {
     let path = default_socket_path();
@@ -25,9 +23,7 @@ fn client_or_skip() -> Option<HerdrClient> {
     match client.require_supported_protocol() {
         Ok(_) => Some(client),
         Err(e) => {
-            eprintln!(
-                "socket is not Herdr {SUPPORTED_HERDR_VERSION} / protocol {SUPPORTED_HERDR_PROTOCOL}: {e}; skipping"
-            );
+            eprintln!("socket does not speak protocol {SUPPORTED_HERDR_PROTOCOL}: {e}; skipping");
             None
         }
     }

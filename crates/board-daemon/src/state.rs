@@ -35,7 +35,7 @@ fn trace_notification_error(error: &HerdrError) {
     );
 }
 
-/// Probe the exact supported Herdr contract immediately before the cosmetic
+/// Probe the supported Herdr socket protocol immediately before the cosmetic
 /// notification mutation. Keeping this synchronous helper separate from the
 /// detached wrapper makes the gate and request ordering deterministic in tests.
 fn send_notification(
@@ -440,8 +440,10 @@ mod tracing_tests {
 
     #[test]
     fn notification_send_only_pings_an_incompatible_herdr() {
+        // Protocol is the hard gate: wrong protocol must stop before notification.show.
+        // Version 0.9.1 with protocol 22 is compatible and would proceed to notification.show.
         let herdr = crate::testkit::herdr_server()
-            .version("0.8.1")
+            .protocol(board_herdr::SUPPORTED_HERDR_PROTOCOL - 1)
             .on("notification.show", |req| {
                 crate::testkit::reply(req, serde_json::json!({"shown": true}))
             })
