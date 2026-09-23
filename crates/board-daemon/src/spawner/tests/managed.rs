@@ -10,12 +10,15 @@ use serde_json::json;
 
 #[test]
 fn herdr_protocol_gate_rejects_mismatches_before_any_spawn_or_placement_call() {
+    // Protocol is the hard gate: wrong protocol must be rejected before any placement.
+    // Version 0.9.1 with protocol 22 is compatible (warn but allow).
     for (version, protocol) in [
-        ("0.8.1", board_herdr::SUPPORTED_HERDR_PROTOCOL),
+        ("0.9.1", board_herdr::SUPPORTED_HERDR_PROTOCOL - 1),
         (
             board_herdr::SUPPORTED_HERDR_VERSION,
             board_herdr::SUPPORTED_HERDR_PROTOCOL - 1,
         ),
+        ("0.9.1", 99),
     ] {
         let fake = serve_recording_herdr_with_ping(
             |req, _| error(req, "unexpected_call", "protocol gate was bypassed"),
@@ -58,6 +61,59 @@ fn herdr_protocol_gate_rejects_mismatches_before_any_spawn_or_placement_call() {
         assert!(
             calls.lock().unwrap().is_empty(),
             "protocol mismatch must stop before pane runner"
+        );
+    }
+
+    // Version 0.9.1 with protocol 22 must be compatible (protocol-only gate).
+    {
+        let herdr = crate::testkit::herdr_server()
+            .version("0.9.1")
+            .protocol(board_herdr::SUPPORTED_HERDR_PROTOCOL)
+            .serve();
+        let mut client = board_herdr::HerdrClient::connect(&herdr.socket).unwrap();
+        assert!(
+            client.require_supported_protocol().is_ok(),
+            "version 0.9.1 with protocol 22 must be compatible"
+        );
+        assert_eq!(herdr.methods(), vec!["ping"]);
+    }
+    {
+        // Spawner must also allow version 0.9.1 with correct protocol beyond the gate.
+        let fake = serve_recording_herdr_with_ping(
+            |req, _| match req["method"].as_str().unwrap() {
+                "tab.list" => empty_tab_list(req),
+                _ => error(req, "proceeded", "gate passed: should proceed beyond ping"),
+            },
+            "0.9.1",
+            board_herdr::SUPPORTED_HERDR_PROTOCOL,
+        );
+        let calls = Arc::new(Mutex::new(Vec::<PaneRunCall>::new()));
+        let runner = RecordingPaneRunner {
+            calls: Arc::clone(&calls),
+            behavior: Box::new(|_, _| anyhow::bail!("runner must not be called")),
+        };
+        let spawner = HerdrSpawner::with_pane_runner(fake.socket.clone(), Arc::new(runner));
+        let err = spawner
+            .spawn(&custom_req(
+                fake.socket.clone(),
+                PathBuf::from("/tmp/card cwd"),
+                vec!["custom-agent".into()],
+            ))
+            .unwrap_err();
+        assert!(
+            !err.to_string().contains("is required"),
+            "version 0.9.1 with protocol 22 must not be rejected by gate: {err}"
+        );
+        let methods: Vec<_> = fake
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r["method"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            methods.contains(&"tab.list".to_string()),
+            "compatible version must proceed beyond ping, got {methods:?}"
         );
     }
 }

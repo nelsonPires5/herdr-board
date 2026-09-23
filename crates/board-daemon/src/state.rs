@@ -440,8 +440,10 @@ mod tracing_tests {
 
     #[test]
     fn notification_send_only_pings_an_incompatible_herdr() {
+        // Protocol is the hard gate: wrong protocol must stop before notification.show.
+        // Version 0.9.1 with protocol 22 is compatible and would proceed to notification.show.
         let herdr = crate::testkit::herdr_server()
-            .version("0.8.1")
+            .protocol(board_herdr::SUPPORTED_HERDR_PROTOCOL - 1)
             .on("notification.show", |req| {
                 crate::testkit::reply(req, serde_json::json!({"shown": true}))
             })
