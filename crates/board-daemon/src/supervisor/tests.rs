@@ -246,6 +246,31 @@ async fn valid_snapshot_missing_pane_fails_run_without_column_transition() {
 }
 
 #[tokio::test]
+async fn watched_run_missing_from_one_snapshot_waits_a_pass_for_its_event_stream() {
+    let f = fixture(None, Some("pane-1"));
+    let target = || resolver(None, SessionTarget::Default(PathBuf::from("/default.sock")));
+    let runtime = Arc::new(ScriptedRuntime {
+        scripts: Mutex::new(VecDeque::from([
+            Script::Snapshot(RuntimeSnapshot::new([("pane-1", AgentStatus::Working)])),
+            Script::Snapshot(RuntimeSnapshot::new([("other", AgentStatus::Working)])),
+            Script::Snapshot(RuntimeSnapshot::new([("other", AgentStatus::Working)])),
+        ])),
+        calls: Arc::new(Mutex::new(Vec::new())),
+    });
+    // Adopted: the run is now live-watched through its pane's event stream.
+    reconcile_once(&f.d, target(), runtime.clone(), f.clock.clone()).await;
+    assert!(f.d.sched.lock().unwrap().active.contains_key(&f.run.id));
+    // First miss: the stream normally reports the exit first, so stay open.
+    reconcile_once(&f.d, target(), runtime.clone(), f.clock.clone()).await;
+    let run = f.d.store.lock().get_run(f.run.id).unwrap();
+    assert!(run.ended_at.is_none());
+    // Still gone a pass later: the fallback finalizes.
+    reconcile_once(&f.d, target(), runtime.clone(), f.clock.clone()).await;
+    let run = f.d.store.lock().get_run(f.run.id).unwrap();
+    assert_eq!(run.outcome, Some(RunOutcome::Fail));
+}
+
+#[tokio::test]
 async fn alive_done_adopts_exact_pane_and_socket_then_enters_awaiting_open() {
     let f = fixture(Some("named"), Some("pane-1"));
     let socket = PathBuf::from("/sessions/named.sock");

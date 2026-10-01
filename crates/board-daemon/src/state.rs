@@ -1,7 +1,7 @@
 //! Shared daemon state (`Daemon`) plus small effect helpers (events, herdr
 //! notifications, watch-set tracking, shutdown).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -135,6 +135,9 @@ pub struct Sched {
     pub active: HashMap<i64, ActiveRun>,
     /// Consecutive auto-hops per card (reset on human action / chain end).
     pub chain_hops: HashMap<i64, u32>,
+    /// Live-watched runs one reconciliation pass has already seen gone. The
+    /// pane's event stream gets that pass to report the exit first.
+    pub reconcile_gone: HashSet<i64>,
 }
 
 /// The panes the herdr event watcher should subscribe to, grouped by the herdr

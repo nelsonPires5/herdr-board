@@ -1,5 +1,5 @@
+use board_ipc::Stream as UnixStream;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 use board_core::client::BoardClient;

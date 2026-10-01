@@ -20,8 +20,12 @@ use super::placement::{
 use super::{HerdrLaunchPlan, RuntimeHandle, SpawnError, Spawner};
 use crate::herdr_conn::connect_checked_for;
 
+#[cfg(all(test, unix))]
+pub(crate) use configured::posix_quote;
+#[cfg(all(test, windows))]
+pub(crate) use configured::ps_quote;
 #[cfg(test)]
-pub(crate) use configured::{configured_script, posix_quote, remove_file_if_exists};
+pub(crate) use configured::{configured_script, remove_file_if_exists, runner_argv};
 pub(crate) use configured::{launch_configured, HerdrCliPaneRunner, PaneRunner};
 pub(crate) use managed::{launch_managed, DelayFn, DEFAULT_AGENT_START_DELAY};
 

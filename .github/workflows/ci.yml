@@ -146,6 +146,73 @@ jobs:
       - name: Rust tests
         run: cargo test --workspace --all-features
 
+  # Native Windows: named-pipe transport, detached auto-start, PowerShell
+  # launch scripts. Same commands as the Linux clippy/test gates, so the
+  # documented gate list stays one list.
+  windows:
+    name: windows
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Rust tests
+        run: cargo test --workspace --all-features
+
+  # The provider-free live suite on native Windows (Git Bash + Windows Herdr).
+  # Placed before live-e2e so each live job's steps stay contiguous.
+  live-e2e-windows:
+    name: live-e2e-windows
+    needs: [windows, e2e-safety]
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Cache Herdr 0.9.0 (Windows)
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.tool_cache }}/herdr-board-0.9.0-windows-x86_64
+          key: herdr-${{ runner.os }}-x86_64-0.9.0-b4508c445de1c1a68c760a01735da2aba2fa214b2aafd4b07f732e49b2a64b11
+
+      # `shell: bash` is Git Bash; a bare `bash` under pwsh may resolve to WSL.
+      # e2e/test-harness.sh stays on the Linux e2e-safety job: its fixtures are
+      # MSYS children, which Windows process identity cannot see.
+      - name: Provider-free live E2E
+        shell: bash
+        env:
+          HERDR_CACHE_DIR: ${{ runner.tool_cache }}/herdr-board-0.9.0-windows-x86_64
+        run: bash e2e/ci.sh
+
+      - name: Upload live E2E evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-e2e-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          path: e2e-artifacts
+          if-no-files-found: warn
+          retention-days: 30
+
   live-e2e:
     name: live-e2e
     needs: [fmt, clippy, docs, scripts, e2e-safety, test]

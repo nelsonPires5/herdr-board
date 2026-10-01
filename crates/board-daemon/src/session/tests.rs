@@ -72,6 +72,7 @@ fn session_infos_maps_shape() {
 
 /// A stand-in `herdr` binary in a short-path tempdir (AF_UNIX-safe habit, and
 /// `argv[1..]` is always `session list --json`, which the script ignores).
+#[cfg(unix)]
 fn fake_herdr_bin(body: &str) -> (tempfile::TempDir, String) {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
@@ -87,6 +88,7 @@ fn fake_herdr_bin(body: &str) -> (tempfile::TempDir, String) {
     (dir, bin)
 }
 
+#[cfg(unix)]
 fn registry_with_bin(bin: String, fetch_timeout: Duration) -> SessionRegistry {
     SessionRegistry {
         herdr_bin: bin,
@@ -97,6 +99,7 @@ fn registry_with_bin(bin: String, fetch_timeout: Duration) -> SessionRegistry {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn fetch_kills_a_hung_herdr_and_reports_the_deadline() {
     // `sleep 60` stands in for a wedged herdr: without a deadline this pins a
@@ -111,6 +114,7 @@ fn fetch_kills_a_hung_herdr_and_reports_the_deadline() {
     assert!(error.contains("killed"), "{error}");
 }
 
+#[cfg(unix)]
 #[test]
 fn fetch_reads_a_prompt_reply_within_the_deadline() {
     let (_dir, bin) = fake_herdr_bin(&format!("cat <<'EOF'\n{SAMPLE}\nEOF"));
@@ -120,6 +124,7 @@ fn fetch_reads_a_prompt_reply_within_the_deadline() {
     assert_eq!(entries[0].name, "default");
 }
 
+#[cfg(unix)]
 #[test]
 fn fetch_surfaces_a_nonzero_exit_with_stderr() {
     let (_dir, bin) = fake_herdr_bin("echo 'no session dir' >&2; exit 3");

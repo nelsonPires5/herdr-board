@@ -1,7 +1,10 @@
 use std::fs::OpenOptions;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::Path;
+#[cfg(unix)]
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -48,10 +51,24 @@ fn spawn_daemon() -> Result<()> {
             }
             Err(error) => return Err(error.into()),
         }
+        // Windows: the profile ACL of the log directory is already owner-only.
+        #[cfg(unix)]
         std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
     }
+    #[cfg(unix)]
     daemon_command(&exe, &bootstrap_path)?.spawn()?;
+    #[cfg(windows)]
+    board_ipc::spawn_detached(&exe, &["daemon"], open_bootstrap_log(&bootstrap_path)?)?;
     Ok(())
+}
+
+/// Truncate on each auto-start: this file contains only failures emitted
+/// before the structured subscriber is available and cannot grow forever.
+fn open_bootstrap_log(bootstrap_path: &Path) -> Result<std::fs::File> {
+    Ok(paths::open_private_file(
+        OpenOptions::new().create(true).write(true).truncate(true),
+        bootstrap_path,
+    )?)
 }
 
 /// Build the detached daemon child without a double-fork or a session-wide
@@ -60,17 +77,13 @@ fn spawn_daemon() -> Result<()> {
 /// process group while remaining addressable by its exact PID for diagnostics.
 /// Lifecycle control still goes through `daemon.stop`; the process group is not
 /// used as a broad cleanup authority.
+///
+/// Windows spawns through `board_ipc::spawn_detached` instead: `Command` there
+/// would leak every inheritable handle (e.g. a caller's stdout pipe) into the
+/// long-lived daemon.
+#[cfg(unix)]
 pub(crate) fn daemon_command(exe: &Path, bootstrap_path: &Path) -> Result<Command> {
-    // Truncate on each auto-start: this file contains only failures emitted
-    // before the structured subscriber is available and cannot grow forever.
-    let err = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(bootstrap_path)?;
-    err.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    let err = open_bootstrap_log(bootstrap_path)?;
     let mut cmd = Command::new(exe);
     cmd.arg("daemon")
         .stdin(std::process::Stdio::null())
@@ -83,6 +96,7 @@ pub(crate) fn daemon_command(exe: &Path, bootstrap_path: &Path) -> Result<Comman
     Ok(cmd)
 }
 
+#[cfg(unix)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FileIdentity {
     device: u64,
@@ -90,8 +104,10 @@ struct FileIdentity {
     file_type: u32,
 }
 
+#[cfg(unix)]
 const SOCKET_FILE_TYPE: u32 = 0o140000;
 
+#[cfg(unix)]
 fn file_identity(path: &Path) -> Option<FileIdentity> {
     std::fs::symlink_metadata(path)
         .ok()
@@ -105,9 +121,36 @@ fn file_identity(path: &Path) -> Option<FileIdentity> {
 enum ListenerCheck {
     Live,
     Gone,
+    #[cfg_attr(windows, allow(dead_code))]
     Replaced,
 }
 
+/// A named pipe has no filesystem entry and vanishes with its server, so on
+/// Windows there is no stale socket and no identity to compare.
+#[cfg(windows)]
+type FileIdentity = ();
+
+#[cfg(windows)]
+fn file_identity(_path: &Path) -> Option<FileIdentity> {
+    None
+}
+
+/// Windows: the listener is gone only when the pipe no longer exists. A pipe
+/// that exists but refuses the connect (every instance busy, another user's
+/// server) fails closed as still live.
+#[cfg(windows)]
+fn check_listener_after_connect_failure(
+    path: &Path,
+    _original: Option<FileIdentity>,
+) -> ListenerCheck {
+    if UnixClient::connect(path).is_ok() || board_ipc::endpoint_exists(path) {
+        ListenerCheck::Live
+    } else {
+        ListenerCheck::Gone
+    }
+}
+
+#[cfg(unix)]
 /// Confirm that a failed fresh connect means this exact socket is stale. The
 /// identity is checked again immediately before unlinking; a missing path is
 /// already clean, while a replacement (including a non-socket) fails closed.

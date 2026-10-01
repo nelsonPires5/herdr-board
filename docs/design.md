@@ -87,6 +87,30 @@ environment taking precedence. There is no second best-effort TOML parser and
 no `unwrap_or_default` fallback, so board and daemon settings cannot disagree
 about whether the document is valid.
 
+### Platform boundary (Windows)
+
+The same binary runs natively on Windows; the platform differences stay behind a few fixed seams:
+
+- **Local IPC lives in `board-ipc`.** It is AF_UNIX on Unix and a named pipe on Windows at
+  `\\.\pipe\` + the socket path, which is Herdr's own convention. `BOARD_SOCKET` and
+  `HERDR_SOCKET_PATH` therefore stay plain paths everywhere, and all Win32 `unsafe` is confined
+  to that crate. Herdr-specific pipe facts are in [herdr.md](herdr.md#windows).
+- **Auto-start uses `board_ipc::spawn_detached`.** std `Command` on Windows lets the child
+  inherit every inheritable handle, so a detached boardd would hold the caller's pipes and hang
+  piped CLI use. The detached child inherits only NUL stdin/stdout and the bootstrap log, gets
+  its own process group, and gets a windowless console, so console programs it later runs
+  (Herdr, git, catalog probes) open no window.
+- **Configured harnesses start through a PowerShell script**, not a POSIX shell script.
+  `pane run` gets the single command line `pwsh … -File "<script>"`, falling back to Windows
+  PowerShell when pwsh is absent. The script carries a UTF-8 BOM so Windows PowerShell 5.1 reads
+  non-ASCII arguments intact.
+- **Provider CLIs resolve through `PATH` × `PATHEXT`**, so npm `.cmd` shims launch like native
+  executables.
+- **Scope paths are canonicalized without the `\\?\` verbatim prefix** (`paths::canonical`), so
+  a stored scope path matches the spelling users type.
+- **The Herdr plugin install stays Linux/macOS.** Its build steps and `open-board` action are
+  shell scripts; Windows installs the CLI with cargo ([install.md](install.md#windows)).
+
 ### Herdr compatibility and launch boundary
 
 The public boardd socket protocol remains **v1**. That is independent of the upstream Herdr socket

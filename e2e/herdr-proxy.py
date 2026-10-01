@@ -6,6 +6,36 @@ import asyncio
 import json
 import os
 import signal
+import sys
+
+WINDOWS = sys.platform == "win32"
+
+
+def pipe_address(path: str) -> str:
+    # Herdr and boardd serve the named pipe `\\.\pipe\` + the socket path.
+    return r"\\.\pipe" + "\\" + path
+
+
+async def open_connection(path: str):
+    if not WINDOWS:
+        return await asyncio.open_unix_connection(path)
+    loop = asyncio.get_running_loop()
+    reader = asyncio.StreamReader()
+    protocol = asyncio.StreamReaderProtocol(reader)
+    transport, _ = await loop.create_pipe_connection(lambda: protocol, pipe_address(path))
+    return reader, asyncio.StreamWriter(transport, protocol, reader, loop)
+
+
+async def start_server(callback, path: str):
+    """Serve `path`; returns an object with close()."""
+    if not WINDOWS:
+        return await asyncio.start_unix_server(callback, path)
+    loop = asyncio.get_running_loop()
+    [server] = await loop.start_serving_pipe(
+        lambda: asyncio.StreamReaderProtocol(asyncio.StreamReader(), callback),
+        pipe_address(path),
+    )
+    return server
 
 
 class Proxy:
@@ -103,7 +133,7 @@ class Proxy:
                 self.pane_splits.append(str(params.get("target_pane_id", "")))
             elif method == "pane.close":
                 self.pane_closes.append(str(params.get("pane_id", "")))
-            upstream_reader, upstream_writer = await asyncio.open_unix_connection(self.target)
+            upstream_reader, upstream_writer = await open_connection(self.target)
             record = (writer, upstream_writer, is_events)
             self.connections.add(record)
             upstream_writer.write(first)
@@ -198,16 +228,23 @@ async def main():
         except FileNotFoundError:
             pass
     proxy = Proxy(args.target)
-    data_server = await asyncio.start_unix_server(proxy.client, args.listen)
-    control_server = await asyncio.start_unix_server(proxy.control, args.control)
-    os.chmod(args.listen, 0o600)
-    os.chmod(args.control, 0o600)
+    data_server = await start_server(proxy.client, args.listen)
+    control_server = await start_server(proxy.control, args.control)
+    if not WINDOWS:
+        os.chmod(args.listen, 0o600)
+        os.chmod(args.control, 0o600)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, stop.set)
-    async with data_server, control_server:
+    # Windows has no loop signal handlers; the harness stops it with
+    # TerminateProcess, and its pipes go away with the process.
+    if not WINDOWS:
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, stop.set)
+    try:
         await stop.wait()
+    finally:
+        data_server.close()
+        control_server.close()
     await proxy.close_matching(all_connections=True)
     for path in (args.listen, args.control):
         try:

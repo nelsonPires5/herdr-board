@@ -7,6 +7,7 @@
 mod dispatch;
 mod herdr_conn;
 mod herdr_snapshot;
+mod listener;
 mod logging;
 mod ops;
 mod recovery;
@@ -23,6 +24,7 @@ mod supervisor;
 mod testkit;
 mod watchers;
 
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -206,7 +208,9 @@ async fn async_main(db_path: PathBuf, socket_path: PathBuf) -> anyhow::Result<()
     recovery::startup_recovery(&daemon).await;
     daemon.wake_dispatch();
 
-    // Bind the socket (removing any stale file first) and serve.
+    // Bind the socket (removing any stale file first) and serve. On Windows
+    // the endpoint is a named pipe: no file, nothing stale to remove.
+    #[cfg(unix)]
     let _ = std::fs::remove_file(&socket_path);
     if let Some(parent) = socket_path.parent() {
         // Name the directory: without it the failure resurfaces below as an
@@ -214,9 +218,13 @@ async fn async_main(db_path: PathBuf, socket_path: PathBuf) -> anyhow::Result<()
         std::fs::create_dir_all(parent)
             .with_context(|| format!("cannot create the boardd socket directory {parent:?}"))?;
     }
-    let listener = bind_secured_socket(&socket_path, |path| {
+    #[cfg(unix)]
+    let listener = listener::Listener::from_unix(bind_secured_socket(&socket_path, |path| {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-    })?;
+    })?);
+    #[cfg(windows)]
+    let listener = listener::Listener::bind(&socket_path)
+        .with_context(|| format!("cannot bind the boardd pipe for {socket_path:?}"))?;
     tracing::info!("boardd listening");
 
     server::serve(daemon.clone(), listener).await;
@@ -230,10 +238,12 @@ async fn async_main(db_path: PathBuf, socket_path: PathBuf) -> anyhow::Result<()
     }
 
     // Graceful: leave running panes alone; just clean up the socket.
+    #[cfg(unix)]
     let _ = std::fs::remove_file(&socket_path);
     Ok(())
 }
 
+#[cfg(unix)]
 fn spawn_signal_handler(d: Arc<Daemon>) {
     tokio::spawn(async move {
         use tokio::signal::unix::{signal, SignalKind};
@@ -265,6 +275,30 @@ fn spawn_signal_handler(d: Arc<Daemon>) {
     });
 }
 
+#[cfg(windows)]
+fn spawn_signal_handler(d: Arc<Daemon>) {
+    tokio::spawn(async move {
+        use tokio::signal::windows::{ctrl_break, ctrl_c, ctrl_close, ctrl_shutdown};
+        let (Ok(mut c), Ok(mut b), Ok(mut close), Ok(mut shutdown)) =
+            (ctrl_c(), ctrl_break(), ctrl_close(), ctrl_shutdown())
+        else {
+            tracing::warn!(
+                error_category = "signal_handler",
+                "console control handler setup failed"
+            );
+            return;
+        };
+        tokio::select! {
+            _ = c.recv() => tracing::info!("CTRL_C received"),
+            _ = b.recv() => tracing::info!("CTRL_BREAK received"),
+            _ = close.recv() => tracing::info!("CTRL_CLOSE received"),
+            _ = shutdown.recv() => tracing::info!("CTRL_SHUTDOWN received"),
+        }
+        d.trigger_shutdown();
+    });
+}
+
+#[cfg(unix)]
 /// Bind the daemon socket and make it owner-only. When securing the socket
 /// fails, remove the half-created file so a later start is not blocked by a
 /// stale socket, then surface the security error. `secure` is injectable so
@@ -292,7 +326,7 @@ fn bind_secured_socket(
     Ok(listener)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

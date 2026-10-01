@@ -9,7 +9,11 @@ use serde_json::Value;
 use super::{json_error, json_output, TestDaemon};
 
 fn canonical(dir: &std::path::Path) -> String {
-    dir.canonicalize().unwrap().to_str().unwrap().to_string()
+    board_core::paths::canonical(dir)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string()
 }
 
 /// (a) `project create` on an existing directory creates the project with a

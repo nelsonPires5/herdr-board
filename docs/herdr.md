@@ -363,6 +363,29 @@ and the exact method/type shape, then reconcile `board-herdr` (and update the
 "verified against" note here and in `AGENTS.md`) to match. Editing code against a
 remembered shape is how drift bugs get baked in.
 
+## Windows
+
+Verified against the Windows builds of Herdr 0.9.0 (CI, `live-e2e-windows`) and 0.9.1 (a
+manual run on a Windows host):
+
+- **Pipes, not sockets.** Herdr serves the API on the named pipe `\\.\pipe\` + the socket path
+  that `session list --json` reports (`%APPDATA%\herdr\herdr.sock` for the default session,
+  `…\sessions\<name>\herdr.sock` for named ones). No file exists at that path. `board-ipc`
+  speaks the pipe, and boardd serves its own pipe with the same convention.
+- **Registry location.** The config and session registry live under `%XDG_CONFIG_HOME%\herdr`
+  when that is set, else `%APPDATA%\herdr`. `HOME` is not consulted, which is why the e2e
+  harness isolates sessions through `XDG_CONFIG_HOME`.
+- **Pane environment.** A pane shell receives Herdr's environment except `PATH`, which Herdr
+  rebuilds from the system and user registry values. `[terminal] default_shell` picks the pane
+  shell. With `shell_mode = "login"`, Herdr 0.9.0 falls back to `cmd.exe`; 0.9.1 honors it.
+- **`pane run`** takes one command line and types it into whatever the pane shell is. boardd
+  therefore sends one `pwsh … -File "<script>"` line, which pwsh, Windows PowerShell, `cmd`
+  and bash all accept.
+- **Process lifetime.** Pane processes are not placed in a Job Object, so an auto-started boardd
+  outlives the pane that started it.
+- **Width.** `stty cols` inside a pane does not resize the ConPTY; `board tui` sees the pane's
+  real width.
+
 ## Ours vs herdr's
 
 Two different things document two different tools — keep them straight:

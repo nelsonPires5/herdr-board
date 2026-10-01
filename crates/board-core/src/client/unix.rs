@@ -1,6 +1,9 @@
+//! The boardd client transport: a Unix socket on Unix, the named pipe
+//! `\\.\pipe\` + socket path on Windows (via `board-ipc`).
+
 use std::io::{BufRead, BufReader, Write};
 
-use std::os::unix::net::UnixStream;
+use board_ipc::Stream as UnixStream;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -94,7 +97,7 @@ struct WireRpcError {
     details: Option<Value>,
 }
 
-/// The real Unix-socket client.
+/// The real boardd client (Unix socket, or named pipe on Windows).
 pub struct UnixClient {
     path: PathBuf,
     reader: BufReader<UnixStream>,

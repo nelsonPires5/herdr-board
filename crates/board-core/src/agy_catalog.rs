@@ -57,7 +57,7 @@
 
 use std::collections::BTreeMap;
 use std::io::Read;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -217,7 +217,7 @@ pub fn load_from_cli(agy_bin: &str) -> Option<Vec<ModelInfo>> {
 /// read, a non-zero exit, or a lost reader thread.
 pub fn load_from_cli_bounded(agy_bin: &str, timeout: Duration) -> Option<Vec<ModelInfo>> {
     let argv = models_argv(agy_bin);
-    let mut child = Command::new(&argv[0])
+    let mut child = crate::process::command(&argv[0])
         .args(&argv[1..])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -250,14 +250,14 @@ pub fn load_from_cli_bounded(agy_bin: &str, timeout: Duration) -> Option<Vec<Mod
     let deadline = Instant::now() + timeout;
     let stdout = match rx.recv_timeout(timeout) {
         Ok(Some(buffer)) => buffer,
-        // Timeout, oversized output, or read failure: kill the child so its
-        // pipe closes, reap it, and join the reader. The channel is dropped
-        // first so a reader blocked on a final send cannot hang the join.
+        // Timeout, oversized output, or read failure: kill and reap the
+        // child. The reader is deliberately not joined: a grandchild (e.g.
+        // node under an npm `.cmd` shim) can hold the pipe open past the
+        // kill, and it must not extend this deadline. The reader ends on
+        // its own once the pipe closes.
         Ok(None) | Err(_) => {
             let _ = child.kill();
             let _ = child.wait();
-            drop(rx);
-            let _ = reader.join();
             return None;
         }
     };

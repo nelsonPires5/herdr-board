@@ -3,8 +3,11 @@ use std::time::{Duration, Instant};
 
 use board_core::client::{BoardClient, UnixClient};
 
-use super::{run_board_stop, FakeListener, FakeStop, TestDaemon};
+use super::{run_board_stop, TestDaemon};
+#[cfg(unix)]
+use super::{FakeListener, FakeStop};
 
+#[cfg(unix)]
 #[test]
 fn daemon_stop_rpc_error_preserves_live_socket_for_new_rpc() {
     let dir = tempfile::tempdir().unwrap();
@@ -22,6 +25,7 @@ fn daemon_stop_rpc_error_preserves_live_socket_for_new_rpc() {
     assert_eq!(status.version, "fake");
 }
 
+#[cfg(unix)]
 #[test]
 fn daemon_stop_ack_with_live_listener_times_out_without_unlinking() {
     let dir = tempfile::tempdir().unwrap();
@@ -37,6 +41,7 @@ fn daemon_stop_ack_with_live_listener_times_out_without_unlinking() {
     assert!(stderr.contains("still listening") || stderr.contains("timed out"));
 }
 
+#[cfg(unix)]
 #[test]
 fn daemon_stop_real_disappearance_succeeds() {
     let dir = tempfile::tempdir().unwrap();
@@ -53,6 +58,7 @@ fn daemon_stop_real_disappearance_succeeds() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn daemon_stop_removes_stale_socket_only_after_failed_connect() {
     let dir = tempfile::tempdir().unwrap();
@@ -69,6 +75,7 @@ fn daemon_stop_removes_stale_socket_only_after_failed_connect() {
     assert!(!socket.exists(), "stale socket should be removed");
 }
 
+#[cfg(unix)]
 #[test]
 fn daemon_stop_preserves_inode_replacement_after_ack() {
     let dir = tempfile::tempdir().unwrap();
@@ -86,6 +93,7 @@ fn daemon_stop_preserves_inode_replacement_after_ack() {
 
 /// D1: `board daemon stop` is the spelled-out form of the retained
 /// `board daemon --stop` flag and behaves identically.
+#[cfg(unix)]
 #[test]
 fn daemon_stop_subcommand_matches_the_retained_flag() {
     let dir = tempfile::tempdir().unwrap();
@@ -106,6 +114,7 @@ fn daemon_stop_subcommand_matches_the_retained_flag() {
 
 /// C3: the daemon commands use the same output path as everything else, so
 /// `--json` is honored instead of printing prose to stdout.
+#[cfg(unix)]
 #[test]
 fn daemon_stop_honors_json() {
     let dir = tempfile::tempdir().unwrap();
@@ -164,4 +173,58 @@ fn single_instance_second_exits_zero() {
     }
     // Original daemon still serving.
     assert!(td.client().daemon_status().is_ok());
+}
+
+#[test]
+fn daemon_stop_stops_a_real_daemon() {
+    let td = TestDaemon::start(&[]);
+    let out = run_board_stop(&td.socket);
+    assert!(
+        out.status.success(),
+        "stop failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("boardd stopped"));
+    assert!(
+        UnixClient::connect(&td.socket).is_err(),
+        "listener still up"
+    );
+}
+
+/// An auto-started boardd must not keep the caller's stdout/stderr open: a
+/// piped `board …` (or a test's `Command::output`) has to see EOF when the CLI
+/// exits, even though the detached daemon lives on.
+#[test]
+fn auto_started_daemon_does_not_hold_the_callers_pipes() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("boardd.sock");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let child_env = [
+        ("BOARD_SOCKET", socket.clone().into_os_string()),
+        ("BOARD_DB", dir.path().join("board.db").into_os_string()),
+        ("BOARD_LOG_DIR", dir.path().join("logs").into_os_string()),
+        (
+            "HERDR_BOARD_CONFIG",
+            dir.path().join("config.toml").into_os_string(),
+        ),
+        ("BOARD_SPAWNER", "local".into()),
+    ];
+    std::thread::spawn(move || {
+        let out = Command::new(env!("CARGO_BIN_EXE_board"))
+            .args(["board", "list", "--json"])
+            .envs(child_env)
+            .output();
+        let _ = tx.send(out);
+    });
+    let out = rx
+        .recv_timeout(Duration::from_secs(20))
+        .expect("CLI output never reached EOF: the daemon inherited its pipes")
+        .expect("run board");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stopped = run_board_stop(&socket);
+    assert!(stopped.status.success());
 }

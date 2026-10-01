@@ -13,11 +13,16 @@ import platform
 import stat
 import struct
 import sys
+import time
 from dataclasses import dataclass
 from typing import Any
 
 SYSTEM = platform.system()
-PLATFORM = {"Linux": "linux", "Darwin": "darwin"}.get(SYSTEM, "unsupported")
+PLATFORM = {"Linux": "linux", "Darwin": "darwin", "Windows": "windows"}.get(
+    SYSTEM, "unsupported"
+)
+# Platforms whose owner evidence is the child's own environment block.
+ENVIRONMENT_PLATFORMS = {"linux", "windows"}
 OWNER_ENVS = {"E2E_HERDR_OWNER_TOKEN", "E2E_BOARD_DAEMON_OWNER_TOKEN"}
 TOKEN_KEYS = {
     "version",
@@ -60,8 +65,13 @@ def _canonical(value: dict[str, Any]) -> bytes:
 
 def _read_key() -> bytes:
     try:
-        with os.fdopen(3, "rb", closefd=True) as stream:
-            key = stream.read().rstrip(b"\n")
+        if PLATFORM == "windows":
+            # A native Windows process inherits no fd 3 from Git Bash; lib.sh
+            # hands the key over stdin instead (no identity command reads it).
+            key = sys.stdin.buffer.read().rstrip(b"\n")
+        else:
+            with os.fdopen(3, "rb", closefd=True) as stream:
+                key = stream.read().rstrip(b"\n")
     except OSError as exc:
         raise IdentityError("identity signing key unavailable") from exc
     if len(key) < 32:
@@ -86,6 +96,8 @@ def validate_token(token: object, key: bytes) -> dict[str, Any]:
     allowed_proofs = {
         "linux-environment-direct-child",
         "linux-environment-transition",
+        "windows-environment-direct-child",
+        "windows-environment-transition",
         "darwin-direct-child",
         "darwin-direct-child-transition",
     }
@@ -259,15 +271,177 @@ def _darwin_snapshot(pid: int) -> Snapshot:
     )
 
 
+_WIN_STILL_ACTIVE = 259
+_WIN_QUERY_LIMITED = 0x1000
+_WIN_VM_READ = 0x0010
+
+
+def _win_api():
+    """kernel32/ntdll/shell32 with explicit prototypes (64-bit handles)."""
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    ntdll = ctypes.WinDLL("ntdll")
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)
+    ]
+    kernel32.IsWow64Process.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
+    kernel32.ReadProcessMemory.argtypes = [
+        wintypes.HANDLE, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_size_t),
+    ]
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    ntdll.NtQueryInformationProcess.argtypes = [
+        wintypes.HANDLE, wintypes.ULONG, ctypes.c_void_p, wintypes.ULONG,
+        ctypes.POINTER(wintypes.ULONG),
+    ]
+    ntdll.NtQueryInformationProcess.restype = ctypes.c_long
+    shell32.CommandLineToArgvW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_int)]
+    shell32.CommandLineToArgvW.restype = ctypes.POINTER(wintypes.LPWSTR)
+    return kernel32, ntdll, shell32
+
+
+class _ProcessBasicInformation(ctypes.Structure):
+    _fields_ = [
+        ("ExitStatus", ctypes.c_long),
+        ("PebBaseAddress", ctypes.c_void_p),
+        ("AffinityMask", ctypes.c_size_t),
+        ("BasePriority", ctypes.c_long),
+        ("UniqueProcessId", ctypes.c_size_t),
+        ("InheritedFromUniqueProcessId", ctypes.c_size_t),
+    ]
+
+
+def _windows_snapshot(pid: int) -> Snapshot:
+    """Identity from the target's PEB: x64 layouts only, 32-bit targets fail closed."""
+    from ctypes import wintypes
+
+    kernel32, ntdll, shell32 = _win_api()
+    handle = kernel32.OpenProcess(_WIN_QUERY_LIMITED | _WIN_VM_READ, False, pid)
+    if not handle:
+        raise IdentityError("cannot open Windows process")
+    try:
+        wow64 = wintypes.BOOL()
+        if not kernel32.IsWow64Process(handle, ctypes.byref(wow64)) or wow64.value:
+            raise IdentityError("unsupported 32-bit Windows process")
+
+        def start_time() -> str:
+            times = [wintypes.FILETIME() for _ in range(4)]
+            if not kernel32.GetProcessTimes(handle, *map(ctypes.byref, times)):
+                raise IdentityError("cannot read Windows process times")
+            return str((times[0].dwHighDateTime << 32) | times[0].dwLowDateTime)
+
+        def read(address: int, size: int) -> bytes:
+            buffer = ctypes.create_string_buffer(size)
+            done = ctypes.c_size_t()
+            if not kernel32.ReadProcessMemory(
+                handle, address, buffer, size, ctypes.byref(done)
+            ) or done.value != size:
+                raise IdentityError("cannot read Windows process memory")
+            return buffer.raw
+
+        def pointer(address: int) -> int:
+            return struct.unpack("<Q", read(address, 8))[0]
+
+        before = start_time()
+        info = _ProcessBasicInformation()
+        if ntdll.NtQueryInformationProcess(
+            handle, 0, ctypes.byref(info), ctypes.sizeof(info), None
+        ) != 0:
+            raise IdentityError("cannot query Windows process information")
+        params = pointer(info.PebBaseAddress + 0x20)
+        if not struct.unpack("<I", read(params + 0x08, 4))[0] & 0x1:
+            # RTL_USER_PROC_PARAMS_NORMALIZED is unset until the loader turns the
+            # buffer offsets into pointers; callers retry.
+            raise IdentityError("Windows process parameters not yet normalized")
+        command_length = struct.unpack("<H", read(params + 0x70, 2))[0]
+        command_line = read(pointer(params + 0x78), command_length).decode("utf-16-le")
+        environment_size = pointer(params + 0x3F0)
+        if not environment_size:
+            # A freshly created process has no sized block yet; callers retry.
+            raise IdentityError("Windows process environment not yet initialized")
+        block = read(pointer(params + 0x80), environment_size).decode(
+            "utf-16-le", "surrogatepass"
+        )
+        environ = frozenset(
+            entry.encode("utf-8", "surrogatepass")
+            for entry in block.split("\0")
+            if entry and not entry.startswith("=")
+        )
+        argc = ctypes.c_int()
+        argv_ptr = shell32.CommandLineToArgvW(command_line, ctypes.byref(argc))
+        if not argv_ptr:
+            raise IdentityError("cannot parse Windows command line")
+        try:
+            cmdline = [argv_ptr[i] for i in range(argc.value)]
+        finally:
+            kernel32.LocalFree(argv_ptr)
+        size = wintypes.DWORD(32768)
+        image = ctypes.create_unicode_buffer(size.value)
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, image, ctypes.byref(size)):
+            raise IdentityError("cannot read Windows executable path")
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            raise IdentityError("cannot read Windows process state")
+        if start_time() != before:
+            raise IdentityError("Windows process changed during inspection")
+        if not cmdline or not cmdline[0]:
+            raise IdentityError("empty Windows cmdline")
+        state = "R" if code.value == _WIN_STILL_ACTIVE else "Z"
+        return Snapshot(
+            str(pid),
+            before,
+            str(info.InheritedFromUniqueProcessId),
+            state,
+            image.value,
+            cmdline,
+            environ,
+        )
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def snapshot(pid: int) -> Snapshot:
     if PLATFORM == "linux":
         return _linux_snapshot(pid)
     if PLATFORM == "darwin":
         return _darwin_snapshot(pid)
+    if PLATFORM == "windows":
+        # Another process's PEB can change under us (e.g. the environment block
+        # is reallocated); take a few consistent-read attempts before failing.
+        for attempt in range(5):
+            try:
+                return _windows_snapshot(pid)
+            except IdentityError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.01)
     raise IdentityError("unsupported E2E platform")
 
 
 def process_exists(pid: int) -> bool:
+    if PLATFORM == "windows":
+        # Never `os.kill(pid, 0)` here: on Windows it calls TerminateProcess.
+        from ctypes import wintypes
+
+        kernel32, _, _ = _win_api()
+        handle = kernel32.OpenProcess(_WIN_QUERY_LIMITED, False, pid)
+        if not handle:
+            return False
+        try:
+            code = wintypes.DWORD()
+            return bool(
+                kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+                and code.value == _WIN_STILL_ACTIVE
+            )
+        finally:
+            kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
         return True
@@ -278,7 +452,7 @@ def process_exists(pid: int) -> bool:
 def _owner_present(current: Snapshot, owner_env: str, owner_token: str) -> bool:
     if owner_env not in OWNER_ENVS or not owner_token:
         return False
-    if PLATFORM == "linux":
+    if PLATFORM in ENVIRONMENT_PLATFORMS:
         assert current.environ is not None
         return f"{owner_env}={owner_token}".encode() in current.environ
     return True
@@ -325,15 +499,43 @@ def _unsigned(
     }
 
 
+_MSYS_STUBS = {"bash.exe", "sh.exe"}
+
+
+def is_direct_child(current: Snapshot, parent_pid: str) -> bool:
+    """Whether `current` was spawned by `parent_pid`.
+
+    Git Bash runs a native program through a forked MSYS stub (bash.exe/sh.exe)
+    that the native process sees as its parent; that exact one-hop stub, itself
+    a child of `parent_pid`, counts as the same spawn. Nothing else does.
+    """
+    if current.parent_pid == parent_pid:
+        return True
+    if PLATFORM != "windows":
+        return False
+    try:
+        stub = snapshot(int(current.parent_pid))
+    except (IdentityError, ValueError):
+        return False
+    return (
+        os.path.basename(stub.exe).lower() in _MSYS_STUBS
+        and stub.parent_pid == parent_pid
+    )
+
+
 def provisional_capture(
     pid: int, owner_token: str, parent_pid: str, owner_env: str, key: bytes
 ) -> dict[str, Any]:
     current = snapshot(pid)
-    if current.parent_pid != parent_pid or not current.cmdline:
+    if not is_direct_child(current, parent_pid) or not current.cmdline:
         raise IdentityError("process is not the exact direct child")
     if not _owner_present(current, owner_env, owner_token):
         raise IdentityError("process owner evidence mismatch")
-    proof = "linux-environment-direct-child" if PLATFORM == "linux" else "darwin-direct-child"
+    proof = (
+        f"{PLATFORM}-environment-direct-child"
+        if PLATFORM in ENVIRONMENT_PLATFORMS
+        else "darwin-direct-child"
+    )
     return sign(_unsigned(current, proof, "", "", "", owner_token), key)
 
 
@@ -350,6 +552,7 @@ def stable_capture(
     capability = validate_token(provisional, key)
     if capability["proof"] not in {
         "linux-environment-direct-child",
+        "windows-environment-direct-child",
         "darwin-direct-child",
     }:
         raise IdentityError("stable capture lacks provisional capability")
@@ -365,7 +568,11 @@ def stable_capture(
         raise IdentityError("stable owner evidence mismatch")
     if not _semantic_argv(current, session, name, expected_command, owner_token):
         raise IdentityError("stable argv mismatch")
-    proof = "linux-environment-transition" if PLATFORM == "linux" else "darwin-direct-child-transition"
+    proof = (
+        f"{PLATFORM}-environment-transition"
+        if PLATFORM in ENVIRONMENT_PLATFORMS
+        else "darwin-direct-child-transition"
+    )
     return sign(
         _unsigned(current, proof, session, name, expected_command, owner_token), key
     )
@@ -387,7 +594,7 @@ def verify_identity(
             return False
         if not audit and current.parent_pid != recorded["parent_pid"]:
             return False
-        if recorded["proof"].startswith("linux-"):
+        if recorded["proof"].startswith(("linux-", "windows-")):
             owner_env = (
                 "E2E_BOARD_DAEMON_OWNER_TOKEN"
                 if recorded["session"] == "daemon" and recorded["name"] == "--foreground"
@@ -423,6 +630,7 @@ def provisional_transition_verify(
         recorded = validate_token(token, key)
         if recorded["proof"] not in {
             "linux-environment-direct-child",
+            "windows-environment-direct-child",
             "darwin-direct-child",
         }:
             return False
@@ -430,7 +638,7 @@ def provisional_transition_verify(
         if (
             current.pid != recorded["pid"]
             or current.start_time != recorded["start_time"]
-            or current.parent_pid != parent_pid
+            or not is_direct_child(current, parent_pid)
             or current.parent_pid != recorded["parent_pid"]
             or not _owner_present(current, owner_env, recorded["owner_token"])
         ):
@@ -464,16 +672,33 @@ def _emit(value: object) -> None:
     print(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True))
 
 
+def private_mode(path: str) -> str:
+    """POSIX permission bits as the harness checks them (`600`/`700`).
+
+    NTFS has no mode bits: `os.stat` reports 666/777 for everything. A path
+    inside the invoking user's profile inherits its owner/SYSTEM/Administrators
+    ACL — the Windows equivalent of owner-only — so it reports 600 (file) or 700
+    (directory). Anything else, and any symlink, reports its raw bits and fails
+    the harness's owner-only checks closed.
+    """
+    st = os.lstat(path)
+    raw = f"{stat.S_IMODE(st.st_mode):o}"
+    if PLATFORM != "windows" or stat.S_ISLNK(st.st_mode):
+        return raw
+    profile = os.path.realpath(os.path.expanduser("~"))
+    resolved = os.path.realpath(path)
+    if os.path.commonpath([os.path.normcase(profile), os.path.normcase(resolved)]) != os.path.normcase(profile):
+        return raw
+    return "700" if stat.S_ISDIR(st.st_mode) else "600"
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         return 2
     command = sys.argv[1]
     try:
         if command == "mode":
-            print(f"{stat.S_IMODE(os.stat(sys.argv[2]).st_mode):o}")
-            return 0
-        if command == "realpath":
-            print(os.path.realpath(sys.argv[2]))
+            print(private_mode(sys.argv[2]) if PLATFORM == "windows" else f"{stat.S_IMODE(os.stat(sys.argv[2]).st_mode):o}")
             return 0
         if command == "exists":
             return 0 if process_exists(int(sys.argv[2])) else 1

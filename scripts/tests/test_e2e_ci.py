@@ -15,6 +15,13 @@ HERDR_URL = (
     "https://github.com/herdrdev/herdr/releases/download/"
     f"v{HERDR_VERSION}/herdr-linux-x86_64"
 )
+HERDR_WINDOWS_SHA256 = "b4508c445de1c1a68c760a01735da2aba2fa214b2aafd4b07f732e49b2a64b11"
+# herdr.exe inside the pinned zip, re-verified on every run like the Linux binary.
+HERDR_WINDOWS_EXE_SHA256 = "9b3bf49f94c2d09b1d62e11171b132865768dafc36b1327fb946c0cef9ca0d00"
+HERDR_WINDOWS_URL = (
+    "https://github.com/herdrdev/herdr/releases/download/"
+    f"v{HERDR_VERSION}/herdr-windows-x86_64.zip"
+)
 
 
 class LiveE2ECIContractTests(unittest.TestCase):
@@ -96,6 +103,34 @@ class LiveE2ECIContractTests(unittest.TestCase):
             self.wrapper,
         )
 
+    def test_wrapper_pins_the_windows_herdr_zip(self) -> None:
+        self.assertIn(HERDR_WINDOWS_URL, self.wrapper)
+        self.assertIn(HERDR_WINDOWS_SHA256, self.wrapper)
+        self.assertIn("MINGW*", self.wrapper)
+
+    def test_wrapper_rehashes_the_cached_windows_exe(self) -> None:
+        self.assertIn(f"HERDR_EXE_SHA256={HERDR_WINDOWS_EXE_SHA256}", self.wrapper)
+        sha_matches = self.wrapper.split("sha_matches() {", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn(
+            r"""printf '%s  %s\n' "$HERDR_EXE_SHA256" "$1" | sha256sum --check --status""",
+            sha_matches,
+        )
+
+    def test_windows_live_job_runs_the_same_wrappers_on_windows(self) -> None:
+        self.assertIn("  live-e2e-windows:", self.workflow)
+        job = self.workflow.split("  live-e2e-windows:", 1)[1].split("\n  live-e2e:", 1)[0]
+        self.assertIn("runs-on: windows-latest", job)
+        self.assertIn("needs: [windows, e2e-safety]", job)
+        self.assertRegex(job, r"timeout-minutes:\s*[1-9][0-9]*")
+        self.assertIn("persist-credentials: false", job)
+        self.assertIn("shell: bash", job)
+        self.assertEqual(
+            re.findall(r"^\s*run:\s*(.+)$", job, re.M),
+            ["bash e2e/ci.sh"],
+        )
+        self.assertIn(HERDR_WINDOWS_SHA256, job)
+        self.assertIn("if: always()", job)
+
     def test_plugin_manifest_pins_exact_minimum_herdr_version(self) -> None:
         manifest = (ROOT / "herdr-plugin.toml").read_text(encoding="utf-8")
         self.assertEqual(
@@ -106,9 +141,19 @@ class LiveE2ECIContractTests(unittest.TestCase):
     def test_wrapper_forces_one_fresh_release_build_before_scenarios(self) -> None:
         command = (
             'E2E_FORCE_BUILD=1 "$REPO_ROOT/e2e/run-all.sh" --require-all '
-            '2>&1 | tee "$EXPORT_DIR/suite.log"'
+            '"${SUITE_SCENARIOS[@]}" 2>&1 | tee "$EXPORT_DIR/suite.log"'
         )
         self.assertEqual(self.wrapper.count(command), 1)
+
+    def test_linux_runs_the_whole_catalog_and_windows_a_named_subset(self) -> None:
+        self.assertEqual(
+            re.findall(r"(?m)^\s*SUITE_SCENARIOS=\((.*)\)$", self.wrapper),
+            [
+                "01-core 04-fail-on-fail 06-silent-exit 17-configured-p17-runner "
+                "19-daemon-before-herdr",
+                "",
+            ],
+        )
 
     def test_e2e_preflights_accept_compatible_versions_and_pin_protocol(self) -> None:
         # The standard-suite preflight accepts the reference release and the

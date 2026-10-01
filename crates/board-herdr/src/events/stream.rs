@@ -1,6 +1,5 @@
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -94,8 +93,8 @@ pub fn watch_subscriptions(pane_ids: &[String]) -> Vec<Subscription> {
 /// the socket closes.
 pub struct HerdrEvents {
     path: PathBuf,
-    reader: BufReader<UnixStream>,
-    writer: UnixStream,
+    reader: BufReader<transport::Stream>,
+    writer: transport::Stream,
     /// Partial line carried across [`HerdrEvents::poll_event`] timeouts so a
     /// read deadline mid-line never drops event bytes.
     pending: String,

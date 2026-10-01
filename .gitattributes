@@ -1,0 +1,6 @@
+# LF everywhere, on every checkout: `board skill` embeds skill/SKILL.md byte for
+# byte, and Git Bash runs the e2e shell scripts, which break on CRLF.
+* text=auto eol=lf
+# cmd.exe needs CRLF for batch files.
+*.cmd text eol=crlf
+*.bat text eol=crlf

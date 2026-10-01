@@ -58,7 +58,7 @@ for _ in $(seq 1 100); do
 done
 [ "${outcome:-}" = fail ] || { e2e_card_failure_diag "$CARD_ID"; fail "late watcher did not finalize pane exit"; }
 SHOW="$($BOARD_BIN card show "$CARD_ID" --json)"
-python3 - "$SHOW" "$EXEC_ID" <<'PY'
+if python3 - "$SHOW" "$EXEC_ID" <<'PY'
 import json,sys
 x=json.loads(sys.argv[1]); expected=int(sys.argv[2])
 assert x["card"]["status"] == "failed"
@@ -67,5 +67,6 @@ matches=[c for c in x["comments"] if c["body"] == "pane exited without board don
 assert len(matches) == 1
 print("  late stream observed exact pane exit once")
 PY
+then :; else e2e_card_failure_diag "$CARD_ID"; fail "late watcher did not record the pane exit exactly once"; fi
 $BOARD_BIN daemon status >/dev/null
 step "19-daemon-before-herdr: ALL CHECKS PASSED"

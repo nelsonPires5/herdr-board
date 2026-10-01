@@ -1,8 +1,8 @@
 //! Nested `card comment` CRUD/history, the structured JSON error envelope for
 //! a rejected comment mutation, and agent-run ownership policy.
 
+use board_ipc::Listener as UnixListener;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixListener;
 use std::process::{Command, Stdio};
 
 use board_core::client::BoardClient;

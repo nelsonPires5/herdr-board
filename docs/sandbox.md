@@ -10,6 +10,11 @@ Supported hosts: **Docker Engine on Linux** and **Docker through Colima on
 macOS**; both **amd64** and **arm64** (Apple Silicon included). CI integration
 is intentionally out of scope — this is a local tool.
 
+The container runs Linux, so it cannot exercise the Windows build. On a Windows
+host, run `cargo test` directly (it touches no Herdr) and rely on CI's `windows`
+and `live-e2e-windows` jobs. A host-side live E2E run needs the user's explicit
+approval (see `AGENTS.md`).
+
 ## Setup
 
 - Linux: install Docker Engine.

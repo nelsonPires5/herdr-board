@@ -31,6 +31,9 @@
 //!   the antigravity harness then degrades to free-form (stored models keep
 //!   running).
 
+// The CLI-fallback tests drive a fake `/bin/sh` binary and are Unix-only.
+#![cfg_attr(windows, allow(unused_imports))]
+
 use std::fs;
 use std::time::{Duration, Instant};
 
@@ -359,6 +362,25 @@ fn load_from_cli_bounded_rejects_oversized_stdout_and_kills_the_child() {
     assert!(
         !process_alive(pid),
         "the oversized child (pid {pid}) must be killed and reaped, not abandoned"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn load_from_cli_bounded_times_out_when_a_grandchild_holds_stdout() {
+    // A `.cmd` CLI runs under cmd.exe, so `ping` is a grandchild that keeps
+    // the stdout pipe open after cmd.exe is killed: the timeout must still
+    // bound the call instead of waiting for the orphan to exit.
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("agy-grandchild.cmd");
+    fs::write(&bin, "@ping -n 20 127.0.0.1\r\n").unwrap();
+    let started = Instant::now();
+    let models = load_from_cli_bounded(bin.to_str().unwrap(), Duration::from_secs(1));
+    let elapsed = started.elapsed();
+    assert!(models.is_none(), "a hung CLI must yield None");
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "the grandchild must not extend the timeout (took {elapsed:?})"
     );
 }
 

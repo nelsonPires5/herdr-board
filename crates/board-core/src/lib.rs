@@ -28,6 +28,7 @@ pub mod model;
 pub mod opencode_catalog;
 pub mod paths;
 pub mod pi_catalog;
+pub mod process;
 pub mod prompt;
 pub mod protocol;
 pub mod scope;

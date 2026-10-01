@@ -161,6 +161,12 @@ pub async fn reconcile_once(
             return;
         }
     };
+    // Forget grace marks of runs that closed some other way meanwhile.
+    d.sched
+        .lock()
+        .unwrap()
+        .reconcile_gone
+        .retain(|id| active.iter().any(|(run, _)| run.id == *id));
     for (run, card) in active {
         let target = resolver.resolve_target(run.session.as_deref());
         let pane_id = run.herdr_pane_id.clone();
@@ -235,6 +241,16 @@ fn apply_observation(
             if same_open_run(d, &run, card.id).is_none() {
                 return;
             }
+            // A live-watched run gets one pass of grace: its event stream
+            // reports a closed pane within milliseconds, and finalizing here
+            // first would record a restart that never happened.
+            {
+                let mut s = d.sched.lock().unwrap();
+                if s.active.contains_key(&run.id) && s.reconcile_gone.insert(run.id) {
+                    return;
+                }
+                s.reconcile_gone.remove(&run.id);
+            }
             let message = "daemon restart: pane exited".to_string();
             if let Err(_error) = dispatch::finalize_run(
                 d,
@@ -253,7 +269,10 @@ fn apply_observation(
                 );
             }
         }
-        RuntimeProbe::Alive(status) => adopt_alive(d, run, card, target, status, clock),
+        RuntimeProbe::Alive(status) => {
+            d.sched.lock().unwrap().reconcile_gone.remove(&run.id);
+            adopt_alive(d, run, card, target, status, clock)
+        }
     }
 }
 

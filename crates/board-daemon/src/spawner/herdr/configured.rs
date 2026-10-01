@@ -1,8 +1,10 @@
 //! Configured (unmanaged) harnesses: a board-owned pane runs a generated,
-//! shell-free startup script handed to it through the `herdr pane run` CLI.
+//! shell-free startup script handed to it through the `herdr pane run` CLI
+//! (`/bin/sh` on Unix, a PowerShell `.ps1` on Windows).
 
 use std::fs;
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
@@ -60,6 +62,7 @@ pub(crate) fn launch_configured(
 
     let mut script = tempfile::Builder::new()
         .prefix("herdr-board-run-")
+        .suffix(SCRIPT_SUFFIX)
         .tempfile()
         .context("creating configured-harness startup script")?;
     let script_path = script.path().to_path_buf();
@@ -70,6 +73,8 @@ pub(crate) fn launch_configured(
     script
         .flush()
         .context("flushing configured-harness startup script")?;
+    // Windows runs the script through `-File`; there is no execute bit.
+    #[cfg(unix)]
     fs::set_permissions(&script_path, fs::Permissions::from_mode(0o700))
         .context("setting configured-harness startup script mode to 0700")?;
     // Close the writer before the pane executes this file (Linux rejects an
@@ -80,12 +85,7 @@ pub(crate) fn launch_configured(
         .context("persisting configured-harness startup script")?;
     drop(script_file);
 
-    let runner_argv = vec![
-        "pane".to_string(),
-        "run".to_string(),
-        pane_id.to_string(),
-        script_path.to_string_lossy().into_owned(),
-    ];
+    let runner_argv = runner_argv(pane_id, &script_path);
     let run_result = runner
         .run(socket, &runner_argv)
         .map_err(mark_retryable_runner_race)
@@ -118,6 +118,73 @@ pub(crate) fn launch_configured(
     }
 }
 
+#[cfg(unix)]
+const SCRIPT_SUFFIX: &str = "";
+#[cfg(windows)]
+const SCRIPT_SUFFIX: &str = ".ps1";
+
+#[cfg(unix)]
+pub(crate) fn runner_argv(pane_id: &str, script: &Path) -> Vec<String> {
+    vec![
+        "pane".into(),
+        "run".into(),
+        pane_id.into(),
+        script.to_string_lossy().into_owned(),
+    ]
+}
+
+/// One command line that works whatever the pane shell is (pwsh, Windows
+/// PowerShell or cmd): a double-quoted path survives all three.
+#[cfg(windows)]
+pub(crate) fn runner_argv(pane_id: &str, script: &Path) -> Vec<String> {
+    let shell = if board_core::process::resolve("pwsh").extension().is_some() {
+        "pwsh"
+    } else {
+        "powershell.exe"
+    };
+    let command = format!(
+        "{shell} -NoProfile -ExecutionPolicy Bypass -File \"{}\"",
+        script.display()
+    );
+    vec!["pane".into(), "run".into(), pane_id.into(), command]
+}
+
+/// Starts with a UTF-8 BOM: Windows PowerShell 5.1 reads a BOM-less .ps1 in
+/// the ANSI code page, mangling non-ASCII argv and the self-delete path.
+#[cfg(windows)]
+pub(crate) fn configured_script(path: &Path, argv: &[String]) -> String {
+    let quoted: Vec<String> = argv.iter().map(|arg| ps_quote(arg)).collect();
+    format!(
+        "\u{FEFF}Remove-Item -LiteralPath {} -Force -ErrorAction SilentlyContinue\n\
+         $childStatus = 1\n\
+         try {{ & {}; $childStatus = $LASTEXITCODE }} catch {{ Write-Error $_ }}\n\
+         if ($null -eq $childStatus) {{ $childStatus = 0 }}\n\
+         if ($env:BOARD_BIN) {{ & $env:BOARD_BIN __pane-exited --run-id $env:BOARD_RUN_ID }}\n\
+         exit $childStatus\n",
+        ps_quote(&path.to_string_lossy()),
+        quoted.join(" ")
+    )
+}
+
+/// PowerShell single-quoted literal. PowerShell also treats U+2018..U+201B as
+/// single quotes, so each is doubled like `'`.
+// ponytail: Windows PowerShell 5.1 still mangles native args containing `"`;
+// pwsh >= 7.3 passes them intact, which is why pwsh is preferred.
+#[cfg(windows)]
+pub(crate) fn ps_quote(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('\'');
+    for ch in value.chars() {
+        if matches!(ch, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+            out.push(ch);
+        }
+        out.push(ch);
+    }
+    out.push('\'');
+    out
+}
+
+#[cfg(unix)]
 pub(crate) fn configured_script(path: &Path, argv: &[String]) -> String {
     let mut script = String::from("#!/bin/sh\nrm -f -- ");
     script.push_str(&posix_quote(&path.to_string_lossy()));
@@ -133,6 +200,7 @@ pub(crate) fn configured_script(path: &Path, argv: &[String]) -> String {
     script
 }
 
+#[cfg(unix)]
 pub(crate) fn posix_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }

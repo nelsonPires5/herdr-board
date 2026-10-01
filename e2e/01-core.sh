@@ -65,7 +65,15 @@ echo "  tui pane: $PANE_ID"
 e2e_launch_tui "$PANE_ID" \
   "BOARD_SOCKET=$BOARD_SOCKET BOARD_DB=$BOARD_DB HERDR_BOARD_CONFIG=$HERDR_BOARD_CONFIG BOARD_SCOPE_PATH=$BOARD_SCOPE_PATH"
 echo "  waiting for the TUI to come up..."
-sleep 3
+# Poll for the CLI path's card on the board rather than a fixed sleep: a slow
+# host (Windows CI) can take longer to start the TUI, and keys sent before it
+# is up land in the pane shell instead.
+for _ in $(seq 1 40); do
+  screen="$("$HERDR_BIN" pane read "$PANE_ID" --source recent-unwrapped --lines 200 || true)"
+  grep -q "E2E CLI Card" <<<"$screen" && break
+  sleep 0.5
+done
+grep -q "E2E CLI Card" <<<"$screen" || fail "board TUI did not come up in pane $PANE_ID"
 
 step "Drive the new-card form via send-keys (n, type title, Enter)"
 e2e_herdr_mutate -- pane send-keys "$PANE_ID" n
@@ -73,10 +81,13 @@ sleep 0.5
 e2e_herdr_mutate -- pane send-text "$PANE_ID" "E2E TUI Card"
 sleep 0.5
 e2e_herdr_mutate -- pane send-keys "$PANE_ID" enter
-sleep 2
 
 step "Read the TUI pane and assert the new card appears"
-screen="$("$HERDR_BIN" pane read "$PANE_ID" --source recent-unwrapped --lines 200 || true)"
+for _ in $(seq 1 20); do
+  sleep 0.5
+  screen="$("$HERDR_BIN" pane read "$PANE_ID" --source recent-unwrapped --lines 200 || true)"
+  grep -q "E2E TUI Card" <<<"$screen" && break
+done
 printf '%s\n' "$screen" | grep -q "E2E TUI Card" \
   || fail "new card 'E2E TUI Card' not visible in the TUI pane"
 ok "card created through the TUI is visible on the board"

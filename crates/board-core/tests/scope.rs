@@ -46,7 +46,7 @@ fn git_subdirectory_resolves_to_canonical_root() {
 
     assert_eq!(
         resolve_scope_path(&subdir).unwrap(),
-        root.canonicalize().unwrap()
+        board_core::paths::canonical(&root).unwrap()
     );
 }
 
@@ -58,7 +58,7 @@ fn non_git_directory_resolves_to_canonical_cwd() {
 
     assert_eq!(
         resolve_scope_path(&dir).unwrap(),
-        dir.canonicalize().unwrap()
+        board_core::paths::canonical(&dir).unwrap()
     );
 }
 
@@ -73,6 +73,24 @@ fn fallback_and_git_root_are_canonicalized() {
 
     assert_eq!(
         resolve_scope_path(&link).unwrap(),
-        real.canonicalize().unwrap()
+        board_core::paths::canonical(&real).unwrap()
     );
+}
+
+/// Windows: `canonicalize` returns a `\\?\C:\…` verbatim path; a scope path is
+/// user-facing (listed, matched against `--board <PATH>`), so it stays plain.
+#[cfg(windows)]
+#[test]
+fn windows_scope_path_has_no_verbatim_prefix() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("plain");
+    std::fs::create_dir(&dir).unwrap();
+
+    let resolved = resolve_scope_path(&dir).unwrap();
+    assert!(
+        !resolved.to_string_lossy().starts_with(r"\\?\"),
+        "{}",
+        resolved.display()
+    );
+    assert!(resolved.is_absolute());
 }

@@ -9,6 +9,7 @@ license.workspace = true
 fake-client = []
 
 [dependencies]
+board-ipc = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
@@ -17,6 +18,9 @@ uuid = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 directories = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

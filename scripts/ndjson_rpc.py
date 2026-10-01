@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import sys
 from typing import Any, Iterable
 
 CHUNK_SIZE = 4096
@@ -47,10 +48,21 @@ def request_line(path: str, request_id: str, method: str, params: Any) -> str:
     reports with its own program-prefixed message.
     """
     request = {"id": request_id, "method": method, "params": params}
+    line = (json.dumps(request) + "\n").encode("utf-8")
+    buffer = b""
+    if sys.platform == "win32":
+        # Herdr and boardd serve the named pipe `\\.\pipe\` + the socket path.
+        with open(r"\\.\pipe" + "\\" + path, "r+b", buffering=0) as pipe:
+            pipe.write(line)
+            while b"\n" not in buffer:
+                chunk = pipe.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                buffer += chunk
+        return buffer.split(b"\n", 1)[0].decode("utf-8", "replace")
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
         connection.connect(path)
-        connection.sendall((json.dumps(request) + "\n").encode("utf-8"))
-        buffer = b""
+        connection.sendall(line)
         while b"\n" not in buffer:
             chunk = connection.recv(CHUNK_SIZE)
             if not chunk:
