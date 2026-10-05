@@ -6,8 +6,8 @@
 //! pass through to the exit status; anything else the daemon may report is
 //! clamped to `70`, and errors raised by the CLI itself exit `64`.
 
+use board_ipc::Listener as UnixListener;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixListener;
 use std::process::{Command, Output, Stdio};
 
 use board_core::protocol::{Request, Response};

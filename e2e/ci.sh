@@ -11,16 +11,43 @@ exec > >(tee "$EXPORT_DIR/runner.log") 2>&1
 
 HERDR_VERSION=0.9.0
 HERDR_PROTOCOL=22
-HERDR_URL=https://github.com/herdrdev/herdr/releases/download/v0.9.0/herdr-linux-x86_64
-HERDR_SHA256=4fa1a01158dd8043da92d31b270780b0dcc10603038d9b61cac4d81ab63fb71f
-CACHE_DIR="${HERDR_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/herdr-board/herdr-$HERDR_VERSION-linux-x86_64}"
-HERDR_BIN="$CACHE_DIR/herdr"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    # Git Bash on Windows: the release ships a zip; its SHA pins the archive,
+    # a marker written after a verified extract pins the extracted tree
+    # (conpty/ ships beside herdr.exe), and herdr.exe is re-hashed every run.
+    HERDR_PLATFORM=windows-x86_64
+    HERDR_URL=https://github.com/herdrdev/herdr/releases/download/v0.9.0/herdr-windows-x86_64.zip
+    HERDR_SHA256=b4508c445de1c1a68c760a01735da2aba2fa214b2aafd4b07f732e49b2a64b11
+    HERDR_EXE_SHA256=9b3bf49f94c2d09b1d62e11171b132865768dafc36b1327fb946c0cef9ca0d00
+    HERDR_EXE=herdr.exe
+    # The Windows live suite runs this subset for now; the rest of the
+    # catalog is a documented follow-up (docs/testing.md).
+    SUITE_SCENARIOS=(01-core 04-fail-on-fail 06-silent-exit 17-configured-p17-runner 19-daemon-before-herdr)
+    # Windows Python installs ship `python`; `python3` may be absent or a stub.
+    python3 -c '' >/dev/null 2>&1 || python3() { python "$@"; }
+    ;;
+  *)
+    HERDR_PLATFORM=linux-x86_64
+    HERDR_URL=https://github.com/herdrdev/herdr/releases/download/v0.9.0/herdr-linux-x86_64
+    HERDR_SHA256=4fa1a01158dd8043da92d31b270780b0dcc10603038d9b61cac4d81ab63fb71f
+    HERDR_EXE_SHA256=$HERDR_SHA256
+    HERDR_EXE=herdr
+    SUITE_SCENARIOS=()
+    ;;
+esac
+CACHE_DIR="${HERDR_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/herdr-board/herdr-$HERDR_VERSION-$HERDR_PLATFORM}"
+HERDR_BIN="$CACHE_DIR/$HERDR_EXE"
+HERDR_ZIP_MARKER="$CACHE_DIR/.verified-zip.sha256"
 mkdir -p "$CACHE_DIR"
 chmod 700 "$CACHE_DIR"
 
 sha_matches() {
-  [ -f "$1" ] && [ ! -L "$1" ] &&
-    printf '%s  %s\n' "$HERDR_SHA256" "$1" | sha256sum --check --status
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  if [ "$HERDR_EXE" = herdr.exe ]; then
+    [ -f "$HERDR_ZIP_MARKER" ] && [ "$(cat "$HERDR_ZIP_MARKER")" = "$HERDR_SHA256" ] || return 1
+  fi
+  printf '%s  %s\n' "$HERDR_EXE_SHA256" "$1" | sha256sum --check --status
 }
 
 if [ ! -x "$HERDR_BIN" ] || ! sha_matches "$HERDR_BIN"; then
@@ -31,8 +58,16 @@ if [ ! -x "$HERDR_BIN" ] || ! sha_matches "$HERDR_BIN"; then
     --connect-timeout 15 --max-time 120 --retry 3 --retry-all-errors \
     --output "$tmp" "$HERDR_URL"
   printf '%s  %s\n' "$HERDR_SHA256" "$tmp" | sha256sum --check
-  chmod 755 "$tmp"
-  mv -f "$tmp" "$HERDR_BIN"
+  if [ "$HERDR_EXE" = herdr.exe ]; then
+    rm -f "$HERDR_ZIP_MARKER" "$HERDR_BIN"
+    python3 -m zipfile -e "$(cygpath -w "$tmp")" "$(cygpath -w "$CACHE_DIR")"
+    [ -f "$HERDR_BIN" ] || { echo "herdr.exe missing from the pinned zip" >&2; exit 1; }
+    printf '%s' "$HERDR_SHA256" >"$HERDR_ZIP_MARKER"
+    rm -f "$tmp"
+  else
+    chmod 755 "$tmp"
+    mv -f "$tmp" "$HERDR_BIN"
+  fi
   trap - EXIT
 else
   echo "Using SHA-verified cached Herdr $HERDR_VERSION"
@@ -53,19 +88,26 @@ echo "Pinned Herdr SHA-256: $HERDR_SHA256"
 
 export HERDR_BIN_PATH="$HERDR_BIN"
 set +e
-E2E_FORCE_BUILD=1 "$REPO_ROOT/e2e/run-all.sh" --require-all 2>&1 | tee "$EXPORT_DIR/suite.log"
+E2E_FORCE_BUILD=1 "$REPO_ROOT/e2e/run-all.sh" --require-all "${SUITE_SCENARIOS[@]}" 2>&1 | tee "$EXPORT_DIR/suite.log"
 suite_status=${PIPESTATUS[0]}
 set -e
 printf '%s\n' "$suite_status" >"$EXPORT_DIR/suite.status"
 
 mapfile -t artifact_roots < <(
-  awk '/^  artifacts: \/tmp\/hb-e2e-run\.[[:alnum:]]{6}$/ { print $2 }' \
+  awk '/^  artifacts: (\/tmp|[A-Za-z]:\/[^ ]*)\/hb-e2e-run\.[[:alnum:]]{6}$/ { print $2 }' \
     "$EXPORT_DIR/suite.log"
 )
 export_status=0
 if [ "${#artifact_roots[@]}" -eq 1 ]; then
   artifact_root="${artifact_roots[0]}"
-  if python3 - "$artifact_root" <<'PY'
+  # Native Windows Python sees Git Bash's /tmp only through its Windows path.
+  native_root="$artifact_root"
+  native_tmp=/tmp
+  if [ "$HERDR_EXE" = herdr.exe ]; then
+    native_root="$(cygpath -w "$artifact_root")"
+    native_tmp="$(cygpath -w /tmp)"
+  fi
+  if python3 - "$native_root" "$native_tmp" <<'PY'
 import os
 import stat
 import sys
@@ -76,8 +118,9 @@ st = root.lstat()
 valid = (
     stat.S_ISDIR(st.st_mode)
     and not root.is_symlink()
-    and stat.S_IMODE(st.st_mode) == 0o700
-    and root.parent.resolve() == Path("/tmp")
+    # NTFS has no POSIX mode bits; the runner profile ACL is owner-only.
+    and (os.name == "nt" or stat.S_IMODE(st.st_mode) == 0o700)
+    and root.parent.resolve() == Path(sys.argv[2]).resolve()
     and root.name.startswith("hb-e2e-run.")
     and len(root.name.removeprefix("hb-e2e-run.")) == 6
 )

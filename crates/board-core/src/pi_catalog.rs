@@ -19,7 +19,6 @@
 //! Everything here is pure file/subprocess reading; nothing mutates state.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::Deserialize;
 
@@ -153,7 +152,10 @@ pub fn load_from_files(agent_dir: &Path) -> Option<Vec<ModelInfo>> {
 /// the table's `provider model …` rows. Used only when the on-disk files are
 /// unavailable. Fragile (human table, no JSON flag), hence a fallback.
 pub fn load_from_cli(pi_bin: &str) -> Option<Vec<ModelInfo>> {
-    let out = Command::new(pi_bin).arg("--list-models").output().ok()?;
+    let out = crate::process::command(pi_bin)
+        .arg("--list-models")
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }

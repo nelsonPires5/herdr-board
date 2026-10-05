@@ -5,6 +5,8 @@
 ```
 Cargo.toml                  # workspace; [workspace.dependencies] pins shared deps
 crates/
+  board-ipc/     # platform local IPC: AF_UNIX / Windows named pipes, spawn_detached;
+                 # all Win32 unsafe (added with native Windows support)
   board-core/    # OWNED BY PHASE A. models, protocol types, db(rusqlite)+migrations,
                  # column engine (pure), prompt assembly, harness adapters, config,
                  # blocking NDJSON client (used by CLI + TUI)

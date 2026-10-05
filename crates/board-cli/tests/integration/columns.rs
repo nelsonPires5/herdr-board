@@ -78,7 +78,7 @@ fn canonical_column_create_edit_reorder_and_delete_with_destination() {
     assert_eq!(persisted, vec![(id, 0), (todo_id, 1)]);
 
     let mut client = td.client();
-    let scope_path = td._dir.path().canonicalize().unwrap();
+    let scope_path = board_core::paths::canonical(td._dir.path()).unwrap();
     let board_id = client
         .board_open(scope_path.to_str().unwrap())
         .unwrap()
@@ -122,8 +122,8 @@ fn column_transition_targets_must_belong_to_the_current_board() {
     let beta_path = td._dir.path().join("beta");
     std::fs::create_dir_all(&alpha_path).unwrap();
     std::fs::create_dir_all(&beta_path).unwrap();
-    let alpha_path = alpha_path.canonicalize().unwrap();
-    let beta_path = beta_path.canonicalize().unwrap();
+    let alpha_path = board_core::paths::canonical(&alpha_path).unwrap();
+    let beta_path = board_core::paths::canonical(&beta_path).unwrap();
 
     let mut client = td.client();
     let alpha = client
@@ -201,7 +201,7 @@ fn column_transition_targets_must_belong_to_the_current_board() {
 fn column_edit_covers_all_settings_and_explicit_clears() {
     let td = TestDaemon::start(&[]);
     let mut client = td.client();
-    let scope_path = td._dir.path().canonicalize().unwrap();
+    let scope_path = board_core::paths::canonical(td._dir.path()).unwrap();
     let board_id = client
         .board_open(scope_path.to_str().unwrap())
         .unwrap()

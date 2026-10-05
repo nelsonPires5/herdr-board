@@ -332,6 +332,7 @@ fn harness_opencode_models_efforts_and_permissions() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn harness_opencode_models_overlay_live_catalog_from_cli() {
     // An OPENCODE_BIN resolving to a working CLI → the daemon overlays the
@@ -1041,6 +1042,7 @@ fn harness_antigravity_models_lists_efforts_and_permissions() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn harness_antigravity_models_lists_live_catalog_when_agy_bin_resolves() {
     // With AGY_BIN pointing at a fixture CLI, the daemon overlays the live

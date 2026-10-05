@@ -277,7 +277,12 @@ fn local_spawner_missing_pi_surfaces_clean_run_failure() {
     let td = TestDaemon::start(&[("PATH", "/usr/bin:/bin")]);
     let mut c = td.client();
     let board = c
-        .board_open(td._dir.path().canonicalize().unwrap().to_str().unwrap())
+        .board_open(
+            board_core::paths::canonical(td._dir.path())
+                .unwrap()
+                .to_str()
+                .unwrap(),
+        )
         .unwrap()
         .board;
     c.column_create(&ColumnCreateParams {
@@ -308,7 +313,7 @@ fn scoped_template_dispatches_and_transitions_with_local_spawner() {
     let td = TestDaemon::start(&[]);
     let scope = td._dir.path().join("scoped-pipeline");
     std::fs::create_dir_all(&scope).unwrap();
-    let scope = scope.canonicalize().unwrap();
+    let scope = board_core::paths::canonical(&scope).unwrap();
     let mut client = td.client();
     let board = client.board_open(scope.to_str().unwrap()).unwrap().board;
     let columns = client

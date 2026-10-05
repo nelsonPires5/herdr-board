@@ -7,8 +7,8 @@
 //! reply (or closes it to simulate a disconnect). `serve_stream` hands the raw
 //! stream to a closure for the persistent event-subscription case.
 
+use board_ipc::{Listener as UnixListener, Stream as UnixStream};
 use std::io::{self, BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;

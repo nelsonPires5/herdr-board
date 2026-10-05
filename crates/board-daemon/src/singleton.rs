@@ -1,7 +1,7 @@
-//! Single-instance guard: an exclusive `flock` on `<db>.lock`.
+//! Single-instance guard: an exclusive `File::try_lock` (`flock` on Unix,
+//! `LockFileEx` on Windows) on `<db>.lock`.
 
 use std::fs::{File, OpenOptions};
-use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
 /// Path of the lock file for a given db path (`board.db` → `board.db.lock`).
@@ -25,13 +25,29 @@ pub fn acquire(db_path: &Path) -> anyhow::Result<Option<File>> {
         .write(true)
         .truncate(false)
         .open(&path)?;
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if rc == 0 {
-        return Ok(Some(file));
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
     }
-    let err = std::io::Error::last_os_error();
-    match err.raw_os_error() {
-        Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN => Ok(None),
-        _ => Err(err.into()),
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn second_acquire_reports_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("board.db");
+        let first = super::acquire(&db).unwrap();
+        assert!(first.is_some());
+        assert!(
+            super::acquire(&db).unwrap().is_none(),
+            "second daemon must exit quietly"
+        );
+        drop(first);
+        assert!(
+            super::acquire(&db).unwrap().is_some(),
+            "lock released on drop"
+        );
     }
 }

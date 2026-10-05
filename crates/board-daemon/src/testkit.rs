@@ -14,9 +14,9 @@
 //! This module is compiled only under `cfg(test)`; nothing here is production
 //! code.
 
+use board_ipc::{Listener as UnixListener, Stream as UnixStream};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -77,8 +77,8 @@ pub(crate) fn daemon() -> DaemonBuilder {
         spawner: Arc::new(LocalSpawner::new()),
         session_registry: None,
         herdr: None,
-        db_path: PathBuf::from("/tmp/board-test.db"),
-        socket_path: PathBuf::from("/tmp/board-test.sock"),
+        db_path: std::env::temp_dir().join("board-test.db"),
+        socket_path: std::env::temp_dir().join("board-test.sock"),
         events_capacity: 16,
     }
 }

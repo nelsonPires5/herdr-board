@@ -4,7 +4,7 @@
 
 use std::process::Command;
 
-use board_core::paths::session_name_from_socket;
+use board_core::paths::{open_private_file, session_name_from_socket};
 
 #[test]
 fn session_name_is_read_only_from_a_named_session_socket() {
@@ -66,4 +66,45 @@ fn log_dir_honors_the_board_log_dir_override() {
             .any(|line| line == dir.path().to_str().unwrap()),
         "log_dir() must resolve to the BOARD_LOG_DIR override verbatim; got: {stdout:?}"
     );
+}
+
+#[test]
+fn session_name_parses_windows_separators() {
+    assert_eq!(
+        session_name_from_socket(Some(
+            r"C:\Users\a\AppData\Roaming\herdr\sessions\work\herdr.sock"
+        )),
+        Some("work".to_string())
+    );
+    assert_eq!(
+        session_name_from_socket(Some(r"C:\Users\a\AppData\Roaming\herdr\herdr.sock")),
+        None
+    );
+}
+
+#[test]
+fn open_private_file_refuses_a_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target.log");
+    std::fs::write(&target, b"").unwrap();
+    let link = dir.path().join("link.log");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    #[cfg(windows)]
+    if std::os::windows::fs::symlink_file(&target, &link).is_err() {
+        return; // creating symlinks needs Developer Mode or admin; nothing to test
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    assert!(open_private_file(&mut options, &link).is_err());
+}
+
+#[test]
+fn open_private_file_creates_a_regular_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("x.log");
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    open_private_file(&mut options, &path).unwrap();
+    assert!(path.is_file());
 }

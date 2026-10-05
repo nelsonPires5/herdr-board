@@ -1,6 +1,6 @@
+use board_ipc::Listener as UnixListener;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixListener;
 use std::sync::mpsc;
 
 use board_core::client::{BoardClient, UnixClient};

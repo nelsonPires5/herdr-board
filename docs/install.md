@@ -5,7 +5,7 @@ them: a custom CLI directory, a Herdr keybinding, the harness integration, the a
 named Herdr sessions.
 
 Requires **Herdr >= 0.9.0 speaking socket protocol 22** (including 0.9.1), Git, and a Rust
-toolchain with `cargo`; Linux and macOS are supported. The board-side compatibility contract remains board protocol v1 and
+toolchain with `cargo`; Linux, macOS, and [Windows](#windows) are supported. The board-side compatibility contract remains board protocol v1 and
 SQLite schema v15. See the README for the one-line install command itself.
 
 | Component | Required support level | How to verify |
@@ -106,3 +106,28 @@ A single board daemon serves every scoped board across every Herdr session. Each
 `session` (the default session when unset), and dispatch resolves that session's socket through
 `herdr session list`. Use `BOARD_SOCKET` and `BOARD_DB` overrides only when you want a completely
 separate board stack.
+
+## Windows
+
+herdr-board runs natively on Windows against a Windows Herdr (>= 0.9.0, protocol 22). Install
+the CLI with cargo; the GitHub plugin install is Linux/macOS only for now, because the plugin's
+build steps and its `open-board` action are shell scripts.
+
+```powershell
+git clone https://github.com/nelsonPires5/herdr-board
+cd herdr-board
+cargo install --path crates/board-cli --locked   # board.exe -> %USERPROFILE%\.cargo\bin
+```
+
+Run `board tui` in a Herdr pane; the daemon auto-starts on first use, as on Unix.
+
+- Herdr serves its API on the named pipe `\\.\pipe\` + its socket path
+  (`%APPDATA%\herdr\herdr.sock` for the default session). boardd follows the same convention
+  (default `%APPDATA%\herdr-board\boardd.sock`), so `BOARD_SOCKET` and `HERDR_SOCKET_PATH`
+  stay plain paths.
+- Provider CLIs installed as npm `.cmd` shims (`pi`, `claude`, `codex`, …) resolve through
+  `PATHEXT`.
+- Configured harnesses start through a PowerShell script: `pwsh` when it is installed, else
+  Windows PowerShell 5.1, which mangles arguments that contain `"`.
+- Managed (`agent.start`) launches use the same `.cmd` resolution but have not yet been run
+  against a real provider on Windows.

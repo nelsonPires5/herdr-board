@@ -47,9 +47,25 @@ fi
 # Resolve required non-system tools before entering the controlled standard PATH.
 BOARD_BIN="${BOARD_BIN:-$REPO_ROOT/target/release/board}"
 HERDR_BIN_PATH="${HERDR_BIN_PATH:-$(type -P herdr 2>/dev/null || true)}"
+# Windows Herdr (and the Actions tool cache) spell it `C:\…`.
+[ "$E2E_WINDOWS" != 1 ] || [ -z "$HERDR_BIN_PATH" ] || HERDR_BIN_PATH="$(cygpath -u "$HERDR_BIN_PATH")"
 [[ "$HERDR_BIN_PATH" == /* ]] && [ -x "$HERDR_BIN_PATH" ] \
   || { echo 'run-all.sh: herdr must resolve to an absolute executable' >&2; exit 2; }
 E2E_STANDARD_PATH=/usr/local/bin:/usr/bin:/bin
+# Windows programs also need the system directories, and configured harnesses
+# launch through PowerShell (pwsh when present).
+E2E_WINDOWS_ENV=()
+if [ "$E2E_WINDOWS" = 1 ]; then
+  E2E_STANDARD_PATH="$E2E_STANDARD_PATH:$(cygpath -u "$SYSTEMROOT")/System32:$(cygpath -u "$SYSTEMROOT")"
+  E2E_STANDARD_PATH="$E2E_STANDARD_PATH:$(cygpath -u "$SYSTEMROOT")/System32/WindowsPowerShell/v1.0"
+  _pwsh="$(type -P pwsh 2>/dev/null || true)"
+  [ -z "$_pwsh" ] || E2E_STANDARD_PATH="$E2E_STANDARD_PATH:$(dirname "$_pwsh")"
+  for _var in SYSTEMROOT WINDIR SYSTEMDRIVE COMSPEC PATHEXT USERPROFILE APPDATA LOCALAPPDATA \
+    PROGRAMDATA PROGRAMFILES TEMP TMP E2E_PYTHON; do
+    [ -z "${!_var:-}" ] || E2E_WINDOWS_ENV+=("$_var=${!_var}")
+  done
+  unset _pwsh _var
+fi
 resolve_bash4() {
   local candidate
   for candidate in "${BASH:-}" "$(type -P bash 2>/dev/null || true)" \
@@ -91,7 +107,7 @@ run_this() {
 }
 
 umask 077
-RUN_ROOT="$(mktemp -d /tmp/hb-e2e-run.XXXXXX)" \
+RUN_ROOT="$(mktemp -d "$E2E_TMP_ROOT/hb-e2e-run.XXXXXX")" \
   || { echo 'run-all.sh: cannot create private artifact root' >&2; exit 2; }
 chmod 700 "$RUN_ROOT"
 OWNER_ID="run-$$-$(python3 -c 'import secrets; print(secrets.token_hex(8))')"
@@ -122,7 +138,7 @@ for s in "${SCENARIOS[@]}"; do
     E2E_INVOCATION_ARTIFACT_ROOT="$RUN_ROOT" E2E_INVOCATION_TOKEN="$INVOCATION_TOKEN"
     E2E_INVOCATION_OWNER_ID="$OWNER_ID" E2E_IDENTITY_KEY_BOOTSTRAP="$IDENTITY_KEY"
     E2E_STANDARD_PATH="$E2E_STANDARD_PATH" E2E_BASH="$E2E_BASH"
-    BOARD_BIN="$BOARD_BIN" HERDR_BIN_PATH="$HERDR_BIN_PATH"
+    BOARD_BIN="$BOARD_BIN" HERDR_BIN_PATH="$HERDR_BIN_PATH" ${E2E_WINDOWS_ENV[@]+"${E2E_WINDOWS_ENV[@]}"}
   )
   set +e
   env -i "${child_env[@]}" "$E2E_BASH" "$DIR/$s" 2>&1 | tee "$artifact/scenario.log"

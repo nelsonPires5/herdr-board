@@ -21,6 +21,18 @@ SPEC.loader.exec_module(prepare_release)
 
 
 class PrepareReleaseTests(unittest.TestCase):
+    def test_local_packages_are_exactly_the_workspace_members(self) -> None:
+        # A workspace crate missing here keeps its old Cargo.lock version after
+        # a bump, and the Release workflow's `cargo build --locked` then fails.
+        root = SCRIPTS_DIR.parent
+        cargo = (root / "Cargo.toml").read_text(encoding="utf-8")
+        members = re.search(r"(?s)^members = \[(.*?)\]", cargo, re.M).group(1)
+        names = {
+            re.search(r'(?m)^name = "([^"]+)"', (root / member / "Cargo.toml").read_text(encoding="utf-8")).group(1)
+            for member in re.findall(r'"([^"]+)"', members)
+        }
+        self.assertEqual(set(prepare_release.LOCAL_PACKAGES), names)
+
     def write_fixture(
         self,
         repo_root: Path,
@@ -38,6 +50,7 @@ class PrepareReleaseTests(unittest.TestCase):
                 [workspace]
                 resolver = "2"
                 members = [
+                    "crates/board-ipc",
                     "crates/board-core",
                     "crates/board-herdr",
                     "crates/board-tui",
@@ -88,6 +101,11 @@ class PrepareReleaseTests(unittest.TestCase):
 
                 [[package]]
                 name = "board-herdr"
+                version = "{lock_version}"
+                dependencies = []
+
+                [[package]]
+                name = "board-ipc"
                 version = "{lock_version}"
                 dependencies = []
 
@@ -198,6 +216,7 @@ class PrepareReleaseTests(unittest.TestCase):
                     "board-core": "0.2.0",
                     "board-daemon": "0.2.0",
                     "board-herdr": "0.2.0",
+                    "board-ipc": "0.2.0",
                     "board-tui": "0.2.0",
                 },
             )
@@ -307,7 +326,7 @@ class PrepareReleaseTests(unittest.TestCase):
                         repo, repo_url="https://github.com/example/herdr-board"
                     )
 
-    def test_verify_rejects_missing_one_of_five_local_lock_packages(self) -> None:
+    def test_verify_rejects_missing_one_of_the_local_lock_packages(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             self.write_fixture(repo)

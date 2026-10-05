@@ -32,7 +32,7 @@ SEMVER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 LOCK_BLOCK_RE = re.compile(r"(?ms)^\[\[package\]\]\n.*?(?=^\[\[package\]\]|\Z)")
 REF_LINE_RE = re.compile(r"^\[([^\]]+)\]:\s+(\S+)\s*$")
 TARGET_HEADING_RE = re.compile(r"^## \[(?P<version>[^\]]+)\] - .+$")
-LOCAL_PACKAGES = ("board-cli", "board-core", "board-daemon", "board-herdr", "board-tui")
+LOCAL_PACKAGES = ("board-cli", "board-core", "board-daemon", "board-herdr", "board-ipc", "board-tui")
 
 # Documented `herdr plugin install … --ref vX.Y.Z` pins. These ship to users as
 # the copy-pasteable install/update command, so they are part of the release

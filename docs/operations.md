@@ -31,7 +31,8 @@ process-name kill.
 
 boardd writes one JSON object per line to private daily files in the XDG data directory:
 `~/.local/share/herdr-board/logs/daemon.YYYY-MM-DD.ndjson` on Linux (the platform data
-directory equivalent on macOS; override the directory with `BOARD_LOG_DIR`). The directory is
+directory equivalent on macOS, `%APPDATA%\herdr-board\logs` on Windows; override the directory
+with `BOARD_LOG_DIR`). On Windows the owner-only protection comes from the profile ACL. The directory is
 mode `0700` and regular log files are mode
 `0600`. `board daemon --foreground` mirrors the same structured events to stderr.
 
@@ -105,7 +106,8 @@ If `HERDR_BOARD_CLI_INSTALL_DIR` was used, use the same directory for every upda
 Uninstall the plugin from each named session where it was registered.
 
 To remove all board data (cards, columns, runs), delete the data directory — `BOARD_DB`'s default
-(`~/Library/Application Support/herdr-board` on macOS, `~/.local/share/herdr-board` on Linux).
+(`~/Library/Application Support/herdr-board` on macOS, `~/.local/share/herdr-board` on Linux,
+`%APPDATA%\herdr-board` on Windows).
 This is optional and never needed for a normal reinstall.
 
 ## Local development / source install

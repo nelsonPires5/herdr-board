@@ -546,7 +546,12 @@ fn run_focus_rescue_gives_the_new_pane_the_board_env_but_never_the_run_credentia
     assert_eq!(env.get("BOARD_CARD_ID"), Some(&card_id.to_string()));
     assert_eq!(
         env.get("BOARD_SOCKET").map(String::as_str),
-        Some("/tmp/board-test.sock")
+        Some(
+            std::env::temp_dir()
+                .join("board-test.sock")
+                .to_string_lossy()
+                .as_ref()
+        )
     );
     assert!(env.contains_key("BOARD_BIN"), "env: {env:?}");
     assert_eq!(env.get("BOARD_RESCUE"), Some(&"1".to_string()));
@@ -1084,6 +1089,7 @@ fn harness_capabilities_codex_falls_back_to_static_on_malformed_cache() {
 }
 
 /// A fake `opencode` executable printing the verbose model catalog shape.
+#[cfg(unix)]
 fn fixture_opencode_bin(dir: &tempfile::TempDir, stdout: &str) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
 
@@ -1098,6 +1104,7 @@ fn fixture_opencode_bin(dir: &tempfile::TempDir, stdout: &str) -> std::path::Pat
 /// lines + one JSON object each, with a per-model `variants` map).
 /// `opencode/nemotron-3-ultra-free` declares `variants: {}` for real
 /// (verified live): a valid model that stays listed with empty efforts.
+#[cfg(unix)]
 const OPENCODE_VERBOSE_FIXTURE: &str = r#"opencode/nemotron-3-ultra-free
 {
   "id": "nemotron-3-ultra-free",
@@ -1123,6 +1130,7 @@ openai/gpt-5.6-sol
 }
 "#;
 
+#[cfg(unix)]
 #[test]
 fn harness_capabilities_opencode_overlays_live_catalog_from_cli() {
     // An `opencode_bin` resolving to a working CLI → the daemon overlays the
@@ -1296,6 +1304,7 @@ fn space_list_rejects_a_socket_with_the_wrong_protocol() {
     assert_eq!(herdr.methods(), vec!["ping"]);
 }
 
+#[cfg(unix)]
 #[test]
 fn run_focus_rejects_a_socket_with_the_wrong_protocol() {
     let herdr = fake_herdr_with_protocol(board_herdr::SUPPORTED_HERDR_PROTOCOL - 1);
@@ -1336,6 +1345,7 @@ fn run_focus_rejects_a_socket_with_the_wrong_protocol() {
 
 /// A mirror of the real `agy --output-format json models` envelope: variant
 /// ids normalize onto base models, fixed-effort ids stay whole.
+#[cfg(unix)]
 const AGY_JSON_FIXTURE: &str = r#"{
   "conversation_id": "",
   "status": "SUCCESS",
@@ -1354,6 +1364,7 @@ const AGY_JSON_FIXTURE: &str = r#"{
 }
 "#;
 
+#[cfg(unix)]
 fn fixture_agy_bin(dir: &tempfile::TempDir, stdout: &str) -> std::path::PathBuf {
     let script = format!("#!/bin/sh\ncat <<'HBEOF'\n{stdout}\nHBEOF\n");
     let bin = dir.path().join("agy-fixture");
@@ -1363,6 +1374,7 @@ fn fixture_agy_bin(dir: &tempfile::TempDir, stdout: &str) -> std::path::PathBuf 
     bin
 }
 
+#[cfg(unix)]
 #[test]
 fn harness_capabilities_antigravity_overlays_live_catalog_from_cli() {
     // An `agy_bin` resolving to a working CLI → the daemon overlays the live

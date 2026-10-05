@@ -1,5 +1,9 @@
+// The fake boardd stop listener below is Unix-only, so on Windows some of
+// these imports go unused.
+#![cfg_attr(windows, allow(unused_imports))]
+
+use board_ipc::{Listener as UnixListener, Stream as UnixStream};
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::{
@@ -34,13 +38,23 @@ impl TestDaemon {
         let db = dir.path().join("board.db");
         let socket = dir.path().join("boardd.sock");
         let cfg = dir.path().join("config.toml");
-        let fake = fixtures_dir().join("fake-agent.sh");
+        // Windows has no reliable `bash` (System32's is WSL), so it runs the
+        // PowerShell twin of the fake agent. TOML literal strings keep a
+        // Windows path's `\` from being read as an escape.
+        let fake_argv = if cfg!(windows) {
+            format!(
+                "[\"powershell.exe\", \"-NoProfile\", \"-ExecutionPolicy\", \"Bypass\", \"-File\", '{}']",
+                fixtures_dir().join("fake-agent.ps1").display()
+            )
+        } else {
+            format!(
+                "[\"bash\", '{}']",
+                fixtures_dir().join("fake-agent.sh").display()
+            )
+        };
         std::fs::write(
             &cfg,
-            format!(
-                "[harness.fake]\nargv = [\"bash\", \"{}\"]\n\n[daemon]\nspawner = \"local\"\n",
-                fake.display()
-            ),
+            format!("[harness.fake]\nargv = {fake_argv}\n\n[daemon]\nspawner = \"local\"\n"),
         )
         .unwrap();
 
@@ -55,6 +69,8 @@ impl TestDaemon {
             .env("BOARD_TICK_MS", "150")
             .env("BOARD_LOCAL_POLL_MS", "150")
             .env("FAKE_AGENT_SLEEP", "0.3")
+            // Hermetic: never reach a provider CLI installed on the host.
+            .env("AGY_BIN", dir.path().join("no-agy"))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -285,6 +301,7 @@ pub(crate) fn poll(
     }
 }
 
+#[cfg(unix)]
 #[derive(Clone, Copy)]
 pub(crate) enum FakeStop {
     Error,
@@ -293,13 +310,17 @@ pub(crate) enum FakeStop {
     Replace,
 }
 
-/// Minimal boardd-shaped listener for daemon-stop state-machine tests.
+/// Minimal boardd-shaped listener for daemon-stop state-machine tests. These
+/// pin Unix socket-file semantics (stale unlink, inode replacement), so they
+/// are Unix-only; a named pipe has no file to go stale.
+#[cfg(unix)]
 pub(crate) struct FakeListener {
     path: PathBuf,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
+#[cfg(unix)]
 impl FakeListener {
     pub(crate) fn bind(dir: &Path, mode: FakeStop) -> Self {
         let path = dir.join("fake-boardd.sock");
@@ -337,6 +358,7 @@ impl FakeListener {
     }
 }
 
+#[cfg(unix)]
 impl Drop for FakeListener {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
@@ -349,6 +371,7 @@ impl Drop for FakeListener {
     }
 }
 
+#[cfg(unix)]
 fn handle_fake_connection(mut stream: UnixStream, path: &Path, mode: FakeStop) -> bool {
     // Test listeners must also work on macOS, where SO_RCVTIMEO can return
     // EINVAL for AF_UNIX streams. A short nonblocking loop still lets Drop's

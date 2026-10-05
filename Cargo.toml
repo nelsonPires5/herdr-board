@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/board-ipc",
     "crates/board-core",
     "crates/board-herdr",
     "crates/board-tui",
@@ -50,12 +51,21 @@ directories = "5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 libc = "0.2"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
 
 # Dev / test
 insta = "1"
 tempfile = "3"
 
 # Internal crates
+board-ipc = { path = "crates/board-ipc" }
 board-core = { path = "crates/board-core" }
 board-herdr = { path = "crates/board-herdr" }
 board-tui = { path = "crates/board-tui" }

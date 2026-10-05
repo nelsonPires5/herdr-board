@@ -5,9 +5,11 @@ use crate::testkit::{
     self, agent_info, agent_started, error, pane_info, reply, tab_created, FakeHerdr,
 };
 
-use super::herdr::{
-    configured_script, posix_quote, remove_file_if_exists, HerdrCliPaneRunner, PaneRunner,
-};
+#[cfg(unix)]
+use super::herdr::posix_quote;
+#[cfg(unix)]
+use super::herdr::{configured_script, HerdrCliPaneRunner};
+use super::herdr::{remove_file_if_exists, PaneRunner};
 use super::local::materialize_local_argv;
 use super::placement::grid_slot;
 use super::{HerdrLaunchPlan, HerdrSpawner, Spawner, WorkspaceBootstrapHint};
@@ -67,7 +69,7 @@ impl Drop for RecordingPaneRunner {
                     .filter(|call| {
                         call.argv.len() == 4 && call.argv[0] == "pane" && call.argv[1] == "run"
                     })
-                    .map(|call| PathBuf::from(&call.argv[3]))
+                    .map(|call| runner_script_path(&call.argv[3]))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
@@ -84,15 +86,40 @@ impl Drop for RecordingPaneRunner {
                 // before running the child, so absence is expected.
                 continue;
             };
-            let expected_header = format!(
-                "#!/bin/sh\nrm -f -- {}\n",
-                posix_quote(&path.to_string_lossy())
-            );
-            if script.starts_with(&expected_header) {
+            if script.starts_with(&script_header(&path)) {
                 let _ = remove_file_if_exists(&path);
             }
         }
     }
+}
+
+/// The startup-script path inside a `pane run` command argument.
+#[cfg(unix)]
+fn runner_script_path(arg: &str) -> PathBuf {
+    PathBuf::from(arg)
+}
+
+/// Windows hands `pane run` one `pwsh … -File "<script>"` command line.
+#[cfg(windows)]
+fn runner_script_path(arg: &str) -> PathBuf {
+    let quoted = arg.trim_end_matches('"');
+    PathBuf::from(quoted.rsplit_once('"').map_or(quoted, |(_, path)| path))
+}
+
+#[cfg(unix)]
+fn script_header(path: &Path) -> String {
+    format!(
+        "#!/bin/sh\nrm -f -- {}\n",
+        posix_quote(&path.to_string_lossy())
+    )
+}
+
+#[cfg(windows)]
+fn script_header(path: &Path) -> String {
+    format!(
+        "\u{FEFF}Remove-Item -LiteralPath {} ",
+        super::herdr::ps_quote(&path.to_string_lossy())
+    )
 }
 
 fn serve_recording_herdr<F>(handler: F) -> FakeHerdr
@@ -337,8 +364,6 @@ fn assert_startup_prompt_file(
     expected_flag: &str,
     expected_contents: &str,
 ) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
     let args = req["params"]["args"].as_array().unwrap();
     let actual_base: Vec<_> = args[..expected_base_args.len()]
         .iter()
@@ -349,11 +374,16 @@ fn assert_startup_prompt_file(
     assert_eq!(args[expected_base_args.len()], expected_flag);
     let path = PathBuf::from(args.last().unwrap().as_str().unwrap());
     assert_eq!(std::fs::read_to_string(&path).unwrap(), expected_contents);
-    assert_eq!(
-        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-        0o600,
-        "authoritative system prompt must never be group/world-readable",
-    );
+    // Windows: `%TEMP%` carries the profile's owner-only ACL instead of a mode.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "authoritative system prompt must never be group/world-readable",
+        );
+    }
     path
 }
 

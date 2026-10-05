@@ -36,7 +36,7 @@ impl EditorLauncher for RealEditor {
 
         let editor = std::env::var("EDITOR")
             .or_else(|_| std::env::var("VISUAL"))
-            .unwrap_or_else(|_| "vi".to_string());
+            .unwrap_or_else(|_| if cfg!(windows) { "notepad" } else { "vi" }.to_string());
 
         let mut tmp = tempfile::Builder::new()
             .prefix("board-edit-")
@@ -51,7 +51,7 @@ impl EditorLauncher for RealEditor {
         let _ = crossterm::execute!(out, LeaveAlternateScreen);
         let _ = disable_raw_mode();
 
-        let status = std::process::Command::new(&editor).arg(&path).status();
+        let status = board_core::process::command(&editor).arg(&path).status();
 
         // Resume the TUI regardless of the editor's exit status.
         let _ = enable_raw_mode();

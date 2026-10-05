@@ -63,7 +63,8 @@ bash e2e/ci.sh
 CI runs the fast commands as independent `fmt`, `clippy`, `docs`, `scripts`, `e2e-safety`, and
 `test` jobs split by what each protects. The dependent `live-e2e` job starts only after all six
 succeed, installs the SHA-verified Herdr 0.9.0 binary, and runs the wrapper above. This keeps cheap failures
-fast while making the complete live suite part of the same required `CI` workflow. `test_docs.py`
+fast while making the complete live suite part of the same required `CI` workflow. The `windows`
+job runs the same clippy and `cargo test` commands on `windows-latest`. `test_docs.py`
 asserts that every `scripts/tests/test_*.py` is matched by a pattern above, so a new module cannot
 land in no job at all.
 

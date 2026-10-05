@@ -1,7 +1,7 @@
 //! Regression coverage for metadata-only, exactly-once Herdr diagnostics.
 
+use board_ipc::Listener as UnixListener;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;

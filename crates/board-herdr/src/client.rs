@@ -1,4 +1,5 @@
-//! Blocking herdr socket client (`std::os::unix::net::UnixStream`, no async).
+//! Blocking herdr socket client (`UnixStream` on Unix, a named pipe on
+//! Windows; no async).
 //!
 //! One [`HerdrClient`] owns a single request/response connection. Calls are
 //! synchronous: the daemon is expected to wrap them in `spawn_blocking` or a

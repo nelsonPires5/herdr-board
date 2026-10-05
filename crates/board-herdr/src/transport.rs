@@ -1,7 +1,8 @@
 //! Socket-path resolution, deadline configuration, and platform-aware
-//! AF_UNIX transport helpers.
+//! transport helpers: AF_UNIX here, the Windows named pipe in
+//! `transport_windows.rs` (same `pub(crate)` signatures).
 //!
-//! All `unsafe` blocks live in this module. The safe wrappers handle:
+//! All Unix `unsafe` blocks live in this module. The safe wrappers handle:
 //! - AF_UNIX path-length validation
 //! - Non-blocking connect with a deadline
 //! - SOCK_CLOEXEC / SOCK_NONBLOCK atomically on Linux, portable fallback
@@ -11,30 +12,62 @@
 //!   fall back to a huge sentinel duration.
 
 use std::io;
+#[cfg(unix)]
 use std::os::fd::FromRawFd;
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::error::{HerdrError, Result};
+use crate::error::HerdrError;
+#[cfg(unix)]
+use crate::error::Result;
+
+#[cfg(unix)]
+pub(crate) type Stream = UnixStream;
+
+#[cfg(windows)]
+#[path = "transport_windows.rs"]
+mod windows;
+#[cfg(windows)]
+pub(crate) use windows::{
+    connect_with_deadline, poll_read_ready, poll_read_ready_infinite, set_nonblocking, Stream,
+};
 
 // -- socket-path resolution ---------------------------------------------------
 
 /// Default socket path: `$HERDR_SOCKET_PATH` (herdr's canonical variable,
 /// injected into panes/plugins so named sessions resolve to their own socket),
 /// else `$HERDR_SOCKET` (this crate's override), else the default session's
-/// `~/.config/herdr/herdr.sock`.
+/// `~/.config/herdr/herdr.sock` (`%APPDATA%\herdr\herdr.sock` on Windows).
 pub fn default_socket_path() -> PathBuf {
-    for var in ["HERDR_SOCKET_PATH", "HERDR_SOCKET"] {
-        if let Ok(p) = std::env::var(var) {
-            if !p.is_empty() {
-                return PathBuf::from(p);
-            }
+    let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+    default_socket_path_from(
+        var("HERDR_SOCKET_PATH").or_else(|| var("HERDR_SOCKET")),
+        var("HOME"),
+        var("APPDATA"),
+    )
+}
+
+/// Pure resolution: explicit socket, else the platform's default session path.
+fn default_socket_path_from(
+    explicit: Option<String>,
+    home: Option<String>,
+    appdata: Option<String>,
+) -> PathBuf {
+    if let Some(path) = explicit {
+        return PathBuf::from(path);
+    }
+    if cfg!(windows) {
+        if let Some(appdata) = appdata {
+            return PathBuf::from(appdata).join("herdr").join("herdr.sock");
         }
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-    PathBuf::from(home).join(".config/herdr/herdr.sock")
+    PathBuf::from(home.unwrap_or_else(|| "/root".to_string())).join(".config/herdr/herdr.sock")
 }
 
 // -- deadline configuration ---------------------------------------------------
@@ -66,6 +99,7 @@ impl Default for SocketDeadlines {
 
 // -- connect with deadline ----------------------------------------------------
 
+#[cfg(unix)]
 /// Open a blocking AF_UNIX stream to `path`, bounded by `timeout`.
 ///
 /// The returned stream is in **blocking** mode (O_NONBLOCK cleared) so
@@ -172,6 +206,7 @@ pub(crate) fn connect_with_deadline(path: &Path, timeout: Duration) -> Result<Un
 
 // -- nonblocking toggle ------------------------------------------------------
 
+#[cfg(unix)]
 /// Set or clear O_NONBLOCK on a Unix stream.
 pub(crate) fn set_nonblocking(stream: &UnixStream, nonblocking: bool) -> Result<()> {
     stream
@@ -193,6 +228,7 @@ pub(crate) fn deadline_io(error: io::Error, operation: &'static str) -> HerdrErr
     }
 }
 
+#[cfg(unix)]
 /// Block until `stream` is readable or `deadline` expires, without touching
 /// SO_RCVTIMEO.  Returns `Ok(true)` when data is ready, `Ok(false)` on
 /// timeout, and `Err` on error.
@@ -220,6 +256,7 @@ pub(crate) fn poll_read_ready(stream: &UnixStream, deadline: Duration) -> Result
     }
 }
 
+#[cfg(unix)]
 /// Block indefinitely until `stream` becomes readable or closes.
 pub(crate) fn poll_read_ready_infinite(stream: &UnixStream) -> Result<bool> {
     use std::os::fd::AsRawFd;
@@ -243,5 +280,28 @@ pub(crate) fn poll_read_ready_infinite(stream: &UnixStream) -> Result<bool> {
             }
             return Ok(ready > 0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn windows_default_socket_is_under_appdata() {
+        let path = super::default_socket_path_from(
+            None,
+            None,
+            Some(r"C:\Users\a b\AppData\Roaming".into()),
+        );
+        assert_eq!(
+            path,
+            std::path::PathBuf::from(r"C:\Users\a b\AppData\Roaming\herdr\herdr.sock")
+        );
+    }
+
+    #[test]
+    fn explicit_socket_env_wins() {
+        let path = super::default_socket_path_from(Some("/x/h.sock".into()), None, None);
+        assert_eq!(path, std::path::PathBuf::from("/x/h.sock"));
     }
 }

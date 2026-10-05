@@ -42,7 +42,7 @@ pub fn select_scope_candidate(
 /// Canonicalize a candidate and use its Git root when it belongs to a repo.
 /// A missing/failing Git command deliberately falls back to the canonical cwd.
 pub fn resolve_scope_path(candidate: &Path) -> Result<PathBuf> {
-    let canonical = candidate.canonicalize()?;
+    let canonical = crate::paths::canonical(candidate)?;
     let output = Command::new("git")
         .arg("-C")
         .arg(&canonical)
@@ -54,7 +54,7 @@ pub fn resolve_scope_path(candidate: &Path) -> Result<PathBuf> {
             let root = String::from_utf8_lossy(&output.stdout);
             let root = root.trim();
             if !root.is_empty() {
-                if let Ok(root) = Path::new(root).canonicalize() {
+                if let Ok(root) = crate::paths::canonical(Path::new(root)) {
                     return Ok(root);
                 }
             }

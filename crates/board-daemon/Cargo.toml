@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 board-core = { workspace = true }
+board-ipc = { workspace = true }
 board-herdr = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
@@ -14,7 +15,6 @@ uuid = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-libc = { workspace = true }
 thiserror = { workspace = true }
 # Runtime dependency, not a test-only one: the Herdr spawner writes the
 # configured-harness startup script and the managed system-prompt file through

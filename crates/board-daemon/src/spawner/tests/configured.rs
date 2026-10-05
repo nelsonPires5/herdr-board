@@ -158,6 +158,7 @@ fn configured_runner_pane_not_found_retries_but_generic_runner_error_is_terminal
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn configured_pane_runner_resolves_herdr_bin_path_without_live_herdr() {
     // Run the real CLI runner in a child test process so HERDR_BIN_PATH is
@@ -220,6 +221,7 @@ fn configured_pane_runner_resolves_herdr_bin_path_without_live_herdr() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn configured_harness_uses_selected_socket_pane_run_with_exact_payload() {
     use std::os::unix::fs::PermissionsExt;
@@ -405,7 +407,7 @@ fn recording_runner_drop_removes_only_recorded_startup_scripts() {
             vec!["configured-agent".into()],
         ))
         .unwrap();
-    let recorded_path = PathBuf::from(&calls.lock().unwrap()[0].argv[3]);
+    let recorded_path = runner_script_path(&calls.lock().unwrap()[0].argv[3]);
     let decoy_path = recorded_path.with_file_name("herdr-board-run-decoy");
     std::fs::write(&decoy_path, "not a configured startup script\n").unwrap();
     assert!(recorded_path.exists());
@@ -427,6 +429,7 @@ fn recording_runner_drop_removes_only_recorded_startup_scripts() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn configured_script_runs_child_then_reports_silent_exit_and_preserves_status() {
     use std::os::unix::fs::PermissionsExt;
@@ -496,5 +499,68 @@ fn configured_script_runs_child_then_reports_silent_exit_and_preserves_status() 
     assert_eq!(
         nul_args(&board_capture),
         vec!["__pane-exited", "--run-id", "run-42"]
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn ps_quote_doubles_ascii_and_smart_single_quotes() {
+    use crate::spawner::herdr::ps_quote;
+    assert_eq!(ps_quote("it's"), "'it''s'");
+    assert_eq!(ps_quote("a\u{2019}b"), "'a\u{2019}\u{2019}b'");
+    assert_eq!(ps_quote("$env:X `n"), "'$env:X `n'");
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_script_removes_itself_runs_argv_and_reports_exit() {
+    use crate::spawner::herdr::configured_script;
+    let script = configured_script(
+        std::path::Path::new(r"C:\Users\Jan K\AppData\Local\Temp\herdr-board-run-1.ps1"),
+        &["my tool".to_string(), "--flag=it's".to_string()],
+    );
+    assert_eq!(
+        script,
+        "\u{FEFF}Remove-Item -LiteralPath 'C:\\Users\\Jan K\\AppData\\Local\\Temp\\herdr-board-run-1.ps1' -Force -ErrorAction SilentlyContinue\n\
+         $childStatus = 1\n\
+         try { & 'my tool' '--flag=it''s'; $childStatus = $LASTEXITCODE } catch { Write-Error $_ }\n\
+         if ($null -eq $childStatus) { $childStatus = 0 }\n\
+         if ($env:BOARD_BIN) { & $env:BOARD_BIN __pane-exited --run-id $env:BOARD_RUN_ID }\n\
+         exit $childStatus\n"
+    );
+}
+
+/// Windows PowerShell 5.1 reads a BOM-less .ps1 in the ANSI code page, which
+/// would mangle non-ASCII argv and the self-delete path.
+#[cfg(windows)]
+#[test]
+fn windows_script_starts_with_a_utf8_bom() {
+    use crate::spawner::herdr::configured_script;
+    let script = configured_script(
+        std::path::Path::new(r"C:\Users\Łukasz\x.ps1"),
+        &["zażółć".to_string()],
+    );
+    assert!(script.as_bytes().starts_with(&[0xEF, 0xBB, 0xBF]));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_runner_argv_invokes_powershell_file_with_a_quoted_path() {
+    use crate::spawner::herdr::runner_argv;
+    let argv = runner_argv("w1:p2", std::path::Path::new(r"C:\Users\Jan K\x.ps1"));
+    assert_eq!(&argv[..3], ["pane", "run", "w1:p2"]);
+    assert!(
+        argv[3].ends_with(r#" -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Jan K\x.ps1""#)
+    );
+    assert!(argv[3].starts_with("pwsh") || argv[3].starts_with("powershell.exe"));
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_runner_argv_hands_the_script_path_to_pane_run() {
+    use crate::spawner::herdr::runner_argv;
+    assert_eq!(
+        runner_argv("w1:p2", std::path::Path::new("/tmp/herdr-board-run-1")),
+        ["pane", "run", "w1:p2", "/tmp/herdr-board-run-1"]
     );
 }

@@ -1,5 +1,8 @@
 //! Live Pi model catalog discovery (auth.json + models-store.json).
 
+// The CLI-fallback tests drive a fake `/bin/sh` binary and are Unix-only.
+#![cfg_attr(windows, allow(unused_imports))]
+
 use std::fs;
 
 use board_core::pi_catalog::{load_from_cli, load_from_files};

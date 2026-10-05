@@ -283,6 +283,7 @@ fn persistent_busy_closes_only_new_split_child_not_anchor() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn configured_pane_run_failure_removes_script_and_closes_owned_pane() {
     use std::os::unix::fs::PermissionsExt;

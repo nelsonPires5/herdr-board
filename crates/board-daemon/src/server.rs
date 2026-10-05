@@ -6,11 +6,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::listener::{Conn, Listener};
 use board_core::protocol::{BoardChangedReason, Event, Request, Response, SubscribeResult};
 use serde::Serialize;
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, Mutex, Notify};
 
 use crate::ops;
@@ -164,12 +164,12 @@ impl Outbox {
 }
 
 /// Accept connections until shutdown.
-pub async fn serve(d: Arc<Daemon>, listener: UnixListener) {
+pub(crate) async fn serve(d: Arc<Daemon>, mut listener: Listener) {
     let mut rx = d.shutdown_rx();
     loop {
         tokio::select! {
             accepted = listener.accept() => match accepted {
-                Ok((stream, _)) => {
+                Ok(stream) => {
                     let conn_id = NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed);
                     tokio::spawn(handle_conn(d.clone(), stream, conn_id));
                 }
@@ -190,8 +190,8 @@ pub async fn serve(d: Arc<Daemon>, listener: UnixListener) {
 /// at a time and only pushes the next response after awaiting the previous
 /// one, so a client always sees one response per request, in request order —
 /// even though every handler now runs on the blocking pool.
-async fn handle_conn(d: Arc<Daemon>, stream: UnixStream, conn_id: u64) {
-    let (read_half, write_half) = stream.into_split();
+async fn handle_conn(d: Arc<Daemon>, stream: Conn, conn_id: u64) {
+    let (read_half, write_half) = tokio::io::split(stream);
     let outbox = Arc::new(Outbox::new(OUTBOUND_CAPACITY));
     let writer_outbox = outbox.clone();
     let writer = tokio::spawn(async move {

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, bail, Context};
@@ -82,7 +82,7 @@ impl LocalSpawner {
     fn spawn_inner(&self, req: &HerdrLaunchPlan) -> anyhow::Result<RuntimeHandle> {
         let argv = materialize_local_argv(req)?;
         let (prog, args) = argv.split_first().ok_or_else(|| anyhow!("empty argv"))?;
-        let mut cmd = Command::new(prog);
+        let mut cmd = board_core::process::command(prog);
         cmd.args(args);
         if let Some(cwd) = &req.cwd {
             cmd.current_dir(cwd);

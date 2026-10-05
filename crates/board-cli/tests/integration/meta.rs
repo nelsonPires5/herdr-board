@@ -1,11 +1,13 @@
 //! Cross-cutting CLI surface: the command tree's refusals, `template apply`,
 //! version/status separation, `skill`, and the JSON error envelope.
 
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
 
 use super::{json_error, json_output, TestDaemon};
 
+#[cfg(unix)]
 #[test]
 fn daemon_socket_is_owner_only() {
     let td = TestDaemon::start(&[]);

@@ -24,9 +24,10 @@ Engine on Linux): `./scripts/sandbox.sh prepare` once, then `./scripts/sandbox.s
 
 ## Architecture
 
-One `board` binary, five workspace crates: `board-core` (models, protocol, database, engine,
+One `board` binary, six workspace crates: `board-core` (models, protocol, database, engine,
 prompts, config, harness adapters), `board-daemon` (orchestration and dispatch), `board-herdr`
-(Herdr socket client), `board-tui` (Ratatui application), and `board-cli` (the `board` binary).
+(Herdr socket client), `board-ipc` (Unix socket / Windows named-pipe transport),
+`board-tui` (Ratatui application), and `board-cli` (the `board` binary).
 
 | Role | Responsibility |
 |---|---|

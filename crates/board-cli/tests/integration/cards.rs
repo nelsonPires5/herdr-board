@@ -23,7 +23,7 @@ fn board_commands_list_show_open_and_rename() {
     let td = TestDaemon::start(&[]);
     let project = td._dir.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
-    let project = project.canonicalize().unwrap();
+    let project = board_core::paths::canonical(&project).unwrap();
 
     let mut client = td.client();
     let opened = client.board_open(project.to_str().unwrap()).unwrap().board;
@@ -53,7 +53,7 @@ fn global_board_selector_accepts_id_and_path() {
     let td = TestDaemon::start(&[]);
     let project = td._dir.path().join("selected-project");
     std::fs::create_dir_all(&project).unwrap();
-    let project = project.canonicalize().unwrap();
+    let project = board_core::paths::canonical(&project).unwrap();
     let mut client = td.client();
     let board = client.board_open(project.to_str().unwrap()).unwrap().board;
     let card = client

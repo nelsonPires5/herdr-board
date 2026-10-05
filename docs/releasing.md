@@ -63,8 +63,8 @@ The release PR synchronizes:
 
 - root `Cargo.toml` `[workspace.package].version`;
 - `herdr-plugin.toml` `version`;
-- all five local package entries in `Cargo.lock` (`board-cli`, `board-core`, `board-daemon`,
-  `board-herdr`, `board-tui`);
+- all six local package entries in `Cargo.lock` (`board-cli`, `board-core`, `board-daemon`,
+  `board-herdr`, `board-ipc`, `board-tui`);
 - the `CHANGELOG.md` release section, empty `[Unreleased]`, and matching links.
 
 `scripts/prepare-release.py verify` is the single read-only check for this contract. Prepare runs

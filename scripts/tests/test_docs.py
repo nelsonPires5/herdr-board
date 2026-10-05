@@ -488,7 +488,8 @@ class DocumentationContractTests(unittest.TestCase):
 
     def test_maintained_markdown_links_resolve(self) -> None:
         for document in maintained_markdown():
-            for link in re.findall(r"\[[^]]+\]\(([^)]+)\)", document.read_text()):
+            text = document.read_text(encoding="utf-8")
+            for link in re.findall(r"\[[^]]+\]\(([^)]+)\)", text):
                 target = link.split("#", 1)[0]
                 if not target or "://" in target or target.startswith("mailto:"):
                     continue

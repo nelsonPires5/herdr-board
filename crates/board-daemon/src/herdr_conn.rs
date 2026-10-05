@@ -46,10 +46,52 @@ pub(crate) fn connect_checked_for(socket: &Path, purpose: &str) -> anyhow::Resul
 /// reported as `herdr unavailable` rather than as an opaque connect failure.
 /// `kind` names the socket in that message (e.g. `origin`, `target`).
 pub(crate) fn normalize_socket(path: &Path, kind: &str) -> board_core::Result<PathBuf> {
-    path.canonicalize().map_err(|e| {
+    let unavailable = |e: &dyn std::fmt::Display| {
         board_core::Error::HerdrUnavailable(format!(
             "{kind} Herdr socket '{}' is unavailable: {e}",
             path.display()
         ))
-    })
+    };
+    #[cfg(unix)]
+    {
+        path.canonicalize().map_err(|e| unavailable(&e))
+    }
+    // Windows: the endpoint is the named pipe `\\.\pipe\` + path, not a file,
+    // and `canonicalize` would add a `\\?\` prefix that changes the pipe name.
+    // `absolute` normalizes separators and `.`/`..` without touching the disk.
+    #[cfg(windows)]
+    {
+        let absolute = std::path::absolute(path).map_err(|e| unavailable(&e))?;
+        if board_ipc::endpoint_exists(&absolute) {
+            Ok(absolute)
+        } else {
+            Err(unavailable(&"no Herdr named pipe is listening"))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_socket;
+
+    #[test]
+    fn normalize_socket_reports_a_missing_socket_as_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = normalize_socket(&dir.path().join("herdr.sock"), "origin").unwrap_err();
+        assert!(matches!(error, board_core::Error::HerdrUnavailable(_)));
+    }
+
+    /// Windows: the endpoint is a named pipe (no file), and the result must stay
+    /// a plain absolute path — a `\\?\` verbatim prefix would change the pipe name.
+    #[cfg(windows)]
+    #[test]
+    fn normalize_socket_accepts_a_live_pipe_and_keeps_a_plain_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("herdr.sock");
+        let _listener = board_ipc::Listener::bind(&socket).unwrap();
+        let spelled = dir.path().join(".").join("herdr.sock");
+        let normalized = normalize_socket(&spelled, "origin").unwrap();
+        assert_eq!(normalized, socket);
+        assert!(!normalized.to_string_lossy().starts_with(r"\\?\"));
+    }
 }

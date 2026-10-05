@@ -117,7 +117,7 @@ async fn capacity_one_flood_stays_bounded() {
 
 fn test_daemon() -> Arc<Daemon> {
     testkit::daemon()
-        .db_path(PathBuf::from("/tmp/board-server-test.db"))
+        .db_path(std::env::temp_dir().join("board-server-test.db"))
         .build_daemon()
 }
 
@@ -126,7 +126,7 @@ fn serve_on_tempdir(rt: &tokio::runtime::Runtime, d: Arc<Daemon>) -> (tempfile::
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("b.sock");
     let guard = rt.enter();
-    let listener = UnixListener::bind(&socket).unwrap();
+    let listener = crate::listener::Listener::bind(&socket).unwrap();
     drop(guard);
     rt.spawn(serve(d, listener));
     (dir, socket)
@@ -140,13 +140,13 @@ fn serve_on_tempdir(rt: &tokio::runtime::Runtime, d: Arc<Daemon>) -> (tempfile::
 /// failing it. A socket read timeout is enforced by the kernel, so the
 /// regression fails fast and loudly.
 struct Client {
-    reader: std::io::BufReader<std::os::unix::net::UnixStream>,
-    write: std::os::unix::net::UnixStream,
+    reader: std::io::BufReader<board_ipc::Stream>,
+    write: board_ipc::Stream,
 }
 
 impl Client {
     fn connect(socket: &std::path::Path) -> Client {
-        let write = std::os::unix::net::UnixStream::connect(socket).unwrap();
+        let write = board_ipc::Stream::connect(socket).unwrap();
         let read = write.try_clone().unwrap();
         read.set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
@@ -383,4 +383,53 @@ async fn a_dead_handler_task_still_answers_with_an_internal_error() {
         "{}",
         error.message
     );
+}
+
+#[cfg(windows)]
+#[test]
+fn second_listener_on_the_same_pipe_fails() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("b.sock");
+    let _first = crate::listener::Listener::bind(&socket).unwrap();
+    assert!(crate::listener::Listener::bind(&socket).is_err());
+}
+
+/// A client that connects and leaves before the accept loop reaches it must
+/// not wedge the listener: the next client is still served.
+#[test]
+fn listener_survives_a_client_that_left_before_accept() {
+    use std::io::Write;
+    use tokio::io::AsyncReadExt;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("b.sock");
+    let mut listener = {
+        let _guard = rt.enter();
+        crate::listener::Listener::bind(&socket).unwrap()
+    };
+    drop(board_ipc::Stream::connect(&socket).unwrap());
+    let path = socket.clone();
+    let client = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        let mut stream = board_ipc::Stream::connect(&path).unwrap();
+        stream.write_all(b"x").unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+    });
+    let byte = rt.block_on(async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let mut conn = listener.accept().await.unwrap();
+                let mut byte = [0u8; 1];
+                if conn.read(&mut byte).await.unwrap_or(0) == 1 {
+                    return byte;
+                }
+            }
+        })
+        .await
+        .expect("listener wedged")
+    });
+    assert_eq!(&byte, b"x");
+    client.join().unwrap();
 }

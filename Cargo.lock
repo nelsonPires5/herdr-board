@@ -99,9 +99,9 @@ dependencies = [
  "board-core",
  "board-daemon",
  "board-herdr",
+ "board-ipc",
  "board-tui",
  "clap",
- "libc",
  "serde",
  "serde_json",
  "tempfile",
@@ -112,7 +112,9 @@ name = "board-core"
 version = "0.18.0"
 dependencies = [
  "anyhow",
+ "board-ipc",
  "directories",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",
@@ -129,7 +131,7 @@ dependencies = [
  "anyhow",
  "board-core",
  "board-herdr",
- "libc",
+ "board-ipc",
  "rusqlite",
  "serde",
  "serde_json",
@@ -145,6 +147,7 @@ dependencies = [
 name = "board-herdr"
 version = "0.18.0"
 dependencies = [
+ "board-ipc",
  "libc",
  "serde",
  "serde_json",
@@ -152,6 +155,14 @@ dependencies = [
  "thiserror",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "board-ipc"
+version = "0.18.0"
+dependencies = [
+ "tempfile",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
