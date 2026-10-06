@@ -1436,3 +1436,31 @@ fn drag_card_dropped_on_its_own_row_is_noop() {
         "dropping on the origin slot must not reorder"
     );
 }
+
+#[test]
+fn card_detail_card_action_button_click_runs_the_action() {
+    use board_tui::command::FakeCommand;
+
+    for (w, h) in [(40, 20), (80, 24)] {
+        let mut d = setup_card_detail();
+        let commands = FakeCommand::default();
+        d.set_command_launcher(Box::new(commands.clone()));
+        assert!(!hit_zones_after_render(&mut d, w, h)
+            .iter()
+            .any(|(_, z)| matches!(z, Zone::Action(UiAction::CardAction(_)))));
+
+        d.app.detail.as_mut().unwrap().actions = vec![board_core::protocol::CardAction {
+            label: "Review".into(),
+            argv: vec!["review-tool".into()],
+        }];
+        let (x, y) = hit_zones_after_render(&mut d, w, h)
+            .into_iter()
+            .find_map(|(p, z)| (z == Zone::Action(UiAction::CardAction(0))).then_some(p))
+            .unwrap_or_else(|| panic!("{w}x{h}: card action button"));
+        d.handle(left_down(x, y));
+        let calls = commands.calls.borrow();
+        assert_eq!(calls.len(), 1, "{w}x{h}");
+        assert_eq!(calls[0].argv, vec!["review-tool".to_string()]);
+        assert_eq!(d.app.screen, Screen::CardDetail);
+    }
+}

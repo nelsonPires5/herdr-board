@@ -8,9 +8,10 @@
 //! should land given that geometry, so it stays pure and testable.
 
 use board_core::model::Comment;
-use board_core::protocol::{CardStatus, RunOutcome};
+use board_core::protocol::{CardDetail, CardStatus, RunOutcome};
 use crossterm::event::{KeyCode, KeyEvent};
 
+use crate::command::CommandSpec;
 use crate::forms::Form;
 
 use super::nav::{nav_delta, step_clamped};
@@ -316,6 +317,13 @@ pub(super) fn detail_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
                 return vec![Effect::CardDuplicate(id)];
             }
         }
+        // `1`-`9` run the card's config-defined actions, in button order.
+        KeyCode::Char(c @ '1'..='9') => {
+            let index = usize::from(c as u8 - b'1');
+            if let Some(spec) = app.detail.as_ref().and_then(|d| card_action_spec(d, index)) {
+                return vec![Effect::RunCardAction(spec)];
+            }
+        }
         KeyCode::Char('c') => {
             if let Some(id) = card_id {
                 app.form = Some(Form::comment(id).returning_to(Screen::CardDetail));
@@ -379,6 +387,32 @@ pub(super) fn detail_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
         _ => {}
     }
     vec![]
+}
+
+/// The command for the card's `index`-th action, carrying the card context as
+/// `BOARD_ACTION_*` variables (not `BOARD_CARD_ID`, which marks an agent run).
+fn card_action_spec(detail: &CardDetail, index: usize) -> Option<CommandSpec> {
+    let action = detail.actions.get(index)?;
+    let card = &detail.card;
+    let mut env = vec![
+        ("BOARD_ACTION_CARD_ID".to_string(), card.id.to_string()),
+        (
+            "BOARD_ACTION_BOARD_ID".to_string(),
+            card.board_id.to_string(),
+        ),
+        (
+            "BOARD_ACTION_COLUMN_ID".to_string(),
+            card.column_id.to_string(),
+        ),
+    ];
+    if let Some(space) = &card.space_ref {
+        env.push(("BOARD_ACTION_SPACE_REF".to_string(), space.clone()));
+    }
+    Some(CommandSpec {
+        argv: action.argv.clone(),
+        env,
+        cwd: card.space_cwd.as_ref().map(std::path::PathBuf::from),
+    })
 }
 
 /// `↑`/`↓` in card detail: move the focused section's cursor when that section

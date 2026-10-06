@@ -412,10 +412,12 @@ fake_methods!(db, config, params, {
         let card = db
             .get_card(id)?
             .ok_or_else(|| anyhow::anyhow!("card {id} not found"))?;
+        let actions = config.card_actions_for(&db.require_column(card.column_id)?.name);
         let detail = CardDetail {
             card: stamp(card),
             comments: db.list_comments(id)?,
             runs: db.list_runs(id)?,
+            actions,
         };
         serde_json::to_value(detail)?
     },

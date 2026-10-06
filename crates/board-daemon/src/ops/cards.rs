@@ -443,9 +443,13 @@ pub(super) fn card_get(d: &Arc<Daemon>, p: CardIdParams) -> Result<Value> {
     let db = d.store.lock();
     let mut card = db.require_card(p.id)?;
     stamp_card_labels(d, &mut card);
+    let actions = d
+        .config
+        .card_actions_for(&db.require_column(card.column_id)?.name);
     Ok(json!(CardDetail {
         comments: db.list_comments(p.id)?,
         runs: db.list_runs(p.id)?,
+        actions,
         card,
     }))
 }
