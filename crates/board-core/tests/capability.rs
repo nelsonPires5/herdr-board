@@ -1,7 +1,8 @@
 //! Harness capability catalog + run-pane naming.
 
 use board_core::capability::{
-    available_harnesses, capabilities_for, claude_capabilities, default_capabilities, efforts_for,
+    anchor_label_for_tab, available_harnesses, capabilities_for, card_anchor_label,
+    card_short_name, card_tab_label, claude_capabilities, default_capabilities, efforts_for,
     meta_for, pi_capabilities, resume_support_for, run_pane_name, run_pane_name_unique,
     HarnessCapabilities, ResumeSupport,
 };
@@ -209,6 +210,79 @@ fn pane_name_unique_adds_run_suffix() {
     assert_eq!(run_pane_name_unique(3, "", 2), "card-3-r2");
 }
 
+#[test]
+fn card_short_name_kebab_cases_first_four_words() {
+    assert_eq!(card_short_name("Fix login redirect"), "fix-login-redirect");
+    assert_eq!(
+        card_short_name("Ship the new onboarding flow today please"),
+        "ship-the-new-onboarding"
+    );
+}
+
+#[test]
+fn card_short_name_tolerates_noise_and_caps_length() {
+    assert_eq!(card_short_name("  Refactor   Auth!! "), "refactor-auth");
+    assert_eq!(card_short_name(""), "");
+    assert_eq!(card_short_name("***"), "");
+    let long = card_short_name("abcdefghijklmnopqrstuvwxyz abcdefghijklmnopqrstuvwxyz");
+    assert!(long.chars().count() <= 32, "slug too long: {long}");
+    assert!(!long.ends_with('-'));
+    assert_eq!(long, "abcdefghijklmnopqrstuvwxyz-abcde");
+}
+
+#[test]
+fn card_short_name_handles_mixed_non_ascii_titles() {
+    // Non-ASCII runs collapse to `-` like any other separator; ASCII words survive.
+    assert_eq!(card_short_name("Fix caf\u{e9} bug"), "fix-caf-bug");
+    assert_eq!(card_short_name("caf\u{e9} d\u{e9}j\u{e0} vu"), "caf-d-j-vu");
+    assert_eq!(card_tab_label(7, "Fix caf\u{e9} bug"), "card-7 fix-caf-bug");
+}
+
+#[test]
+fn card_short_name_entirely_non_ascii_yields_bare_tab_label() {
+    // Entirely non-ASCII titles have no slug words: the tab stays bare `card-<id>`.
+    assert_eq!(
+        card_short_name("\u{65e5}\u{672c}\u{8a9e} \u{30c6}\u{30b9}\u{30c8}"),
+        ""
+    );
+    assert_eq!(card_short_name("\u{1f680}\u{2728}"), "");
+    assert_eq!(
+        card_tab_label(9, "\u{65e5}\u{672c}\u{8a9e} \u{30c6}\u{30b9}\u{30c8}"),
+        "card-9"
+    );
+    assert_eq!(card_tab_label(9, "\u{1f680}\u{2728}"), "card-9");
+}
+
+#[test]
+fn anchor_label_stays_card_id_anchor_despite_tab_suffix() {
+    // Regression: anchors must stay `card-<id>-anchor` independent of the
+    // human-readable tab suffix (`card-7 fix-login-redirect` → `card-7-anchor`,
+    // never `card-7 fix-login-redirect-anchor`).
+    assert_eq!(card_anchor_label(7), "card-7-anchor");
+    assert_eq!(
+        anchor_label_for_tab(&card_tab_label(7, "Fix login redirect")),
+        "card-7-anchor"
+    );
+    assert_eq!(anchor_label_for_tab("card-42"), "card-42-anchor");
+    assert_eq!(
+        anchor_label_for_tab("card-7 fix-login-redirect"),
+        "card-7-anchor"
+    );
+    assert_eq!(anchor_label_for_tab("card-9"), "card-9-anchor");
+}
+
+#[test]
+fn card_tab_label_shows_short_name_after_id() {
+    assert_eq!(
+        card_tab_label(7, "Fix login redirect"),
+        "card-7 fix-login-redirect"
+    );
+    assert_eq!(card_tab_label(7, ""), "card-7");
+    assert_eq!(card_tab_label(7, "***"), "card-7");
+    // Ownership still keys on the `card-` prefix, never the label suffix.
+    assert!(card_tab_label(7, "Fix login").starts_with("card-"));
+}
+
 // -- HarnessMeta trait -----------------------------------------------------
 
 #[test]
@@ -396,5 +470,96 @@ fn default_capabilities_match_builtins_and_fail_closed_for_unknown() {
     assert_eq!(
         unknown.resume,
         resume_support_for("mystery", &Config::default())
+    );
+}
+
+#[test]
+fn filtered_harnesses_show_only_installed_builtins() {
+    use board_core::capability::filtered_available_harnesses;
+    let cfg = Config::default();
+    // Herdr reports only pi and codex as available → only those builtins survive.
+    let installed = vec!["pi".to_string(), "codex".to_string()];
+    assert_eq!(
+        filtered_available_harnesses(&cfg, Some(&installed)),
+        vec!["pi", "codex"]
+    );
+    // Antigravity is discovered via the `antigravity_cli` target.
+    let agy = vec!["antigravity_cli".to_string()];
+    assert_eq!(
+        filtered_available_harnesses(&cfg, Some(&agy)),
+        vec!["antigravity"]
+    );
+    // No Herdr reachability → graceful fallback to all builtins.
+    assert_eq!(
+        filtered_available_harnesses(&cfg, None),
+        vec!["pi", "claude", "codex", "opencode", "antigravity"]
+    );
+    // Config-defined harnesses are always appended, sorted, and never filtered by Herdr.
+    let toml = "[harness.zeta]\nargv = [\"z\"]\n[harness.alpha]\nargv = [\"a\"]\n";
+    let cfg2 = Config::from_toml(toml).unwrap();
+    assert_eq!(
+        filtered_available_harnesses(&cfg2, Some(&installed)),
+        vec!["pi", "codex", "alpha", "zeta"]
+    );
+    assert_eq!(
+        filtered_available_harnesses(&cfg2, None),
+        vec![
+            "pi",
+            "claude",
+            "codex",
+            "opencode",
+            "antigravity",
+            "alpha",
+            "zeta"
+        ]
+    );
+}
+
+#[test]
+fn config_section_under_a_builtin_name_never_readmits_it() {
+    use board_core::capability::{available_harnesses, filtered_available_harnesses};
+    // `[harness.claude]` is unreachable (`meta_for` resolves the builtin first), so
+    // it must never re-add `claude` to a filtered list, and never appear twice in
+    // the unfiltered fallback. A genuinely custom name is still appended.
+    let toml = "[harness.claude]\nargv = [\"x\"]\n[harness.mine]\nargv = [\"m\"]\n";
+    let cfg = Config::from_toml(toml).unwrap();
+    let only_pi = vec!["pi".to_string()];
+    assert_eq!(
+        filtered_available_harnesses(&cfg, Some(&only_pi)),
+        vec!["pi", "mine"],
+        "the uninstalled builtin must stay out even with a colliding config section"
+    );
+    let pi_and_claude = vec!["pi".to_string(), "claude".to_string()];
+    assert_eq!(
+        filtered_available_harnesses(&cfg, Some(&pi_and_claude)),
+        vec!["pi", "claude", "mine"],
+        "the installed builtin appears exactly once"
+    );
+    assert_eq!(
+        available_harnesses(&cfg),
+        vec!["pi", "claude", "codex", "opencode", "antigravity", "mine"],
+        "the unfiltered fallback also keeps one claude entry"
+    );
+}
+
+#[test]
+fn default_harness_picks_pi_or_first_installed() {
+    use board_core::capability::default_harness_for;
+    // pi present → pi is the default even though other harnesses exist.
+    assert_eq!(
+        default_harness_for(&["pi".to_string(), "codex".to_string()]),
+        "pi"
+    );
+    // pi absent → first installed in canonical order.
+    assert_eq!(
+        default_harness_for(&["codex".to_string(), "opencode".to_string()]),
+        "codex"
+    );
+    // Empty list (no builtin installed and no config) → last-resort pi.
+    assert_eq!(default_harness_for(&[]), "pi");
+    // Config-only list → first config harness.
+    assert_eq!(
+        default_harness_for(&["alpha".to_string(), "zeta".to_string()]),
+        "alpha"
     );
 }

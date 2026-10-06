@@ -110,10 +110,10 @@ panes = json.loads(sys.argv[2]).get("panes", [])
 rescued_tab, old_tab, card, rescued_pane = sys.argv[3:7]
 match = next((t for t in tabs if t.get("tab_id") == rescued_tab), None)
 assert match is not None
-assert match.get("label") == f"card-{card}"
+assert match.get("label") == f"card-{card} rescue-me"
 owned = [p for p in panes if p.get("tab_id") == rescued_tab]
 assert owned == [p for p in owned if p.get("pane_id") == rescued_pane]
-assert not any(p.get("label") == f"card-{card}-anchor" for p in owned)
+assert not any((p.get("label") or "").endswith("-anchor") for p in owned)
 print(f"  [ok] rescued pane landed in card tab {rescued_tab} (old tab {old_tab} was removed with its sole pane); the managed rescue closed the new tab's anchor, leaving exactly one harness pane", file=sys.stderr)
 PY
 rescue_label="$(pane_field "$RESCUED_PANE" label)"

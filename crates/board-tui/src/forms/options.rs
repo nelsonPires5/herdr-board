@@ -201,6 +201,25 @@ impl Form {
         }
     }
 
+    /// The harness a create form treats as selected once the (possibly
+    /// filtered) installed list is known: the current selection when the list
+    /// is unknown or contains it, otherwise the filtered default (`pi` when
+    /// installed, else the first installed harness). Edit and column forms
+    /// keep their stored harness even when it is not installed — only a new
+    /// card may be re-homed. The loader uses this to fetch capabilities for
+    /// the harness whose selectors will actually be built.
+    pub fn reconciled_harness(&self, harnesses: Option<&[String]>) -> String {
+        let current = self.current_harness();
+        let Some(list) = harnesses else {
+            return current;
+        };
+        if matches!(self.kind, FormKind::CardCreate { .. }) && !list.contains(&current) {
+            board_core::capability::default_harness_for(list)
+        } else {
+            current
+        }
+    }
+
     fn rebuild_fields(&mut self) {
         if self.is_card_form() {
             self.rebuild_card_fields();
@@ -213,7 +232,13 @@ impl Form {
         if !self.is_card_form() {
             return;
         }
-        let values = self.card_values();
+        let mut values = self.card_values();
+        // For a new card, the guided selectors follow the reconciled harness:
+        // a filtered list may exclude `pi`. Edits preserve the card's existing
+        // harness even when that harness is not installed.
+        if matches!(self.kind, FormKind::CardCreate { .. }) {
+            values.harness = self.reconciled_harness(Some(&self.harnesses));
+        }
         self.fields = build_card_fields(
             &values,
             self.caps.as_ref(),
@@ -338,14 +363,15 @@ impl Form {
     // -- focus / visibility --------------------------------------------------
 
     /// Whether a field is currently shown. The `(custom)` free-text companion
-    /// appears only when the `SpaceRef` selector is on `(custom)`; `cwd` only for
-    /// the `new_workspace` space kind; both `permission` selectors disappear
+    /// appears only when the `SpaceRef` selector is on `(custom)`; `cwd` shows for
+    /// both space kinds (required for `new_workspace`, explicit override for
+    /// `workspace`); both `permission` selectors disappear
     /// when the driving harness has no permission modes (e.g. Pi); the column
     /// `system prompt` is hidden for `manual` triggers (no run → no prompt) but
     /// stays in the field list so its value is preserved and submitted.
     pub fn field_visible(&self, idx: usize) -> bool {
         match self.fields[idx].id {
-            FieldId::SpaceCwd => self.space_kind_is_new_workspace(),
+            FieldId::SpaceCwd => true,
             FieldId::ModelCustom => self.model_is_custom(),
             FieldId::Permission | FieldId::PermissionOverride => self.permission_is_applicable(),
             FieldId::SpaceRefCustom => self.space_ref_is_custom(),
@@ -388,15 +414,6 @@ impl Form {
             Some(caps) => Cow::Borrowed(caps),
             None => Cow::Owned(default_capabilities(&self.current_harness())),
         }
-    }
-
-    pub(super) fn space_kind_is_new_workspace(&self) -> bool {
-        self.fields
-            .iter()
-            .find(|f| f.id == FieldId::SpaceKind)
-            .and_then(|f| f.choice_val())
-            .map(|v| matches!(v, ChoiceVal::Str(s) if s == "new_workspace"))
-            .unwrap_or(false)
     }
 
     /// Move focus to the next/previous visible field (wrapping).

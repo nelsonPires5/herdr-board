@@ -1042,3 +1042,66 @@ fn missing_anchor_is_recreated_from_a_durable_child_only() {
         "w1:p-new-child"
     );
 }
+
+#[test]
+fn suffixed_card_tab_still_anchors_as_card_id_anchor() {
+    // Regression: a human-readable tab suffix must not leak into the anchor.
+    // `card-42 fix-login-redirect` anchors as `card-42-anchor`, never
+    // `card-42 fix-login-redirect-anchor`.
+    let fake = serve_recording_herdr(|req, _| match req["method"].as_str().unwrap() {
+        "tab.list" => empty_tab_list(req),
+        "tab.create" => tab_created(req, "w1:p-root"),
+        "pane.rename" => {
+            assert_eq!(
+                req["params"],
+                serde_json::json!({
+                    "pane_id": "w1:p-root",
+                    "label": "card-42-anchor"
+                }),
+                "suffixed tab label must still anchor as card-42-anchor"
+            );
+            pane_result(req, "w1:p-root")
+        }
+        "pane.layout" => reply(
+            req,
+            serde_json::json!({"type":"pane_layout", "layout":{
+                "workspace_id":"w1","tab_id":"w1:t1","zoomed":false,
+                "area":{"x":0,"y":0,"width":200,"height":40},"focused_pane_id":"w1:p-root",
+                "panes":[{"pane_id":"w1:p-root","focused":true,
+                    "rect":{"x":0,"y":0,"width":200,"height":40}}],"splits":[]
+            }}),
+        ),
+        "pane.split" => {
+            assert_eq!(req["params"]["target_pane_id"], "w1:p-root");
+            pane_result(req, "w1:p-child")
+        }
+        "agent.start" => {
+            assert_eq!(req["params"]["pane_id"], "w1:p-child");
+            agent_started(req, "w1:p-child", false, true)
+        }
+        "pane.close" => {
+            assert_eq!(req["params"]["pane_id"], "w1:p-root");
+            pane_result(req, "w1:p-root")
+        }
+        method => panic!("unexpected suffixed-anchor method {method}"),
+    });
+    let spawner = HerdrSpawner::new(fake.socket.clone());
+    let mut request = pi_req(None);
+    request.tab_label = Some("card-42 fix-login-redirect".into());
+
+    let handle = spawner.spawn(&request).unwrap();
+    assert_eq!(handle.pane_id.as_deref(), Some("w1:p-child"));
+    assert_eq!(
+        handle.anchor_pane_id, None,
+        "managed launch closes its stable anchor"
+    );
+    let requests = fake.requests.lock().unwrap();
+    let tab_create = requests
+        .iter()
+        .find(|request| request["method"] == "tab.create")
+        .unwrap();
+    assert_eq!(
+        tab_create["params"]["label"], "card-42 fix-login-redirect",
+        "the tab keeps its human-readable suffix"
+    );
+}

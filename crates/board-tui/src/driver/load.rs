@@ -362,13 +362,20 @@ impl Driver {
         let Some(form) = self.app.form.as_ref() else {
             return;
         };
-        let harness = form.current_harness();
         let is_card_form = form.is_card_form();
         // Column forms only need the selected harness metadata. They have no
         // session or workspace selectors, so avoid unrelated RPCs entirely.
         let session = form.current_session();
-        let caps = fetch_capabilities(self.client.as_mut(), &harness);
+        // Fetch `harness.list` BEFORE `harness.capabilities`: a filtered list
+        // can move a create form onto another harness, and the capabilities
+        // must be the ones for the harness whose selectors get built. Fetching
+        // caps for the pre-filter `pi` and then switching the form to the
+        // first installed harness would populate its fields from Pi's catalog.
         let harnesses = fetch_harness_list(self.client.as_mut());
+        // harness.list failing is non-fatal: the selectors keep the built-ins.
+        let harnesses_opt = harnesses.ok();
+        let harness = form.reconciled_harness(harnesses_opt.as_deref());
+        let caps = fetch_capabilities(self.client.as_mut(), &harness);
         let sessions = is_card_form.then(|| fetch_sessions(self.client.as_mut()));
         let spaces = is_card_form.then(|| fetch_spaces(self.client.as_mut(), session.as_deref()));
 
@@ -380,8 +387,6 @@ impl Driver {
                 None
             }
         };
-        // harness.list failing is non-fatal: the selectors keep the built-ins.
-        let harnesses_opt = harnesses.ok();
         let spaces_opt = match spaces {
             Some(Ok(s)) => Some(s),
             Some(Err(e)) => {

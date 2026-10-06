@@ -93,6 +93,38 @@ fn card_harness_select_consumes_harness_list() {
 }
 
 #[test]
+fn new_card_harness_options_filtered_to_installed_via_herdr() {
+    // Regression for #111: fake Herdr integration.list with only pi available
+    // → harness.list returns ["pi"]. New Card harness picker must then
+    // contain only the installed harness, not the full static list.
+    let mut form = Form::card_create(1);
+    // Simulate daemon's filtered harness.list with only pi available.
+    form.apply_options(None, Some(vec!["pi".into()]), None, None);
+    let labels = choice_labels(&form, FieldId::Harness);
+    assert_eq!(
+        labels,
+        vec!["pi".to_string()],
+        "only pi installed → New Card shows only pi"
+    );
+    // Default harness for filtered list is pi (or first installed).
+    assert_eq!(form.current_harness(), "pi");
+    // If later a fuller list arrives (e.g. Herdr unreachable fallback), options expand.
+    form.apply_options(
+        None,
+        Some(vec![
+            "pi".into(),
+            "claude".into(),
+            "codex".into(),
+            "opencode".into(),
+            "antigravity".into(),
+        ]),
+        None,
+        None,
+    );
+    assert!(choice_labels(&form, FieldId::Harness).contains(&"claude".to_string()));
+}
+
+#[test]
 fn column_harness_override_is_select_with_builtins() {
     // Before any fetch, harness_override is already a Choice (not free text)
     // seeded with the built-ins + a leading `(none)`.

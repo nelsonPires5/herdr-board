@@ -5,7 +5,8 @@
 //!   exactly per `docs/protocol.md` (the codex adapter lives in [`codex`], the
 //!   opencode adapter in [`opencode`], the antigravity adapter in [`agy`]);
 //! - config-defined harnesses — an argv template with `{model}`/`{effort}`/
-//!   `{permission_mode}` placeholders; prompt via `BOARD_PROMPT` env.
+//!   `{permission_mode}`/`{card_id}`/`{card_title}`/`{card_short_name}`
+//!   placeholders; prompt via `BOARD_PROMPT` env.
 
 pub mod agy;
 pub mod codex;
@@ -424,8 +425,21 @@ pub fn pi_argv(
     })
 }
 
+/// Card identity available to config-defined harness templates. `None` (via
+/// [`build_invocation`]) means no card context: elements referencing card
+/// placeholders are dropped exactly like any other unset placeholder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CardScope<'a> {
+    pub id: i64,
+    pub title: &'a str,
+}
+
 /// Build a full invocation for `harness_name`, using a built-in adapter or a
 /// config-defined harness template.
+///
+/// Card placeholders (`{card_id}`/`{card_title}`/`{card_short_name}`) have no
+/// card to read here, so they are dropped; use [`build_invocation_for_card`]
+/// when the card is known (dispatch always knows it).
 pub fn build_invocation(
     harness_name: &str,
     config: &Config,
@@ -433,6 +447,29 @@ pub fn build_invocation(
     session: &SessionPlan,
     minted_uuid: Option<&str>,
     prompt: &str,
+) -> Result<HarnessInvocation, HarnessError> {
+    build_invocation_for_card(
+        harness_name,
+        config,
+        settings,
+        session,
+        minted_uuid,
+        prompt,
+        None,
+    )
+}
+
+/// Like [`build_invocation`], but template card placeholders against `card`.
+/// The daemon's enqueue path always supplies the card; callers without one
+/// (notably tests pinning the legacy contract) pass `None`.
+pub fn build_invocation_for_card(
+    harness_name: &str,
+    config: &Config,
+    settings: &EffectiveSettings,
+    session: &SessionPlan,
+    minted_uuid: Option<&str>,
+    prompt: &str,
+    card: Option<CardScope<'_>>,
 ) -> Result<HarnessInvocation, HarnessError> {
     if harness_name == "pi" {
         return managed_pi_invocation(settings, session, minted_uuid, prompt);
@@ -455,7 +492,7 @@ pub fn build_invocation(
         .get(harness_name)
         .ok_or_else(|| HarnessError::UnknownHarness(harness_name.to_string()))?;
 
-    let argv = substitute_template(&def.argv, settings);
+    let argv = substitute_template(&def.argv, settings, card);
 
     // The protocol trailer is unconditional: custom harnesses get it via
     // BOARD_SYSTEM_PROMPT even when the column sets no system prompt.
@@ -514,6 +551,14 @@ fn managed_pi_invocation(
 
 /// Build a managed Herdr Claude launch while preserving the established
 /// model/effort/permission/session flag ordering exactly.
+///
+/// No display-name flag is appended: the pinned claude CLI 2.1.209 argv
+/// (docs/protocol.md), the checked-in fake fixture, and the Herdr 0.9.0 schema
+/// expose no `--name`/title spelling this change could verify, and real-Claude
+/// session naming was NOT verified — so no flag is invented here (fail closed).
+/// Herdr's `agent.start {name}` already carries the agent name separately from
+/// the claude session. Card identity reaches the session through the run tab
+/// label plus `BOARD_CARD_TITLE`/`BOARD_CARD_SHORT_NAME` in the run env.
 fn managed_claude_invocation(
     settings: &EffectiveSettings,
     session: &SessionPlan,
@@ -545,26 +590,80 @@ fn managed_claude_invocation(
     })
 }
 
-/// Substitute `{model}`/`{effort}`/`{permission_mode}` in each template element.
+/// Substitute `{model}`/`{effort}`/`{permission_mode}` plus
+/// `{card_id}`/`{card_title}`/`{card_short_name}` in each template element.
 /// An element referencing an unset placeholder is dropped entirely.
-fn substitute_template(template: &[String], settings: &EffectiveSettings) -> Vec<String> {
+///
+/// Substitution is a single pass over the original template: replacement
+/// values are never re-scanned, so a card title like
+/// `Document {card_short_name}` stays literal instead of double-expanding.
+fn substitute_template(
+    template: &[String],
+    settings: &EffectiveSettings,
+    card: Option<CardScope<'_>>,
+) -> Vec<String> {
     let model = settings.model.as_deref();
     let effort = settings.effort.map(|e| e.as_str());
     let perm = settings.permission_mode.as_deref();
+    let card_id;
+    let card_short;
+    let (card_id, card_title, card_short) = match card {
+        Some(scope) => {
+            card_id = scope.id.to_string();
+            card_short = crate::capability::card_short_name(scope.title);
+            (
+                Some(card_id.as_str()),
+                Some(scope.title),
+                Some(card_short.as_str()),
+            )
+        }
+        None => (None, None, None),
+    };
+
+    let pairs: [(&str, Option<&str>); 6] = [
+        ("{model}", model),
+        ("{effort}", effort),
+        ("{permission_mode}", perm),
+        ("{card_id}", card_id),
+        ("{card_title}", card_title),
+        ("{card_short_name}", card_short),
+    ];
 
     let mut out = Vec::with_capacity(template.len());
     'items: for item in template {
-        let mut cur = item.clone();
-        for (ph, val) in [
-            ("{model}", model),
-            ("{effort}", effort),
-            ("{permission_mode}", perm),
-        ] {
-            if cur.contains(ph) {
-                match val {
-                    Some(v) => cur = cur.replace(ph, v),
-                    None => continue 'items, // unset placeholder → drop element
+        // Unset placeholder present in the ORIGINAL template → drop element.
+        for (ph, val) in pairs.iter() {
+            if item.contains(ph) && val.is_none() {
+                continue 'items;
+            }
+        }
+        // Single pass over the original bytes; replacement text is copied
+        // verbatim and never re-scanned for placeholders.
+        let mut cur = String::with_capacity(item.len());
+        let bytes = item.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            let mut matched: Option<&str> = None;
+            for (ph, val) in pairs.iter() {
+                if val.is_some() && item[i..].starts_with(ph) {
+                    matched = Some(ph);
+                    break;
                 }
+            }
+            if let Some(ph) = matched {
+                let val = pairs
+                    .iter()
+                    .find(|(p, _)| *p == ph)
+                    .and_then(|(_, v)| *v)
+                    .unwrap_or("");
+                cur.push_str(val);
+                i += ph.len();
+            } else {
+                // Copy one char (placeholders are ASCII, so byte-wise copy
+                // is safe for the non-matching prefix).
+                let ch = item[i..].chars().next().unwrap_or('\0');
+                cur.push(ch);
+                i += ch.len_utf8();
             }
         }
         out.push(cur);

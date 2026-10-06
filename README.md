@@ -94,7 +94,7 @@ state is never modified.
 ## Install
 
 ```bash
-herdr plugin install nelsonPires5/herdr-board --ref v0.18.0
+herdr plugin install nelsonPires5/herdr-board --ref v0.19.0
 ```
 
 Open the board:
@@ -302,7 +302,7 @@ The exit status carries the same number, so scripts branch on `$?` instead of pa
 
 - [`docs/README.md`](docs/README.md) — the documentation index (design, protocol, herdr facts,
   testing, releasing), the single source of the
-  [test gates](docs/README.md#test-gates-single-source), and the `e2e/` catalog (scenarios 01–39);
+  [test gates](docs/README.md#test-gates-single-source), and the `e2e/` catalog (scenarios 01–40);
 - [`docs/configuration.md`](docs/configuration.md) — `config.toml`, `[daemon]` settings,
   config-defined harnesses, and every environment variable;
 - [`docs/operations.md`](docs/operations.md) — update, uninstall, and local-development

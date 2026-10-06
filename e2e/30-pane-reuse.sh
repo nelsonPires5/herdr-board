@@ -100,14 +100,14 @@ assert shared_pane, "runs have no herdr_pane_id"
 # Exactly ONE managed agent pane (the shared one) lives in the card's tab,
 # and the managed tab is anchorless: every successful managed launch closes
 # its anchor, so the tab converges to one harness pane.
-card_tabs = [t for t in tabs if t.get("label") == f"card-{card_id}"]
+card_tabs = [t for t in tabs if t.get("label") == f"card-{card_id} reuse-card"]
 assert len(card_tabs) == 1
 owned = [p for p in panes if p.get("tab_id") == card_tabs[0]["tab_id"]]
 assert len(owned) == 1
 agents = [p for p in owned if p.get("agent") == "pi"]
 assert len(agents) == 1
 assert agents[0]["pane_id"] == shared_pane
-assert not any(p.get("label") == f"card-{card_id}-anchor" for p in owned)
+assert not any((p.get("label") or "").endswith("-anchor") for p in owned)
 print(f"[ok] 3 runs reuse one pane {shared_pane} and one conversation", file=sys.stderr)
 PY
 

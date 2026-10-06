@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # 14-column-config.sh — the column harness_override (now a SELECT in the TUI)
 # drives a run end-to-end through real Herdr, and `harness.list` advertises
-# config-defined harnesses. The TUI select's data source and the
-# permission-hiding rule are unit/snapshot-tested in board-tui; this scenario
-# exercises the dispatch path the select feeds: a column whose harness_override
-# points at a config-defined harness, with effort/permission overrides that flow
-# into the run's resolved argv.
+# installed builtins plus config-defined harnesses. The TUI select's data
+# source and the permission-hiding rule are unit/snapshot-tested in board-tui;
+# this scenario exercises the dispatch path the select feeds: a column whose
+# harness_override points at a config-defined harness, with effort/permission
+# overrides that flow into the run's resolved argv.
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/lib.sh"
 
@@ -27,15 +27,23 @@ EOF
 
 e2e_daemon_start
 
-step "harness.list advertises built-ins + config-defined harnesses"
+step "harness.list advertises installed built-ins + config-defined harnesses"
 brpc harness.list '{}' | python3 -c '
 import json, sys
 hs = json.load(sys.stdin)["harnesses"]
-# Built-ins first in default order, then config-defined sorted.
-assert hs == ["pi", "claude", "codex", "opencode", "antigravity", "fake", "fake-ov"], hs
+# Harness discovery filters the builtins against the Herdr integration.list and
+# the ephemeral CI session installs none of them, so the full five may be
+# legitimately absent. Assert the documented shape instead of the exact list:
+# an installed-builtin prefix in canonical order, then the config-defined
+# harnesses (always appended) sorted.
+builtins = ["pi", "claude", "codex", "opencode", "antigravity"]
+split = next((i for i, h in enumerate(hs) if h not in builtins), len(hs))
+installed, config = hs[:split], hs[split:]
+assert installed == [h for h in builtins if h in installed], hs
+assert config == ["fake", "fake-ov"], hs
 print("  harnesses:", ", ".join(hs))
 '
-ok "harness.list returns built-ins (pi, claude, codex, opencode, antigravity) and config-defined (fake, fake-ov)"
+ok "harness.list returns installed builtins in canonical order, then config-defined (fake, fake-ov)"
 
 step "HERDR MUTATION: create disposable workspace for the override column"
 e2e_ws_create board-colcfg-e2e; WS_ID="$E2E_WS"

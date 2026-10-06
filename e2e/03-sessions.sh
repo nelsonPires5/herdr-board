@@ -38,18 +38,19 @@ echo "  session B: $SESS"
 echo "  session B socket: $SESS_SOCK (server pid ${SESS_B_PID:-?})"
 hrpc_sess() { HERDR_SOCKET_PATH="$SESS_SOCK" python3 "$HRPC" "$@"; }
 
-# assert_card_tab_pane <ws_id> <card_id> — the workspace in SESS has the
-# stable `card-<card_id>` tab holding its agent pane.
+# assert_card_tab_pane <ws_id> <card_id> <slug> — the workspace in SESS has
+# the stable `card-<card_id> <slug>` tab holding its agent pane.
 assert_card_tab_pane() {
-  local ws="$1" card="$2" tabs panes
+  local ws="$1" card="$2" slug="$3" tabs panes
   tabs="$(hrpc_sess tab.list "{\"workspace_id\":\"$ws\"}")"
   panes="$(hrpc_sess pane.list "{\"workspace_id\":\"$ws\"}")"
-  python3 - "$tabs" "$panes" "$card" <<'PY' || fail "card-tab pane assertion failed (ws $ws, card $card)"
+  python3 - "$tabs" "$panes" "$card" "$slug" <<'PY' || fail "card-tab pane assertion failed (ws $ws, card $card)"
 import json, re, sys
 tabs = json.loads(sys.argv[1]).get("tabs", [])
 panes = json.loads(sys.argv[2]).get("panes", [])
 card = sys.argv[3]
-card_tab = [t for t in tabs if t.get("label") == f"card-{card}"]
+label = f"card-{card} {sys.argv[4]}"
+card_tab = [t for t in tabs if t.get("label") == label]
 if len(card_tab) != 1:
     sys.exit(f"expected one card tab, got {[t.get('label') for t in tabs]}")
 ktab = card_tab[0]["tab_id"]
@@ -94,7 +95,7 @@ mut "board move $CARD_WS Execute -> agent.start in session $SESS / ws $WS_SESS"
 e2e_board_herdr_mutate "$SESS_B_PID" "$SESS_B_IDENTITY" -- move "$CARD_WS" Execute --json >/dev/null
 oc="$(wait_ok "$CARD_WS")" || { fail "card $CARD_WS outcome '$oc'"; }
 echo "  outcome: $oc"
-assert_card_tab_pane "$WS_SESS" "$CARD_WS"
+assert_card_tab_pane "$WS_SESS" "$CARD_WS" "sess-ws-card"
 ok "workspace card ran in session '$SESS' and landed a pane in its card tab"
 
 # --- new-workspace card (daemon creates the workspace) ----------------------
@@ -117,17 +118,17 @@ print(next((w["workspace_id"] for w in ws if w.get("label") == "bsess-new"), "")
 [ -n "$NEW_WS" ] || fail "daemon did not create the bsess-new workspace in session '$SESS'"
 e2e_ws_defer_close "$NEW_WS" "$SESS_SOCK" "$SESS_B_PID" "$SESS_B_IDENTITY"
 echo "  daemon-created workspace: $NEW_WS"
-assert_card_tab_pane "$NEW_WS" "$CARD_NEW"
+assert_card_tab_pane "$NEW_WS" "$CARD_NEW" "sess-new-card"
 # The daemon-created workspace must have NO unused initial tab: the card's
 # first allocation adopted the workspace's own initial tab as the card tab
-# (renamed to card-<id>) instead of leaving it empty beside a new one.
+# (renamed to card-<id> <slug>) instead of leaving it empty beside a new one.
 python3 - "$(hrpc_sess tab.list "{\"workspace_id\":\"$NEW_WS\"}")" "$CARD_NEW" <<'PY' || fail "adopted card tab assertion failed (ws $NEW_WS)"
 import json, sys
 tabs = json.loads(sys.argv[1]).get("tabs", [])
 card = sys.argv[2]
 labels = [t.get("label") for t in tabs]
 assert len(tabs) == 1
-assert labels[0] == f"card-{card}"
+assert labels[0] == f"card-{card} sess-new-card"
 print(f"  [ok] daemon-created workspace has no unused initial tab; card tab {tabs[0]['tab_id']} adopted", file=sys.stderr)
 PY
 ok "new-workspace card created a workspace in '$SESS' with an adopted card tab pane"

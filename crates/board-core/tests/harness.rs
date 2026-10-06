@@ -3,8 +3,9 @@
 use board_core::capability::ResumeSupport;
 use board_core::config::{Config, HarnessDef};
 use board_core::harness::{
-    build_invocation, claude_argv, is_builtin_harness, pi_argv, plan_session, resume_invocation,
-    session_argv, HarnessError, SessionPlan, BOARD_PROTOCOL_TRAILER, DEFAULT_HARNESS,
+    build_invocation, build_invocation_for_card, claude_argv, is_builtin_harness, pi_argv,
+    plan_session, resume_invocation, session_argv, CardScope, HarnessError, SessionPlan,
+    BOARD_PROTOCOL_TRAILER, DEFAULT_HARNESS,
 };
 use board_core::launch::ExecutionSpec;
 use board_core::prompt::EffectiveSettings;
@@ -339,6 +340,127 @@ fn custom_harness_drops_unset_placeholders() {
     s.permission_mode = None; // unset → its element is dropped
     let inv = build_invocation("fake", &config, &s, &SessionPlan::Mint, None, "p").unwrap();
     assert_eq!(inv.argv, vec!["run", "sonnet"]);
+}
+
+#[test]
+fn custom_harness_substitutes_card_placeholders() {
+    let mut config = Config::default();
+    config.harness.insert(
+        "fake".into(),
+        HarnessDef {
+            argv: vec![
+                "run".into(),
+                "--card".into(),
+                "{card_id}".into(),
+                "--title".into(),
+                "{card_title}".into(),
+                "--short".into(),
+                "{card_short_name}".into(),
+            ],
+            ..Default::default()
+        },
+    );
+    let card = CardScope {
+        id: 7,
+        title: "Fix login redirect",
+    };
+    let inv = build_invocation_for_card(
+        "fake",
+        &config,
+        &settings(),
+        &SessionPlan::Mint,
+        None,
+        "p",
+        Some(card),
+    )
+    .unwrap();
+    assert_eq!(
+        inv.argv,
+        vec![
+            "run",
+            "--card",
+            "7",
+            "--title",
+            "Fix login redirect",
+            "--short",
+            "fix-login-redirect",
+        ]
+    );
+}
+
+#[test]
+fn custom_harness_does_not_reexpand_replacement_values() {
+    // Regression: substitution is one pass over the original template.
+    // A card title that itself looks like a placeholder stays literal.
+    let mut config = Config::default();
+    config.harness.insert(
+        "fake".into(),
+        HarnessDef {
+            argv: vec!["run".into(), "{card_title}".into()],
+            ..Default::default()
+        },
+    );
+    let card = CardScope {
+        id: 7,
+        title: "Document {card_short_name}",
+    };
+    let inv = build_invocation_for_card(
+        "fake",
+        &config,
+        &settings(),
+        &SessionPlan::Mint,
+        None,
+        "p",
+        Some(card),
+    )
+    .unwrap();
+    assert_eq!(inv.argv, vec!["run", "Document {card_short_name}"]);
+
+    // A second placeholder in the SAME template element still expands from
+    // the original, while the title's inner placeholder-like text does not.
+    let mut config2 = Config::default();
+    config2.harness.insert(
+        "fake".into(),
+        HarnessDef {
+            argv: vec!["run".into(), "{card_title} {card_short_name}".into()],
+            ..Default::default()
+        },
+    );
+    let inv2 = build_invocation_for_card(
+        "fake",
+        &config2,
+        &settings(),
+        &SessionPlan::Mint,
+        None,
+        "p",
+        Some(card),
+    )
+    .unwrap();
+    let short = board_core::capability::card_short_name("Document {card_short_name}");
+    assert_eq!(
+        inv2.argv,
+        vec![
+            "run".to_string(),
+            format!("Document {{card_short_name}} {short}")
+        ]
+    );
+}
+
+#[test]
+fn custom_harness_drops_card_placeholders_without_card_scope() {
+    let mut config = Config::default();
+    config.harness.insert(
+        "fake".into(),
+        HarnessDef {
+            argv: vec!["run".into(), "{card_id}".into(), "{card_title}".into()],
+            ..Default::default()
+        },
+    );
+    // The legacy entry point carries no card identity: card elements are
+    // dropped exactly like any other unset placeholder.
+    let inv =
+        build_invocation("fake", &config, &settings(), &SessionPlan::Mint, None, "p").unwrap();
+    assert_eq!(inv.argv, vec!["run"]);
 }
 
 #[test]

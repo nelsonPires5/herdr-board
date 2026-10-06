@@ -260,6 +260,21 @@ pub struct NotificationShown {
     pub reason: String,
 }
 
+/// One Herdr integration entry as returned by `integration.list`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct IntegrationInfo {
+    #[serde(default)]
+    pub target: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub available: bool,
+    #[serde(default)]
+    pub state: String,
+}
+
 /// Result of `ping` (used for liveness).
 #[derive(Debug, Clone, Deserialize)]
 pub struct Pong {

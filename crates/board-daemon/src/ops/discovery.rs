@@ -1,6 +1,36 @@
 use super::*;
-use board_core::capability::{available_harnesses, capabilities_for};
+use board_core::capability::{available_harnesses, capabilities_for, filtered_available_harnesses};
 use board_core::{agy_catalog, codex_catalog, opencode_catalog, pi_catalog};
+
+/// Try Herdr's `integration.list` to discover which builtin harnesses are
+/// currently installed (`available == true`). Returns `None` when Herdr is
+/// unreachable, incompatible, or the daemon runs with the local spawner — the
+/// caller then falls back to the full builtin list (graceful degradation).
+pub(crate) fn installed_targets(d: &Daemon) -> Option<Vec<String>> {
+    let reg = d.session_registry.as_ref()?;
+    let socket = reg.default_socket();
+    let mut client = crate::herdr_conn::connect_checked(socket).ok()?;
+    let integrations = client.integration_list().ok()?;
+    Some(
+        integrations
+            .into_iter()
+            .filter(|info| info.available)
+            .map(|info| info.target)
+            .collect(),
+    )
+}
+
+pub(crate) fn effective_harnesses(d: &Daemon) -> Vec<String> {
+    match installed_targets(d) {
+        Some(targets) => filtered_available_harnesses(&d.config, Some(&targets)),
+        None => available_harnesses(&d.config),
+    }
+}
+
+pub(crate) fn effective_default_harness(d: &Daemon) -> String {
+    let harnesses = effective_harnesses(d);
+    board_core::capability::default_harness_for(&harnesses)
+}
 pub(super) fn harness_capabilities(d: &Arc<Daemon>, p: HarnessCapabilitiesParams) -> Result<Value> {
     match capabilities_for(&p.harness, &d.config) {
         Some(mut caps) => {
@@ -59,7 +89,7 @@ pub(super) fn harness_capabilities(d: &Arc<Daemon>, p: HarnessCapabilitiesParams
 
 pub(super) fn harness_list(d: &Arc<Daemon>) -> Result<Value> {
     Ok(json!(HarnessListResult {
-        harnesses: available_harnesses(&d.config)
+        harnesses: effective_harnesses(d)
     }))
 }
 

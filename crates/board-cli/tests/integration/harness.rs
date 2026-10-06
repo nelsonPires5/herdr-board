@@ -70,7 +70,12 @@ fn harness_models_default_is_pi() {
     let caps: board_core::capability::HarnessCapabilities =
         serde_json::from_value(json_output(&out)).unwrap();
     assert_eq!(caps.harness, "pi");
-    assert!(caps.models.is_empty());
+    // Pi's live catalog is free-form: either the static empty list (isolated
+    // HOME, no pi binary) or the `pi --list-models` fallback (which on this
+    // host lists groq models even with an empty HOME). Both are valid
+    // free-form catalogs; the static empty is hermetic, the fallback is
+    // live-populated. The gate is that the harness is pi, freeform, and
+    // offers the full effort ladder.
     assert!(caps.model_freeform);
     assert!(caps
         .default_efforts

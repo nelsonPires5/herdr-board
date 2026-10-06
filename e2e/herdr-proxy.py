@@ -21,6 +21,13 @@ class Proxy:
         self.busy_injections = 0
         self.pane_splits: list[str] = []
         self.pane_closes: list[str] = []
+        # integration.list fault injection: `None` forwards to the real server
+        # (the default). A list serves exactly those targets as `available`;
+        # `error=True` makes the call fail. The board must degrade gracefully
+        # in both directions, so the scenario can pin either behavior.
+        self.integration_list_targets: list[str] | None = None
+        self.integration_list_error = False
+        self.integration_list_calls = 0
         self.connections: set[tuple[asyncio.StreamWriter, asyncio.StreamWriter, bool]] = set()
         self.subscriptions = 0
 
@@ -49,6 +56,32 @@ class Proxy:
             if is_events:
                 self.subscriptions += 1
                 if self.reject_events:
+                    return
+            if method == "integration.list":
+                self.integration_list_calls += 1
+                if self.integration_list_error:
+                    writer.write(json.dumps({
+                        "id": request.get("id"),
+                        "error": {
+                            "code": "internal",
+                            "message": "integration.list unavailable (deterministic e2e fault)",
+                        },
+                    }, separators=(",", ":")).encode() + b"\n")
+                    await writer.drain()
+                    return
+                if self.integration_list_targets is not None:
+                    writer.write(json.dumps({
+                        "id": request.get("id"),
+                        "result": {
+                            "type": "integration_list",
+                            "integrations": [
+                                {"target": target, "label": target, "command": target,
+                                 "available": True, "state": "current"}
+                                for target in self.integration_list_targets
+                            ],
+                        },
+                    }, separators=(",", ":")).encode() + b"\n")
+                    await writer.drain()
                     return
             if method == "agent.start":
                 pane_id = str(params.get("pane_id", ""))
@@ -119,6 +152,16 @@ class Proxy:
                 self.agent_pane_busy_mode = "persistent"
             elif command in ("agent_pane_busy_clear", "busy_clear"):
                 self.agent_pane_busy_mode = "none"
+            elif command == "integration_list_available":
+                raw = request.get("targets", "")
+                self.integration_list_targets = [t for t in raw.split(",") if t]
+                self.integration_list_error = False
+            elif command == "integration_list_error":
+                self.integration_list_targets = None
+                self.integration_list_error = True
+            elif command == "integration_list_auto":
+                self.integration_list_targets = None
+                self.integration_list_error = False
             elif command != "status":
                 raise ValueError("unknown command")
             response = {"ok": True, "offline": self.offline,
@@ -129,6 +172,11 @@ class Proxy:
                         "pane_splits": self.pane_splits,
                         "pane_closes": self.pane_closes,
                         "subscriptions": self.subscriptions,
+                        "integration_list_mode": ("error" if self.integration_list_error
+                                                   else "available" if self.integration_list_targets is not None
+                                                   else "auto"),
+                        "integration_list_targets": self.integration_list_targets,
+                        "integration_list_calls": self.integration_list_calls,
                         "connections": len(self.connections)}
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as error:
             response = {"ok": False, "error": str(error)}

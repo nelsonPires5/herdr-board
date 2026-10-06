@@ -5,7 +5,6 @@ use board_core::engine::{
     decide_entry, merge_card_update, validate_card_archive, validate_card_edit,
     validate_card_settings, validate_card_values, validate_effective_settings,
 };
-use board_core::harness::DEFAULT_HARNESS;
 use board_core::labels::card_labels;
 use board_core::model::Card;
 
@@ -47,7 +46,7 @@ fn pending_create_card(db: &Db, p: &CardCreateParams) -> Result<Card> {
         harness: p
             .harness
             .clone()
-            .unwrap_or_else(|| DEFAULT_HARNESS.to_string()),
+            .unwrap_or_else(|| board_core::harness::DEFAULT_HARNESS.to_string()),
         model: p.model.clone(),
         effort: p.effort,
         permission_mode: p.permission_mode.clone(),
@@ -67,7 +66,14 @@ fn pending_create_card(db: &Db, p: &CardCreateParams) -> Result<Card> {
 }
 
 pub(super) fn card_create(d: &Arc<Daemon>, p: CardCreateParams) -> Result<Value> {
-    let harness = p.harness.as_deref().unwrap_or(DEFAULT_HARNESS);
+    // Discover the installed default only when the caller omitted a harness.
+    // An explicit harness is authoritative: it must not wait on (or depend on)
+    // a Herdr round-trip that cannot change the choice.
+    let harness_owned = match p.harness.as_deref() {
+        Some(h) => h.to_string(),
+        None => super::discovery::effective_default_harness(d),
+    };
+    let harness = harness_owned.as_str();
     validate_card_values(
         harness,
         p.model.as_deref(),
@@ -112,21 +118,27 @@ pub(super) fn card_create(d: &Arc<Daemon>, p: CardCreateParams) -> Result<Value>
         }
     }
 
+    // The DB always sees the effective harness, discovered when omitted.
+    let effective_p = CardCreateParams {
+        harness: Some(harness_owned.clone()),
+        ..p.clone()
+    };
     let (mut card, enqueue) = {
         // Scheduler state and card creation/enqueue share one critical
         // section. The DB UoW below contains no Herdr or process I/O.
         let mut _sched = d.sched.lock().unwrap();
         let db = d.store.lock();
-        let pending = pending_create_card(&db, &p)?;
+        let pending = pending_create_card(&db, &effective_p)?;
         let column = db.require_column(pending.column_id)?;
         let entry = decide_entry(&column, pending.status, false);
         if entry.enqueue {
             let prepared = prepare_enqueue_values(d, &db, &pending, pending.column_id, false)?;
-            let (card, _run) = db.create_card_and_enqueue_uow(&p, &prepared.borrowed())?;
+            let (card, _run) =
+                db.create_card_and_enqueue_uow(&effective_p, &prepared.borrowed())?;
             _sched.chain_hops.remove(&card.id);
             (card, true)
         } else {
-            (db.create_card(&p)?, false)
+            (db.create_card(&effective_p)?, false)
         }
     };
 

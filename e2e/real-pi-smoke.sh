@@ -282,19 +282,19 @@ PY
 if [ "$NEW_WORKSPACE" = "1" ]; then
   # The daemon-created workspace adopted its own initial tab as the card tab
   # and the managed launch closed the anchor: the workspace must hold exactly
-  # one `card-<id>` tab and exactly one Pi harness pane — no anchor, no unused
-  # initial tab.
+  # one `card-<id> <slug>` tab and exactly one Pi harness pane — no anchor,
+  # no unused initial tab.
   python3 - "$EVIDENCE/herdr-snapshot.json" "$WS_ID" "$CARD_ID" "$POEM" <<'PY'
 import json, pathlib, sys
 snap = json.load(open(sys.argv[1], encoding="utf-8")).get("result", {}).get("snapshot", {})
 ws_id, card, poem_path = sys.argv[2:]
 tabs = [t for t in snap.get("tabs", []) if t.get("workspace_id") == ws_id]
 assert len(tabs) == 1
-assert tabs[0].get("label") == f"card-{card}"
+assert tabs[0].get("label") == f"card-{card} poema-tempor-rio-pi"
 panes = [p for p in snap.get("panes", []) if p.get("workspace_id") == ws_id]
 assert len(panes) == 1
 assert panes[0].get("agent") == "pi"
-assert not any(p.get("label") == f"card-{card}-anchor" for p in panes)
+assert not any((p.get("label") or "").endswith("-anchor") for p in panes)
 poem = pathlib.Path(poem_path)
 assert poem.is_file()
 print(f"  [ok] workspace {ws_id}: one card-{card} tab, one Pi harness pane, no anchor/unused tab", file=sys.stderr)

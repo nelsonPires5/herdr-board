@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use board_core::capability::{run_pane_name, run_pane_name_unique};
+use board_core::capability::{
+    card_short_name, card_tab_label, run_pane_name, run_pane_name_unique,
+};
 use board_core::db::FinalizeRun;
 use board_core::harness::is_builtin_harness;
 use board_core::model::{Card, Run};
@@ -26,12 +28,22 @@ use crate::state::{ActiveRun, Daemon};
 /// `run_id` is `None` for a rescued pane: `BOARD_RUN_ID` is the actor
 /// credential, and a rescue belongs to no run (see `rescue::rescue_board_env`
 /// for the full reasoning). Every other variable is identical either way.
+/// `BOARD_CARD_TITLE` is the full live title; `BOARD_CARD_SHORT_NAME` is the
+/// display slug shared with the run tab label.
 pub(crate) fn board_env(
     card_id: i64,
+    card_title: &str,
     run_id: Option<i64>,
     socket_path: &std::path::Path,
 ) -> Result<Vec<(String, String)>> {
-    let mut env = vec![("BOARD_CARD_ID".to_string(), card_id.to_string())];
+    let mut env = vec![
+        ("BOARD_CARD_ID".to_string(), card_id.to_string()),
+        ("BOARD_CARD_TITLE".to_string(), card_title.to_string()),
+        (
+            "BOARD_CARD_SHORT_NAME".to_string(),
+            card_short_name(card_title),
+        ),
+    ];
     if let Some(run_id) = run_id {
         env.push(("BOARD_RUN_ID".to_string(), run_id.to_string()));
     }
@@ -105,7 +117,12 @@ pub(super) async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result
     // Appended once, after the base env is final. The v11 branch above replaces
     // `env` wholesale, so pushing the board variables before it would only be
     // discarded again.
-    env.extend(board_env(card.id, Some(run.id), &d.socket_path)?);
+    env.extend(board_env(
+        card.id,
+        &card.title,
+        Some(run.id),
+        &d.socket_path,
+    )?);
     let (agent_kind, initial_prompt, system_prompt) = match run.launch_spec.as_ref() {
         Some(spec) => {
             let execution = spec.execution();
@@ -127,10 +144,13 @@ pub(super) async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result
         initial_prompt,
         system_prompt,
         name_fallback: Some(run_pane_name_unique(card.id, &column.name, run.id)),
-        // New durable runs get one exact tab per card. Legacy rows retain the
-        // historical kanban placement and lookup behavior unchanged.
+        // New durable runs get one exact tab per card, labeled with the card's
+        // short name (`card-<id> <slug>`) so the tab reads as the card, not
+        // just its id. Legacy rows retain the historical kanban placement and
+        // lookup behavior unchanged. Ownership still keys on the exact tab id
+        // (and the `card-` prefix), never on this label.
         tab_label: Some(if run.launch_spec.is_some() {
-            format!("card-{}", card.id)
+            card_tab_label(card.id, &card.title)
         } else {
             "kanban".to_string()
         }),

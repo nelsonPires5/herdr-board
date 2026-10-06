@@ -184,6 +184,7 @@ pub struct DemoClient {
     caps_available: bool,
     spaces: Option<Vec<SpaceInfo>>,
     sessions: Option<Vec<SessionInfo>>,
+    harnesses: Option<Vec<String>>,
 }
 
 impl DemoClient {
@@ -193,6 +194,7 @@ impl DemoClient {
             caps_available: true,
             spaces: Some(demo_spaces()),
             sessions: Some(demo_sessions()),
+            harnesses: None,
         }
     }
 
@@ -212,6 +214,18 @@ impl DemoClient {
     /// `default session` option).
     pub fn without_sessions(mut self) -> DemoClient {
         self.sessions = None;
+        self
+    }
+
+    /// Make `harness.list` return exactly `harnesses` (instead of the full
+    /// builtin list), so tests can exercise the filtered installed-harness
+    /// path end to end.
+    pub fn with_harnesses<I, S>(mut self, harnesses: I) -> DemoClient
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.harnesses = Some(harnesses.into_iter().map(Into::into).collect());
         self
     }
 
@@ -236,7 +250,10 @@ impl BoardClient for DemoClient {
                 anyhow::bail!("harness.capabilities: stubbed failure")
             }
             "harness.list" => Ok(json!(HarnessListResult {
-                harnesses: BUILTIN_HARNESSES.iter().map(|s| (*s).to_string()).collect()
+                harnesses: self.harnesses.clone().unwrap_or_else(|| BUILTIN_HARNESSES
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect())
             })),
             "space.list" => match &self.spaces {
                 Some(_) => {

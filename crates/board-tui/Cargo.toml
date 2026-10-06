@@ -8,7 +8,7 @@ license.workspace = true
 board-core = { workspace = true }
 anyhow = { workspace = true }
 serde_json = { workspace = true }
-ratatui = { workspace = true }
+ratatui = { workspace = true, features = ["unstable-rendered-line-info"] }
 crossterm = { workspace = true }
 tui-textarea = { workspace = true }
 tempfile = { workspace = true }

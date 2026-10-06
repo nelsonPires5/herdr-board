@@ -36,7 +36,22 @@ cat >"$PI_AGENT_DIR/models-store.json" <<'JSON'
 }
 JSON
 chmod 600 "$PI_AGENT_DIR/auth.json" "$PI_AGENT_DIR/models-store.json"
+
+# CI's ephemeral Herdr has no builtin integration installed, so a live
+# `integration.list` would filter pi out of harness.list and the new-card
+# default would become the config-defined `fake`; the pi catalog model would
+# then never reach the form. Pin discovery to pi through the owned proxy
+# (every other request is forwarded). Keep boardd last: its live catalog path
+# is resolved once at startup.
+e2e_proxy_start "$E2E_TMP/herdr-proxy.sock" "$E2E_TMP/proxy-control.sock" \
+  "$E2E_SESSION_SOCKET"
+e2e_proxy_command integration_list_available pi >/dev/null
+export HERDR_SOCKET_PATH="$E2E_PROXY_SOCKET"
 e2e_daemon_start
+# boardd captured the proxy socket as its default at startup; this shell's own
+# herdr CLI mutations (workspace/tab/pane) must keep targeting the real
+# ephemeral session, exactly as before the proxy was introduced.
+export HERDR_SOCKET_PATH="$E2E_SESSION_SOCKET"
 
 EXPECTED='["off","minimal","low","medium","high","xhigh","max"]'
 
@@ -82,8 +97,9 @@ e2e_herdr_mutate -- pane send-keys "$TUI_PANE" n >/dev/null
 wait_for "New card" || fail "new-card form did not render"
 
 # Fixed visible-field order: title -> description -> harness -> model -> effort.
-# Pi is already selected; three Tabs focus model, Right picks the sole catalog
-# model, and one more Tab focuses effort. No Enter: the card is never submitted.
+# Pi is the selected default because the proxy reports it installed; three Tabs
+# focus model, Right picks the sole catalog model, and one more Tab focuses
+# effort. No Enter: the card is never submitted.
 e2e_herdr_mutate -- pane send-keys "$TUI_PANE" tab tab tab >/dev/null
 e2e_herdr_mutate -- pane send-keys "$TUI_PANE" right >/dev/null
 wait_for "gpt-effort-e2e" || {

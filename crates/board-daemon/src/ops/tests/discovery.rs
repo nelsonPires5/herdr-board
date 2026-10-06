@@ -1462,3 +1462,297 @@ fn harness_capabilities_antigravity_down_on_failing_cli() {
     assert_eq!(v["models"].as_array().unwrap().len(), 0);
     assert_eq!(v["model_freeform"], true);
 }
+
+#[test]
+fn harness_list_filters_to_installed_builtins_via_herdr() {
+    // Herdr reports only pi and codex as `available` → only those builtins
+    // survive filtering; the other Herdr targets are ignored by the board.
+    let herdr = testkit::herdr_server()
+        .on("integration.list", |req| {
+            testkit::reply(
+                req,
+                json!({
+                    "type": "integration_list",
+                    "integrations": [
+                        {"target": "pi", "label": "pi", "command": "pi", "available": true, "state": "current"},
+                        {"target": "claude", "label": "claude", "command": "claude", "available": false, "state": "not_installed"},
+                        {"target": "codex", "label": "codex", "command": "codex", "available": true, "state": "current"},
+                        {"target": "opencode", "label": "opencode", "command": "opencode", "available": false, "state": "not_installed"},
+                        {"target": "antigravity_cli", "label": "antigravity-cli", "command": "agy", "available": false, "state": "not_installed"},
+                        {"target": "copilot", "label": "copilot", "command": "copilot", "available": true, "state": "current"}
+                    ]
+                }),
+            )
+        })
+        .serve();
+    let d = test_daemon_with_registry(
+        Config::default(),
+        Some(SessionRegistry::new(herdr.socket.clone())),
+    );
+    let v = handle_request(&d, "harness.list", json!({})).unwrap();
+    let names: Vec<String> = serde_json::from_value(v["harnesses"].clone()).unwrap();
+    assert_eq!(names, vec!["pi", "codex"]);
+    assert!(herdr.methods().contains(&"integration.list".to_string()));
+}
+
+#[test]
+fn harness_list_maps_antigravity_cli_target() {
+    // `antigravity` is served by the Herdr target `antigravity_cli` (command
+    // `agy`). Only that target's `available` flag controls the board name.
+    let herdr = testkit::herdr_server()
+        .on("integration.list", |req| {
+            testkit::reply(
+                req,
+                json!({
+                    "type": "integration_list",
+                    "integrations": [
+                        {"target": "pi", "label": "pi", "command": "pi", "available": false, "state": "not_installed"},
+                        {"target": "antigravity_cli", "label": "antigravity-cli", "command": "agy", "available": true, "state": "current"}
+                    ]
+                }),
+            )
+        })
+        .serve();
+    let d = test_daemon_with_registry(
+        Config::default(),
+        Some(SessionRegistry::new(herdr.socket.clone())),
+    );
+    let v = handle_request(&d, "harness.list", json!({})).unwrap();
+    let names: Vec<String> = serde_json::from_value(v["harnesses"].clone()).unwrap();
+    assert_eq!(names, vec!["antigravity"]);
+}
+
+#[test]
+fn harness_list_fallback_when_herdr_unavailable() {
+    // A Herdr that errors on `integration.list` must not break `harness.list`;
+    // the full builtin list is the graceful fallback (LocalSpawner already does
+    // this, but a Herdr error must do the same).
+    let herdr = testkit::herdr_server()
+        .on("integration.list", |req| {
+            testkit::error(req, "internal", "boom")
+        })
+        .serve();
+    let d = test_daemon_with_registry(
+        Config::default(),
+        Some(SessionRegistry::new(herdr.socket.clone())),
+    );
+    let v = handle_request(&d, "harness.list", json!({})).unwrap();
+    let names: Vec<String> = serde_json::from_value(v["harnesses"].clone()).unwrap();
+    assert_eq!(
+        names,
+        vec!["pi", "claude", "codex", "opencode", "antigravity"]
+    );
+}
+
+#[test]
+fn harness_list_keeps_config_harnesses_when_filtering() {
+    // Config-defined harnesses are never filtered by Herdr; they are always
+    // appended sorted after the filtered builtins.
+    let mut config = Config::default();
+    config.harness.insert(
+        "zeta".to_string(),
+        HarnessDef {
+            argv: vec!["z".into()],
+            ..Default::default()
+        },
+    );
+    config.harness.insert(
+        "alpha".to_string(),
+        HarnessDef {
+            argv: vec!["a".into()],
+            ..Default::default()
+        },
+    );
+    let herdr = testkit::herdr_server()
+        .on("integration.list", |req| {
+            testkit::reply(
+                req,
+                json!({
+                    "type": "integration_list",
+                    "integrations": [
+                        {"target": "pi", "label": "pi", "command": "pi", "available": true, "state": "current"},
+                        {"target": "codex", "label": "codex", "command": "codex", "available": false, "state": "not_installed"}
+                    ]
+                }),
+            )
+        })
+        .serve();
+    let d = test_daemon_with_registry(config, Some(SessionRegistry::new(herdr.socket.clone())));
+    let v = handle_request(&d, "harness.list", json!({})).unwrap();
+    let names: Vec<String> = serde_json::from_value(v["harnesses"].clone()).unwrap();
+    assert_eq!(names, vec!["pi", "alpha", "zeta"]);
+}
+
+#[test]
+fn harness_list_single_pi_regression_for_new_card() {
+    // Regression for #111: fake Herdr integration.list with only pi available
+    // → harness.list returns ["pi"]. This proves New Card harness options
+    // contain only installed harnesses, not the full static list.
+    let herdr = testkit::herdr_server()
+        .on("integration.list", |req| {
+            testkit::reply(
+                req,
+                json!({
+                    "type": "integration_list",
+                    "integrations": [
+                        {"target": "pi", "label": "pi", "command": "pi", "available": true, "state": "current"},
+                        {"target": "claude", "label": "claude", "command": "claude", "available": false, "state": "not_installed"},
+                        {"target": "codex", "label": "codex", "command": "codex", "available": false, "state": "not_installed"},
+                        {"target": "opencode", "label": "opencode", "command": "opencode", "available": false, "state": "not_installed"},
+                        {"target": "antigravity_cli", "label": "antigravity-cli", "command": "agy", "available": false, "state": "not_installed"}
+                    ]
+                }),
+            )
+        })
+        .serve();
+    let d = test_daemon_with_registry(
+        Config::default(),
+        Some(SessionRegistry::new(herdr.socket.clone())),
+    );
+    let v = handle_request(&d, "harness.list", json!({})).unwrap();
+    let names: Vec<String> = serde_json::from_value(v["harnesses"].clone()).unwrap();
+    assert_eq!(names, vec!["pi"], "only pi installed → only pi listed");
+    assert!(herdr.methods().contains(&"integration.list".to_string()));
+    // New Card default harness must also be the filtered default (pi).
+    let card = handle_request(&d, "card.create", json!({"title": "t"})).unwrap();
+    assert_eq!(card["harness"], "pi");
+}
+
+#[test]
+fn card_create_uses_filtered_default_harness() {
+    // Only `codex` is reported as installed → a `card.create` without an
+    // explicit harness must default to `codex`, not `pi`.
+    let herdr = testkit::herdr_server()
+        .on("integration.list", |req| {
+            testkit::reply(
+                req,
+                json!({
+                    "type": "integration_list",
+                    "integrations": [
+                        {"target": "pi", "label": "pi", "command": "pi", "available": false, "state": "not_installed"},
+                        {"target": "codex", "label": "codex", "command": "codex", "available": true, "state": "current"}
+                    ]
+                }),
+            )
+        })
+        .serve();
+    let d = test_daemon_with_registry(
+        Config::default(),
+        Some(SessionRegistry::new(herdr.socket.clone())),
+    );
+    // `harness` omitted → daemon must pick `codex` as the filtered default.
+    let card = handle_request(&d, "card.create", json!({"title": "t"})).unwrap();
+    assert_eq!(card["harness"], "codex");
+    // Explicit `claude` is still accepted even though it was filtered from the
+    // list: the list is a picker hint, not a creation gate.
+    let explicit = handle_request(
+        &d,
+        "card.create",
+        json!({"title": "t2", "harness": "claude"}),
+    )
+    .unwrap();
+    assert_eq!(explicit["harness"], "claude");
+    // When Herdr is unreachable, the default stays `pi` (graceful fallback).
+    let fallback = test_daemon(Config::default());
+    let card2 = handle_request(&fallback, "card.create", json!({"title": "t3"})).unwrap();
+    assert_eq!(card2["harness"], "pi");
+}
+
+#[test]
+fn card_create_with_explicit_harness_skips_herdr_discovery() {
+    // An explicit harness cannot be changed by discovery, so `card.create`
+    // must not pay for an `integration.list` round-trip (nor fail when Herdr
+    // errors the call). An omitted harness still discovers.
+    let herdr = testkit::herdr_server()
+        .on("integration.list", |req| {
+            testkit::error(req, "internal", "boom")
+        })
+        .serve();
+    let d = test_daemon_with_registry(
+        Config::default(),
+        Some(SessionRegistry::new(herdr.socket.clone())),
+    );
+    let explicit = handle_request(
+        &d,
+        "card.create",
+        json!({"title": "explicit", "harness": "claude"}),
+    )
+    .unwrap();
+    assert_eq!(explicit["harness"], "claude");
+    assert!(
+        !herdr.methods().contains(&"integration.list".to_string()),
+        "an explicit harness must not trigger Herdr discovery"
+    );
+    // Omitted harness discovers through a failing Herdr → graceful pi fallback.
+    let default = handle_request(&d, "card.create", json!({"title": "default"})).unwrap();
+    assert_eq!(default["harness"], "pi");
+    assert!(herdr.methods().contains(&"integration.list".to_string()));
+}
+
+#[test]
+fn harness_capabilities_pi_filtered_to_logged_in_provider() {
+    // Models are filtered to the logged-in provider: store has `zai` + `openai`
+    // but auth only lists `zai` → only `zai/` models appear. This is the
+    // per-harness model filtering for the pi harness (auth.json + models-store).
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("auth.json"),
+        r#"{"zai": {"type": "api_key"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("models-store.json"),
+        r#"{
+          "zai": {"models": [{"id": "glm-5.2", "reasoning": true}]},
+          "openai-codex": {"models": [{"id": "gpt-5", "reasoning": true}]},
+          "ghost": {"models": [{"id": "nope", "reasoning": true}]}
+        }"#,
+    )
+    .unwrap();
+    let config = Config {
+        pi_agent_dir: Some(dir.path().to_path_buf()),
+        ..Config::default()
+    };
+    let d = test_daemon(config);
+    let v = handle_request(&d, "harness.capabilities", json!({"harness": "pi"})).unwrap();
+    let ids: Vec<String> = v["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["zai/glm-5.2"],
+        "only zai provider is authenticated"
+    );
+    assert_eq!(v["model_freeform"], true);
+}
+
+#[test]
+fn harness_capabilities_models_fallback_when_login_unreachable() {
+    // Graceful fallback: when the harness CLI/login is unreachable, models fall
+    // back to the static list (or free-form). For pi without an agent dir,
+    // for codex without a cache, for opencode with a failing bin, for
+    // antigravity without a bin — all degrade without error.
+    let d = test_daemon(Config::default());
+    // pi: static free-form (models []), codex: static [], opencode: static fallback (2), agy: down state.
+    let pi = handle_request(&d, "harness.capabilities", json!({"harness": "pi"})).unwrap();
+    assert!(pi["models"].as_array().unwrap().is_empty());
+    assert_eq!(pi["model_freeform"], true);
+    let codex = handle_request(&d, "harness.capabilities", json!({"harness": "codex"})).unwrap();
+    assert!(codex["models"].as_array().unwrap().is_empty());
+    assert_eq!(codex["model_freeform"], true);
+    let opencode =
+        handle_request(&d, "harness.capabilities", json!({"harness": "opencode"})).unwrap();
+    // Opencode fallback is defined (nemotron + deepseek), models field always defined.
+    assert_eq!(opencode["models"].as_array().unwrap().len(), 2);
+    let agy = handle_request(
+        &d,
+        "harness.capabilities",
+        json!({"harness": "antigravity"}),
+    )
+    .unwrap();
+    assert!(agy["models"].as_array().unwrap().is_empty());
+    assert_eq!(agy["model_freeform"], true);
+}

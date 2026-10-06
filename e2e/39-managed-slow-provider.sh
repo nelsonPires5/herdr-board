@@ -169,7 +169,7 @@ python3 - "$tabs_json" "$panes_json" "$PANE_ID" "$CARD_ID" <<'PY' || fail "slow-
 import json, sys
 tabs=json.loads(sys.argv[1]).get("tabs",[]); panes=json.loads(sys.argv[2]).get("panes",[])
 pane_id, card_id = sys.argv[3], sys.argv[4]
-card_tabs=[t for t in tabs if t.get("label")==f"card-{card_id}"]
+card_tabs=[t for t in tabs if t.get("label")==f"card-{card_id} slow-pi"]
 assert len(card_tabs)==1, f"expected one card tab, got {card_tabs}"
 by_id={p["pane_id"]: p for p in panes}
 assert pane_id in by_id, f"pane {pane_id} not in pane.list"
@@ -178,7 +178,7 @@ assert by_id[pane_id].get("agent") == "pi"
 owned=[p for p in panes if p.get("tab_id") == card_tabs[0]["tab_id"]]
 assert len(owned)==1, f"tab should have exactly one harness pane, got {owned}"
 assert owned[0]["pane_id"] == pane_id
-assert not any(p.get("label")==f"card-{card_id}-anchor" for p in owned)
+assert not any((p.get("label") or "").endswith("-anchor") for p in owned)
 print("  layout: one managed pi pane, anchorless tab — as expected after successful launch")
 PY
 

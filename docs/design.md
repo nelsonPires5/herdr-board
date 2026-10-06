@@ -119,14 +119,16 @@ new discovery, placement, focus, notification, or launch; supervisor reconciliat
 caller-visible focus/rescue paths remain checked. A mismatch on a checked dispatch path fails the
 queued run without mutating the workspace.
 
-The managed launch contract is pane-first. New durable runs place each card in a stable short
-`card-<id>` tab. When the dispatch itself just created the workspace (`new_workspace` with no
+The managed launch contract is pane-first. New durable runs place each card in a stable
+`card-<id> <short-name>` tab (e.g. `card-7 fix-login-redirect`), so the tab reads as the card,
+not just its id. When the dispatch itself just created the workspace (`new_workspace` with no
 matching open workspace), the workspace's own initial tab is **adopted** as the card tab: the
 first card-tab allocation verifies the exact bootstrap tab/root ids are still live (root is the
-tab's sole pane and carries no agent), renames the tab to `card-<id>` and the root to
+tab's sole pane and carries no agent), renames the tab to `card-<id> <short-name>` and the root to
 `card-<id>-anchor`, and splits the run child from it — so a daemon-created workspace has no
 unused initial tab. Any verification mismatch falls back to a fresh `tab.create` and never
-touches that root; reused/existing/user workspaces never supply a hint.
+touches that root; reused/existing/user workspaces never supply a hint. Ownership still keys on
+exact tab/pane ids, never on these labels.
 
 The root of a card tab is reserved as a labeled shell anchor (`card-<id>-anchor`); it is never
 an agent target. Every run, including the first, splits a child from that anchor with the run's `cwd`
@@ -290,7 +292,7 @@ then list the session's workspaces; if one's label matches `space_ref`
 (case-insensitive) reuse it, else `workspace.create {label:space_ref, cwd:space_cwd, focus:false}`.
 Then proceed identically to a `workspace` card (cwd snapshot, pane-first per-card tab placement). An existing `workspace` card may provide `space_cwd` as an explicit override; otherwise its non-empty live pane cwd values must all agree, and heterogeneous candidates fail closed instead of depending on snapshot order. Reused `new_workspace` cards still verify the live workspace rather than treating their creation cwd as an override. If the reused or existing workspace snapshot fails, or contains no live cwd, dispatch fails; it never falls back to process cwd or a stale snapshot. A workspace this dispatch **created** additionally
 threads its exact initial tab/root pane as a one-shot bootstrap hint: the first card-tab
-allocation adopts that tab (renamed to `card-<id>`, root renamed to `card-<id>-anchor`) instead
+allocation adopts that tab (renamed to `card-<id> <short-name>`, root renamed to `card-<id>-anchor`) instead
 of leaving an unused initial tab beside a fresh one. Verification is exact (workspace/tab/root
 still exist, root is the sole pane, no agent); any mismatch falls back to `tab.create` without
 touching the root. The hint's exact tab/root is remembered in the daemon's per-card registry
@@ -443,7 +445,7 @@ callers can name *which* run they landed on and *how*.
 
 **Rescuing a run whose pane is gone.** A finished run's pane is an ordinary terminal: the user can
 close it, and then the run's `herdr_pane_id` points at nothing. Rather than dead-ending, `o` reopens
-the run by **resuming its harness conversation in a brand-new pane** in the card's `card-<id>` tab —
+the run by **resuming its harness conversation in a brand-new pane** in the card's `card-<id> <short-name>` tab —
 automatically, with no confirmation prompt, and reported after the fact. The same path covers a run
 that never recorded a pane at all. End to end:
 
@@ -772,7 +774,7 @@ opens the script, the residual configured-script orphan is an accepted asynchron
 3. Column engine: *Plan* is `trigger=auto` → **enqueue run** on the card's space queue.
 4. Dispatcher (respecting per-space serial queue + global cap):
    a. Resolve the card's session socket and `ping` it. Anything except socket protocol 22 fails before workspace discovery/creation. Then reuse workspace `w4`, or create/reuse the card's labeled `new_workspace`; repository worktree isolation remains an agent prompt responsibility.
-   b. Preflight the selected socket again at the spawner boundary. For a new durable run, the card's **`card-<id>` tab** is resolved by exact owned id (reconstructed from the newest matching durable pane in the same session/workspace when boardd restarts), or `tab.create {workspace_id,cwd,env,…}` supplies a new shell anchor — unless the dispatch just created the workspace, in which case the workspace's own initial tab is adopted (verified, then renamed) instead of leaving an unused tab. The anchor is labeled `card-<id>-anchor`, its exact id is persisted on the promoted run (NULL for managed runs, whose anchor is closed after a successful launch), and the run child is always created by `pane.split` from that anchor; `agent.start`/`pane run` never target the root. A renamed anchor is still selected only by exact identity; a closed anchor is recreated only from a durable board-run child in the exact proven tab, and missing proof creates a fresh tab without selecting a duplicate-label user tab. Exact ended children may be reclaimed before a later split so the anchor keeps usable geometry. The child receives the run env; the anchor receives only stable card identity. If multiple historical panes are live, newest run id wins; legacy rows retain their old lookup. Placement, cwd, and environment are not `agent.start` fields; the call receives neither the workspace placement nor the anchor pane id.
+   b. Preflight the selected socket again at the spawner boundary. For a new durable run, the card's **`card-<id> <short-name>` tab** is resolved by exact owned id (reconstructed from the newest matching durable pane in the same session/workspace when boardd restarts), or `tab.create {workspace_id,cwd,env,…}` supplies a new shell anchor — unless the dispatch just created the workspace, in which case the workspace's own initial tab is adopted (verified, then renamed) instead of leaving an unused tab. The anchor is labeled `card-<id>-anchor`, its exact id is persisted on the promoted run (NULL for managed runs, whose anchor is closed after a successful launch), and the run child is always created by `pane.split` from that anchor; `agent.start`/`pane run` never target the root. A renamed anchor is still selected only by exact identity; a closed anchor is recreated only from a durable board-run child in the exact proven tab, and missing proof creates a fresh tab without selecting a duplicate-label user tab. Exact ended children may be reclaimed before a later split so the anchor keeps usable geometry. The child receives the run env; the anchor receives only stable card identity. If multiple historical panes are live, newest run id wins; legacy rows retain their old lookup. Placement, cwd, and environment are not `agent.start` fields; the call receives neither the workspace placement nor the anchor pane id.
     c. For Pi/Claude, write the snapshotted system prompt to a mode-`0600` temporary file; issue `agent.start {name,kind,pane_id,args}` on the split child with prompt-free startup args; a typed `agent_pane_busy` retries the exact request on that same child with bounded 100ms/200ms backoff (never another split); poll `agent.get` for readiness; then send only the task snapshot through `agent.prompt`. Remove the file. For codex/opencode/antigravity, no prompt file exists: after the same readiness poll the daemon bounded-polls `agent.get.agent_session` (at most 5 probes / 10s) for the integration-reported id (expected agent, `kind:"id"`, non-empty `value`; opencode and antigravity also pin the integration source, `herdr:opencode` / `herdr:antigravity_cli`) and persists it atomically with the promotion — **codex captures before delivering the prompt, opencode and antigravity after it** (real OpenCode mints `agent_session` only once the first `agent.prompt` lands; antigravity likewise reports its conversation id only after the first prompt) — and the prompt is a delimited `system + task` block on a Mint, the task alone on a resume/fork fresh pane. Card status → `running`; record the exact child pane/workspace ids. The pane is **visible** — you can watch or type into it anytime.
 
    **Pane naming and ownership**: the managed agent name is `card-<id>-<column-slug>` (e.g. `card-42-plan`, `card-42-execute`). Herdr names are exclusive while a pane is open, so `agent_name_taken` retries once on the same pane with `card-<id>-<column-slug>-r<run>`. A persistent `agent_pane_busy` closes only the board-owned child and leaves the pre-existing anchor. If a placement target disappears, boardd closes only the pane it created (a missing pane is already clean), restarts discovery from `tab.list`, and retries the complete placement once. A terminal launch error also closes only that board-owned pane; pre-existing user panes are never cleanup targets.

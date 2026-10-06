@@ -1131,13 +1131,17 @@ e2e_proxy_start() {
 
 e2e_proxy_command() {
   local command="$1"
+  shift
   e2e_process_identity_verify "${E2E_OWNED_PROCESS_PIDS[herdr-proxy]:-}" \
     "${E2E_OWNED_PROCESS_IDENTITIES[herdr-proxy]:-}" \
     || fail "refusing proxy control: identity changed"
-  python3 - "$E2E_PROXY_CONTROL" "$command" <<'PY'
+  python3 - "$E2E_PROXY_CONTROL" "$command" "$@" <<'PY'
 import json,socket,sys
+request={"command":sys.argv[2]}
+if len(sys.argv) > 3:
+    request["targets"]=",".join(sys.argv[3:])
 s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.connect(sys.argv[1])
-s.sendall(json.dumps({"command":sys.argv[2]}).encode()+b"\n")
+s.sendall(json.dumps(request).encode()+b"\n")
 f=s.makefile(); response=json.loads(f.readline())
 if not response.get("ok"): raise SystemExit(response.get("error","proxy command failed"))
 print(json.dumps(response,separators=(",",":"),sort_keys=True))

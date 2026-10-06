@@ -63,6 +63,7 @@ fn diagnostic_method(method: &str) -> &'static str {
         "pane.layout" => "pane.layout",
         "notification.show" => "notification.show",
         "session.snapshot" => "session.snapshot",
+        "integration.list" => "integration.list",
         _ => "<unknown>",
     }
 }
@@ -449,5 +450,11 @@ impl HerdrClient {
 
     pub fn session_snapshot(&mut self) -> Result<SessionSnapshot> {
         self.call_field("session.snapshot", json!({}), "snapshot")
+    }
+
+    // -- integration --------------------------------------------------------
+
+    pub fn integration_list(&mut self) -> Result<Vec<crate::types::IntegrationInfo>> {
+        self.call_field("integration.list", json!({}), "integrations")
     }
 }
