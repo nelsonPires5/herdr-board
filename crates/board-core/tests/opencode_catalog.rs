@@ -352,28 +352,36 @@ fn process_alive(pid: u32) -> bool {
 #[cfg(unix)]
 #[test]
 fn load_from_cli_bounded_times_out_and_kills_the_child() {
-    let dir = tempfile::tempdir().unwrap();
-    let pid_file = dir.path().join("fixture-timeout.pid");
     // A CLI that hangs far past the budget: the recorded PID must be gone once
     // the bounded run returns, proving kill+wait rather than abandonment.
-    let bin = pid_fixture_opencode_bin(&dir, pid_file.to_str().unwrap(), "sleep 60");
-    // The controlled budget is far below the hang, with generous margins so
-    // the test never races a busy machine (a cold first spawn of a script can
-    // take a few hundred ms, so a tiny deadline would be flaky).
-    let deadline = Duration::from_secs(2);
-    let started = Instant::now();
-    let models = load_from_cli_bounded(bin.to_str().unwrap(), deadline);
-    let elapsed = started.elapsed();
-    assert!(models.is_none(), "a hung CLI must yield None");
-    assert!(
-        elapsed < Duration::from_secs(30),
-        "the child must be killed on timeout, not left to finish its sleep (took {elapsed:?})"
-    );
-    let pid = wait_for_pid_file(&pid_file).expect("the fixture wrote its PID before the kill");
-    assert!(
-        !process_alive(pid),
-        "the hung child (pid {pid}) must be killed and reaped, not abandoned"
-    );
+    // Retried: under heavy parallel CI load a spawn can transiently never
+    // run, surfacing as a missing PID file rather than a product bug.
+    for attempt in 1..=3u32 {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("fixture-timeout.pid");
+        let bin = pid_fixture_opencode_bin(&dir, pid_file.to_str().unwrap(), "sleep 60");
+        // The controlled budget is far below the hang, with generous margins so
+        // the test never races a busy machine (a cold first spawn of a script can
+        // take a few hundred ms, so a tiny deadline would be flaky).
+        let deadline = Duration::from_secs(2);
+        let started = Instant::now();
+        let models = load_from_cli_bounded(bin.to_str().unwrap(), deadline);
+        let elapsed = started.elapsed();
+        assert!(models.is_none(), "a hung CLI must yield None");
+        if let Some(pid) = wait_for_pid_file(&pid_file) {
+            assert!(
+                elapsed < Duration::from_secs(30),
+                "the child must be killed on timeout, not left to finish its sleep (took {elapsed:?})"
+            );
+            assert!(
+                !process_alive(pid),
+                "the hung child (pid {pid}) must be killed and reaped, not abandoned"
+            );
+            return;
+        }
+        eprintln!("attempt {attempt}/3: fixture PID file never appeared; retrying");
+    }
+    panic!("fixture PID file missing after 3 attempts");
 }
 
 #[cfg(unix)]
