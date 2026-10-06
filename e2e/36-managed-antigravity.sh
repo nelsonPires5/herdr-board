@@ -167,12 +167,12 @@ import json, sys
 tabs = json.loads(sys.argv[1]).get("tabs", [])
 panes = json.loads(sys.argv[2]).get("panes", [])
 card, pane = sys.argv[3:5]
-match = [t for t in tabs if t.get("label") == f"card-{card}"]
+match = [t for t in tabs if t.get("label") == f"card-{card} antigravity-mint"]
 assert len(match) == 1, f"expected one card-{card} tab, got {len(match)}"
 owned = [p for p in panes if p.get("tab_id") == match[0]["tab_id"]]
 assert len(owned) == 1, f"expected exactly one pane in the mint tab, got {len(owned)}"
 assert owned[0]["pane_id"] == pane and owned[0].get("agent") == "agy"
-assert not any(p.get("label") == f"card-{card}-anchor" for p in owned)
+assert not any((p.get("label") or "").endswith("-anchor") for p in owned)
 PY
 ok "mint tab holds exactly the one agy pane, no anchor"
 
@@ -242,12 +242,12 @@ import json, sys
 tabs = json.loads(sys.argv[1]).get("tabs", [])
 panes = json.loads(sys.argv[2]).get("panes", [])
 card, pane = sys.argv[3:5]
-match = [t for t in tabs if t.get("label") == f"card-{card}"]
+match = [t for t in tabs if t.get("label") == f"card-{card} antigravity-mint"]
 assert len(match) == 1
 owned = [p for p in panes if p.get("tab_id") == match[0]["tab_id"]]
 assert len(owned) == 1, f"expected exactly one pane in the retry tab, got {len(owned)}"
 assert owned[0]["pane_id"] == pane and owned[0].get("agent") == "agy"
-assert not any(p.get("label") == f"card-{card}-anchor" for p in owned)
+assert not any((p.get("label") or "").endswith("-anchor") for p in owned)
 PY
 ok "the retry's fresh launch recreated the card tab with exactly one agy pane"
 
@@ -303,12 +303,12 @@ assert argv1 == ["agy", "--model", "gemini-3.7-flash", "--effort", "medium",
                  "--conversation", session], f"hop argv {argv1} != --conversation argv"
 panes = json.loads(panes_json).get("panes", [])
 tabs = json.loads(tabs_json).get("tabs", [])
-match = [t for t in tabs if t.get("label") == f"card-{card}"]
+match = [t for t in tabs if t.get("label") == f"card-{card} antigravity-chain"]
 assert len(match) == 1
 owned = [p for p in panes if p.get("tab_id") == match[0]["tab_id"]]
 assert len(owned) == 1 and owned[0].get("agent") == "agy", f"tab holds {len(owned)} panes"
 assert owned[0]["pane_id"] == runs[1]["herdr_pane_id"]
-assert not any(p.get("label") == f"card-{card}-anchor" for p in owned)
+assert not any((p.get("label") or "").endswith("-anchor") for p in owned)
 print("  Chain: 2 runs share conversation %s but use DIFFERENT panes (%s -> %s)" %
       (session, runs[0]["herdr_pane_id"], runs[1]["herdr_pane_id"]), file=sys.stderr)
 PY
@@ -464,7 +464,7 @@ tabs = json.loads(sys.argv[1]).get("tabs", [])
 panes = json.loads(sys.argv[2]).get("panes", [])
 rescued_tab, card, pane = sys.argv[3:6]
 match = [t for t in tabs if t.get("tab_id") == rescued_tab]
-assert len(match) == 1 and match[0].get("label") == f"card-{card}"
+assert len(match) == 1 and match[0].get("label") == f"card-{card} antigravity-rescue"
 owned = [p for p in panes if p.get("tab_id") == rescued_tab]
 assert len(owned) == 1 and owned[0]["pane_id"] == pane and owned[0].get("agent") == "agy"
 assert not any(p.get("label") == f"card-{card}-anchor" for p in owned)

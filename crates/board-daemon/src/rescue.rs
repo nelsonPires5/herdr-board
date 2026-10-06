@@ -39,7 +39,7 @@ pub(crate) fn focus_run(d: &Arc<Daemon>, p: RunFocusParams) -> Result<Value> {
     // keeps "this run can never be reopened" reportable even with Herdr down,
     // and preserves the pre-rescue error code for that dead end.
     let identity = match &recorded_pane_id {
-        None => Some(rescue_identity(d, &run, None)?),
+        None => Some(rescue_identity(d, &run, &card, None)?),
         Some(_) => None,
     };
     let registry = d
@@ -105,7 +105,7 @@ pub(crate) fn focus_run(d: &Arc<Daemon>, p: RunFocusParams) -> Result<Value> {
     // is written to the database — see `rescue_run`.
     let identity = match identity {
         Some(identity) => identity,
-        None => rescue_identity(d, &run, recorded_pane_id.as_deref())?,
+        None => rescue_identity(d, &run, &card, recorded_pane_id.as_deref())?,
     };
     let (action, pane_id) = rescue_run(d, &run, &card, identity, &target_socket)?;
     Ok(json!(RunFocusResult {
@@ -139,6 +139,7 @@ struct RescueIdentity {
 fn rescue_identity(
     d: &Arc<Daemon>,
     run: &Run,
+    card: &Card,
     recorded_pane_id: Option<&str>,
 ) -> Result<RescueIdentity> {
     // How to describe the dead end in every message below.
@@ -191,7 +192,7 @@ fn rescue_identity(
     let mut execution =
         harness::resume_invocation(&run.harness, support, launch_spec.execution(), &session_id)
             .map_err(crate::dispatch::map_harness_err)?;
-    rescue_board_env(d, run, &mut execution)?;
+    rescue_board_env(d, run, card, &mut execution)?;
 
     // 4. The workspace the run actually ran in. Its liveness is probed later
     //    (against live Herdr); here only the recorded id is required, and a
@@ -245,11 +246,14 @@ fn rescue_identity(
 fn rescue_board_env(
     d: &Arc<Daemon>,
     run: &Run,
+    card: &Card,
     execution: &mut board_core::launch::ExecutionSpec,
 ) -> Result<()> {
     // The resume spec already carries BOARD_RESCUE + BOARD_RESUME_SESSION_ID.
     // `None` is what withholds `BOARD_RUN_ID` from the shared dispatch helper.
-    let mut injected = crate::dispatch::board_env(run.card_id, None, &d.socket_path)?;
+    // The card title travels with it, so a rescued pane names the same card
+    // its dispatch-time tab label did.
+    let mut injected = crate::dispatch::board_env(run.card_id, &card.title, None, &d.socket_path)?;
     injected.push(("BOARD_RESCUED_RUN_ID".to_string(), run.id.to_string()));
     for (key, value) in injected {
         // The persisted spec never sets these, but never shadow it silently.
@@ -299,7 +303,11 @@ fn rescue_run(
     // colliding with a live original run pane. Treat it as a diagnostic hint, not
     // a record — see `spawner::rescue::find_rescued_pane`.
     let marker_name = format!("card-{}-r{}-rescue", run.card_id, run.id);
-    let tab_label = format!("card-{}", run.card_id);
+    // Same label dispatch uses (`card-<id> <slug>`), so a rescue lands in the
+    // card's tab instead of opening a second one. A rename between dispatch
+    // and rescue only affects freshly created tabs: existing tabs are reused
+    // by exact tab id, never by this label.
+    let tab_label = capability::card_tab_label(run.card_id, &card.title);
 
     // 6. The placement workspace is the run's recorded workspace when it is
     //    still usable; otherwise it is a replacement resolved from the card's

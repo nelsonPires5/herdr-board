@@ -25,8 +25,8 @@ resume = false             # can this harness resume a recorded conversation? de
 ```
 
 Custom harness prompts are delivered through `$BOARD_PROMPT`. The placeholders `{model}`, `{effort}`,
-and `{permission_mode}` are available in `argv`. Optional keys `models`, `efforts`, and
-`permission_modes` declare the harness's capability catalog.
+`{permission_mode}`, `{card_id}`, `{card_title}`, and `{card_short_name}` are available in `argv`.
+Optional keys `models`, `efforts`, and `permission_modes` declare the harness's capability catalog.
 
 `resume` declares whether this harness can re-attach to a conversation it recorded earlier, which is
 what lets `board card run focus` **reopen a run whose pane was closed** (see

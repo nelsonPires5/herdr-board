@@ -58,7 +58,11 @@ fn is_card_tab(label: &str) -> bool {
 }
 
 fn anchor_label(tab_label: &str) -> String {
-    format!("{tab_label}-anchor")
+    // Stable `card-<id>-anchor`, independent of the human-readable tab suffix
+    // (`card-7 fix-login-redirect` → `card-7-anchor`, never
+    // `card-7 fix-login-redirect-anchor`). See
+    // `board_core::capability::anchor_label_for_tab`.
+    board_core::capability::anchor_label_for_tab(tab_label)
 }
 
 /// Keep per-run values out of the long-lived anchor shell. The child receives

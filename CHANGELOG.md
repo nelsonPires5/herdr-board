@@ -10,6 +10,10 @@ All notable changes to this project are documented here. The format is based on
 
 - [#132](https://github.com/nelsonPires5/herdr-board/pull/132) feat: Offer only Herdr-installed harnesses in the card and column pickers, defaulting new cards to an installed harness (issue #111).
 
+### Changed
+
+- [#136](https://github.com/nelsonPires5/herdr-board/pull/136) feat: Name each card's run tab after the card, and offer card placeholders to custom harnesses (issue #134).
+
 ### Fixed
 
 - [#136](https://github.com/nelsonPires5/herdr-board/pull/136) fix: Show the card form cwd field for workspace cards so the directory can be set and kept (issue #131).

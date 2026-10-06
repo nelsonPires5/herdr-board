@@ -759,9 +759,20 @@ const SLUG_MAX: usize = 24;
 /// non-ascii-alphanumeric characters collapsed to a single `-`, trimmed of
 /// leading/trailing `-`, truncated to [`SLUG_MAX`] chars without ending on `-`.
 fn column_slug(column_name: &str) -> String {
+    slugify_raw(column_name, SLUG_MAX)
+}
+
+/// Join slug words with `-`, then apply the shared collapse: lowercased, every
+/// run of non-ascii-alphanumeric characters collapsed to a single `-`, trimmed
+/// of leading/trailing `-`, truncated to `max` chars without ending on `-`.
+fn slugify_words(words: &[&str], max: usize) -> String {
+    slugify_raw(&words.join("-"), max)
+}
+
+fn slugify_raw(raw: &str, max: usize) -> String {
     let mut slug = String::new();
     let mut prev_dash = false;
-    for ch in column_name.chars() {
+    for ch in raw.chars() {
         if ch.is_ascii_alphanumeric() {
             slug.push(ch.to_ascii_lowercase());
             prev_dash = false;
@@ -770,15 +781,65 @@ fn column_slug(column_name: &str) -> String {
             prev_dash = true;
         }
     }
-    let mut out: String = slug.trim_matches('-').chars().take(SLUG_MAX).collect();
+    let mut out: String = slug.trim_matches('-').chars().take(max).collect();
     while out.ends_with('-') {
         out.pop();
     }
     out
 }
 
+/// Short display slug for a card title: the first four whitespace-separated
+/// words in lowercase-kebab form, truncated to [`CARD_SLUG_MAX`] chars without
+/// ending on `-`. Derived at launch time from the live title, so no stored
+/// short name (and no migration) can drift behind a rename.
+const CARD_SLUG_MAX: usize = 32;
+
+pub fn card_short_name(title: &str) -> String {
+    let words: Vec<&str> = title.split_whitespace().take(4).collect();
+    slugify_words(&words, CARD_SLUG_MAX)
+}
+
+/// Stable anchor pane label for a card: `card-<id>-anchor` (e.g.
+/// `card-7-anchor`). Independent of the human-readable tab suffix: anchors
+/// never append `-anchor` to the full tab label, so a rename cannot orphan
+/// them.
+pub fn card_anchor_label(card_id: i64) -> String {
+    format!("card-{card_id}-anchor")
+}
+
+/// Derive the stable anchor label from a card tab label (`card-<id>` or
+/// `card-<id> <slug>`). The anchor is always `card-<id>-anchor`, never
+/// `<full-tab-label>-anchor` (which would yield the unstable
+/// `card-7 fix-login-redirect-anchor`). Falls back to `{tab_label}-anchor`
+/// for non-card labels (legacy `kanban` never reaches here).
+pub fn anchor_label_for_tab(tab_label: &str) -> String {
+    let first = tab_label.split_whitespace().next().unwrap_or(tab_label);
+    if let Some(id) = first.strip_prefix("card-") {
+        if !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()) {
+            return format!("{first}-anchor");
+        }
+    }
+    format!("{tab_label}-anchor")
+}
+
+/// Display label for a card's durable run tab: `card-<id> <short-name>` (e.g.
+/// `card-7 fix-login-redirect`), or bare `card-<id>` when the title has no
+/// slug words. The `card-` prefix is load-bearing (ownership discovery keys on
+/// it); the suffix is display metadata only — pane labels, the stable
+/// [`card_anchor_label`]/[`anchor_label_for_tab`] anchor, and the rescue
+/// marker never include it, so a rename cannot orphan them.
+pub fn card_tab_label(card_id: i64, title: &str) -> String {
+    let slug = card_short_name(title);
+    if slug.is_empty() {
+        format!("card-{card_id}")
+    } else {
+        format!("card-{card_id} {slug}")
+    }
+}
+
 /// Stable run-pane name: `card-<id>-<column-slug>` (e.g. `card-14-execute`).
-/// An empty slug yields just `card-<id>`.
+/// An empty slug yields just `card-<id>`. Unchanged by card-tab naming: pane
+/// labels stay machine-shaped so rescue correlation keeps working.
 pub fn run_pane_name(card_id: i64, column_name: &str) -> String {
     let slug = column_slug(column_name);
     if slug.is_empty() {

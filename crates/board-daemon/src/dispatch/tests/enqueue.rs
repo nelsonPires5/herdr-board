@@ -506,9 +506,10 @@ async fn queued_managed_pi_uses_enqueue_time_system_snapshot() {
     assert_eq!(req.initial_prompt, exact.initial_prompt);
     assert_eq!(req.system_prompt, exact.system_prompt);
     assert_eq!(req.agent_kind.as_deref(), Some("pi"));
+    // The run tab is labeled with the card's short name, not just its id.
     assert_eq!(
         req.tab_label.as_deref(),
-        Some(format!("card-{card_id}").as_str())
+        Some(board_core::capability::card_tab_label(card_id, "snapshot dispatch").as_str())
     );
     assert_eq!(
         req.initial_prompt.as_deref(),
@@ -586,7 +587,9 @@ async fn queued_configured_harness_uses_enqueue_time_system_snapshot() {
     assert_eq!(req.initial_prompt, exact.initial_prompt);
     assert_eq!(req.system_prompt, exact.system_prompt);
     assert_eq!(&req.env[..exact.env.len()], exact.env.as_slice());
-    assert_eq!(req.env.len(), exact.env.len() + 4);
+    // Dispatch appends the six board variables (card id/title/short-name, run
+    // id, socket, binary) after the persisted execution env.
+    assert_eq!(req.env.len(), exact.env.len() + 6);
     let env = &req.env;
     assert_eq!(
         env.iter()
@@ -754,19 +757,41 @@ fn prepare_enqueue_values_is_deterministic_for_equivalent_inputs() {
 #[test]
 fn board_env_carries_the_run_id_for_dispatch_and_withholds_it_for_a_rescue() {
     let socket = std::path::Path::new("/tmp/boardd.sock");
-    let dispatched: Vec<String> = board_env(7, Some(42), socket)
+    let dispatched: Vec<String> = board_env(7, "Fix login redirect", Some(42), socket)
         .unwrap()
         .into_iter()
         .map(|(key, _)| key)
         .collect();
     assert_eq!(
         dispatched,
-        ["BOARD_CARD_ID", "BOARD_RUN_ID", "BOARD_SOCKET", "BOARD_BIN"]
+        [
+            "BOARD_CARD_ID",
+            "BOARD_CARD_TITLE",
+            "BOARD_CARD_SHORT_NAME",
+            "BOARD_RUN_ID",
+            "BOARD_SOCKET",
+            "BOARD_BIN"
+        ]
+    );
+    let dispatched = board_env(7, "Fix login redirect", Some(42), socket).unwrap();
+    assert_eq!(
+        dispatched
+            .iter()
+            .find(|(key, _)| key == "BOARD_CARD_TITLE")
+            .map(|(_, value)| value.as_str()),
+        Some("Fix login redirect")
+    );
+    assert_eq!(
+        dispatched
+            .iter()
+            .find(|(key, _)| key == "BOARD_CARD_SHORT_NAME")
+            .map(|(_, value)| value.as_str()),
+        Some("fix-login-redirect")
     );
 
     // A rescued pane belongs to no run, so it must not receive the actor
     // credential `board comment`/`board done` authenticate with.
-    let rescued = board_env(7, None, socket).unwrap();
+    let rescued = board_env(7, "Fix login redirect", None, socket).unwrap();
     assert!(rescued.iter().all(|(key, _)| key != "BOARD_RUN_ID"));
     assert_eq!(
         rescued

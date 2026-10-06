@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 02-kanban-grid.sh — dispatch several cards into one auto column and assert
-# that each card gets its own stable `card-<id>` tab.
+# that each card gets its own stable `card-<id> <short-name>` tab.
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/lib.sh"
 
@@ -33,8 +33,10 @@ tabs=json.loads(sys.argv[1]).get("tabs",[])
 panes=json.loads(sys.argv[2]).get("panes",[])
 ids=sys.argv[3:]
 assert not any(t.get("label")=="kanban" for t in tabs)
-for card in ids:
-    label=f"card-{card}"
+for n, card in enumerate(ids, start=1):
+    # Run tabs carry the card short name (`card-<id> <slug>`); the anchor
+    # stays stable as `card-<id>-anchor`, independent of that suffix.
+    label=f"card-{card} grid-card-{n}"
     matches=[t for t in tabs if t.get("label")==label]
     assert len(matches)==1
     tab=matches[0]

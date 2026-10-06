@@ -177,8 +177,8 @@ python3 - "$tabs_json" "$panes_json" "$PI_PANE_ID" "$CLAUDE_PANE_ID" "$PI_ID" "$
 import json, sys
 tabs=json.loads(sys.argv[1]).get("tabs",[]); panes=json.loads(sys.argv[2]).get("panes",[])
 pi_id, claude_id, pi_card, claude_card = sys.argv[3:]
-pi_tab=[t for t in tabs if t.get("label")==f"card-{pi_card}"]
-claude_tab=[t for t in tabs if t.get("label")==f"card-{claude_card}"]
+pi_tab=[t for t in tabs if t.get("label")==f"card-{pi_card} p17-pi"]
+claude_tab=[t for t in tabs if t.get("label")==f"card-{claude_card} p17-claude"]
 assert len(pi_tab)==len(claude_tab)==1
 assert pi_tab[0]["tab_id"] != claude_tab[0]["tab_id"]
 by_id={p["pane_id"]: p for p in panes}
@@ -192,7 +192,7 @@ for card, tab, harness_id in ((pi_card, pi_tab[0], pi_id), (claude_card, claude_
     # exactly the harness pane and nothing else.
     assert len(owned) == 1
     assert owned[0]["pane_id"] == harness_id
-    assert not any(p.get("label") == f"card-{card}-anchor" for p in owned)
+    assert not any((p.get("label") or "").endswith("-anchor") and (p.get("label") or "").startswith(f"card-{card}") for p in owned)
 PY
 for managed_pane in "$PI_PANE_ID" "$CLAUDE_PANE_ID"; do
   layout_json="$(hrpc pane.layout "{\"pane_id\":\"$managed_pane\"}")"

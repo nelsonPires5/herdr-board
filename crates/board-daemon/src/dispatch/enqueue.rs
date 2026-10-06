@@ -3,7 +3,9 @@ use std::sync::Arc;
 use board_core::config::Config;
 use board_core::db::Db;
 use board_core::engine::{decide_resumability, validate_effective_settings, ResumabilityDecision};
-use board_core::harness::{build_invocation, is_builtin_harness, plan_session, SessionPlan};
+use board_core::harness::{
+    build_invocation_for_card, is_builtin_harness, plan_session, CardScope, SessionPlan,
+};
 use board_core::launch::{ExecutionSpec, RunLaunchSpec};
 use board_core::model::{Card, Run};
 use board_core::prompt::{assemble_prompt, effective_settings};
@@ -127,13 +129,17 @@ pub(crate) fn prepare_enqueue_values(
     let plan = plan_session(existing_session, settings.fresh_session, is_retry);
     let target_session = matches!(plan, SessionPlan::Mint | SessionPlan::Fork(_))
         .then(|| Uuid::new_v4().to_string());
-    let invocation = build_invocation(
+    let invocation = build_invocation_for_card(
         &settings.harness,
         &d.config,
         &settings,
         &plan,
         target_session.as_deref(),
         &prompt,
+        Some(CardScope {
+            id: card.id,
+            title: &card.title,
+        }),
     )
     .map_err(map_harness_err)?;
     let session_id = invocation

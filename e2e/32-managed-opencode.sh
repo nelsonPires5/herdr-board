@@ -174,12 +174,12 @@ import json, sys
 tabs = json.loads(sys.argv[1]).get("tabs", [])
 panes = json.loads(sys.argv[2]).get("panes", [])
 card, pane = sys.argv[3:5]
-match = [t for t in tabs if t.get("label") == f"card-{card}"]
+match = [t for t in tabs if t.get("label") == f"card-{card} opencode-mint"]
 assert len(match) == 1, f"expected one card-{card} tab, got {len(match)}"
 owned = [p for p in panes if p.get("tab_id") == match[0]["tab_id"]]
 assert len(owned) == 1, f"expected exactly one pane in the mint tab, got {len(owned)}"
 assert owned[0]["pane_id"] == pane and owned[0].get("agent") == "opencode"
-assert not any(p.get("label") == f"card-{card}-anchor" for p in owned)
+assert not any((p.get("label") or "").endswith("-anchor") for p in owned)
 PY
 ok "mint tab holds exactly the one OpenCode pane, no anchor"
 
@@ -248,12 +248,12 @@ import json, sys
 tabs = json.loads(sys.argv[1]).get("tabs", [])
 panes = json.loads(sys.argv[2]).get("panes", [])
 card, pane = sys.argv[3:5]
-match = [t for t in tabs if t.get("label") == f"card-{card}"]
+match = [t for t in tabs if t.get("label") == f"card-{card} opencode-mint"]
 assert len(match) == 1
 owned = [p for p in panes if p.get("tab_id") == match[0]["tab_id"]]
 assert len(owned) == 1, f"expected exactly one pane in the fork tab, got {len(owned)}"
 assert owned[0]["pane_id"] == pane and owned[0].get("agent") == "opencode"
-assert not any(p.get("label") == f"card-{card}-anchor" for p in owned)
+assert not any((p.get("label") or "").endswith("-anchor") for p in owned)
 PY
 ok "the fork's fresh launch recreated the card tab with exactly one OpenCode pane"
 
@@ -309,12 +309,12 @@ assert "--variant" not in argv0 and "-m" not in argv0
 assert argv1[-2:] == ["-s", session], f"reuse hop argv tail {argv1[-2:]} != ['-s', {session}]"
 panes = json.loads(panes_json).get("panes", [])
 tabs = json.loads(tabs_json).get("tabs", [])
-match = [t for t in tabs if t.get("label") == f"card-{card}"]
+match = [t for t in tabs if t.get("label") == f"card-{card} opencode-reuse"]
 assert len(match) == 1
 owned = [p for p in panes if p.get("tab_id") == match[0]["tab_id"]]
 assert len(owned) == 1 and owned[0].get("agent") == "opencode", f"tab holds {len(owned)} panes"
 assert owned[0]["pane_id"] == runs[1]["herdr_pane_id"]
-assert not any(p.get("label") == f"card-{card}-anchor" for p in owned)
+assert not any((p.get("label") or "").endswith("-anchor") for p in owned)
 print("  Reuse: 2 runs share pane %s and session %s (off -> config variant none)" %
       (runs[1]["herdr_pane_id"], session), file=sys.stderr)
 PY
@@ -455,10 +455,10 @@ tabs = json.loads(sys.argv[1]).get("tabs", [])
 panes = json.loads(sys.argv[2]).get("panes", [])
 rescued_tab, card, pane = sys.argv[3:6]
 match = [t for t in tabs if t.get("tab_id") == rescued_tab]
-assert len(match) == 1 and match[0].get("label") == f"card-{card}"
+assert len(match) == 1 and match[0].get("label") == f"card-{card} opencode-rescue"
 owned = [p for p in panes if p.get("tab_id") == rescued_tab]
 assert len(owned) == 1 and owned[0]["pane_id"] == pane and owned[0].get("agent") == "opencode"
-assert not any(p.get("label") == f"card-{card}-anchor" for p in owned)
+assert not any((p.get("label") or "").endswith("-anchor") for p in owned)
 PY
 ok "the managed rescue closed its anchor; the recreated tab holds exactly one OpenCode pane"
 

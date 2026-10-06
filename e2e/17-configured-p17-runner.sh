@@ -105,7 +105,7 @@ panes_json="$(hrpc pane.list "{\"workspace_id\":\"$WS_ID\"}")"
 python3 - "$tabs_json" "$panes_json" "$CARD_ID" <<'PY'
 import json, re, sys
 tabs=json.loads(sys.argv[1]).get("tabs",[]); panes=json.loads(sys.argv[2]).get("panes",[])
-card=sys.argv[3]; card_tabs=[t for t in tabs if t.get("label")==f"card-{card}"]
+card=sys.argv[3]; card_tabs=[t for t in tabs if t.get("label")==f"card-{card} p17-configured"]
 assert len(card_tabs)==1
 kp=[p for p in panes if p.get("tab_id")==card_tabs[0]["tab_id"]]
 assert any(p.get("label") == f"card-{card}-anchor" and not p.get("agent") for p in kp)

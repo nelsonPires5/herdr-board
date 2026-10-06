@@ -13,7 +13,9 @@ EXEC_ID="$(col_create '{"name":"Execute","trigger":"auto"}')"
 card_json="$($BOARD_BIN card new --title 'Per-card tabs' --description 'tab ownership' \
   --harness fake --space-kind workspace --space-ref "$WS_ID" --json)"
 CARD_ID="$(printf '%s' "$card_json" | jget id)"
-CARD_TAB_LABEL="card-$CARD_ID"
+# The board names the run tab after the card (`card-<id> <short-name>`); the
+# duplicate user tab below must use that exact label to test the collision.
+CARD_TAB_LABEL="card-$CARD_ID per-card-tabs"
 # A duplicate label is a user tab, not an ownership claim.
 USER_TAB="$(e2e_herdr_mutate -- tab create --workspace "$WS_ID" --label "$CARD_TAB_LABEL" --no-focus)"
 USER_TAB_ID="$(printf '%s' "$USER_TAB" | jget tab_id)"
@@ -93,7 +95,9 @@ panes=json.loads(sys.argv[1]).get('panes',[])
 pane, tab, label, old_anchor=sys.argv[2:]
 assert next(p for p in panes if p.get('pane_id')==pane).get('tab_id') == tab
 owned=[p for p in panes if p.get('tab_id')==tab]
-anchors=[p for p in owned if p.get('label')==f"{label}-anchor" and not p.get('agent')]
+# The anchor stays stable as `card-<id>-anchor`, independent of the tab suffix.
+card_id=label.split()[0]
+anchors=[p for p in owned if p.get('label')==f"{card_id}-anchor" and not p.get('agent')]
 assert len(anchors)==1 and anchors[0].get('pane_id') != old_anchor
 assert pane != anchors[0].get('pane_id')
 PY
@@ -112,7 +116,9 @@ pane, user, old, label=sys.argv[2:]
 new=next(p for p in panes if p.get('pane_id')==pane).get('tab_id')
 assert new not in {user, old}
 owned=[p for p in panes if p.get('tab_id')==new]
-anchors=[p for p in owned if p.get('label')==f"{label}-anchor" and not p.get('agent')]
+# The anchor stays stable as `card-<id>-anchor`, independent of the tab suffix.
+card_id=label.split()[0]
+anchors=[p for p in owned if p.get('label')==f"{card_id}-anchor" and not p.get('agent')]
 assert len(anchors)==1 and pane != anchors[0].get('pane_id')
 PY
 ok "closed owned tab was recreated without selecting a duplicate-label user tab"
