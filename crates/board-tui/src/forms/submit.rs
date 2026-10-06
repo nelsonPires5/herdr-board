@@ -48,7 +48,7 @@ impl Form {
                     session: self.current_session(),
                     space_kind: self.opt_space_kind(),
                     space_ref: self.card_space_ref(),
-                    space_cwd: self.new_workspace_cwd(),
+                    space_cwd: self.space_cwd(),
                     position: None,
                 }))
             }
@@ -72,7 +72,7 @@ impl Form {
                     session: Patch::from_option(self.current_session()),
                     space_kind: self.opt_space_kind(),
                     space_ref: Patch::from_option(self.card_space_ref()),
-                    space_cwd: Patch::from_option(self.new_workspace_cwd()),
+                    space_cwd: Patch::from_option(self.space_cwd()),
                 }))
             }
             FormKind::ColumnCreate => {
@@ -189,7 +189,7 @@ impl Form {
             FormKind::CardCreate { .. } | FormKind::CardEdit { .. } => validate_card_space(
                 self.opt_space_kind().unwrap_or(SpaceKind::Workspace),
                 self.card_space_ref().as_deref(),
-                self.new_workspace_cwd().as_deref(),
+                self.space_cwd().as_deref(),
             ),
             FormKind::ColumnCreate | FormKind::ColumnEdit { .. } => {
                 validate_column_permission_override(
@@ -256,13 +256,10 @@ impl Form {
         self.opt_choice_str(FieldId::SpaceKind)
             .and_then(|s| SpaceKind::parse_str(&s))
     }
-    /// The `cwd` text, only for a `new_workspace` space (else `None`).
-    fn new_workspace_cwd(&self) -> Option<String> {
-        if self.space_kind_is_new_workspace() {
-            self.opt_text(FieldId::SpaceCwd)
-        } else {
-            None
-        }
+    /// The `cwd` text for either space kind: required for `new_workspace`,
+    /// an explicit override for `workspace`.
+    fn space_cwd(&self) -> Option<String> {
+        self.opt_text(FieldId::SpaceCwd)
     }
     pub(super) fn opt_int(&self, id: FieldId) -> Option<i64> {
         self.opt_text(id).and_then(|s| s.parse().ok())

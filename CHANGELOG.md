@@ -16,6 +16,7 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- [#136](https://github.com/nelsonPires5/herdr-board/pull/136) fix: Show the card form cwd field for workspace cards so the directory can be set and kept (issue #131).
 - [#135](https://github.com/nelsonPires5/herdr-board/pull/135) fix: New Task description scrolls with wrapped lines (issue #114).
 
 ## [0.18.0] - 2026-09-23

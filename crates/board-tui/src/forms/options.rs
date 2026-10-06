@@ -363,14 +363,15 @@ impl Form {
     // -- focus / visibility --------------------------------------------------
 
     /// Whether a field is currently shown. The `(custom)` free-text companion
-    /// appears only when the `SpaceRef` selector is on `(custom)`; `cwd` only for
-    /// the `new_workspace` space kind; both `permission` selectors disappear
+    /// appears only when the `SpaceRef` selector is on `(custom)`; `cwd` shows for
+    /// both space kinds (required for `new_workspace`, explicit override for
+    /// `workspace`); both `permission` selectors disappear
     /// when the driving harness has no permission modes (e.g. Pi); the column
     /// `system prompt` is hidden for `manual` triggers (no run → no prompt) but
     /// stays in the field list so its value is preserved and submitted.
     pub fn field_visible(&self, idx: usize) -> bool {
         match self.fields[idx].id {
-            FieldId::SpaceCwd => self.space_kind_is_new_workspace(),
+            FieldId::SpaceCwd => true,
             FieldId::ModelCustom => self.model_is_custom(),
             FieldId::Permission | FieldId::PermissionOverride => self.permission_is_applicable(),
             FieldId::SpaceRefCustom => self.space_ref_is_custom(),
@@ -413,15 +414,6 @@ impl Form {
             Some(caps) => Cow::Borrowed(caps),
             None => Cow::Owned(default_capabilities(&self.current_harness())),
         }
-    }
-
-    pub(super) fn space_kind_is_new_workspace(&self) -> bool {
-        self.fields
-            .iter()
-            .find(|f| f.id == FieldId::SpaceKind)
-            .and_then(|f| f.choice_val())
-            .map(|v| matches!(v, ChoiceVal::Str(s) if s == "new_workspace"))
-            .unwrap_or(false)
     }
 
     /// Move focus to the next/previous visible field (wrapping).

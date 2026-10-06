@@ -133,28 +133,30 @@ fn form_field_cycling_wraps_and_skips_hidden() {
     update(&mut app, key(KeyCode::Char('n'))); // open new-card form
     assert_eq!(app.screen, Screen::CardForm);
 
-    // Focus starts at Title (0). Tab advances; `cwd` is hidden while the space
-    // kind is `workspace`, so the visible-field walk skips it.
+    // Focus starts at Title (0). Tab advances; `cwd` is visible for both space
+    // kinds (required for `new_workspace`, explicit override for `workspace`),
+    // so the visible-field walk includes it.
     let start = app.form.as_ref().unwrap().focus;
     assert_eq!(start, 0);
     update(&mut app, key(KeyCode::Tab));
     assert_eq!(app.form.as_ref().unwrap().focus, 1);
 
-    // BackTab from field 0 wraps to the last *visible* field.
+    // BackTab from field 0 wraps to the last *visible* field, which is now
+    // the always-visible `cwd` field.
     while app.form.as_ref().unwrap().focus != 0 {
         update(&mut app, key(KeyCode::BackTab));
     }
     update(&mut app, key(KeyCode::BackTab));
     let last = app.form.as_ref().unwrap().focus;
     assert!(app.form.as_ref().unwrap().field_visible(last));
-    assert_ne!(
+    assert_eq!(
         app.form.as_ref().unwrap().fields[last].id,
         FieldId::SpaceCwd
     );
 }
 
 #[test]
-fn cwd_visibility_follows_space_kind() {
+fn cwd_visible_for_both_space_kinds() {
     let mut form = Form::card_create(1);
     // Find the space-kind choice field and cycle it to "new workspace".
     let space_idx = form
@@ -167,8 +169,8 @@ fn cwd_visibility_follows_space_kind() {
         .iter()
         .position(|f| f.id == FieldId::SpaceCwd)
         .unwrap();
-    assert!(!form.field_visible(cwd_idx)); // hidden by default (workspace)
-                                           // workspace -> new workspace
+    assert!(form.field_visible(cwd_idx)); // visible by default (workspace)
+                                          // workspace -> new workspace stays visible
     form.fields[space_idx].cycle(1);
     assert!(form.field_visible(cwd_idx));
 }
@@ -888,6 +890,50 @@ fn new_workspace_submit_carries_name_and_cwd() {
             assert_eq!(p.space_cwd.as_deref(), Some("/repo/feature"));
         }
         _ => panic!("expected CardCreate"),
+    }
+}
+
+#[test]
+fn workspace_submit_sends_explicit_cwd() {
+    // A `workspace`-kind card may carry an explicit `space_cwd` override
+    // (e.g. when the workspace's live panes disagree on cwd). The form shows
+    // `cwd` for both kinds and always submits its text.
+    let mut form = Form::card_create(1);
+    form.apply_options(Some(claude_capabilities()), None, Some(vec![]), None);
+    form.fields[0].set_text("t"); // title required
+    assert_eq!(
+        form.fields
+            .iter()
+            .find(|f| f.id == FieldId::SpaceKind)
+            .unwrap()
+            .display(),
+        "workspace"
+    );
+    form.fields
+        .iter_mut()
+        .find(|f| f.id == FieldId::SpaceCwd)
+        .unwrap()
+        .set_text("/repo/explicit");
+    match form.submit().unwrap() {
+        Submit::CardCreate(p) => {
+            assert_eq!(p.space_kind, Some(SpaceKind::Workspace));
+            assert_eq!(p.space_cwd.as_deref(), Some("/repo/explicit"));
+        }
+        _ => panic!("expected CardCreate"),
+    }
+
+    // Edit: saving without changes must preserve the stored override instead
+    // of clearing it.
+    let mut client = demo_client().unwrap();
+    let board = client.board_get().unwrap();
+    let mut card = board.cards.first().unwrap().clone();
+    card.space_cwd = Some("/repo/explicit".into());
+    let edit = Form::card_edit(&card);
+    match edit.submit().unwrap() {
+        Submit::CardUpdate(p) => {
+            assert!(matches!(p.space_cwd, Patch::Set(ref cwd) if cwd == "/repo/explicit"));
+        }
+        _ => panic!("expected CardUpdate"),
     }
 }
 
