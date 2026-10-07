@@ -432,6 +432,9 @@ fn action_event(screen: Screen, action: UiAction) -> Option<KeyEvent> {
         (Screen::CardDetail, A::CancelRun) => (KeyCode::Char('x'), KeyModifiers::NONE),
         (Screen::CardDetail, A::RetryRun) => (KeyCode::Char('r'), KeyModifiers::NONE),
         (Screen::CardDetail, A::CloseDetail) => (KeyCode::Esc, KeyModifiers::NONE),
+        (Screen::CardDetail, A::CardAction(i)) if i < 9 => {
+            (KeyCode::Char(char::from(b'1' + i)), KeyModifiers::NONE)
+        }
 
         (Screen::CardForm | Screen::ColumnForm, A::SubmitForm) => {
             (KeyCode::Enter, KeyModifiers::NONE)

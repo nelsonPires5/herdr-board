@@ -719,3 +719,29 @@ fn card_move_same_column_clamps_position_and_compacts() {
         .collect();
     assert_eq!(positions, vec![0, 1, 2]);
 }
+
+#[test]
+fn card_get_reports_config_card_actions_only_for_matching_columns() {
+    let d = test_daemon(Config {
+        card_actions: vec![board_core::config::CardActionDef {
+            label: "Review".into(),
+            columns: vec!["Todo".into()],
+            argv: vec!["review-tool".into(), "--flag".into()],
+        }],
+        ..Default::default()
+    });
+    let card = handle_request(&d, "card.create", json!({ "title": "t" })).unwrap();
+    let id = card["id"].as_i64().unwrap();
+    let detail = handle_request(&d, "card.get", json!({ "id": id })).unwrap();
+    assert_eq!(
+        detail["actions"],
+        json!([{ "label": "Review", "argv": ["review-tool", "--flag"] }])
+    );
+
+    // No action applies ⇒ the field is omitted from the wire.
+    let d = test_daemon(Config::default());
+    let card = handle_request(&d, "card.create", json!({ "title": "t" })).unwrap();
+    let id = card["id"].as_i64().unwrap();
+    let detail = handle_request(&d, "card.get", json!({ "id": id })).unwrap();
+    assert!(detail.get("actions").is_none(), "detail: {detail}");
+}

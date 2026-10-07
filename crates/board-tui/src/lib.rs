@@ -23,6 +23,7 @@
 //! so `board_tui::{Driver, OriginContext, run, run_with_board}` stay valid paths.
 
 pub mod app;
+pub mod command;
 pub mod driver;
 pub mod editor;
 pub mod forms;

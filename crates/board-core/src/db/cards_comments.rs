@@ -763,6 +763,7 @@ impl Db {
             card,
             comments: self.list_comments(id)?,
             runs: self.list_runs(id)?,
+            actions: Vec::new(),
         })
     }
 

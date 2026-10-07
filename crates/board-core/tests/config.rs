@@ -115,3 +115,75 @@ fn root_config_rejects_bad_values_and_malformed_toml() {
         Err(Error::Config(_))
     ));
 }
+
+#[test]
+fn card_actions_default_to_none() {
+    assert!(Config::default().card_actions.is_empty());
+    assert!(Config::from_toml("").unwrap().card_actions.is_empty());
+    assert!(Config::default().card_actions_for("Review").is_empty());
+}
+
+#[test]
+fn card_actions_parse_and_filter_by_column() {
+    let c = Config::from_toml(
+        r#"
+[[card_action]]
+label = "Review"
+columns = ["Code review"]
+argv = ["my-review-tool", "--base", "origin/main"]
+
+[[card_action]]
+label = "Open shell"
+argv = ["sh", "-c", "exec $SHELL"]
+"#,
+    )
+    .unwrap();
+    assert_eq!(c.card_actions.len(), 2);
+    assert_eq!(c.card_actions[0].label, "Review");
+    assert_eq!(c.card_actions[0].columns, vec!["Code review".to_string()]);
+
+    // Column names match trimmed and case-insensitively; an action without
+    // `columns` applies everywhere.
+    let in_review = c.card_actions_for(" code REVIEW ");
+    let labels: Vec<_> = in_review.iter().map(|a| a.label.as_str()).collect();
+    assert_eq!(labels, vec!["Review", "Open shell"]);
+    assert_eq!(
+        in_review[0].argv,
+        vec!["my-review-tool", "--base", "origin/main"]
+    );
+
+    let elsewhere = c.card_actions_for("Todo");
+    let labels: Vec<_> = elsewhere.iter().map(|a| a.label.as_str()).collect();
+    assert_eq!(labels, vec!["Open shell"]);
+}
+
+#[test]
+fn card_actions_are_capped_at_nine() {
+    let mut toml = String::new();
+    for i in 0..12 {
+        toml.push_str(&format!(
+            "[[card_action]]\nlabel = \"a{i}\"\nargv = [\"true\"]\n"
+        ));
+    }
+    let c = Config::from_toml(&toml).unwrap();
+    assert_eq!(c.card_actions.len(), 12);
+    let actions = c.card_actions_for("Todo");
+    assert_eq!(actions.len(), 9);
+    assert_eq!(actions[8].label, "a8");
+}
+
+#[test]
+fn card_actions_reject_empty_label_or_argv() {
+    for source in [
+        "[[card_action]]\nlabel = \"\"\nargv = [\"true\"]\n",
+        "[[card_action]]\nlabel = \"  \"\nargv = [\"true\"]\n",
+        "[[card_action]]\nlabel = \"x\"\nargv = []\n",
+        "[[card_action]]\nlabel = \"x\"\nargv = [\"\"]\n",
+        "[[card_action]]\nlabel = \"x\"\n",
+    ] {
+        assert!(
+            matches!(RootConfig::from_toml(source), Err(Error::Config(_))),
+            "accepted: {source}"
+        );
+    }
+}

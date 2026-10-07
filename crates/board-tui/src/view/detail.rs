@@ -32,7 +32,7 @@ fn detail_control_labels(_panel_width: u16, _fullscreen: bool) -> (&'static str,
     ("X", "□")
 }
 
-fn detail_card_action_buttons(detail: &CardDetail) -> Vec<ActionButton<'static>> {
+fn detail_card_action_buttons(detail: &CardDetail) -> Vec<ActionButton<'_>> {
     let card = &detail.card;
     let mut buttons = vec![
         ActionButton {
@@ -70,6 +70,19 @@ fn detail_card_action_buttons(detail: &CardDetail) -> Vec<ActionButton<'static>>
             tone: ActionTone::Primary,
         });
     }
+    // Config-defined actions (`[[card_action]]`), bound to `1`-`9` in order.
+    buttons.extend(
+        detail
+            .actions
+            .iter()
+            .enumerate()
+            .map(|(i, action)| ActionButton {
+                label: action.label.as_str(),
+                compact_label: action.label.as_str(),
+                action: UiAction::CardAction(i as u8),
+                tone: ActionTone::Normal,
+            }),
+    );
     buttons.push(ActionButton {
         label: "Add comment",
         compact_label: "Add",
@@ -109,11 +122,11 @@ fn compact_action_row_width(buttons: &[ActionButton<'_>]) -> u16 {
         .fold(buttons.len().saturating_sub(1) as u16, u16::saturating_add)
 }
 
-fn pack_compact_action_rows(
-    buttons: &[ActionButton<'static>],
+fn pack_compact_action_rows<'a>(
+    buttons: &[ActionButton<'a>],
     width: u16,
-) -> Vec<Vec<ActionButton<'static>>> {
-    let mut rows: Vec<Vec<ActionButton<'static>>> = Vec::new();
+) -> Vec<Vec<ActionButton<'a>>> {
+    let mut rows: Vec<Vec<ActionButton<'a>>> = Vec::new();
     for button in buttons.iter().copied() {
         let can_append = rows.last().is_some_and(|row| {
             compact_action_row_width(row)
@@ -133,7 +146,7 @@ fn pack_compact_action_rows(
 /// run controls together. At the 40-column content width an awaiting card's
 /// final `[ Add ]` cell shares the second row with `[ Open ] [ Retry ]
 /// [ Cancel ]`, so all seven controls remain named in only two rows.
-fn compact_detail_action_rows(detail: &CardDetail, width: u16) -> Vec<Vec<ActionButton<'static>>> {
+fn compact_detail_action_rows(detail: &CardDetail, width: u16) -> Vec<Vec<ActionButton<'_>>> {
     let card = detail_card_action_buttons(detail);
     let runs = detail_run_action_buttons();
     let mut rows = pack_compact_action_rows(&card, width);

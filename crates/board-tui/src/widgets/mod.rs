@@ -94,6 +94,8 @@ pub enum UiAction {
     CloseSwitcher,
     CloseCommentHistory,
     CloseHelp,
+    /// The card detail's `n`-th config-defined action (`[[card_action]]`).
+    CardAction(u8),
 }
 
 /// Interactive zones registered by the new Compact-mode widgets.

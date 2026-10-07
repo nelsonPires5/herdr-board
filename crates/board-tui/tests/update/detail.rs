@@ -1317,3 +1317,98 @@ fn h_on_a_system_comment_still_loads_history() {
     assert!(matches!(effects.as_slice(), [Effect::LoadCommentHistory { id }] if *id == comment.id));
     assert_eq!(app.screen, Screen::CardDetail);
 }
+
+fn review_action() -> board_core::protocol::CardAction {
+    board_core::protocol::CardAction {
+        label: "Review".into(),
+        argv: vec!["review-tool".into(), "--base".into(), "origin/main".into()],
+    }
+}
+
+#[test]
+fn detail_digit_runs_the_matching_card_action_with_card_context() {
+    let mut app = demo_app_with_detail(CardStatus::Done);
+    let detail = app.detail.as_mut().unwrap();
+    detail.actions = vec![review_action()];
+    detail.card.space_ref = Some("ws-1".into());
+    detail.card.space_cwd = Some("/work/tree".into());
+    let card = detail.card.clone();
+
+    let effects = update(&mut app, key(KeyCode::Char('1')));
+    let [Effect::RunCardAction(spec)] = effects.as_slice() else {
+        panic!("expected one RunCardAction effect");
+    };
+    assert_eq!(spec.argv, vec!["review-tool", "--base", "origin/main"]);
+    assert_eq!(
+        spec.cwd.as_deref(),
+        Some(std::path::Path::new("/work/tree"))
+    );
+    let env: std::collections::HashMap<_, _> = spec.env.iter().cloned().collect();
+    assert_eq!(env["BOARD_ACTION_CARD_ID"], card.id.to_string());
+    assert_eq!(env["BOARD_ACTION_BOARD_ID"], card.board_id.to_string());
+    assert_eq!(env["BOARD_ACTION_COLUMN_ID"], card.column_id.to_string());
+    assert_eq!(env["BOARD_ACTION_SPACE_REF"], "ws-1");
+    // Never the agent-run marker: `board comment` would attribute to it.
+    assert!(!env.contains_key("BOARD_CARD_ID"));
+    assert_eq!(app.screen, Screen::CardDetail);
+
+    // A digit with no action behind it does nothing.
+    assert!(update(&mut app, key(KeyCode::Char('2'))).is_empty());
+}
+
+#[test]
+fn detail_digits_do_nothing_without_card_actions() {
+    let mut app = demo_app_with_detail(CardStatus::Done);
+    assert!(app.detail.as_ref().unwrap().actions.is_empty());
+    for c in '1'..='9' {
+        assert!(update(&mut app, key(KeyCode::Char(c))).is_empty());
+    }
+    assert_eq!(app.screen, Screen::CardDetail);
+}
+
+#[test]
+fn card_action_buttons_render_only_when_configured() {
+    for (w, h) in [(40, 20), (80, 24), (120, 40)] {
+        let mut app = demo_app_with_detail(CardStatus::Done);
+        app.last_area = Rect::new(0, 0, w, h);
+        assert!(
+            !rendered_rows(&app).join("\n").contains("[ Review ]"),
+            "{w}x{h}: no action configured"
+        );
+        app.detail.as_mut().unwrap().actions = vec![review_action()];
+        assert!(
+            rendered_rows(&app).join("\n").contains("[ Review ]"),
+            "{w}x{h}: configured action button missing"
+        );
+    }
+}
+
+#[test]
+fn driver_runs_card_action_and_toasts_a_failing_exit() {
+    use board_tui::command::FakeCommand;
+
+    let mut d = driver_of(super::helpers::demo_client().unwrap());
+    let commands = FakeCommand {
+        exit_code: 3,
+        ..Default::default()
+    };
+    d.set_command_launcher(Box::new(commands.clone()));
+    d.handle(key(KeyCode::Enter));
+    assert_eq!(d.app.screen, Screen::CardDetail);
+    let card_id = d.app.detail.as_ref().unwrap().card.id;
+    d.app.detail.as_mut().unwrap().actions = vec![review_action()];
+
+    d.handle(key(KeyCode::Char('1')));
+    let calls = commands.calls.borrow();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].argv[0], "review-tool");
+    let toast = d.app.toast.as_ref().expect("failure toast");
+    assert!(
+        toast.text.contains("review-tool exited with status 3"),
+        "{}",
+        toast.text
+    );
+    // The detail was reloaded from the daemon and stays open.
+    assert_eq!(d.app.screen, Screen::CardDetail);
+    assert_eq!(d.app.detail.as_ref().unwrap().card.id, card_id);
+}

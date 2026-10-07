@@ -261,6 +261,12 @@ impl Driver {
             }
             Effect::FocusRun(card_id, run_id) => self.focus_run(card_id, run_id),
             Effect::EditFocusedTextArea => self.edit_focused(),
+            Effect::RunCardAction(spec) => {
+                self.run_card_action(&spec);
+                // The command may have changed the card (moved it, commented).
+                self.reload_open_detail();
+                self.refetch();
+            }
             Effect::LoadFormOptions => self.load_form_options(),
             Effect::SetPaneTitle(filter) => self.set_pane_title(filter),
             Effect::Quit => self.app.should_quit = true,

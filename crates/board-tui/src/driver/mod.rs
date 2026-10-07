@@ -18,6 +18,7 @@ use ratatui::layout::Rect;
 use std::path::{Path, PathBuf};
 
 use crate::app::{update, App, CardFilter, Msg};
+use crate::command::{CommandLauncher, CommandSpec, RealCommand};
 use crate::editor::{EditorLauncher, RealEditor};
 use crate::OriginContext;
 
@@ -27,6 +28,8 @@ pub struct Driver {
     pub app: App,
     client: Box<dyn BoardClient>,
     editor: Box<dyn EditorLauncher>,
+    /// Runs config-defined card actions (`[[card_action]]`).
+    commands: Box<dyn CommandLauncher>,
     /// The invoking Herdr/plugin context: which session socket to name when an
     /// effect needs one (`run.focus`, `pane.set_title`) and whether this
     /// process is actually the `herdr-board` plugin pane.
@@ -82,6 +85,7 @@ impl Driver {
             app: App::with_origin_context(board, origin.clone()),
             client,
             editor,
+            commands: Box::new(RealCommand),
             origin,
             needs_full_redraw: false,
         };
@@ -94,6 +98,12 @@ impl Driver {
         self.origin.origin_socket = socket.clone();
         self.origin.session = board_core::paths::session_name_from_socket(socket.as_deref());
         self.app.origin_context = self.origin.clone();
+    }
+
+    /// Replace the card-action launcher (tests use
+    /// [`FakeCommand`](crate::command::FakeCommand)).
+    pub fn set_command_launcher(&mut self, commands: Box<dyn CommandLauncher>) {
+        self.commands = commands;
     }
 
     /// Feed one synthetic message: run the reducer, then apply its effects.
@@ -185,6 +195,29 @@ impl Driver {
                 }
             }
             Err(e) => self.app.set_toast(e.to_string(), true),
+        }
+    }
+
+    fn run_card_action(&mut self, spec: &CommandSpec) {
+        match self.commands.run(spec) {
+            Ok(result) => {
+                if result.needs_full_redraw {
+                    self.needs_full_redraw = true;
+                }
+                if !result.success {
+                    let program = spec.argv.first().map_or("card action", String::as_str);
+                    let message = match result.exit_code {
+                        Some(code) => format!("{program} exited with status {code}"),
+                        None => format!("{program} was terminated by a signal"),
+                    };
+                    self.app.set_toast(message, true);
+                }
+            }
+            Err(e) => {
+                // A spawn failure still suspended and restored the terminal.
+                self.needs_full_redraw = true;
+                self.app.set_toast(e.to_string(), true);
+            }
         }
     }
 

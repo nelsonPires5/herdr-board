@@ -143,6 +143,31 @@ invalid typed value (including an unknown `spawner`) is an error: the daemon doe
 back to defaults. Environment overrides are applied after parsing and take precedence; malformed
 override values also prevent daemon startup.
 
+### Card actions
+
+`[[card_action]]` tables add your own buttons to the TUI card detail dialog. Each action runs a
+command for the open card, so a team can wire in their own review, deploy, or notes tool without a
+plugin:
+
+```toml
+[[card_action]]
+label = "Review"                 # button text in the card detail dialog
+columns = ["Code review"]        # columns it is offered in (case-insensitive); omit for every column
+argv = ["my-review-tool", "--base", "origin/main"]
+```
+
+- The first nine actions that apply to the card's column are shown, in config order, as buttons
+  before `[ Add comment ]` and bound to the keys `1`–`9`. Further matches are ignored.
+- The TUI runs `argv` in the foreground: it suspends itself, runs the command attached to the
+  terminal, waits for it, then redraws and reloads the card. A non-zero exit is reported as a toast.
+- The command runs in the card's space directory when it has one, else in the TUI's own directory,
+  with `BOARD_ACTION_CARD_ID`, `BOARD_ACTION_BOARD_ID`, `BOARD_ACTION_COLUMN_ID`, and (for a card
+  with a space) `BOARD_ACTION_SPACE_REF` set. `BOARD_CARD_ID` is deliberately not set, so a
+  `board comment`/`board done` inside the action is never mistaken for the run's agent.
+- The daemon never runs card actions; it only reports the ones that apply in `card.get` (see
+  [`protocol.md`](protocol.md)). An action with an empty `label` or without a program in `argv` is
+  a config error.
+
 ### Environment variables
 
 | Variable | Purpose |
@@ -154,6 +179,7 @@ override values also prevent daemon startup.
 | `BOARD_SCOPE_PATH` | Canonicalizable scope override for CLI/TUI automation; when no selection exists yet it selects the project at CLI/TUI startup (the selected project otherwise prevails over the current directory). |
 | `BOARD_SPAWNER` | `herdr` or `local`; overrides `[daemon] spawner`. |
 | `BOARD_CARD_ID` / `BOARD_RUN_ID` | Injected into runs; `comment`/`done` use them by default. |
+| `BOARD_ACTION_CARD_ID` / `BOARD_ACTION_BOARD_ID` / `BOARD_ACTION_COLUMN_ID` / `BOARD_ACTION_SPACE_REF` | Set by the TUI on a [card action](#card-actions) command. |
 | `BOARD_PROMPT` / `BOARD_SYSTEM_PROMPT` | Prompt delivery for custom harnesses. |
 | `BOARD_RESCUE` / `BOARD_RESUME_SESSION_ID` / `BOARD_RESCUED_RUN_ID` | Set on a *reopened* run pane only: marks it as an ephemeral rescue (not a tracked run), names the conversation to resume, and labels which run it continues. A reopened pane gets `BOARD_CARD_ID`/`BOARD_SOCKET`/`BOARD_BIN` but explicitly clears `BOARD_RUN_ID` to empty (treated as unset) — that is the actor credential for `comment`/`done`, and a rescued pane must not be able to write to the finished run. |
 | `OPENCODE_BIN` | OpenCode binary used for live `opencode models --verbose` model discovery; default `opencode` on `PATH`. An unset/invalid binary keeps the static fallback catalog. |

@@ -244,6 +244,7 @@ pub const HELP_KEYS: &[(Screen, &str, &str)] = &[
     (Screen::CardDetail, "o", "jump to selected run pane"),
     (Screen::CardDetail, "x", "cancel run (asks first)"),
     (Screen::CardDetail, "r", "retry run (asks first)"),
+    (Screen::CardDetail, "1-9", "run configured action"),
     (Screen::CardDetail, "q / Esc", "back to board"),
     (Screen::CardForm, "--", "-- forms --"),
     (Screen::CardForm, "Tab", "next field"),

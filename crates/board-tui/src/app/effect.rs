@@ -92,6 +92,9 @@ pub enum Effect {
     FocusRun(i64, i64),
     /// Hand the focused multiline text field to `$EDITOR`.
     EditFocusedTextArea,
+    /// Run a config-defined card action (`[[card_action]]`) in the
+    /// foreground, then reload the open card and the board.
+    RunCardAction(crate::command::CommandSpec),
     /// Fetch `harness.capabilities` + `session.list` + `space.list` for the open
     /// card form and populate its guided selectors. Emitted on form open and on
     /// harness/session change (the latter re-scopes the workspace list).

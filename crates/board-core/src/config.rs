@@ -111,6 +111,38 @@ pub struct Config {
     /// this directly to exercise catalog-up behavior hermetically.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agy_models: Option<Vec<crate::capability::ModelInfo>>,
+    /// User-defined card actions (`[[card_action]]`): buttons the TUI shows in
+    /// the card detail dialog. The daemon never runs them; it only reports
+    /// the ones that apply to a card's column in `card.get`.
+    #[serde(default, rename = "card_action", skip_serializing_if = "Vec::is_empty")]
+    pub card_actions: Vec<CardActionDef>,
+}
+
+/// Most card actions offered for one card: they are bound to the `1`-`9` keys.
+pub const MAX_CARD_ACTIONS: usize = 9;
+
+/// A config-defined card action (`[[card_action]]`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CardActionDef {
+    /// Button label in the card detail dialog.
+    pub label: String,
+    /// Column names the action is offered in (trimmed, case-insensitive).
+    /// Empty = every column.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<String>,
+    /// Command the TUI runs in the foreground, in the card's space directory.
+    pub argv: Vec<String>,
+}
+
+impl CardActionDef {
+    fn applies_to(&self, column: &str) -> bool {
+        let column = column.trim();
+        self.columns.is_empty()
+            || self
+                .columns
+                .iter()
+                .any(|c| c.trim().eq_ignore_ascii_case(column))
+    }
 }
 
 /// A config-defined harness: an argv template plus an optional capability
@@ -155,6 +187,7 @@ impl Default for Config {
             opencode_bin: None,
             agy_bin: None,
             agy_models: None,
+            card_actions: Vec::new(),
         }
     }
 }
@@ -178,6 +211,38 @@ impl Config {
     pub fn load() -> Result<Config> {
         Ok(RootConfig::load()?.board)
     }
+
+    /// The card actions offered for a card in `column`, in config order and
+    /// capped at [`MAX_CARD_ACTIONS`].
+    pub fn card_actions_for(&self, column: &str) -> Vec<crate::protocol::CardAction> {
+        self.card_actions
+            .iter()
+            .filter(|a| a.applies_to(column))
+            .take(MAX_CARD_ACTIONS)
+            .map(|a| crate::protocol::CardAction {
+                label: a.label.trim().to_string(),
+                argv: a.argv.clone(),
+            })
+            .collect()
+    }
+
+    fn validate(&self) -> Result<()> {
+        for (i, a) in self.card_actions.iter().enumerate() {
+            if a.label.trim().is_empty() {
+                return Err(Error::Config(format!(
+                    "card_action #{}: label must not be empty",
+                    i + 1
+                )));
+            }
+            if a.argv.first().is_none_or(|p| p.trim().is_empty()) {
+                return Err(Error::Config(format!(
+                    "card_action {:?}: argv must name a program",
+                    a.label
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The complete configuration document.
@@ -197,7 +262,9 @@ pub struct RootConfig {
 impl RootConfig {
     /// Parse the complete configuration document from TOML.
     pub fn from_toml(s: &str) -> Result<Self> {
-        toml::from_str(s).map_err(|e| Error::Config(e.to_string()))
+        let root: Self = toml::from_str(s).map_err(|e| Error::Config(e.to_string()))?;
+        root.board.validate()?;
+        Ok(root)
     }
 
     /// Load the complete document from `path`; a missing file returns all
