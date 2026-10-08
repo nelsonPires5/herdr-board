@@ -652,3 +652,112 @@ fn watch_subscription_accepts_the_supported_socket_after_the_gate() {
 
     assert_eq!(herdr.methods(), vec!["ping", "events.subscribe"]);
 }
+
+/// A fake Herdr whose first `events.subscribe` rejects the whole call with
+/// `pane_not_found` (one dead pane id poisons the set) and whose snapshot
+/// lists only `live_panes`. The retry must then succeed.
+fn fake_herdr_with_dead_pane_rejection(live_panes: Vec<String>) -> FakeHerdr {
+    testkit::herdr_server()
+        .handler(move |request, index| match (request["method"].as_str(), index) {
+            (Some("events.subscribe"), 0) => testkit::error(
+                request,
+                "pane_not_found",
+                "pane dead-pane not found",
+            ),
+            (Some("session.snapshot"), 1) => testkit::reply(
+                request,
+                serde_json::json!({"snapshot": {
+                    "version": board_herdr::SUPPORTED_HERDR_VERSION,
+                    "protocol": board_herdr::SUPPORTED_HERDR_PROTOCOL,
+                    "workspaces": [], "tabs": [],
+                    "panes": live_panes.iter().map(|id| testkit::pane_info(id)).collect::<Vec<_>>(),
+                    "agents": []
+                }}),
+            ),
+            _ => testkit::reply(
+                request,
+                serde_json::json!({"type": "subscription_started"}),
+            ),
+        })
+        .serve()
+}
+
+/// Pane ids in an `events.subscribe` request's subscription set.
+fn subscribed_pane_ids(request: &serde_json::Value) -> Vec<String> {
+    request["params"]["subscriptions"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|sub| sub["pane_id"].as_str().map(str::to_string))
+        .collect()
+}
+
+#[test]
+fn watch_subscription_filters_dead_panes_and_retries_with_the_live_set() {
+    let herdr = fake_herdr_with_dead_pane_rejection(vec!["live-pane".to_string()]);
+    let _events = HerdrWatchConnector
+        .subscribe(&herdr.socket, &["live-pane".into(), "dead-pane".into()])
+        .expect("the retry without the dead pane must succeed");
+
+    // First attempt, then the snapshot that proves which panes are live,
+    // then the filtered retry. The dropped pane's reconcile (PaneExited) is
+    // the supervisor step's job, not the connector's.
+    assert_eq!(
+        herdr.methods(),
+        vec![
+            "ping",
+            "events.subscribe",
+            "ping",
+            "session.snapshot",
+            "events.subscribe"
+        ]
+    );
+    let subscribes = herdr.requests_for("events.subscribe");
+    assert_eq!(subscribed_pane_ids(&subscribes[0]).len(), 2);
+    assert_eq!(subscribed_pane_ids(&subscribes[1]), vec!["live-pane"]);
+}
+
+#[test]
+fn watch_subscription_with_all_panes_dead_falls_back_to_global_only() {
+    let herdr = fake_herdr_with_dead_pane_rejection(vec![]);
+    let _events = HerdrWatchConnector
+        .subscribe(&herdr.socket, &["dead-1".into(), "dead-2".into()])
+        .expect("an all-dead set must still subscribe global-only");
+
+    assert_eq!(
+        herdr.methods(),
+        vec![
+            "ping",
+            "events.subscribe",
+            "ping",
+            "session.snapshot",
+            "events.subscribe"
+        ]
+    );
+    // Global-only: exit/close subscriptions carry no pane_id.
+    let subscribes = herdr.requests_for("events.subscribe");
+    assert!(subscribed_pane_ids(&subscribes[1]).is_empty());
+    assert_eq!(
+        subscribes[1]["params"]["subscriptions"]
+            .as_array()
+            .map(Vec::len),
+        Some(2)
+    );
+}
+
+#[test]
+fn watch_subscription_without_a_dead_pane_rejection_never_snapshots() {
+    let herdr = testkit::herdr_server()
+        .on("events.subscribe", |req| {
+            testkit::error(req, "internal_error", "boom")
+        })
+        .serve();
+    let result = HerdrWatchConnector.subscribe(&herdr.socket, &["p1".into()]);
+
+    assert!(
+        matches!(result, Err(HerdrError::Protocol { .. })),
+        "a non-pane rejection must propagate unchanged"
+    );
+    assert_eq!(herdr.methods(), vec!["ping", "events.subscribe"]);
+}
