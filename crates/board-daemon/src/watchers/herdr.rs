@@ -51,6 +51,17 @@ pub(super) trait WatchConnector: Send + Sync {
 
 pub(super) struct HerdrWatchConnector;
 
+/// True when `events.subscribe` was rejected because at least one watched
+/// pane id is dead. Herdr validates every `pane.agent_status_changed` id and
+/// rejects the whole call (`pane_not_found`), so one exited pane would
+/// otherwise keep the entire socket — including its live panes — unwatched.
+fn is_dead_pane_rejection(error: &HerdrError) -> bool {
+    matches!(
+        error,
+        HerdrError::Protocol { code, .. } if code == "pane_not_found"
+    )
+}
+
 impl WatchConnector for HerdrWatchConnector {
     fn subscribe(
         &self,
@@ -62,8 +73,13 @@ impl WatchConnector for HerdrWatchConnector {
         // before `events.subscribe`: an incompatible but pingable Herdr must
         // never receive a subscription or become a watched generation.
         let _client = crate::herdr_conn::connect_checked(socket)?;
-        HerdrEvents::connect(socket, &watch_subscriptions(panes))
-            .map(|events| Box::new(events) as Box<dyn WatchEventStream>)
+        match HerdrEvents::connect(socket, &watch_subscriptions(panes)) {
+            Ok(events) => Ok(Box::new(events) as Box<dyn WatchEventStream>),
+            Err(error) if is_dead_pane_rejection(&error) => {
+                self.retry_without_dead_panes(socket, panes, error)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn snapshot(&self, socket: &std::path::Path) -> board_herdr::Result<WatchSnapshot> {
@@ -74,6 +90,45 @@ impl WatchConnector for HerdrWatchConnector {
         let snapshot = client.session_snapshot()?;
         let panes = crate::herdr_snapshot::snapshot_pane_statuses(snapshot);
         Ok(WatchSnapshot { panes })
+    }
+}
+
+impl HerdrWatchConnector {
+    /// Re-run `events.subscribe` without the pane ids the live snapshot no
+    /// longer lists. A snapshot that answers is authoritative, so anything it
+    /// omits is dead; the caller's post-subscribe reconcile then reports
+    /// those panes as `PaneExited` and finalizes their runs. An empty live
+    /// set still subscribes — global-only (`pane.exited`/`pane.closed`) — so
+    /// the socket stays watched while its last panes drain. Any snapshot
+    /// failure returns the original subscribe error so the supervisor keeps
+    /// its backoff instead of masking one failure with another.
+    fn retry_without_dead_panes(
+        &self,
+        socket: &std::path::Path,
+        panes: &[String],
+        error: HerdrError,
+    ) -> board_herdr::Result<Box<dyn WatchEventStream>> {
+        let live = match WatchConnector::snapshot(self, socket) {
+            Ok(snapshot) => snapshot,
+            Err(_) => return Err(error),
+        };
+        let filtered: Vec<String> = panes
+            .iter()
+            .filter(|pane| live.panes.contains_key(pane.as_str()))
+            .cloned()
+            .collect();
+        if filtered.len() == panes.len() {
+            // Nothing to drop (a race between subscribe and snapshot): retrying
+            // the same set would fail the same way, so keep the backoff.
+            return Err(error);
+        }
+        tracing::debug!(
+            dropped = panes.len() - filtered.len(),
+            live = filtered.len(),
+            "herdr subscribe filtered dead panes, retrying with live set"
+        );
+        HerdrEvents::connect(socket, &watch_subscriptions(&filtered))
+            .map(|events| Box::new(events) as Box<dyn WatchEventStream>)
     }
 }
 
