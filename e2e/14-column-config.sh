@@ -64,8 +64,10 @@ hs = json.load(sys.stdin)["harnesses"]
 builtins = ["pi", "claude", "codex", "opencode", "antigravity"]
 split = next((i for i, h in enumerate(hs) if h not in builtins), len(hs))
 installed, config = hs[:split], hs[split:]
-assert installed == [h for h in builtins if h in installed], hs
-assert config == ["fake", "fake-ov"], hs
+if installed != [h for h in builtins if h in installed]:
+    sys.exit("harness.list installed builtins out of canonical order")
+if config != ["fake", "fake-ov"]:
+    sys.exit("harness.list config harnesses mismatch")
 print("  harnesses:", ", ".join(hs))
 '
 ok "harness.list returns installed builtins in canonical order, then config-defined (fake, fake-ov)"
@@ -127,8 +129,10 @@ print("  run harness:", run["harness"], "| stored argv:", argv)
 # and it must equal the stored argv's tail (everything past the env/launcher
 # prefix the runner never sees as positional args).
 actual = open(sys.argv[2], encoding="utf-8").read().split()
-assert actual == ["low", "auto"], actual
-assert argv[-len(actual):] == actual, (argv, actual)
+if actual != ["low", "auto"]:
+    sys.exit("actual runner argv mismatch")
+if argv[-len(actual):] != actual:
+    sys.exit("stored argv tail mismatch")
 print("  actual runner argv:", actual, "| matches stored argv tail")
 PY
 ok "column harness_override=fake-ov drove the run; stored and actual argv agree (effort=low, permission=auto)"

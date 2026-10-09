@@ -82,9 +82,11 @@ read -r GUARD_RUN_ID GUARD_PANE <<<"$(python3 - "$E2E_TMP/guard-before.json" <<'
 import json, sys
 show = json.load(open(sys.argv[1], encoding="utf-8"))
 runs = show.get("runs", [])
-assert runs, "no run row yet (dispatcher did not enqueue)"
+if not runs:
+    sys.exit("no run row yet (dispatcher did not enqueue)")
 run = runs[-1]
-assert run.get("ended_at") is None, f"run already ended before the refusal: {run}"
+if run.get("ended_at") is not None:
+    sys.exit("run already ended before the refusal")
 print(run["id"], run.get("herdr_pane_id") or "")
 PY
 )"
@@ -105,14 +107,17 @@ import json, sys
 show = json.load(open(sys.argv[1], encoding="utf-8"))
 want = int(sys.argv[2])
 runs = show.get("runs", [])
-assert runs and runs[-1]["id"] == want, f"run row changed across refusal: {runs}"
-assert runs[-1].get("ended_at") is None, f"refused archive ended the run: {runs[-1]}"
+if not (runs and runs[-1]["id"] == want):
+    sys.exit("run row changed across refusal")
+if runs[-1].get("ended_at") is not None:
+    sys.exit("refused archive ended the run")
 print(f"[ok] run {want} still open after refusal", file=sys.stderr)
 PY
 printf '%s' "$(brpc board.get "{\"board_id\":$ARCHIVE_BOARD_ID}")" | python3 -c '
 import json,sys
 d=json.load(sys.stdin)
-assert d["board"]["archived_at"] is None, d["board"]
+if d["board"]["archived_at"] is not None:
+    sys.exit("board archived_at changed on refusal")
 ' || fail "board archive was not atomic — archived_at changed on refusal"
 ok "atomicity verified: archived_at still null"
 if [ -n "$GUARD_PANE" ]; then
@@ -128,7 +133,8 @@ $BOARD_BIN board archive "$ARCHIVE_BOARD_ID" --json >/dev/null
 printf '%s' "$(brpc board.get "{\"board_id\":$ARCHIVE_BOARD_ID}")" | python3 -c '
 import json,sys
 d=json.load(sys.stdin)
-assert d["board"]["archived_at"] is not None, d["board"]
+if d["board"]["archived_at"] is None:
+    sys.exit("board archived_at still null after archive")
 ' || fail "board archive should succeed after run finished"
 ok "board archive succeeded after run finished"
 

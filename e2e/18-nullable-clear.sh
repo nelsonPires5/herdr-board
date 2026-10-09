@@ -78,7 +78,8 @@ p = pathlib.Path(sys.argv[1])
 agent = sys.argv[2]
 s = p.read_text(encoding="utf-8")
 old = '"bash", "%s"]' % agent
-assert old in s, "logging shim argv missing from config"
+if old not in s:
+    sys.exit("logging shim argv missing from config")
 s = s.replace(old, '"bash", "%s", "card-marker"]' % agent, 1)
 p.write_text(s, encoding="utf-8")
 PY
@@ -178,14 +179,18 @@ assert len(runs) == 1
 run = runs[-1]
 # Distinguishable harnesses: the cleared column's fake-col must not leak;
 # the card's fake drove the run.
-assert run["harness"] == "fake", run["harness"]
+if run["harness"] != "fake":
+    sys.exit("run harness is not the card harness")
 argv = json.loads(run["argv_json"])
-assert argv[-1] == "card-marker", argv
+if argv[-1] != "card-marker":
+    sys.exit("stored argv tail missing card marker")
 print("  run harness:", run["harness"], "| stored argv tail:", argv[-1])
 # Actual-runner side: the spawned process logged exactly what it received.
 actual = open(sys.argv[2], encoding="utf-8").read().split()
-assert actual == ["card-marker"], actual
-assert argv[-len(actual):] == actual, (argv, actual)
+if actual != ["card-marker"]:
+    sys.exit("actual runner argv mismatch")
+if argv[-len(actual):] != actual:
+    sys.exit("stored argv tail mismatch")
 print("  actual runner argv:", actual, "| matches stored argv tail")
 PY
 

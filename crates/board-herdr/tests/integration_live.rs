@@ -21,6 +21,7 @@ use board_herdr::{default_socket_path, HerdrClient, ReadSource, SUPPORTED_HERDR_
 /// - connect failure → socket present but unreachable;
 /// - protocol mismatch → herdr running but on an unsupported contract
 ///   (a contract failure for version-gated runs, a skip here).
+///
 /// A successful gate prints a `LIVE` line with the negotiated version so the
 /// prerequisite status is visible even when the test later skips on empty
 /// session state.
