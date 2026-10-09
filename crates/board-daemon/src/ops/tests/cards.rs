@@ -407,6 +407,129 @@ fn card_move_cross_board_emits_one_event_per_board() {
 }
 
 #[test]
+fn card_move_cross_board_recompacts_both_columns_atomically() {
+    let d = test_daemon(Config::default());
+    let alpha = scoped_board(&d, "/alpha");
+    let beta = scoped_board(&d, "/beta");
+    let alpha_todo = handle_request(&d, "board.get", json!({ "board_id": alpha })).unwrap()
+        ["columns"][0]["id"]
+        .as_i64()
+        .unwrap();
+    let beta_done = handle_request(
+        &d,
+        "column.create",
+        json!({ "board_id": beta, "name": "Done" }),
+    )
+    .unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    // Two cards in the source column so source recompaction is observable.
+    let c1 = handle_request(
+        &d,
+        "card.create",
+        json!({ "board_id": alpha, "column_id": alpha_todo, "title": "cross-1" }),
+    )
+    .unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    let c2 = handle_request(
+        &d,
+        "card.create",
+        json!({ "board_id": alpha, "column_id": alpha_todo, "title": "cross-2" }),
+    )
+    .unwrap()["id"]
+        .as_i64()
+        .unwrap();
+
+    let moved = handle_request(
+        &d,
+        "card.move",
+        json!({ "id": c1, "board_id": beta, "column_id": beta_done }),
+    )
+    .unwrap();
+    assert_eq!(moved["board_id"], beta);
+    assert_eq!(moved["column_id"], beta_done);
+    assert_eq!(moved["position"], 0);
+
+    // Source recompacted: c2 slides to position 0; destination holds c1.
+    let alpha_cards = handle_request(&d, "board.get", json!({ "board_id": alpha })).unwrap()
+        ["cards"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(alpha_cards.len(), 1);
+    assert_eq!(alpha_cards[0]["id"], c2);
+    assert_eq!(alpha_cards[0]["position"], 0);
+    let beta_cards = handle_request(&d, "board.get", json!({ "board_id": beta })).unwrap()["cards"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(beta_cards.len(), 1);
+    assert_eq!(beta_cards[0]["id"], c1);
+}
+
+#[test]
+fn card_move_rejects_mismatched_board_and_column_without_writing() {
+    let d = test_daemon(Config::default());
+    let alpha = scoped_board(&d, "/alpha");
+    let beta = scoped_board(&d, "/beta");
+    let alpha_todo = handle_request(&d, "board.get", json!({ "board_id": alpha })).unwrap()
+        ["columns"][0]["id"]
+        .as_i64()
+        .unwrap();
+    let beta_done = handle_request(
+        &d,
+        "column.create",
+        json!({ "board_id": beta, "name": "Done" }),
+    )
+    .unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    // A second alpha column: the mismatch probe must use a column the card
+    // is NOT sitting in, otherwise the same-column reorder fast path (which
+    // runs before the cross-board check) turns it into a no-op success.
+    let alpha_keep = handle_request(
+        &d,
+        "column.create",
+        json!({ "board_id": alpha, "name": "Keep" }),
+    )
+    .unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    let c2 = handle_request(
+        &d,
+        "card.create",
+        json!({ "board_id": alpha, "column_id": alpha_todo, "title": "cross-2" }),
+    )
+    .unwrap()["id"]
+        .as_i64()
+        .unwrap();
+
+    // Declare board beta but hand a column that belongs to alpha: rejected
+    // before any write.
+    let err = handle_request(
+        &d,
+        "card.move",
+        json!({ "id": c2, "board_id": beta, "column_id": alpha_keep }),
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("belongs to board"), "got: {err}");
+    // And the symmetric lie: declare alpha, hand beta's column.
+    let err = handle_request(
+        &d,
+        "card.move",
+        json!({ "id": c2, "board_id": alpha, "column_id": beta_done }),
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("belongs to board"), "got: {err}");
+
+    // Fail-closed: the card is untouched on its source board and column.
+    let after = handle_request(&d, "card.get", json!({ "id": c2 })).unwrap();
+    assert_eq!(after["card"]["board_id"], alpha);
+    assert_eq!(after["card"]["column_id"], alpha_todo);
+}
+
+#[test]
 fn card_duplicate_copies_config_resets_state_and_emits_card_created() {
     let d = test_daemon(Config::default());
     let effects = Arc::new(Mutex::new(Vec::new()));
@@ -718,4 +841,153 @@ fn card_move_same_column_clamps_position_and_compacts() {
         .map(|c| c.position)
         .collect();
     assert_eq!(positions, vec![0, 1, 2]);
+}
+
+// --- board/project archive destination guards (e2e/38 hermetic keepers) ---
+//
+// The live scenario keeps one open-run refusal trip; every archived-destination
+// refusal below is wired here at the RPC layer with the restore hint.
+
+#[test]
+fn archived_board_rejects_new_work_with_restore_hints() {
+    let d = test_daemon(Config::default());
+    let alpha = scoped_board(&d, "/arch-alpha");
+    let beta = scoped_board(&d, "/arch-beta");
+    let alpha_todo = handle_request(&d, "board.get", json!({ "board_id": alpha })).unwrap()
+        ["columns"][0]["id"]
+        .as_i64()
+        .unwrap();
+    let beta_todo = handle_request(&d, "board.get", json!({ "board_id": beta })).unwrap()
+        ["columns"][0]["id"]
+        .as_i64()
+        .unwrap();
+    let card = handle_request(
+        &d,
+        "card.create",
+        json!({ "board_id": alpha, "column_id": alpha_todo, "title": "doomed" }),
+    )
+    .unwrap();
+    let card_id = card["id"].as_i64().unwrap();
+
+    handle_request(
+        &d,
+        "board.archive",
+        json!({ "board_id": beta, "archived": true }),
+    )
+    .unwrap();
+
+    // card.create on the archived board.
+    let err = handle_request(
+        &d,
+        "card.create",
+        json!({ "board_id": beta, "column_id": beta_todo, "title": "should fail" }),
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), 3);
+    assert!(
+        err.to_string().contains("archived board must be restored"),
+        "got: {err}"
+    );
+    // card.move to the archived board (destination guard).
+    let err = handle_request(
+        &d,
+        "card.move",
+        json!({ "id": card_id, "board_id": beta, "column_id": beta_todo }),
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), 3);
+    assert!(
+        err.to_string().contains("archived board must be restored"),
+        "got: {err}"
+    );
+    // Fail-closed: the card never left its source board and column.
+    let after = handle_request(&d, "card.get", json!({ "id": card_id })).unwrap();
+    assert_eq!(after["card"]["board_id"], alpha);
+    assert_eq!(after["card"]["column_id"], alpha_todo);
+
+    // A card already on the archived board cannot move (source guard) and
+    // cannot be duplicated or retried until the board is restored.
+    handle_request(
+        &d,
+        "board.archive",
+        json!({ "board_id": alpha, "archived": true }),
+    )
+    .unwrap();
+    let err = handle_request(
+        &d,
+        "card.move",
+        json!({ "id": card_id, "column_id": alpha_todo }),
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("archived board must be restored"),
+        "got: {err}"
+    );
+    let err = handle_request(&d, "card.duplicate", json!({ "id": card_id })).unwrap_err();
+    assert!(
+        err.to_string().contains("archived board must be restored"),
+        "got: {err}"
+    );
+    let err = handle_request(&d, "run.retry", json!({ "card_id": card_id })).unwrap_err();
+    assert!(
+        err.to_string().contains("archived board must be restored"),
+        "got: {err}"
+    );
+    // template.apply on the archived board names the same restore hint.
+    let err = handle_request(
+        &d,
+        "template.apply",
+        json!({ "name": "pipeline", "board_id": alpha }),
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("archived board must be restored"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn archived_project_rejects_board_create_and_select_with_restore_hints() {
+    let d = test_daemon(Config::default());
+    let alpha = scoped_board(&d, "/arch-proj");
+    let project_id = d.store.lock().get_board(alpha).unwrap().project_id;
+    // Archive every board, then the project itself.
+    handle_request(
+        &d,
+        "board.archive",
+        json!({ "board_id": alpha, "archived": true }),
+    )
+    .unwrap();
+    handle_request(
+        &d,
+        "project.archive",
+        json!({ "scope_path": "/arch-proj", "archived": true }),
+    )
+    .unwrap();
+
+    // board.create inside the archived project names the project restore hint.
+    let err = handle_request(
+        &d,
+        "board.create",
+        json!({ "project_id": project_id, "name": "late" }),
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("archived project must be restored"),
+        "got: {err}"
+    );
+    // Selecting the archived board or the archived project is refused.
+    let err = handle_request(&d, "board.select", json!({ "board_id": alpha })).unwrap_err();
+    assert!(
+        err.to_string().contains("archived board must be restored"),
+        "got: {err}"
+    );
+    let err =
+        handle_request(&d, "project.select", json!({ "scope_path": "/arch-proj" })).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("archived project must be restored"),
+        "got: {err}"
+    );
 }

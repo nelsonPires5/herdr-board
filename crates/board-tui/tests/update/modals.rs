@@ -6,7 +6,10 @@
 
 use super::helpers::{demo_app, demo_app_with_detail, demo_client, driver_of, key};
 use board_core::protocol::CardStatus;
-use board_tui::app::{update, App, ConfirmPurpose, Effect, PickerPurpose, Screen};
+use board_tui::app::{
+    update, App, CommentHistoryView, ConfirmPurpose, Effect, Picker, PickerPurpose, Screen,
+    SwitcherState,
+};
 use crossterm::event::KeyCode;
 
 /// Card detail open on the demo board's running card (so it has an open run).
@@ -98,10 +101,147 @@ fn help_returns_to_the_screen_it_was_opened_from() {
 
 #[test]
 fn opening_help_resets_its_scroll_from_every_screen() {
-    let mut app = detail_app();
-    app.help_scroll = 7;
-    update(&mut app, key(KeyCode::Char('?')));
-    assert_eq!(app.help_scroll, 0);
+    // Help is reachable from every non-form screen (see
+    // `help_is_reachable_from_every_non_form_screen` and the global `?`
+    // handler in `app/mod.rs`, which serves every screen except the two
+    // forms and Help itself); opening it always resets the scroll offset,
+    // no matter which screen it was opened from. Every eligible screen is
+    // covered below: Board, CardDetail, Picker, Confirm, MoveColumn,
+    // ReorderCard, Switcher, ProjectPicker, BoardPicker, CommentHistory.
+    // Board.
+    {
+        let mut app = demo_app();
+        app.help_scroll = 7;
+        update(&mut app, key(KeyCode::Char('?')));
+        assert_eq!(app.screen, Screen::Help);
+        assert_eq!(app.help_scroll, 0, "scroll resets from Board");
+    }
+
+    // Card detail.
+    {
+        let mut app = detail_app();
+        app.help_scroll = 7;
+        update(&mut app, key(KeyCode::Char('?')));
+        assert_eq!(app.screen, Screen::Help);
+        assert_eq!(app.help_scroll, 0, "scroll resets from CardDetail");
+    }
+
+    // Picker (`D` on a column with cards opens the relocation picker).
+    {
+        let mut app = demo_app();
+        update(&mut app, key(KeyCode::Char('D')));
+        assert_eq!(app.screen, Screen::Picker);
+        app.help_scroll = 7;
+        update(&mut app, key(KeyCode::Char('?')));
+        assert_eq!(app.screen, Screen::Help);
+        assert_eq!(app.help_scroll, 0, "scroll resets from Picker");
+    }
+
+    // Confirm.
+    {
+        let mut app = demo_app();
+        update(&mut app, key(KeyCode::Char('d')));
+        assert_eq!(app.screen, Screen::Confirm);
+        app.help_scroll = 7;
+        update(&mut app, key(KeyCode::Char('?')));
+        assert_eq!(app.screen, Screen::Help);
+        assert_eq!(app.help_scroll, 0, "scroll resets from Confirm");
+    }
+
+    // Move-column mini-mode.
+    {
+        let mut app = demo_app();
+        update(&mut app, key(KeyCode::Char('M')));
+        assert_eq!(app.screen, Screen::MoveColumn);
+        app.help_scroll = 7;
+        update(&mut app, key(KeyCode::Char('?')));
+        assert_eq!(app.screen, Screen::Help);
+        assert_eq!(app.help_scroll, 0, "scroll resets from MoveColumn");
+    }
+
+    // Reorder-card mini-mode (`O` stages within the selected card's column;
+    // Todo holds cards in the demo board, so it opens without navigation).
+    {
+        let mut app = demo_app();
+        update(&mut app, key(KeyCode::Char('O')));
+        assert_eq!(app.screen, Screen::ReorderCard);
+        app.help_scroll = 7;
+        update(&mut app, key(KeyCode::Char('?')));
+        assert_eq!(app.screen, Screen::Help);
+        assert_eq!(app.help_scroll, 0, "scroll resets from ReorderCard");
+    }
+
+    // Switcher sheet (compact-only; constructed directly because entering it
+    // needs the mouse plumbing `tests/mouse.rs` covers — `?` is handled
+    // globally before per-screen dispatch either way).
+    {
+        let mut app = demo_app();
+        app.switcher = Some(SwitcherState {
+            sel: 0,
+            return_to: Screen::Board,
+        });
+        app.screen = Screen::Switcher;
+        app.help_scroll = 7;
+        update(&mut app, key(KeyCode::Char('?')));
+        assert_eq!(app.screen, Screen::Help);
+        assert_eq!(app.help_scroll, 0, "scroll resets from Switcher");
+    }
+
+    // Project picker (`p` needs the driver to fetch the project list, so the
+    // sheet state is constructed directly for the same global-handler
+    // reason as above).
+    {
+        let mut app = demo_app();
+        let project_id = app.project.id;
+        app.picker = Some(Picker {
+            title: "projects".into(),
+            rows: Vec::new(),
+            sel: 0,
+            purpose: PickerPurpose::SwitchProject,
+            return_to: Screen::Board,
+            project_id,
+        });
+        app.screen = Screen::ProjectPicker;
+        app.help_scroll = 7;
+        update(&mut app, key(KeyCode::Char('?')));
+        assert_eq!(app.screen, Screen::Help);
+        assert_eq!(app.help_scroll, 0, "scroll resets from ProjectPicker");
+    }
+
+    // Board picker (same driver note as above).
+    {
+        let mut app = demo_app();
+        let project_id = app.project.id;
+        app.picker = Some(Picker {
+            title: "boards".into(),
+            rows: Vec::new(),
+            sel: 0,
+            purpose: PickerPurpose::SwitchBoard,
+            return_to: Screen::Board,
+            project_id,
+        });
+        app.screen = Screen::BoardPicker;
+        app.help_scroll = 7;
+        update(&mut app, key(KeyCode::Char('?')));
+        assert_eq!(app.screen, Screen::Help);
+        assert_eq!(app.help_scroll, 0, "scroll resets from BoardPicker");
+    }
+
+    // Comment history (`h` emits `LoadCommentHistory` for the driver to
+    // resolve; the sheet itself is constructed directly).
+    {
+        let mut app = detail_app();
+        app.comment_history = Some(CommentHistoryView {
+            comment_id: 1,
+            entries: Vec::new(),
+            scroll: 0,
+        });
+        app.screen = Screen::CommentHistory;
+        app.help_scroll = 7;
+        update(&mut app, key(KeyCode::Char('?')));
+        assert_eq!(app.screen, Screen::Help);
+        assert_eq!(app.help_scroll, 0, "scroll resets from CommentHistory");
+    }
 }
 
 #[test]

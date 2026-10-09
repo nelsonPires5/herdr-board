@@ -7,7 +7,7 @@ use board_core::engine::{
     validate_card_edit, validate_card_space, validate_column_delete,
     validate_column_permission_override, AgentSignal, AutoHopDecision, FinalizePlan,
     LifecycleAction, LifecycleDecision, LifecycleFacts, LifecycleHarness, LifecycleRejection,
-    ResumabilityDecision, SignalDecision, ValidationError,
+    ResumabilityDecision, ValidationError,
 };
 use board_core::engine::{
     merge_card_update, merge_column_update, validate_card_settings, validate_column_settings,
@@ -435,20 +435,6 @@ fn signal_idle_expired_enters_awaiting_but_keeps_existing_reason() {
     assert_eq!(
         decide_signal(CardStatus::Failed, AgentSignal::IdleExpired),
         None
-    );
-}
-
-#[test]
-fn signal_decision_is_appliable_shape() {
-    // Entering awaiting carries a reason; every other decision clears it.
-    let d = decide_signal(CardStatus::Running, AgentSignal::Done).unwrap();
-    assert_eq!(
-        d,
-        SignalDecision {
-            new_status: CardStatus::Awaiting,
-            awaiting_reason: Some(AwaitingReason::AgentDone),
-            emit_notification: d.emit_notification.clone(),
-        }
     );
 }
 

@@ -478,6 +478,33 @@ fn unknown_harness_errors() {
     assert_eq!(err, HarnessError::UnknownHarness("nope".into()));
 }
 
+#[test]
+fn configured_harnesses_keep_their_synthetic_mint_fallback() {
+    // The no-invented-uuid policy is builtin-specific (codex/opencode Mint
+    // reports None so the daemon persists NULL). A config-defined harness
+    // keeps the current contract: build_invocation reports no resulting
+    // session id, and the daemon's Mint fallback persists the synthetic uuid.
+    let mut config = Config::default();
+    config.harness.insert(
+        "fake".into(),
+        HarnessDef {
+            argv: vec!["run".into()],
+            ..Default::default()
+        },
+    );
+    let inv = build_invocation(
+        "fake",
+        &config,
+        &settings(),
+        &SessionPlan::Mint,
+        Some("synthetic-uuid"),
+        "p",
+    )
+    .unwrap();
+    assert_eq!(inv.resulting_session_id, None);
+    assert_eq!(inv.argv, vec!["run"]);
+}
+
 // ---------------------------------------------------------------------------
 // Resume launches (the dead-pane rescue)
 // ---------------------------------------------------------------------------

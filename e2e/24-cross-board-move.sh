@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
-# 24-cross-board-move.sh — a card can be moved to a column of another board.
+# 24-cross-board-move.sh — LIVE SMOKE for cross-board card transfer.
 #
-# card.move with a board_id that differs from the card's board transfers the
-# card atomically: cards.board_id/column_id are moved in one transaction and
-# both the source and destination columns are recompacted. The daemon's
-# cross-board sanity check resolves the card's Herdr session against the live
-# ephemeral session, and a destination column that belongs to a different board
-# than the declared board_id is rejected with nothing written.
+# The matrix lives hermetically (no live infra):
+# - atomic board_id/column_id move + both-column recompaction, mismatched
+#   board/column rejection, bad-destination atomicity: board-core db
+#   crud transfer_card tests.
+# - daemon transfer incl. recompaction positions, both mismatch directions
+#   fail-closed, harness/session blocking, one event per board: board-daemon
+#   ops cards tests.
+#
+# What stays live: the transfer and the mismatch rejection through a real
+# daemon, where the card's (default) Herdr session resolves against the live
+# ephemeral session registry — the session-resolution boundary no seeded
+# registry can reproduce.
 #
 # Destination columns are manual so the move is dispatch-free (no agent run is
 # enqueued); the read-only workspace preflight for auto columns is covered by

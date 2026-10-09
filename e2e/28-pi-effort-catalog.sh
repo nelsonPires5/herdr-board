@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
-# 28-pi-effort-catalog.sh — Pi thinkingLevelMap tri-state semantics reach the
-# board RPC and the real TUI effort selector without starting Pi or a provider.
+# 28-pi-effort-catalog.sh — LIVE SMOKE: the daemon's live Pi catalog reaches
+# the real TUI effort selector without starting Pi or a provider.
+#
+# The ordering matrix lives hermetically (no live infra):
+# - authenticated-provider filtering + thinkingLevelMap tri-state semantics in
+#   canonical order: board-core pi_catalog tests.
+# - the catalog model's corrected ordering reaching the form selector (full
+#   ladder and sparse-map narrowing): board-tui forms tests.
+#
+# What stays live: the daemon resolving the fixture files at startup into
+# harness.capabilities, and the real TUI surfacing the catalog model with its
+# efforts (first rung only — the full ordering is pinned hermetically).
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/lib.sh"
 
@@ -52,8 +62,6 @@ e2e_daemon_start
 # herdr CLI mutations (workspace/tab/pane) must keep targeting the real
 # ephemeral session, exactly as before the proxy was introduced.
 export HERDR_SOCKET_PATH="$E2E_SESSION_SOCKET"
-
-EXPECTED='["off","minimal","low","medium","high","xhigh","max"]'
 
 step "Board RPC exposes the authenticated provider-prefixed Pi model and exact efforts"
 CAPS="$(brpc harness.capabilities '{"harness":"pi"}')"
@@ -109,21 +117,20 @@ wait_for "gpt-effort-e2e" || {
 e2e_herdr_mutate -- pane send-keys "$TUI_PANE" tab >/dev/null
 wait_for "[ ‹ ]  default effort  [ › ]" || fail "effort field did not start at default effort"
 
-step "Cycle the real TUI effort field through the exact corrected ordering"
-for level in off minimal low medium high xhigh max; do
-  e2e_herdr_mutate -- pane send-keys "$TUI_PANE" right >/dev/null
-  wait_for "[ ‹ ]  $level  [ › ]" || {
-    read_pane >>"$PANE_EVIDENCE"
-    fail "effort selector did not expose '$level' in order"
-  }
-  {
-    printf '\n===== effort=%s =====\n' "$level"
-    read_pane
-  } >>"$PANE_EVIDENCE"
-done
-printf '%s\n' "$EXPECTED" >"$ARTIFACT_DIR/expected-efforts.json"
-chmod 600 "$ARTIFACT_DIR/expected-efforts.json"
-ok "real TUI exposed off, minimal, low, medium, high, xhigh, max in order"
+step "The real TUI surfaces the catalog model with its first effort rung"
+# One step right from default effort must land on `off` (canonical order,
+# first rung): proof the catalog efforts reached the live selector. The full
+# off..max ordering is pinned by the pi_catalog + forms hermetic tests.
+e2e_herdr_mutate -- pane send-keys "$TUI_PANE" right >/dev/null
+wait_for "[ ‹ ]  off  [ › ]" || {
+  read_pane >>"$PANE_EVIDENCE"
+  fail "effort selector did not expose catalog efforts starting at 'off'"
+}
+{
+  printf '\n===== effort=off =====\n'
+  read_pane
+} >>"$PANE_EVIDENCE"
+ok "real TUI exposed the Pi catalog model with its effort ladder"
 echo "  pane evidence: $PANE_EVIDENCE"
 
 step "28-pi-effort-catalog: ALL CHECKS PASSED"

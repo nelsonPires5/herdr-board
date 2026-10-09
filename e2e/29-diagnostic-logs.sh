@@ -1,5 +1,16 @@
 #!/usr/bin/env bash
-# 29-diagnostic-logs.sh — private daily NDJSON, retention, metadata, and redaction.
+# 29-diagnostic-logs.sh — LIVE SMOKE: redacted diagnostic records from real
+# board/Herdr calls plus events.subscribe wiring.
+#
+# The fixture matrix lives hermetically (no live infra): ownership parsing
+# (signed/non-digit years, bad dates), mtime retention with an injected clock
+# pinning the exact 30-day boundary, symlink/directory fail-closed, private
+# dir/file modes, and redaction of a sentinel payload: board-daemon logging
+# tests (daily_ndjson_is_private_redacted_and_prunes_only_expired_owned_files,
+# exact_thirty_day_boundary_is_retained, fallback/permission tests).
+#
+# What stays live: real board + outbound Herdr success/error completions and
+# the subscription record, all with payloads/credentials/secrets absent.
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/lib.sh"
 
@@ -10,54 +21,13 @@ e2e_init
 e2e_build
 e2e_isolate
 
-step "Create retention fixtures before boardd starts"
+step "Isolate the live log dir before boardd starts"
 LOG_DIR="$E2E_TMP/logs"
 export BOARD_LOG_DIR="$LOG_DIR"
 mkdir -p "$LOG_DIR"
 chmod 700 "$LOG_DIR"
-python3 - "$LOG_DIR" <<'PY'
-from datetime import date, timedelta
-from pathlib import Path
-import os, sys, time
-root = Path(sys.argv[1])
-today = date.today()
-now = time.time()
-# Retention is mtime-based. Give the live startup ample margin around the exact
-# boundary; the injected Rust test pins equality to the second.
-for age, mtime_age, label in [
-    (31, 31 * 86400, "expired"),
-    (30, 30 * 86400 - 60, "boundary"),
-    (29, 29 * 86400, "recent"),
-]:
-    path = root / f"daemon.{today-timedelta(days=age):%Y-%m-%d}.ndjson"
-    path.write_text("{}\n")
-    os.chmod(path, 0o600)
-    os.utime(path, (now - mtime_age, now - mtime_age))
-    (root / label).write_text(str(path))
-unrelated = root / "application.log"
-unrelated.write_text("unrelated\n")
-(root / "daemon.bad-date.ndjson").write_text("{}\n")
-(root / "daemon.+123-01-01.ndjson").write_text("{}\n")
-(root / "daemon.-123-01-01.ndjson").write_text("{}\n")
-(root / "daemon.2x23-01-01.ndjson").write_text("{}\n")
-(root / "daemon.1990-01-01.ndjson.directory").mkdir()
-os.symlink(unrelated, root / "daemon.1990-01-01.ndjson")
-PY
-EXPIRED="$(cat "$LOG_DIR/expired")"
-BOUNDARY="$(cat "$LOG_DIR/boundary")"
-RECENT="$(cat "$LOG_DIR/recent")"
-rm "$LOG_DIR/expired" "$LOG_DIR/boundary" "$LOG_DIR/recent"
 
 e2e_daemon_start
-[ ! -e "$EXPIRED" ] || fail "expired exact-owned log was not pruned"
-[ -f "$BOUNDARY" ] || fail "30-day boundary log was pruned"
-[ -f "$RECENT" ] || fail "recent log was pruned"
-[ -f "$LOG_DIR/application.log" ] || fail "unrelated file was pruned"
-[ -f "$LOG_DIR/daemon.+123-01-01.ndjson" ] || fail "positive-signed-year malformed name was pruned"
-[ -f "$LOG_DIR/daemon.-123-01-01.ndjson" ] || fail "negative-signed-year malformed name was pruned"
-[ -f "$LOG_DIR/daemon.2x23-01-01.ndjson" ] || fail "non-digit-year malformed name was pruned"
-[ -L "$LOG_DIR/daemon.1990-01-01.ndjson" ] || fail "owned-looking symlink was touched"
-[ -d "$LOG_DIR/daemon.1990-01-01.ndjson.directory" ] || fail "directory was touched"
 
 step "Emit successful/failing board and Herdr calls without payload logging"
 e2e_ws_standard diagnostic-logs
@@ -91,7 +61,7 @@ import json, os, stat, sys, time
 from pathlib import Path
 root = Path(sys.argv[1])
 files = sorted(root.glob("daemon.*.ndjson"))
-# Symlinks are preserved retention fixtures, never diagnostic inputs.
+# Never follow a symlink into the diagnostics (fail-closed ownership).
 files = [p for p in files if p.is_file() and not p.is_symlink()]
 deadline = time.time() + 10
 records = []
@@ -147,11 +117,6 @@ if sys.argv[3]:
     (evidence / "pane-log-evidence.txt").write_text(
         "provider_free_configured_pane=true\n"
         + "herdr_methods=" + ",".join(sorted({str(f.get("method")) for f in hf})) + "\n")
-    (evidence / "retention-permissions.txt").write_text(
-        "expired_removed=true\nboundary_retained=true\nrecent_retained=true\n"
-        "unrelated_retained=true\nmalformed_signed_year_retained=true\n"
-        "malformed_nondigit_year_retained=true\nsymlink_retained=true\n"
-        "log_dir_mode=0700\nlog_file_mode=0600\n")
 print(f"validated {len(records)} JSON records across {len(files)} regular owned files")
 PY
 

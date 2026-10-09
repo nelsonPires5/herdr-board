@@ -176,3 +176,19 @@ fn board_t_key_and_switcher_apply_template_row_yield_the_same_effect() {
     };
     assert_eq!(extract(&board_effects), extract(&switcher_effects));
 }
+
+/// Esc from a directly-opened board picker (the Compact `b` path, with no
+/// switcher sheet underneath) returns outright to the board view.
+#[test]
+fn esc_from_direct_board_picker_returns_to_board() {
+    let mut d = driver_of(super::helpers::demo_client().unwrap());
+    d.app.last_area = compact_area();
+    d.handle(key(KeyCode::Char('b')));
+    assert_eq!(d.app.screen, Screen::BoardPicker);
+    assert!(d.app.switcher.is_none());
+
+    d.handle(key(KeyCode::Esc));
+    assert_eq!(d.app.screen, Screen::Board);
+    assert!(d.app.picker.is_none(), "the picker must close outright");
+    assert!(d.app.switcher.is_none(), "no sheet may linger underneath");
+}

@@ -2,7 +2,8 @@
 //! selection, recency capped at three, and the open/create/select side-effect
 //! rules (queries and moves never touch recency).
 
-use board_core::db::Db;
+use board_core::db::{Db, EnqueueRun, FinalizeRun};
+use board_core::protocol::{CardCreateParams, CardStatus, RunOutcome, Visibility};
 
 fn mem() -> Db {
     Db::open_in_memory().expect("in-memory db")
@@ -131,6 +132,50 @@ fn per_project_board_recency_and_selection_are_isolated() {
 }
 
 #[test]
+fn selection_and_recency_survive_a_file_reopen() {
+    // Selection and recency are durable (SQLite): a daemon restart reopens
+    // the same file and must see the same context.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("selection.db");
+    let (alpha_id, beta_id, beta_board_id);
+    {
+        let db = Db::open(&path).expect("open");
+        let (alpha, _) = db
+            .create_project_context("/tmp/restart-alpha")
+            .expect("alpha");
+        let (beta, beta_board) = db
+            .create_project_context("/tmp/restart-beta")
+            .expect("beta");
+        alpha_id = alpha.id;
+        beta_id = beta.id;
+        beta_board_id = beta_board.id;
+        // Newest creation selects beta; alpha is the recency entry.
+        assert_eq!(db.selected_project_id().expect("selected"), Some(beta.id));
+        assert_eq!(
+            db.recent_project_ids_excluding(Some(beta.id))
+                .expect("recents"),
+            vec![alpha.id]
+        );
+    }
+    let db = Db::open(&path).expect("reopen");
+    assert_eq!(
+        db.selected_project_id().expect("selected"),
+        Some(beta_id),
+        "selection must survive a daemon restart"
+    );
+    assert_eq!(
+        db.selected_board_id_for(beta_id).expect("board"),
+        Some(beta_board_id)
+    );
+    assert_eq!(
+        db.recent_project_ids_excluding(Some(beta_id))
+            .expect("recents"),
+        vec![alpha_id],
+        "recency must survive a daemon restart"
+    );
+}
+
+#[test]
 fn selecting_a_missing_project_fails_with_the_create_hint() {
     let db = mem();
     let err = db
@@ -213,4 +258,420 @@ fn project_list_result_is_deterministic_and_picker_ready() {
     assert_eq!(global.project.scope_path, None);
     assert_eq!(global.boards.len(), 1);
     assert_eq!(global.boards[0].name, "main");
+}
+
+// --- board/project archive wiring (e2e/38 hermetic keepers) ---
+//
+// The live scenario keeps one open-run refusal trip; everything below is the
+// wiring that the removed live matrices used to prove.
+
+#[test]
+fn board_archive_visibility_active_all_archived() {
+    let db = mem();
+    let (project, _) = db.open_project_context("/arch/alpha").expect("project");
+    let board = db.create_board(project.id, "ArchiveMe").expect("board");
+    db.set_board_archived(board.id, true).expect("archive");
+
+    let active = db
+        .list_boards_for_project_filtered(project.id, Some(Visibility::Active))
+        .expect("active");
+    assert!(
+        active.iter().all(|b| b.archived_at.is_none()),
+        "active must hide archived boards: {active:?}"
+    );
+    assert!(
+        !active.iter().any(|b| b.id == board.id),
+        "archived board leaked into active"
+    );
+    let archived = db
+        .list_boards_for_project_filtered(project.id, Some(Visibility::Archived))
+        .expect("archived");
+    assert!(
+        archived
+            .iter()
+            .any(|b| b.id == board.id && b.archived_at.is_some()),
+        "archived visibility must include the board with archived_at: {archived:?}"
+    );
+    let all = db
+        .list_boards_for_project_filtered(project.id, Some(Visibility::All))
+        .expect("all");
+    assert!(all.iter().any(|b| b.id == board.id), "all must include it");
+    assert!(
+        all.iter().any(|b| b.name == "main"),
+        "all must still include the active main board"
+    );
+}
+
+#[test]
+fn project_archive_visibility_active_all_archived() {
+    let db = mem();
+    let (alpha, main) = db.create_project_context("/arch/vis-alpha").expect("alpha");
+    assert_eq!(alpha.name, "vis-alpha");
+    // A project archives only after every board is archived.
+    db.set_board_archived(main.id, true).expect("archive main");
+    db.set_project_archived("/arch/vis-alpha", true)
+        .expect("archive project");
+
+    let active = db
+        .list_projects_filtered(Some(Visibility::Active))
+        .expect("active");
+    assert!(
+        !active.iter().any(|p| p.id == alpha.id),
+        "active must hide the archived project"
+    );
+    let archived = db
+        .list_projects_filtered(Some(Visibility::Archived))
+        .expect("archived");
+    assert!(
+        archived
+            .iter()
+            .any(|p| p.id == alpha.id && p.archived_at.is_some()),
+        "archived must include the project with archived_at"
+    );
+    let all = db
+        .list_projects_filtered(Some(Visibility::All))
+        .expect("all");
+    assert!(
+        all.iter().any(|p| p.id == alpha.id),
+        "all must include the archived project"
+    );
+}
+
+#[test]
+fn archived_board_name_stays_reserved_nocase_and_project_path_reserved() {
+    let db = mem();
+    let (project, _) = db.open_project_context("/arch/names").expect("project");
+    let board = db.create_board(project.id, "ArchiveMe").expect("board");
+    db.set_board_archived(board.id, true).expect("archive");
+
+    // The UNIQUE (project_id, name COLLATE NOCASE) index has no archived
+    // exemption: the archived name stays reserved, case-insensitively.
+    let dup = db.create_board(project.id, "archiveme").expect_err("dup");
+    assert_eq!(dup.code(), 1);
+    assert!(
+        dup.to_string().contains("already exists"),
+        "duplicate message must say already exists: {dup}"
+    );
+    // Restore never requires a rename: the same name is still taken, and an
+    // explicit reselect of the restored board works without renaming.
+    let restored = db.set_board_archived(board.id, false).expect("restore");
+    assert!(restored.archived_at.is_none());
+    let still_dup = db.create_board(project.id, "ArchiveMe").expect_err("dup");
+    assert_eq!(still_dup.code(), 1);
+
+    // Project scope paths stay reserved while archived: the partial UNIQUE
+    // index is on scope_path IS NOT NULL, and archiving keeps the path.
+    let (beta, beta_main) = db.create_project_context("/arch/names-beta").expect("beta");
+    db.set_board_archived(beta_main.id, true)
+        .expect("archive main");
+    db.set_project_archived("/arch/names-beta", true)
+        .expect("archive beta");
+    let dup_project = db
+        .create_project_context("/arch/names-beta")
+        .expect_err("project dup");
+    assert_eq!(dup_project.code(), 1);
+    assert!(beta.scope_path.is_some());
+}
+
+#[test]
+fn board_archive_selection_falls_back_and_restore_does_not_autoselect() {
+    let db = mem();
+    let (project, _) = db.open_project_context("/arch/sel").expect("project");
+    let first = db.create_board(project.id, "First").expect("first");
+    let second = db.create_board(project.id, "Second").expect("second");
+    // Creating selects the newest board.
+    assert_eq!(
+        db.selected_board_id_for(project.id).expect("selected"),
+        Some(second.id)
+    );
+    // Select First explicitly, then archive it: selection must fall back to
+    // an active board and never point at the archived one.
+    db.select_board(first.id).expect("select first");
+    db.set_board_archived(first.id, true).expect("archive");
+    let selected = db.selected_board_id_for(project.id).expect("selected");
+    assert_ne!(
+        selected,
+        Some(first.id),
+        "selection must leave the archived board"
+    );
+    let selected_board = selected.expect("a fallback board must be selected");
+    assert!(
+        db.get_board(selected_board)
+            .expect("board")
+            .archived_at
+            .is_none(),
+        "fallback selection must be an active board"
+    );
+    // Restore never auto-selects: the restored board stays unselected until
+    // an explicit select.
+    db.set_board_archived(first.id, false).expect("restore");
+    assert_eq!(
+        db.selected_board_id_for(project.id).expect("selected"),
+        Some(selected_board),
+        "restore must not reselect the restored board"
+    );
+    db.select_board(first.id)
+        .expect("explicit select after restore");
+    assert_eq!(
+        db.selected_board_id_for(project.id).expect("selected"),
+        Some(first.id)
+    );
+    assert_eq!(second.project_id, project.id);
+}
+
+#[test]
+fn project_archive_requires_all_boards_archived_refuses_open_run_and_falls_back() {
+    let db = mem();
+    let (alpha, main) = db
+        .create_project_context("/arch/rule-alpha")
+        .expect("alpha");
+    let (beta, _) = db.create_project_context("/arch/rule-beta").expect("beta");
+    // Re-select alpha: the newest creation (beta) would otherwise be selected.
+    db.select_project_by_scope("/arch/rule-alpha", None)
+        .expect("select alpha");
+    assert_eq!(db.selected_project_id().expect("selected"), Some(alpha.id));
+    // Archiving the project while its main board is still active is refused.
+    let err = db
+        .set_project_archived("/arch/rule-alpha", true)
+        .expect_err("rule");
+    assert_eq!(err.code(), 3);
+    assert!(
+        err.to_string().contains("active board"),
+        "refusal must name the active-board rule: {err}"
+    );
+    assert!(
+        db.get_project(alpha.id)
+            .expect("project")
+            .archived_at
+            .is_none(),
+        "refused archive must stay atomic (still active)"
+    );
+    // A board with an open run cannot be archived (ended_at IS NULL includes
+    // queued runs): the wiring refuses before any write.
+    let todo = db.default_column_id(main.id).expect("todo");
+    let card = db
+        .create_card(&CardCreateParams {
+            title: "open-run guard".into(),
+            board_id: Some(main.id),
+            column_id: Some(todo),
+            ..Default::default()
+        })
+        .expect("card");
+    let run = db
+        .enqueue_run_uow(&EnqueueRun {
+            card_id: card.id,
+            column_id: todo,
+            harness: "fake",
+            argv_json: "[]",
+            prompt_snapshot: "p",
+            system_prompt_snapshot: None,
+            launch_spec_json: None,
+            session_id: None,
+            session: None,
+        })
+        .expect("enqueue");
+    let err = db.set_board_archived(main.id, true).expect_err("open run");
+    assert_eq!(err.code(), 3);
+    assert!(err.to_string().contains("open run"), "got: {err}");
+    assert!(
+        db.get_board(main.id).expect("board").archived_at.is_none(),
+        "refused board archive must stay atomic"
+    );
+    // Finish the run: archiving the board, then the project, succeeds, and
+    // selection falls back away from the archived project.
+    db.finalize_run_uow(&FinalizeRun {
+        run_id: run.id,
+        outcome: RunOutcome::Ok,
+        summary: None,
+        comments: &[],
+        target_column_id: None,
+        final_status: CardStatus::Idle,
+        final_awaiting_reason: None,
+        next: None,
+    })
+    .expect("finalize");
+    db.set_board_archived(main.id, true).expect("archive main");
+    db.set_project_archived("/arch/rule-alpha", true)
+        .expect("archive project");
+    // Deterministic fallback: the only other active project is beta.
+    assert_eq!(
+        db.selected_project_id().expect("selected"),
+        Some(beta.id),
+        "selection must fall back to the remaining active project (beta)"
+    );
+    assert!(
+        db.get_project(beta.id)
+            .expect("project")
+            .archived_at
+            .is_none(),
+        "fallback selection must be an active project"
+    );
+    // Restoring a project restores neither its boards nor its selection:
+    // boards stay archived, selection stays on the fallback, and an explicit
+    // select lands back on the project context afterward.
+    db.set_project_archived("/arch/rule-alpha", false)
+        .expect("restore project");
+    assert!(
+        db.get_project(alpha.id)
+            .expect("project")
+            .archived_at
+            .is_none(),
+        "restored project must be active again"
+    );
+    assert!(
+        db.get_board(main.id).expect("board").archived_at.is_some(),
+        "restoring a project must NOT restore its boards"
+    );
+    assert_eq!(
+        db.selected_project_id().expect("selected"),
+        Some(beta.id),
+        "restoring a project must NOT auto-select it"
+    );
+    // Explicit selection works afterward (once its board is restored the
+    // context board exists again).
+    db.set_board_archived(main.id, false)
+        .expect("restore board");
+    db.select_project_by_scope("/arch/rule-alpha", None)
+        .expect("explicit select after project restore");
+    assert_eq!(db.selected_project_id().expect("selected"), Some(alpha.id));
+    assert_eq!(
+        db.selected_board_id_for(alpha.id).expect("selected"),
+        Some(main.id)
+    );
+}
+
+#[test]
+fn board_archive_roundtrip_preserves_columns_cards_runs_and_comments() {
+    let db = mem();
+    let (project, _) = db.open_project_context("/arch/roundtrip").expect("project");
+    let board = db.create_board(project.id, "ArchiveMe").expect("board");
+    let todo = db.default_column_id(board.id).expect("todo");
+    let card = db
+        .create_card(&CardCreateParams {
+            title: "open-run guard".into(),
+            board_id: Some(board.id),
+            column_id: Some(todo),
+            ..Default::default()
+        })
+        .expect("card");
+    let run = db
+        .enqueue_run_uow(&EnqueueRun {
+            card_id: card.id,
+            column_id: todo,
+            harness: "fake",
+            argv_json: "[]",
+            prompt_snapshot: "p",
+            system_prompt_snapshot: None,
+            launch_spec_json: None,
+            session_id: None,
+            session: None,
+        })
+        .expect("enqueue");
+    db.finalize_run_uow(&FinalizeRun {
+        run_id: run.id,
+        outcome: RunOutcome::Ok,
+        summary: None,
+        comments: &[],
+        target_column_id: None,
+        final_status: CardStatus::Idle,
+        final_awaiting_reason: None,
+        next: None,
+    })
+    .expect("finalize");
+    db.add_comment(card.id, "user", "keep me").expect("comment");
+
+    db.set_board_archived(board.id, true).expect("archive");
+    db.set_board_archived(board.id, false).expect("restore");
+
+    let restored = db.get_board(board.id).expect("board");
+    assert!(restored.archived_at.is_none());
+    assert!(!db.list_columns(board.id).expect("columns").is_empty());
+    let cards = db.list_cards(board.id).expect("cards");
+    assert!(
+        cards.iter().any(|c| c.title == "open-run guard"),
+        "cards must survive the archive round-trip: {cards:?}"
+    );
+    assert_eq!(
+        db.list_runs(card.id).expect("runs").len(),
+        1,
+        "run history must survive"
+    );
+    assert_eq!(
+        db.list_comments(card.id).expect("comments").len(),
+        1,
+        "comments must survive"
+    );
+}
+
+#[test]
+fn archive_state_and_selection_survive_file_reopen() {
+    // Archiving is durable SQLite state: a daemon restart reopens the same
+    // file and must see the same archived_at plus the post-fallback selection.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("archive.db");
+    let (project_id, board_id, beta_id);
+    {
+        let db = Db::open(&path).expect("open");
+        let (project, main) = db.open_project_context("/arch/durable").expect("project");
+        let board = db.create_board(project.id, "ArchiveMe").expect("board");
+        let (beta, _) = db
+            .create_project_context("/arch/durable-beta")
+            .expect("beta");
+        project_id = project.id;
+        board_id = board.id;
+        beta_id = beta.id;
+        // Land back on durable/ArchiveMe so the archive trips its fallback.
+        db.select_board(board.id).expect("select");
+        db.set_board_archived(board.id, true).expect("archive");
+        assert_ne!(
+            db.selected_board_id_for(project.id).expect("selected"),
+            Some(board.id)
+        );
+        // Archive the whole project too: every board first, then the project.
+        // Selection must deterministically fall back to beta.
+        db.set_board_archived(main.id, true).expect("archive main");
+        db.set_project_archived("/arch/durable", true)
+            .expect("archive project");
+        assert!(
+            db.get_project(project.id)
+                .expect("project")
+                .archived_at
+                .is_some(),
+            "project must be archived before reopen"
+        );
+        assert_eq!(
+            db.selected_project_id().expect("selected"),
+            Some(beta.id),
+            "selection must fall back to beta"
+        );
+    }
+    let db = Db::open(&path).expect("reopen");
+    assert!(
+        db.get_board(board_id).expect("board").archived_at.is_some(),
+        "archived state must survive a daemon restart"
+    );
+    assert!(
+        db.get_project(project_id)
+            .expect("project")
+            .archived_at
+            .is_some(),
+        "project archived state must survive a daemon restart"
+    );
+    assert_eq!(
+        db.selected_project_id().expect("selected"),
+        Some(beta_id),
+        "project fallback selection must survive a daemon restart"
+    );
+    let selected = db.selected_board_id_for(project_id).expect("selected");
+    assert_ne!(
+        selected,
+        Some(board_id),
+        "selection must still avoid the archived board"
+    );
+    if let Some(sid) = selected {
+        assert!(
+            db.get_board(sid).expect("board").archived_at.is_none(),
+            "fallback selection must still be active after reopen"
+        );
+    }
 }

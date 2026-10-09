@@ -1,25 +1,28 @@
 #!/usr/bin/env bash
-# 33-reorder-card-tui.sh — reordering a card within its own column.
+# 33-reorder-card-tui.sh — reordering a card within its own column (live TUI trip).
 #
-# Asserts (provider-free):
+# Asserts (provider-free) as final-state checks against the persisted board:
 #   - the `O` TUI mini-mode shows the "Reorder card" banner and `j` stages the
 #     card one slot (selection follows; edges clamp),
-#   - Enter commits exactly ONE same-column card.move and the persisted order
-#     flips (read back from the isolated boardd via board.get),
-#   - Esc after staging persists nothing,
-#   - `board card move <id> <column> --position N` reorders via the CLI with
-#     the old forms untouched,
-#   - a same-column reorder inside an AUTO column never dispatches: a failed
-#     card parked in place keeps its single run row, its `failed` status, and
-#     the reordered position.
+#   - Enter commits the staged move and the persisted order flips (read back
+#     from the isolated boardd via board.get),
+#   - Esc after staging leaves the persisted order unchanged.
+# Exact RPC counts (zero on Esc, one same-column card.move on Enter) are NOT
+# proven here — only the final persisted order is read back. Counts belong to
+# the reducer/driver hermetic tests (board-tui update/scope.rs: single-move
+# and esc-emits-nothing cases).
+# Positioning/no-redispatch matrices live hermetically and are NOT repeated
+# here: CLI --position in board-cli integration cards.rs, same-column reorder
+# + auto-column no-dispatch in board-daemon ops cards.rs (seeded 3-card order
+# flips, never enqueues, never wakes dispatch), compaction in board-core db
+# crud.rs. This scenario keeps one live O-reorder trip: three Todo cards
+# (alpha/beta/gamma) prove a real position change, not a single-card no-op.
 #
 # The real TUI runs in a disposable Herdr pane; card order is read back
 # straight from the isolated boardd (the post-Enter truth source), and the
 # in-mode banner is read from the rendered pane.
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/lib.sh"
-
-export E2E_FAKE_ENV="FAKE_AGENT_OUTCOME=fail"  # the auto-column card parks failed in place
 
 e2e_boot   # e2e_init + e2e_build + e2e_isolate + e2e_daemon_start (in that order)
 
@@ -90,7 +93,7 @@ ok "O shows the 'Reorder card' banner"
 e2e_herdr_mutate -- pane send-text "$PANE_ID" j >/dev/null
 e2e_herdr_mutate -- pane send-keys "$PANE_ID" enter >/dev/null
 
-step "Enter commits exactly one same-column card.move; persisted order flips"
+step "Enter commits the staged move; persisted order flips (final-state check)"
 wait_cards "$T2 $T1 $T3"
 ok "committed Todo order is beta alpha gamma"
 
@@ -101,44 +104,8 @@ wait_screen "$PANE_ID" "Reorder card"
 e2e_herdr_mutate -- pane send-text "$PANE_ID" j >/dev/null
 e2e_herdr_mutate -- pane send-keys "$PANE_ID" esc >/dev/null
 
-step "Esc must restore the original order without persisting anything"
+step "Esc leaves the persisted order unchanged (final-state check)"
 wait_cards "$T2 $T1 $T3"
 ok "Esc cancelled: order unchanged (beta alpha gamma)"
-
-step "CLI: board card move --position reorders within the column"
-"$BOARD_BIN" card move "$T3" Todo --position 0 --json >/dev/null
-wait_cards "$T3 $T2 $T1"
-ok "CLI --position 0 moved gamma to the front (gamma beta alpha)"
-"$BOARD_BIN" card move "$T3" Todo --position 2 --json >/dev/null
-wait_cards "$T2 $T1 $T3"
-ok "CLI --position 2 moved gamma to the back (beta alpha gamma)"
-
-step "HERDR MUTATION: same-column reorder in an AUTO column never dispatches"
-AUTO_ID="$(col_create '{"name":"Auto","trigger":"auto"}')"
-[ -n "$AUTO_ID" ] || fail "could not create/parse Auto column"
-A1="$("$BOARD_BIN" card new --title "auto card" --harness fake \
-  --space-kind workspace --space-ref "$WS_ID" --json | jget id)"
-e2e_board_herdr_mutate -- move "$A1" Auto --json >/dev/null
-
-step "Wait for the auto card's run to finish (fails and parks in place)"
-oc="$(wait_runs "$A1" 1)" || { e2e_card_failure_diag "$A1"; fail "auto run never finished"; }
-[ "$oc" = "fail" ] || fail "auto run outcome '$oc', expected 'fail'"
-st="$(card_field "$A1" card.status || true)"
-col="$(card_field "$A1" card.column_id || true)"
-[ "$st" = "failed" ] || fail "card status '$st', expected 'failed'"
-[ "$col" = "$AUTO_ID" ] || fail "card moved to $col; a no-on_fail failure must stay in Auto ($AUTO_ID)"
-ok "auto card failed in place with 1 run"
-
-step "Reorder the failed card inside the auto column; no second run may start"
-"$BOARD_BIN" card move "$A1" Auto --position 0 --json >/dev/null
-sleep 1
-n="$("$BOARD_BIN" card show "$A1" --json \
-  | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("runs",[])))')"
-[ "$n" = "1" ] || fail "expected exactly 1 run after the reorder, got $n"
-st="$(card_field "$A1" card.status || true)"
-[ "$st" = "failed" ] || fail "card status '$st' after reorder, expected 'failed'"
-pos="$(card_field "$A1" card.position || true)"
-[ "$pos" = "0" ] || fail "card position '$pos', expected '0'"
-ok "same-column reorder in the auto column kept 1 run and status 'failed'"
 
 step "33-reorder-card-tui: ALL CHECKS PASSED"

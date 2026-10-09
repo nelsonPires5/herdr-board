@@ -1285,29 +1285,28 @@ fn app_with_system_comment() -> (board_tui::app::App, board_core::model::Comment
 }
 
 #[test]
-fn e_on_a_system_comment_toasts_and_opens_no_form() {
-    let (mut app, _comment) = app_with_system_comment();
-    let effects = update(&mut app, key(KeyCode::Char('e')));
-    assert!(effects.is_empty());
-    assert_eq!(app.screen, Screen::CardDetail);
-    assert!(app.form.is_none());
-    assert!(app
-        .toast
-        .as_ref()
-        .is_some_and(|t| t.is_error && t.text.contains("immutable")));
-}
-
-#[test]
-fn d_on_a_system_comment_toasts_and_opens_no_confirm() {
-    let (mut app, _comment) = app_with_system_comment();
-    let effects = update(&mut app, key(KeyCode::Char('d')));
-    assert!(effects.is_empty());
-    assert_eq!(app.screen, Screen::CardDetail);
-    assert!(app.confirm.is_none());
-    assert!(app
-        .toast
-        .as_ref()
-        .is_some_and(|t| t.is_error && t.text.contains("immutable")));
+fn system_comment_edit_and_delete_are_refused() {
+    // `e` (edit) and `d` (delete) refuse a system comment the same way:
+    // error toast, no modal, stays on CardDetail. Fresh state per key so
+    // the first refusal's toast cannot mask the second.
+    for (name, pressed) in [("e", KeyCode::Char('e')), ("d", KeyCode::Char('d'))] {
+        let (mut app, _comment) = app_with_system_comment();
+        let effects = update(&mut app, key(pressed));
+        assert!(effects.is_empty(), "{name} must emit no effect");
+        assert_eq!(
+            app.screen,
+            Screen::CardDetail,
+            "{name} stays on card detail"
+        );
+        assert!(app.form.is_none(), "{name} opens no form");
+        assert!(app.confirm.is_none(), "{name} opens no confirm");
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|t| t.is_error && t.text.contains("immutable")),
+            "{name} must explain the refusal"
+        );
+    }
 }
 
 #[test]

@@ -4,7 +4,6 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-import tempfile
 import time
 import unittest
 
@@ -58,11 +57,6 @@ class PortableProcessIdentityTests(unittest.TestCase):
             self.key,
         )
         return provisional, stable
-
-    def test_mode_is_portable_octal(self):
-        with tempfile.TemporaryDirectory() as directory:
-            os.chmod(directory, 0o700)
-            self.assertEqual(identity.stat.S_IMODE(os.stat(directory).st_mode), 0o700)
 
     def test_snapshot_preserves_complete_argv(self):
         current = identity.snapshot(self.child.pid)

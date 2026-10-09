@@ -215,37 +215,56 @@ class PrepareReleaseTests(unittest.TestCase):
             self.assertNotIn("[0.1.0] - 2026-07-16", changelog)
 
     def test_apply_release_is_idempotent_on_rerun(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            self.write_fixture(repo)
+        for with_install_docs in (False, True):
+            with self.subTest(
+                with_install_docs=with_install_docs
+            ), tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                self.write_fixture(repo)
+                if with_install_docs:
+                    self.write_install_docs(repo)
 
-            first = prepare_release.apply_release(
-                repo,
-                "0.2.0",
-                release_date="2026-07-16",
-                repo_url="https://github.com/example/herdr-board",
-            )
-            self.assertTrue(first.changed)
+                first = prepare_release.apply_release(
+                    repo,
+                    "0.2.0",
+                    release_date="2026-07-16",
+                    repo_url="https://github.com/example/herdr-board",
+                )
+                self.assertTrue(first.changed)
 
-            snapshot = {
-                name: (repo / name).read_text(encoding="utf-8")
-                for name in ("Cargo.toml", "herdr-plugin.toml", "Cargo.lock", "CHANGELOG.md")
-            }
+                snapshot = {
+                    path.relative_to(repo).as_posix(): path.read_text(encoding="utf-8")
+                    for path in prepare_release.managed_documents(repo)
+                }
+                if with_install_docs:
+                    self.assertEqual(
+                        sorted(snapshot),
+                        sorted(
+                            [
+                                *prepare_release.RELEASE_FILES,
+                                *prepare_release.INSTALL_REF_DOCS,
+                            ]
+                        ),
+                    )
+                else:
+                    self.assertEqual(
+                        sorted(snapshot), sorted(prepare_release.RELEASE_FILES)
+                    )
 
-            second = prepare_release.apply_release(
-                repo,
-                "0.2.0",
-                release_date="2026-07-16",
-                repo_url="https://github.com/example/herdr-board",
-            )
-            self.assertFalse(second.changed)
-            self.assertTrue(second.already_prepared)
+                second = prepare_release.apply_release(
+                    repo,
+                    "0.2.0",
+                    release_date="2026-07-16",
+                    repo_url="https://github.com/example/herdr-board",
+                )
+                self.assertFalse(second.changed)
+                self.assertTrue(second.already_prepared)
 
-            after = {
-                name: (repo / name).read_text(encoding="utf-8")
-                for name in ("Cargo.toml", "herdr-plugin.toml", "Cargo.lock", "CHANGELOG.md")
-            }
-            self.assertEqual(after, snapshot)
+                after = {
+                    path.relative_to(repo).as_posix(): path.read_text(encoding="utf-8")
+                    for path in prepare_release.managed_documents(repo)
+                }
+                self.assertEqual(after, snapshot)
 
     def test_verify_command_validates_prepared_release(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -423,26 +442,6 @@ class PrepareReleaseTests(unittest.TestCase):
                     prepare_release.verify_release(
                         repo, repo_url="https://github.com/example/herdr-board"
                     )
-
-    def test_apply_release_stays_idempotent_with_install_ref_documents(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            self.write_fixture(repo)
-            self.write_install_docs(repo)
-            prepare_release.apply_release(
-                repo,
-                "0.2.0",
-                release_date="2026-07-16",
-                repo_url="https://github.com/example/herdr-board",
-            )
-            second = prepare_release.apply_release(
-                repo,
-                "0.2.0",
-                release_date="2026-07-16",
-                repo_url="https://github.com/example/herdr-board",
-            )
-            self.assertFalse(second.changed)
-            self.assertTrue(second.already_prepared)
 
     def test_apply_release_repairs_a_pin_that_drifted_after_the_bump(self) -> None:
         """A doc-only pin regression must not need a second version bump."""

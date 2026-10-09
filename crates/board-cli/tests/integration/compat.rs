@@ -1,7 +1,5 @@
-use board_core::client::BoardClient;
-use board_core::protocol::{CardCreateParams, CardStatus, ColumnCreateParams, Trigger};
-
-use super::{json_output, old_card, poll, todo_id, TestDaemon};
+use super::runs::{run_done_retry_cancel_workflow, RunCliStyle};
+use super::{json_output, old_card, TestDaemon};
 
 #[test]
 fn top_level_comment_and_move_aliases_remain_supported() {
@@ -19,49 +17,9 @@ fn top_level_comment_and_move_aliases_remain_supported() {
 
 #[test]
 fn top_level_done_cancel_and_retry_aliases_remain_supported() {
-    let td = TestDaemon::start(&[("FAKE_AGENT_SLEEP", "10")]);
-    let mut client = td.client();
-    let todo = todo_id(&mut client);
-    let work = client
-        .column_create(&ColumnCreateParams {
-            name: "legacy-work".into(),
-            trigger: Some(Trigger::Auto),
-            ..Default::default()
-        })
-        .unwrap();
-    let card = client
-        .card_create(&CardCreateParams {
-            title: "legacy run aliases".into(),
-            harness: Some("fake".into()),
-            column_id: Some(todo),
-            ..Default::default()
-        })
-        .unwrap();
-    client
-        .card_move(&board_core::protocol::CardMoveParams {
-            id: card.id,
-            column_id: work.id,
-            board_id: None,
-            position: None,
-        })
-        .unwrap();
-    assert!(poll(&mut client, 10, |c| {
-        c.card_get(card.id).unwrap().card.status == CardStatus::Running
-    }));
-
-    let comment =
-        json_output(&td.board(&["comment", &card.id.to_string(), "before done", "--json"]));
-    assert_eq!(comment["card_id"], card.id);
-
-    let done = json_output(&td.board(&["done", &card.id.to_string(), "--outcome", "ok", "--json"]));
-    assert_eq!(done["card"]["id"], card.id);
-
-    let retry = json_output(&td.board(&["retry", &card.id.to_string(), "--json"]));
-    assert_eq!(retry["card"]["id"], card.id);
-    assert!(poll(&mut client, 10, |c| {
-        c.card_get(card.id).unwrap().runs.len() >= 2
-    }));
-
-    let cancel = json_output(&td.board(&["cancel", &card.id.to_string(), "--json"]));
-    assert_eq!(cancel["card"]["id"], card.id);
+    // Comment/move alias coverage lives in
+    // `top_level_comment_and_move_aliases_remain_supported` above; the
+    // done/retry/cancel workflow itself is shared with the canonical
+    // `card run` verbs in `runs.rs`.
+    run_done_retry_cancel_workflow(RunCliStyle::Alias);
 }

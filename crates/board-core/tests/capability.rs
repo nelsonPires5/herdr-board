@@ -372,18 +372,172 @@ argv = ["a"]
 }
 
 #[test]
-fn capabilities_match_trait_snapshot() {
-    // The wire snapshot and the trait agree for every built-in.
-    for h in ["pi", "claude", "codex", "opencode", "antigravity"] {
-        let cfg = Config::default();
-        let via_fn = capabilities_for(h, &cfg).unwrap();
-        let via_trait = {
-            let m = meta_for(h, &cfg).unwrap();
-            let snap = board_core::capability::HarnessCapabilities::from_meta(m.as_ref());
-            snap
-        };
-        assert_eq!(via_fn, via_trait);
+fn builtin_capability_snapshots_match_pinned_expectations() {
+    // Pinned expectations for every built-in, stated independently on both
+    // the wire snapshot (`capabilities_for`) and the trait adapter
+    // (`meta_for`) so a drift in either is caught. This replaces the old
+    // self-compare (`capabilities_for` vs `from_meta`), which passed as long
+    // as the two shared one implementation.
+    let cfg = Config::default();
+    let full_ladder = vec![
+        Effort::Off,
+        Effort::Minimal,
+        Effort::Low,
+        Effort::Medium,
+        Effort::High,
+        Effort::Xhigh,
+        Effort::Max,
+    ];
+    let claude_ladder = vec![
+        Effort::Low,
+        Effort::Medium,
+        Effort::High,
+        Effort::Xhigh,
+        Effort::Max,
+    ];
+    let agy_ladder = vec![Effort::Low, Effort::Medium, Effort::High];
+
+    // pi: free-form, no catalog, no permissions, full ladder, resumable.
+    let pi = capabilities_for("pi", &cfg).unwrap();
+    assert_eq!(pi.harness, "pi");
+    assert!(pi.models.is_empty());
+    assert!(pi.model_freeform);
+    assert_eq!(pi.default_efforts, full_ladder);
+    assert!(pi.permission_modes.is_empty());
+    assert_eq!(pi.resume, ResumeSupport::ByConversationId);
+    assert_eq!(pi.default_effort_label, "default effort");
+    assert_eq!(pi.default_permission_label, "default permission");
+    assert_eq!(pi.default_model_label, "default model");
+    let m = meta_for("pi", &cfg).unwrap();
+    assert_eq!(m.id(), "pi");
+    assert!(m.models().is_empty());
+    assert!(m.model_freeform());
+    assert_eq!(m.efforts(None), full_ladder);
+    assert!(m.permissions().is_empty());
+    assert_eq!(m.resume(), ResumeSupport::ByConversationId);
+
+    // claude: four aliases sharing the five-level ladder, six permission modes.
+    let claude = capabilities_for("claude", &cfg).unwrap();
+    assert_eq!(claude.harness, "claude");
+    assert!(claude.model_freeform);
+    let ids: Vec<&str> = claude.models.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, ["fable", "opus", "sonnet", "haiku"]);
+    for model in &claude.models {
+        assert_eq!(model.efforts, claude_ladder);
     }
+    assert_eq!(claude.default_efforts, claude_ladder);
+    assert_eq!(
+        claude.permission_modes,
+        vec![
+            "acceptEdits",
+            "auto",
+            "bypassPermissions",
+            "manual",
+            "dontAsk",
+            "plan"
+        ]
+    );
+    assert_eq!(claude.resume, ResumeSupport::ByConversationId);
+    let m = meta_for("claude", &cfg).unwrap();
+    assert_eq!(m.id(), "claude");
+    assert!(m.model_freeform());
+    assert_eq!(m.efforts(Some("sonnet")), claude_ladder);
+    assert_eq!(m.efforts(None), claude_ladder);
+    assert_eq!(
+        m.permissions(),
+        vec![
+            "acceptEdits".to_string(),
+            "auto".to_string(),
+            "bypassPermissions".to_string(),
+            "manual".to_string(),
+            "dontAsk".to_string(),
+            "plan".to_string()
+        ]
+    );
+    assert_eq!(m.resume(), ResumeSupport::ByConversationId);
+
+    // codex: free-form, no catalog, three approval presets, full ladder.
+    let codex = capabilities_for("codex", &cfg).unwrap();
+    assert_eq!(codex.harness, "codex");
+    assert!(codex.models.is_empty());
+    assert!(codex.model_freeform);
+    assert_eq!(codex.default_efforts, full_ladder);
+    assert_eq!(
+        codex.permission_modes,
+        vec!["ask-for-approval", "approve-for-me", "full-access"]
+    );
+    assert_eq!(codex.resume, ResumeSupport::ByConversationId);
+    let m = meta_for("codex", &cfg).unwrap();
+    assert_eq!(m.id(), "codex");
+    assert!(m.model_freeform());
+    assert_eq!(m.efforts(None), full_ladder);
+    assert_eq!(
+        m.permissions(),
+        vec![
+            "ask-for-approval".to_string(),
+            "approve-for-me".to_string(),
+            "full-access".to_string()
+        ]
+    );
+    assert_eq!(m.resume(), ResumeSupport::ByConversationId);
+
+    // opencode: free-form plus the two-entry static fallback catalog.
+    let opencode = capabilities_for("opencode", &cfg).unwrap();
+    assert_eq!(opencode.harness, "opencode");
+    assert!(opencode.model_freeform);
+    assert_eq!(opencode.models.len(), 2);
+    let nemotron = opencode
+        .models
+        .iter()
+        .find(|m| m.id == "opencode/nemotron-3-ultra-free")
+        .expect("fallback defines nemotron");
+    assert!(nemotron.efforts.is_empty());
+    let deepseek = opencode
+        .models
+        .iter()
+        .find(|m| m.id == "opencode/deepseek-v4-flash-free")
+        .expect("fallback defines deepseek");
+    assert_eq!(
+        deepseek.efforts,
+        vec![Effort::Low, Effort::High, Effort::Max]
+    );
+    assert_eq!(opencode.default_efforts, full_ladder);
+    assert_eq!(opencode.permission_modes, vec!["default", "auto-approve"]);
+    assert_eq!(opencode.resume, ResumeSupport::ByConversationId);
+    let m = meta_for("opencode", &cfg).unwrap();
+    assert_eq!(m.id(), "opencode");
+    assert!(m.model_freeform());
+    assert_eq!(m.efforts(None), full_ladder);
+    assert!(m.efforts(Some("opencode/nemotron-3-ultra-free")).is_empty());
+    assert_eq!(
+        m.efforts(Some("opencode/deepseek-v4-flash-free")),
+        vec![Effort::Low, Effort::High, Effort::Max]
+    );
+    assert_eq!(
+        m.permissions(),
+        vec!["default".to_string(), "auto-approve".to_string()]
+    );
+    assert_eq!(m.resume(), ResumeSupport::ByConversationId);
+
+    // antigravity with no live catalog: no models, free-form, three agy
+    // levels, two permission modes, resumable.
+    let agy = capabilities_for("antigravity", &cfg).unwrap();
+    assert_eq!(agy.harness, "antigravity");
+    assert!(agy.models.is_empty());
+    assert!(agy.model_freeform);
+    assert_eq!(agy.default_efforts, agy_ladder);
+    assert_eq!(agy.permission_modes, vec!["sandbox", "always-proceed"]);
+    assert_eq!(agy.resume, ResumeSupport::ByConversationId);
+    let m = meta_for("antigravity", &cfg).unwrap();
+    assert_eq!(m.id(), "antigravity");
+    assert!(m.models().is_empty());
+    assert!(m.model_freeform());
+    assert_eq!(m.efforts(None), agy_ladder);
+    assert_eq!(
+        m.permissions(),
+        vec!["sandbox".to_string(), "always-proceed".to_string()]
+    );
+    assert_eq!(m.resume(), ResumeSupport::ByConversationId);
 }
 
 // ---------------------------------------------------------------------------

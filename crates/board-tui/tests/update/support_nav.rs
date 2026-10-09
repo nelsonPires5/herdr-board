@@ -191,12 +191,11 @@ fn template_only_on_empty_board() {
 }
 
 #[test]
-fn help_and_quit() {
+fn q_quits_from_the_board() {
+    // The help round trip (including the CardDetail return) lives in
+    // `help_returns_to_the_screen_it_was_opened_from` (modals.rs); here
+    // only the quit behavior is covered.
     let mut app = demo_app();
-    update(&mut app, key(KeyCode::Char('?')));
-    assert_eq!(app.screen, Screen::Help);
-    update(&mut app, key(KeyCode::Char(' ')));
-    assert_eq!(app.screen, Screen::Board);
     let effects = update(&mut app, key(KeyCode::Char('q')));
     assert!(matches!(effects.as_slice(), [Effect::Quit]));
 }
