@@ -491,6 +491,67 @@ fn card_opencode_known_model_efforts_follow_the_selected_model() {
 }
 
 #[test]
+fn card_pi_catalog_model_efforts_follow_thinking_level_map_order() {
+    // The live Pi catalog resolves thinkingLevelMap to the canonical ladder
+    // (pi_catalog tri-state semantics); selecting such a catalog model must
+    // surface exactly that ordering in the effort selector — not the default
+    // ladder, and in canonical order, not store order.
+    let mut caps = pi_capabilities();
+    caps.models = vec![
+        ModelInfo {
+            id: "openai-codex/gpt-effort-e2e".to_string(),
+            efforts: vec![
+                Effort::Off,
+                Effort::Minimal,
+                Effort::Low,
+                Effort::Medium,
+                Effort::High,
+                Effort::Xhigh,
+                Effort::Max,
+            ],
+        },
+        // A sparse map (null levels opted out) narrows the selector.
+        ModelInfo {
+            id: "zai/glm-holes".to_string(),
+            efforts: vec![Effort::Off, Effort::Minimal, Effort::High, Effort::Max],
+        },
+    ];
+    let mut form = Form::card_create(1);
+    form.apply_options(Some(caps), None, None, None);
+
+    set_choice(&mut form, FieldId::Model, "openai-codex/gpt-effort-e2e");
+    form.on_model_changed();
+    assert_eq!(
+        choice_labels(&form, FieldId::Effort),
+        vec![
+            "default effort".to_string(),
+            "off".to_string(),
+            "minimal".to_string(),
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+            "xhigh".to_string(),
+            "max".to_string(),
+        ],
+        "the catalog model's corrected ordering reaches the form"
+    );
+
+    set_choice(&mut form, FieldId::Model, "zai/glm-holes");
+    form.on_model_changed();
+    assert_eq!(
+        choice_labels(&form, FieldId::Effort),
+        vec![
+            "default effort".to_string(),
+            "off".to_string(),
+            "minimal".to_string(),
+            "high".to_string(),
+            "max".to_string(),
+        ],
+        "opted-out levels stay out of the selector"
+    );
+}
+
+#[test]
 fn card_opencode_default_capabilities_before_fetch() {
     // Before any catalog fetch, selecting opencode answers from board-core's
     // built-in snapshot (`default_capabilities`), not a hardcoded harness

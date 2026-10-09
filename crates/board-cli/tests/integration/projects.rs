@@ -234,6 +234,175 @@ fn cross_project_move_keeps_the_selection() {
     );
 }
 
+/// (g2) A cross-project `card move` is resolution-only for recency: the
+/// served `recent_project_ids` are byte-identical before and after the move.
+#[test]
+fn cross_project_move_leaves_recency_untouched() {
+    let td = TestDaemon::start(&[]);
+    let a = td._dir.path().join("recency-a");
+    let b = td._dir.path().join("recency-b");
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+    let a_scope = canonical(&a);
+    let b_scope = canonical(&b);
+
+    json_output(&td.board(&["project", "create", &a_scope, "--json"]));
+    let card = json_output(&td.board(&["card", "create", "--title", "recency probe", "--json"]));
+    let card_id = card["id"].as_i64().unwrap();
+    json_output(&td.board(&["project", "create", &b_scope, "--json"]));
+    json_output(&td.board(&["project", "select", &a_scope, "--json"]));
+
+    let before = td.client().project_list().unwrap();
+    json_output(&td.board(&[
+        "card",
+        "move",
+        &card_id.to_string(),
+        "Todo",
+        "--to-project",
+        &b_scope,
+        "--to-board",
+        "main",
+        "--json",
+    ]));
+    let after = td.client().project_list().unwrap();
+    assert_eq!(
+        after.selected_project_id, before.selected_project_id,
+        "the move must not reselect"
+    );
+    assert_eq!(
+        after.recent_project_ids, before.recent_project_ids,
+        "only explicit open/create/select touch recency"
+    );
+}
+/// (h2) Board/project archive visibility and human markers (e2e/38 hermetic
+/// keeper): `board list --visibility active|all|archived` and `project list
+/// --visibility ...` filter on archived_at in JSON, and the human tables mark
+/// archived rows with `(archived)`.
+#[test]
+fn board_and_project_archive_visibility_and_human_markers() {
+    let td = TestDaemon::start(&[]);
+    let dir = td._dir.path().join("archive-vis");
+    std::fs::create_dir_all(&dir).unwrap();
+    let scope = canonical(&dir);
+    json_output(&td.board(&["project", "create", &scope, "--json"]));
+    let created = json_output(&td.board(&["board", "create", "ArchiveMe", "--json"]));
+    let archive_id = created["board"]["id"].as_i64().unwrap();
+    json_output(&td.board(&["board", "archive", &archive_id.to_string(), "--json"]));
+
+    // Board JSON visibility: active hides, archived shows with archived_at, all shows both.
+    let active = json_output(&td.board(&[
+        "board",
+        "list",
+        "--project",
+        &scope,
+        "--visibility",
+        "active",
+        "--json",
+    ]));
+    let active_boards = active.as_array().unwrap();
+    assert!(
+        active_boards.iter().all(|b| b["archived_at"].is_null()),
+        "active must hide archived boards: {active_boards:?}"
+    );
+    assert!(!active_boards.iter().any(|b| b["id"] == archive_id));
+    let archived = json_output(&td.board(&[
+        "board",
+        "list",
+        "--project",
+        &scope,
+        "--visibility",
+        "archived",
+        "--json",
+    ]));
+    let archived_boards = archived.as_array().unwrap();
+    assert!(
+        archived_boards
+            .iter()
+            .any(|b| b["id"] == archive_id && !b["archived_at"].is_null()),
+        "archived must include the board with archived_at: {archived_boards:?}"
+    );
+    let all = json_output(&td.board(&[
+        "board",
+        "list",
+        "--project",
+        &scope,
+        "--visibility",
+        "all",
+        "--json",
+    ]));
+    let all_boards = all.as_array().unwrap();
+    assert!(all_boards.iter().any(|b| b["id"] == archive_id));
+    assert!(all_boards.iter().any(|b| b["name"] == "main"));
+    // Human markers: the archived table marks the row, the active table leaks nothing.
+    let archived_text = td.board(&[
+        "board",
+        "list",
+        "--project",
+        &scope,
+        "--visibility",
+        "archived",
+    ]);
+    assert!(archived_text.status.success());
+    let archived_stdout = String::from_utf8_lossy(&archived_text.stdout);
+    assert!(
+        archived_stdout.contains("(archived)"),
+        "archived text must mark the row: {archived_stdout}"
+    );
+    let active_text = td.board(&[
+        "board",
+        "list",
+        "--project",
+        &scope,
+        "--visibility",
+        "active",
+    ]);
+    assert!(active_text.status.success());
+    assert!(
+        !String::from_utf8_lossy(&active_text.stdout).contains("ArchiveMe"),
+        "active text must not leak the archived board"
+    );
+
+    // Project JSON visibility: the project is still active (main remains), so
+    // the archived project list is empty; after archiving every board and the
+    // project itself, active hides it and archived/all show it with a marker.
+    let proj_archived =
+        json_output(&td.board(&["project", "list", "--visibility", "archived", "--json"]));
+    assert!(
+        proj_archived["projects"].as_array().unwrap().is_empty(),
+        "no project is archived yet"
+    );
+    let main_id = all_boards.iter().find(|b| b["name"] == "main").unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    json_output(&td.board(&["board", "archive", &main_id.to_string(), "--json"]));
+    json_output(&td.board(&["project", "archive", &scope, "--json"]));
+    let proj_active =
+        json_output(&td.board(&["project", "list", "--visibility", "active", "--json"]));
+    assert!(
+        proj_active["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p["project"]["archived_at"].is_null()),
+        "active must hide the archived project"
+    );
+    let proj_archived =
+        json_output(&td.board(&["project", "list", "--visibility", "archived", "--json"]));
+    let archived_projects = proj_archived["projects"].as_array().unwrap();
+    assert!(
+        archived_projects
+            .iter()
+            .any(|p| p["project"]["scope_path"] == scope && !p["project"]["archived_at"].is_null()),
+        "archived must include the project with archived_at"
+    );
+    let proj_text = td.board(&["project", "list", "--visibility", "archived"]);
+    assert!(proj_text.status.success());
+    assert!(
+        String::from_utf8_lossy(&proj_text.stdout).contains("(archived)"),
+        "project archived text must mark the row"
+    );
+}
+
 /// (h) `board board rename` still works, and renaming onto a sibling name in
 /// the same project is a bad request (exit 1).
 #[test]

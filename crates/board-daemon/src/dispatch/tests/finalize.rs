@@ -1,6 +1,9 @@
 //! Terminal-path idempotency and the finalization transaction: exactly one
 //! winner across `board done` / cancel / timeout / pane-exit, the auto-hop
 //! enqueue inside the same transaction, and the exact post-commit effect order.
+//!
+//! Live e2e/08 keeps the pane-death half (the exact started pane disappears);
+//! the kill-flag + on_fail + comment policy for the timeout path lives here.
 
 use super::*;
 
@@ -351,4 +354,167 @@ fn scoped_run_transition_uses_the_cards_board_columns() {
     let (_, moved) = finalize_run(&d, run.id, RunOutcome::Ok, None, None, false, true).unwrap();
     assert_eq!(moved.board_id, card.board_id);
     assert_eq!(moved.column_id, target.id);
+}
+
+#[test]
+fn fail_transition_parks_in_manual_on_fail_with_system_comment() {
+    // Live e2e/04-fail-on-fail.sh keeps only the configured-runner
+    // `board done --outcome fail` reachability from a real pane; the policy
+    // itself lives here: a Fail in an auto column with `on_fail_column_id`
+    // pointing at a MANUAL column moves the card there, parks it idle with
+    // no follow-up run, and records the exact system transition comment.
+    let d = test_daemon(Arc::new(MissingPiSpawner));
+    let (card_id, run_id, backlog_id) = {
+        let db = d.store.lock();
+        let backlog = db
+            .create_column(&ColumnCreateParams {
+                name: "Backlog".into(),
+                trigger: Some(Trigger::Manual),
+                ..Default::default()
+            })
+            .unwrap();
+        let execute = db
+            .create_column(&ColumnCreateParams {
+                name: "Execute".into(),
+                trigger: Some(Trigger::Auto),
+                on_fail_column_id: Some(backlog.id),
+                ..Default::default()
+            })
+            .unwrap();
+        let card = db
+            .create_card(&CardCreateParams {
+                column_id: Some(execute.id),
+                title: "fail policy".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let run = db
+            .enqueue_run_uow(&EnqueueRun {
+                card_id: card.id,
+                column_id: execute.id,
+                harness: "pi",
+                argv_json: "[]",
+                prompt_snapshot: "p",
+                system_prompt_snapshot: None,
+                launch_spec_json: None,
+                session_id: None,
+                session: None,
+            })
+            .unwrap();
+        db.promote_run_uow(run.id, None, None, None).unwrap();
+        (card.id, run.id, backlog.id)
+    };
+
+    let (run, card) = finalize_run(&d, run_id, RunOutcome::Fail, None, None, false, true).unwrap();
+    assert_eq!(run.outcome, Some(RunOutcome::Fail));
+    assert_eq!(card.column_id, backlog_id);
+    assert_eq!(card.status, CardStatus::Idle);
+    // A manual on_fail target parks the card: no follow-up run is enqueued.
+    let runs = d.store.lock().list_runs(card_id).unwrap();
+    assert_eq!(runs.len(), 1);
+    assert!(runs[0].ended_at.is_some());
+    let comments = d.store.lock().list_comments(card_id).unwrap();
+    assert!(
+        comments.iter().any(|c| c.author == "system"
+            && c.body.contains("Execute failed in ")
+            && c.body.contains("Backlog")),
+        "fail transition must record the system comment, got: {comments:?}"
+    );
+}
+
+#[test]
+fn timeout_path_kills_the_agent_pane_and_applies_on_fail_with_comment() {
+    // The timeout ticker calls finalize_run_timeout(Fail, kill=true,
+    // transition=true). Live e2e/08 proves the exact started pane disappears;
+    // this test proves the policy: the spawner is killed exactly once, the
+    // card follows on_fail, the outcome is Fail, and a system comment records
+    // the timeout.
+    let spawner = Arc::new(RecordingSpawner::default());
+    let d = test_daemon(spawner.clone());
+    let (card_id, run_id, backlog_id) = {
+        let db = d.store.lock();
+        let backlog = db
+            .create_column(&ColumnCreateParams {
+                name: "Backlog".into(),
+                trigger: Some(Trigger::Manual),
+                ..Default::default()
+            })
+            .unwrap();
+        let execute = db
+            .create_column(&ColumnCreateParams {
+                name: "Execute".into(),
+                trigger: Some(Trigger::Auto),
+                on_fail_column_id: Some(backlog.id),
+                ..Default::default()
+            })
+            .unwrap();
+        let card = db
+            .create_card(&CardCreateParams {
+                column_id: Some(execute.id),
+                title: "timeout policy".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let run = db
+            .enqueue_run_uow(&EnqueueRun {
+                card_id: card.id,
+                column_id: execute.id,
+                harness: "pi",
+                argv_json: "[]",
+                prompt_snapshot: "p",
+                system_prompt_snapshot: None,
+                launch_spec_json: None,
+                session_id: None,
+                session: None,
+            })
+            .unwrap();
+        db.promote_run_uow(run.id, Some("workspace"), Some("pane"), None)
+            .unwrap();
+        (card.id, run.id, backlog.id)
+    };
+    d.sched.lock().unwrap().active.insert(
+        run_id,
+        ActiveRun {
+            card_id,
+            handle: RuntimeHandle {
+                pane_id: Some("pane".into()),
+                ..Default::default()
+            },
+            started: Instant::now() - Duration::from_secs(120),
+            timeout_deadline: Some(Instant::now() - Duration::from_secs(60)),
+            idle_since: None,
+            awaiting_since: None,
+            is_local: false,
+            pane_id: Some("pane".into()),
+        },
+    );
+
+    let msg = "run timed out after 120s; applying on_fail".to_string();
+    let (run, card) = finalize_run_timeout(
+        &d,
+        run_id,
+        Instant::now(),
+        RunOutcome::Fail,
+        Some(msg.clone()),
+        Some(msg),
+        true,
+        true,
+    )
+    .unwrap()
+    .expect("due timeout with a started run must finalize");
+    assert_eq!(run.outcome, Some(RunOutcome::Fail));
+    assert!(run.ended_at.is_some());
+    assert_eq!(card.column_id, backlog_id);
+    assert_eq!(
+        spawner.kills.load(Ordering::SeqCst),
+        1,
+        "the timeout path must kill the agent pane exactly once"
+    );
+    let comments = d.store.lock().list_comments(card_id).unwrap();
+    assert!(
+        comments
+            .iter()
+            .any(|c| c.is_system() && c.body.contains("timed out")),
+        "timeout must record a system comment, got: {comments:?}"
+    );
 }

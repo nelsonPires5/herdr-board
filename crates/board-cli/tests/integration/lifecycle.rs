@@ -234,7 +234,7 @@ fn cancel_running_card() {
 }
 
 #[test]
-fn retry_creates_new_forked_run() {
+fn configured_retry_creates_new_run_and_preserves_session_id() {
     let td = TestDaemon::start(&[("FAKE_AGENT_OUTCOME", "ok")]);
     let mut c = td.client();
     let todo = todo_id(&mut c);
@@ -268,7 +268,7 @@ fn retry_creates_new_forked_run() {
     let new_run = d.runs.iter().max_by_key(|r| r.id).unwrap();
     assert_eq!(
         new_run.session_id, session,
-        "retry forks/reuses the same session id"
+        "configured retry preserves the harness session id on the new run"
     );
 }
 

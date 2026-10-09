@@ -1055,3 +1055,45 @@ fn antigravity_retry_enqueue_keeps_the_real_recorded_conversation_id() {
         "agy has no fork flag; a retry must never simulate one"
     );
 }
+
+#[test]
+fn enqueue_run_persists_comment_context_in_prompt_snapshot() {
+    // Live e2e/09-comment-context.sh keeps only the second-process witness
+    // (the Stage2 agent observing the Stage1 marker in its own BOARD_PROMPT);
+    // the stored-prompt half of that contract lives here: whatever comments
+    // the card carries at enqueue time must be baked into the persisted
+    // `prompt_snapshot` under the `## Card comments` section.
+    let d = test_daemon(Arc::new(MissingPiSpawner));
+    let card_id = {
+        let db = d.store.lock();
+        let card = db
+            .create_card(&CardCreateParams {
+                title: "context flow".into(),
+                harness: Some("pi".into()),
+                description: Some("task body".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        db.add_comment(card.id, "user", "E2E-CTX-MARKER-probe")
+            .unwrap();
+        card.id
+    };
+
+    let column_id = d.store.lock().get_card(card_id).unwrap().unwrap().column_id;
+    let run = enqueue_run(&d, card_id, column_id, false).unwrap();
+    assert!(
+        run.prompt_snapshot.contains("## Card comments"),
+        "prompt_snapshot must carry the comments section, got: {:?}",
+        run.prompt_snapshot
+    );
+    assert!(
+        run.prompt_snapshot.contains("E2E-CTX-MARKER-probe"),
+        "prompt_snapshot must carry the stored comment, got: {:?}",
+        run.prompt_snapshot
+    );
+    assert!(
+        run.prompt_snapshot.starts_with("task body"),
+        "prompt_snapshot must start from the card description, got: {:?}",
+        run.prompt_snapshot
+    );
+}

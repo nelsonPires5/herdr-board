@@ -58,7 +58,14 @@ print(cwds[0])
 printf '  disposable workspace pane cwd: %s\n' "$MANAGED_PANE_CWD"
 EXEC_ID="$(col_create '{"name":"P17 Execute","trigger":"auto"}')"
 
-step "Dispatch fake Pi through managed protocol-22/current launch"
+step "Dispatch fake Pi through managed protocol-22/current launch (smoke; deep Pi contract lives in 11)"
+# M6: 11 proves the full managed Pi launch contract (0600 system file split
+# from stdin task, ordered session_identity + idle_lifecycle reports with seq
+# ordering, Herdr session path, tty delivery) for Pi INCLUDING the column
+# system-prompt prefix and retry fork. This Pi leg stays a smoke: exact argv
+# shape, exact system file, readiness, and exact stdin prompt delivery. The
+# deep plumbing is proven once in 11 and again for Claude below — not repeated
+# here.
 pi_json="$("$BOARD_BIN" card new --title 'P17 Pi' --description $'description with spaces\nand a newline' \
   --harness pi --model p17/pi-model --effort low --space-kind workspace --space-ref "$WS_ID" --json)"
 PI_ID="$(printf '%s' "$pi_json" | jget id)"
@@ -76,18 +83,15 @@ PI_RECORD="$E2E_TMP/fake-pi-run-$PI_RUN_ID.json"
 PI_SHOW="$E2E_TMP/pi-show.json"
 "$BOARD_BIN" card show "$PI_ID" --json >"$PI_SHOW"
 [ -f "$PI_RECORD" ] || fail "fake Pi did not record run $PI_RUN_ID"
-python3 - "$PI_RECORD" "$PI_SHOW" "$PI_ID" "$PI_RUN_ID" "$BOARD_SOCKET" \
-  "$HERDR_SOCKET_PATH" "$MANAGED_PANE_CWD" <<'PY'
+python3 - "$PI_RECORD" "$PI_SHOW" "$PI_ID" "$PI_RUN_ID" <<'PY'
 import json, os, sys
-record, show_path, card, run, board, herdr, cwd = sys.argv[1:]
+record, show_path, card, run = sys.argv[1:]
 x = json.load(open(record, encoding="utf-8"))
 show = json.load(open(show_path, encoding="utf-8"))
 expected_prompt = show["runs"][-1]["prompt_snapshot"]
 protocol = """## herdr-board protocol
 You are running a herdr-board card ($BOARD_CARD_ID is preset). When this stage's goal is met you MUST finish with exactly two commands: first `board comment \"<your results, files touched, findings>\"`, then `board done --outcome ok`. If the stage goal was NOT met — something failed or you got lost — use `board done --outcome fail --summary \"<why>\"` instead. Always comment before done. Never use `board move`/`cancel`/`retry` on your own card. Finishing or going idle WITHOUT `board done` leaves the card in `awaiting` for human review — a run is never auto-completed."""
 assert str(x["card_id"]) == card and str(x["run_id"]) == run
-assert x["board_socket"] == board and x["herdr_socket"] == herdr
-assert os.path.realpath(x["cwd"]) == os.path.realpath(cwd)
 assert x["model"] == "p17/pi-model" and x["thinking"] == "low"
 assert x["argv"][:-2] == ["--model", "p17/pi-model", "--thinking", "low", "--session-id", x["session_id"]]
 assert x["argv"][-2:] == ["--append-system-prompt", x["system_prompt_file"]]
@@ -95,22 +99,11 @@ assert x["system_prompt_exists_at_read"] is True and x["system_prompt_mode"] == 
 assert x["system_prompt"] == protocol
 assert not os.path.exists(x["system_prompt_file"])
 assert x["readiness_report"] == "ok" and x["herdr_pane_id"]
-reports = x["reports"]
-assert [r["phase"] for r in reports] == ["session_identity", "idle_lifecycle"]
-assert all(r["ok"] and r["reply"]["result"]["type"] == "ok" for r in reports)
-identity, idle = (r["request"] for r in reports)
-assert identity["method"] == "pane.report_agent_session"
-assert idle["method"] == "pane.report_agent" and idle["params"]["state"] == "idle"
-assert identity["params"]["source"] == idle["params"]["source"] == "herdr:pi"
-assert identity["params"]["session_start_source"] == "startup"
-assert identity["params"]["seq"] > 10**15 and idle["params"]["seq"] > identity["params"]["seq"]
-assert x["agent_session_id"] is None and os.path.isfile(x["agent_session_path"])
-assert x["session_id"] in os.path.basename(x["agent_session_path"])
-assert x["stdin_isatty"] is True and x["prompt_received_via_stdin"] is True
+assert x["prompt_received_via_stdin"] is True
 assert x["prompt_matches_run_snapshot"] is True
 assert x["prompt"] == expected_prompt
 assert not any("description with spaces" in arg or "herdr-board protocol" in arg for arg in x["argv"])
-print("  Pi: 0600 system file exact; readiness reported; exact agent.prompt captured on tty")
+print("  Pi smoke: argv shape + 0600 system file exact; readiness reported; exact agent.prompt captured", file=sys.stderr)
 PY
 
 step "Dispatch fake Claude through managed protocol-22/current launch"

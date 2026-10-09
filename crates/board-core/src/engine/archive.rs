@@ -147,3 +147,43 @@ mod tests {
         assert!(decide_project_archive(false, true, 0, true, true).is_ok()); // idempotent
     }
 }
+
+#[cfg(test)]
+mod new_work_tests {
+    use super::*;
+
+    #[test]
+    fn archived_destinations_reject_new_work_with_restore_hints() {
+        // Live e2e/38 proves one refusal live (open-run board.archive); every
+        // archived-destination refusal below is policy asserted here: active
+        // destinations pass, archived ones fail naming the kind + restore hint.
+        assert!(decide_new_work_on_board(false, 7).is_ok());
+        let board_err = decide_new_work_on_board(true, 7).unwrap_err();
+        assert_eq!(board_err.kind, "board");
+        assert!(
+            board_err.restore_hint.contains("restore"),
+            "board hint must name restore: {}",
+            board_err.restore_hint
+        );
+        assert!(
+            board_err
+                .to_string()
+                .contains("archived board must be restored"),
+            "board error must carry the restore hint: {board_err}"
+        );
+        assert!(decide_new_work_on_project(false).is_ok());
+        let proj_err = decide_new_work_on_project(true).unwrap_err();
+        assert_eq!(proj_err.kind, "project");
+        assert!(
+            proj_err.restore_hint.contains("restore"),
+            "project hint must name restore: {}",
+            proj_err.restore_hint
+        );
+        assert!(
+            proj_err
+                .to_string()
+                .contains("archived project must be restored"),
+            "project error must carry the restore hint: {proj_err}"
+        );
+    }
+}

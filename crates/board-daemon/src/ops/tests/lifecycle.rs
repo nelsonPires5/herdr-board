@@ -714,3 +714,83 @@ fn column_delete_rejects_queued_blocked_and_awaiting_open_runs() {
         assert!(err.to_string().contains("open run"));
     }
 }
+
+#[test]
+fn run_retry_enqueues_a_distinct_spawnable_run_in_the_same_column() {
+    // Live e2e/05 proves the spawned half (both runs carry started_at,
+    // argv/prompt evidence, outcome fail; the card parks failed in place).
+    // This test proves the enqueue half: retry of a finished failed card
+    // creates a DISTINCT queued run row in the same column (no
+    // update-in-place), with argv/prompt evidence, and the card returns to
+    // queued. A row without evidence or a reused id must not pass.
+    let d = test_daemon(Config::default());
+    let (card_id, column_id, first_id) = {
+        let db = d.store.lock();
+        let card = db
+            .create_card(&CardCreateParams {
+                title: "retry me".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let run = db
+            .enqueue_run_uow(&EnqueueRun {
+                card_id: card.id,
+                column_id: card.column_id,
+                harness: "pi",
+                argv_json: "[\"pi\"]",
+                prompt_snapshot: "do the thing",
+                system_prompt_snapshot: None,
+                launch_spec_json: None,
+                session_id: None,
+                session: None,
+            })
+            .unwrap();
+        db.promote_run_uow(run.id, Some("w1"), Some("p1"), None)
+            .unwrap();
+        db.finalize_run_uow(&FinalizeRun {
+            run_id: run.id,
+            outcome: RunOutcome::Fail,
+            summary: None,
+            comments: &[],
+            target_column_id: None,
+            final_status: CardStatus::Failed,
+            final_awaiting_reason: None,
+            next: None,
+        })
+        .unwrap();
+        (card.id, card.column_id, run.id)
+    };
+    assert_eq!(
+        d.store.lock().require_card(card_id).unwrap().status,
+        CardStatus::Failed
+    );
+
+    let value = handle_request(&d, "run.retry", json!({"card_id": card_id})).unwrap();
+    let retry_id = value["run"]["id"].as_i64().expect("retry returns a run");
+    assert_ne!(
+        retry_id, first_id,
+        "retry must create a distinct run row (no update-in-place)"
+    );
+    let db = d.store.lock();
+    let runs = db.list_runs(card_id).unwrap();
+    assert_eq!(runs.len(), 2, "run count must grow 1 -> 2");
+    let retry = db.get_run(retry_id).unwrap();
+    assert_eq!(
+        retry.column_id, column_id,
+        "retry must stay in the same column"
+    );
+    assert!(retry.ended_at.is_none(), "retry must be queued (unended)");
+    assert!(
+        !retry.argv_json.is_empty(),
+        "retry must carry argv evidence (spawn failure must not pass)"
+    );
+    assert!(
+        !retry.prompt_snapshot.is_empty(),
+        "retry must carry prompt evidence"
+    );
+    assert_eq!(
+        db.require_card(card_id).unwrap().status,
+        CardStatus::Queued,
+        "retry must re-queue the card"
+    );
+}

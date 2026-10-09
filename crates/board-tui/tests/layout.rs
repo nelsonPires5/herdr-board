@@ -38,16 +38,18 @@ fn app_with_cards(n: usize) -> App {
 // -- LayoutMode::from_width boundaries ---------------------------------------
 
 #[test]
-fn from_width_compact_below_60() {
-    for w in [0, 39, 59] {
-        assert_eq!(LayoutMode::from_width(w), LayoutMode::Compact, "w={w}");
-    }
-}
-
-#[test]
-fn from_width_regular_60_to_119() {
-    for w in [60, 80, 119] {
-        assert_eq!(LayoutMode::from_width(w), LayoutMode::Regular, "w={w}");
+fn from_width_breakpoints_cover_all_boundaries() {
+    for (w, expected) in [
+        (0, LayoutMode::Compact),
+        (39, LayoutMode::Compact),
+        (59, LayoutMode::Compact),
+        (60, LayoutMode::Regular),
+        (80, LayoutMode::Regular),
+        (119, LayoutMode::Regular),
+        (120, LayoutMode::Wide),
+        (200, LayoutMode::Wide),
+    ] {
+        assert_eq!(LayoutMode::from_width(w), expected, "w={w}");
     }
 }
 
@@ -72,12 +74,7 @@ fn header_geometry_matches_the_three_row_compact_and_one_line_desktop_contract()
     }
 }
 
-#[test]
-fn from_width_wide_120_and_above() {
-    for w in [120, 200] {
-        assert_eq!(LayoutMode::from_width(w), LayoutMode::Wide, "w={w}");
-    }
-}
+// (from_width Wide boundary covered in from_width_breakpoints_cover_all_boundaries above)
 
 // -- Compact single-column layout ---------------------------------------------
 
@@ -381,16 +378,20 @@ fn runs_viewport_reserves_action_row_before_every_run_body_row() {
 #[test]
 fn zero_height_runs_body_keeps_a_bounded_logical_anchor() {
     let mut app = app_with_detail_runs(2);
-    app.last_area = Rect::new(0, 0, 60, 24);
+    app.last_area = Rect::new(0, 0, 60, 20);
     let layout = detail_layout(&app, app.last_area);
-    if board_tui::view::runs_viewport_height(&layout) == 0 {
-        app.detail_runs_scroll = 99;
-        app.scroll_detail_to_latest();
-        assert_eq!(app.detail_runs_scroll, 1);
-        app.detail_scroll_target = DetailScrollTarget::Runs;
-        update(&mut app, key(KeyCode::Down));
-        assert_eq!(app.detail_runs_scroll, 1);
-    }
+    assert_eq!(
+        board_tui::view::runs_viewport_height(&layout),
+        0,
+        "fixture must expose a zero-row runs body (runs={:?})",
+        layout.runs
+    );
+    app.detail_runs_scroll = 99;
+    app.scroll_detail_to_latest();
+    assert_eq!(app.detail_runs_scroll, 1);
+    app.detail_scroll_target = DetailScrollTarget::Runs;
+    update(&mut app, key(KeyCode::Down));
+    assert_eq!(app.detail_runs_scroll, 1);
 }
 
 #[test]
@@ -606,20 +607,76 @@ fn runs_selection_stays_inside_the_rendered_runs_viewport() {
     }
 }
 
+/// A `CardDetail` fixture with exact `(author, body)` comments, for
+/// wrap-measurement assertions with fixed expectations.
+fn app_with_comment_bodies(pairs: &[(&str, &str)]) -> App {
+    let mut c = FakeBoardClient::new().unwrap();
+    let column_id = c.board_get().unwrap().columns[0].id;
+    let card = c.card_create(&card("comment fixture", column_id)).unwrap();
+    for (author, body) in pairs {
+        c.comment_add(card.id, body, Some(author)).unwrap();
+    }
+    let detail = c.card_get(card.id).unwrap();
+    let mut app = App::new(c.board_get().unwrap());
+    app.detail = Some(detail);
+    app.screen = Screen::CardDetail;
+    app.detail_scroll_target = DetailScrollTarget::Comments;
+    app
+}
+
 #[test]
-fn comment_row_spans_sum_equals_comment_wrapped_rows() {
-    for n in [0, 1, 5, 12] {
-        let app = app_with_detail_comments(n);
-        let detail = app.detail.as_ref().unwrap();
-        for width in [20u16, 40, 78, 118] {
-            let spans = comment_row_spans(detail, width);
-            let sum: usize = spans.iter().map(|&(_, len)| len).sum();
-            let total = comment_wrapped_rows(detail, width);
-            assert_eq!(
-                sum.max(1),
-                total,
-                "n={n} width={width}: comment_row_spans must sum to comment_wrapped_rows"
-            );
-        }
+fn comment_row_spans_match_fixed_wrap_expectations() {
+    // Empty detail: no spans, but the wrapped total keeps the 1-row minimum
+    // so scroll clamping has a stable anchor.
+    let app = app_with_comment_bodies(&[]);
+    let detail = app.detail.as_ref().unwrap();
+    assert_eq!(comment_row_spans(detail, 20), Vec::<(usize, usize)>::new());
+    assert_eq!(comment_wrapped_rows(detail, 20), 1);
+
+    // Single short line stays on one row at any width.
+    let app = app_with_comment_bodies(&[("a", "hi")]);
+    let detail = app.detail.as_ref().unwrap();
+    assert_eq!(comment_row_spans(detail, 20), vec![(0, 1)]);
+    assert_eq!(comment_wrapped_rows(detail, 20), 1);
+
+    // Multiline: one wrapped row per source line at width 20; the first line
+    // (`" [b] line one"`, 13 chars) wraps to two rows at narrow width 10.
+    let app = app_with_comment_bodies(&[("b", "line one\nline two")]);
+    let detail = app.detail.as_ref().unwrap();
+    assert_eq!(comment_row_spans(detail, 20), vec![(0, 2)]);
+    assert_eq!(comment_wrapped_rows(detail, 20), 2);
+    assert_eq!(comment_row_spans(detail, 10), vec![(0, 3)]);
+    assert_eq!(comment_wrapped_rows(detail, 10), 3);
+
+    // Blank source line still occupies one row.
+    let app = app_with_comment_bodies(&[("c", "a\n\nb")]);
+    let detail = app.detail.as_ref().unwrap();
+    assert_eq!(comment_row_spans(detail, 20), vec![(0, 3)]);
+    assert_eq!(comment_wrapped_rows(detail, 20), 3);
+
+    // Over-long word without spaces is hard-broken: 80 `x`s plus the
+    // 5-char `" [t] "` prefix need 5 rows at width 20, 9 at width 10.
+    let long = "x".repeat(80);
+    let app = app_with_comment_bodies(&[("t", long.as_str())]);
+    let detail = app.detail.as_ref().unwrap();
+    assert_eq!(comment_row_spans(detail, 20), vec![(0, 5)]);
+    assert_eq!(comment_wrapped_rows(detail, 20), 5);
+    assert_eq!(comment_row_spans(detail, 10), vec![(0, 9)]);
+    assert_eq!(comment_wrapped_rows(detail, 10), 9);
+
+    // Several comments tile contiguously: each span starts where the previous
+    // ended, and the total is their sum (1 + 2 + 3 = 6 at width 20).
+    let app = app_with_comment_bodies(&[("a", "hi"), ("b", "line one\nline two"), ("c", "a\n\nb")]);
+    let detail = app.detail.as_ref().unwrap();
+    let spans = comment_row_spans(detail, 20);
+    assert_eq!(spans, vec![(0, 1), (1, 2), (3, 3)]);
+    assert_eq!(comment_wrapped_rows(detail, 20), 6);
+    for (i, &(start, len)) in spans.iter().enumerate() {
+        let expected_start: usize = spans[..i].iter().map(|&(_, n)| n).sum();
+        assert_eq!(
+            start, expected_start,
+            "span {i} must start where the previous ended"
+        );
+        assert!(len >= 1, "span {i} must occupy at least one row");
     }
 }

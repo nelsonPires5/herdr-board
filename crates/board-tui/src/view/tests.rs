@@ -1,5 +1,5 @@
 use super::detail::detail_section_title;
-use super::{pane_title, project_label, HELP_GUTTER_WIDTH, HELP_KEYS};
+use super::{board_scope_label, pane_title, project_label, HELP_GUTTER_WIDTH, HELP_KEYS};
 use crate::app::CardFilter;
 use board_core::model::{Board, Project};
 
@@ -28,13 +28,20 @@ fn pane_titles_include_scope_filter_and_sanitize_long_labels() {
         id: 2,
         project_id: 2,
         name: "/tmp/repo".into(),
-        scope_path: Some("/tmp/a[unsafe]/abcdefghijklmnopqrstuvwxyz0123456789".into()),
+        scope_path: Some("/tmp/proj/ab[cd]efghijklmnopqrstuvwxyz0123456789".into()),
         archived_at: None,
     };
-    let title = pane_title(&scoped, CardFilter::Archived);
-    assert!(title.starts_with("Board [abcdefghijklmnopqrstuvwxyz01234"));
-    assert!(title.ends_with("… · ARCHIVED]"));
-    assert!(!title.contains('[') || title.starts_with("Board ["));
+    // The displayed folder name contains brackets; sanitization swaps them
+    // for parens before the 32-char truncation, so the exact title proves
+    // both steps (no raw `[`/`]` survives inside the label).
+    assert_eq!(
+        board_scope_label(&scoped),
+        "ab(cd)efghijklmnopqrstuvwxyz012…"
+    );
+    assert_eq!(
+        pane_title(&scoped, CardFilter::Archived),
+        "Board [ab(cd)efghijklmnopqrstuvwxyz012… · ARCHIVED]"
+    );
 }
 
 #[test]

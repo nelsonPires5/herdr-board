@@ -14,7 +14,9 @@
 #
 # Grounds: watchers.rs::timeout_ticker -> finalize_run(Fail, kill=true,
 # transition=true) when now >= timeout_deadline. Mirrors the crate test
-# `timeout_kills_and_applies_on_fail`.
+# `timeout_kills_and_applies_on_fail`. The pane-death half is asserted live
+# here (the exact started pane must disappear); the kill-flag half is also
+# covered hermetically in board-daemon dispatch finalize tests.
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/lib.sh"
 
@@ -45,6 +47,38 @@ step "Wait for the timeout to fire and finalize the run"
 oc="$(wait_runs "$CARD_ID" 1)" || { fail "run never finalized (timeout did not fire?)"; }
 [ "$oc" = "fail" ] || { e2e_card_failure_diag "$CARD_ID"; fail "run outcome '$oc', expected 'fail' (timed out)"; }
 ok "run timed out and was finalized as fail"
+
+step "Assert the exact started pane is gone (timeout kills the agent pane)"
+STARTED_PANE="$(card_field "$CARD_ID" 'runs[-1].herdr_pane_id' || true)"
+[ -n "$STARTED_PANE" ] \
+  || { e2e_card_failure_diag "$CARD_ID"; fail "timed-out run recorded no herdr_pane_id (spawn failure must not pass)"; }
+echo "  started pane: $STARTED_PANE"
+# pane.close is synchronous on the daemon side but Herdr may reap async;
+# poll pane.get until Herdr answers the exact protocol error code
+# pane_not_found. Any OTHER failure (socket error, empty/malformed reply,
+# another error code, or a foreign message that merely mentions the text) is
+# a transport failure, not proof of death, and fails the scenario.
+pane_gone=""
+for (( i=0; i<50; i++ )); do
+  if PANE_OUT="$(hrpc pane.get "{\"pane_id\":\"$STARTED_PANE\"}" 2>&1)"; then
+    sleep 0.2
+    continue
+  elif python3 - "$PANE_OUT" <<'PY'; then
+import re, sys
+text = sys.argv[1]
+m = re.search(r'''['"]code['"]\s*[:=]\s*['"]([^'"]+)['"]''', text)
+sys.exit(0 if (m and m.group(1) == "pane_not_found") else 1)
+PY
+    pane_gone=1
+    break
+  else
+    e2e_card_failure_diag "$CARD_ID"
+    fail "pane.get for $STARTED_PANE failed without pane_not_found (transport failure proves nothing): $PANE_OUT"
+  fi
+done
+[ -n "$pane_gone" ] \
+  || { e2e_card_failure_diag "$CARD_ID"; fail "timed-out pane $STARTED_PANE still alive (kill=true did not close it)"; }
+ok "timed-out agent pane $STARTED_PANE is gone (pane-death)"
 
 step "Assert the card followed on_fail into Backlog (timeout DOES transition)"
 col_now="$(card_field "$CARD_ID" card.column_id || true)"

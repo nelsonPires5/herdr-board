@@ -1,26 +1,50 @@
 #!/usr/bin/env bash
-# 09-comment-context.sh — a comment from one auto stage flows into the next
-# stage's prompt.
+# 09-comment-context.sh — a comment from one auto stage reaches the NEXT
+# stage's agent process.
 #
 # Two chained auto columns: Stage1 (on_success -> Stage2) and Stage2. The fake
-# agent posts a distinctive marker comment (FAKE_AGENT_COMMENT) and reports ok in
-# EACH stage. When the card auto-advances from Stage1 to Stage2, the daemon
-# rebuilds the prompt from the card's comments, so Stage2's run captures Stage1's
-# marker. Asserts:
-#   - two run rows exist (one per stage), both finished ok;
-#   - the Stage2 run's `prompt_snapshot` contains a `## Card comments` section AND
-#     the Stage1 marker text.
+# agent posts a distinctive marker comment and reports ok in EACH stage. When
+# the card auto-advances, the daemon rebuilds the prompt from the card's
+# comments — and this scenario proves the second PROCESS actually received
+# that comment-bearing prompt: a witness shim (E2E_FAKE_AGENT override, real
+# fake-agent underneath) posts a `STAGE2-WITNESSED:<marker>` comment iff its
+# own BOARD_PROMPT contains the Stage1 marker. Only Stage2's process can
+# observe it, so the witness comment is proof of delivery, not just storage.
 #
-# Grounds: prompt.rs::assemble_prompt (adds "## Card comments" + recent comments),
-# dispatch.rs::enqueue_run re-reads db.list_comments before each run;
-# runs.prompt_snapshot is exposed via `board card show --json`.
+# The storage half — comments are baked into the persisted `prompt_snapshot`
+# under `## Card comments` — is pinned hermetically in
+# `crates/board-daemon/src/dispatch/tests/enqueue.rs`
+# (`enqueue_run_persists_comment_context_in_prompt_snapshot`) and
+# `crates/board-core/tests/prompt.rs`.
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/lib.sh"
 
 MARKER="E2E-CTX-MARKER-$$"
-export E2E_FAKE_ENV="FAKE_AGENT_COMMENT=${MARKER}"   # each stage comments the marker
+
+# Witness shim: runs in place of fake-agent.sh in the real pane. Iff this
+# process's BOARD_PROMPT carries the Stage1 marker, it says so through the
+# real CLI before delegating to the real fake agent (same sleep/comment/done
+# behavior). Stage1's prompt predates the marker, so only Stage2 can witness.
+WIT_DIR="$(mktemp -d /tmp/hb-e2e-wit.XXXXXX)"
+cat >"$WIT_DIR/witness-agent.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+: "${BOARD_PROMPT:=}"
+: "${BOARD_CARD_ID:?BOARD_CARD_ID required}"
+: "${BOARD_SOCKET:?BOARD_SOCKET required}"
+: "${BOARD_BIN:?BOARD_BIN required}"
+: "${REAL_FAKE_AGENT:?REAL_FAKE_AGENT required}"
+if [ -n "${WITNESS_MARKER:-}" ] && [[ "$BOARD_PROMPT" == *"$WITNESS_MARKER"* ]]; then
+  "$BOARD_BIN" comment "STAGE2-WITNESSED:${WITNESS_MARKER}" >/dev/null 2>&1 || true
+fi
+exec bash "$REAL_FAKE_AGENT" "$@"
+EOF
+chmod +x "$WIT_DIR/witness-agent.sh"
+export E2E_FAKE_AGENT="$WIT_DIR/witness-agent.sh"
+export E2E_FAKE_ENV="FAKE_AGENT_COMMENT=${MARKER} WITNESS_MARKER=${MARKER} REAL_FAKE_AGENT=$E2E_LIB_DIR/fake-agent.sh"
 
 e2e_boot   # e2e_init + e2e_build + e2e_isolate + e2e_daemon_start (in that order)
+e2e_defer "rm -rf $WIT_DIR"
 
 e2e_ws_standard board-e2e   # step + e2e_ws_create + WS_ID + echo
 
@@ -43,22 +67,10 @@ oc="$(wait_runs "$CARD_ID" 2)" || { e2e_card_failure_diag "$CARD_ID"; fail "seco
 echo "  last (Stage2) run outcome: $oc"
 [ "$oc" = "ok" ] || fail "Stage2 run outcome '$oc', expected ok"
 
-step "Assert the Stage2 run's prompt_snapshot carries the Stage1 comment context"
-"$BOARD_BIN" card show "$CARD_ID" --json | python3 -c '
-import json, sys
-marker = sys.argv[1]
-d = json.load(sys.stdin)
-runs = d.get("runs", [])
-if len(runs) < 2:
-    sys.exit(f"expected >=2 runs, got {len(runs)}")
-last = runs[-1]
-snap = last.get("prompt_snapshot") or ""
-if "## Card comments" not in snap:
-    sys.exit(f"Stage2 prompt_snapshot missing comments section (length={len(snap)})")
-if marker not in snap:
-    sys.exit(f"Stage2 prompt_snapshot missing fixed marker (length={len(snap)})")
-print(f"  [ok] Stage2 prompt_snapshot contains \"## Card comments\" and the marker {marker}", file=sys.stderr)
-' "$MARKER" || { e2e_card_failure_diag "$CARD_ID"; fail "comment context did not flow into Stage2 prompt"; }
-ok "Stage1 comment flowed into Stage2's prompt via the '## Card comments' section"
+step "Assert the Stage2 process witnessed the Stage1 marker in its own prompt"
+show="$("$BOARD_BIN" card show "$CARD_ID" --json)"
+grep -Fq "STAGE2-WITNESSED:${MARKER}" <<<"$show" \
+  || { e2e_card_failure_diag "$CARD_ID"; fail "Stage2 process never observed the Stage1 marker in BOARD_PROMPT"; }
+ok "Stage2 process received the comment-bearing prompt (witness comment present)"
 
 step "09-comment-context: ALL CHECKS PASSED"

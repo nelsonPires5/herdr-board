@@ -836,17 +836,6 @@ fn comment_history_sheet_40x20_and_80x24() {
 }
 
 #[test]
-fn board_picker_wide_and_narrow() {
-    let mut wide = driver(demo_client().unwrap());
-    key(&mut wide, KeyCode::Char('b'));
-    insta::assert_snapshot!("board_picker_120x35", render(&mut wide, 120, 35));
-
-    let mut narrow = driver(demo_client().unwrap());
-    key(&mut narrow, KeyCode::Char('b'));
-    insta::assert_snapshot!("board_picker_80x24", render(&mut narrow, 80, 24));
-}
-
-#[test]
 fn long_scoped_project_row_survives_in_the_picker_and_desktop_chevron_survives() {
     let long_scope = "/private/tmp/hb-visual.HWoEPU/scope";
     let mut client = demo_client().unwrap();
@@ -873,28 +862,6 @@ fn long_scoped_project_row_survives_in_the_picker_and_desktop_chevron_survives()
         header.contains("… ▾"),
         "truncated desktop board chip must retain its dropdown chevron: {header:?}"
     );
-}
-
-#[test]
-fn help_overlay() {
-    let mut d = driver(demo_client().unwrap());
-    key(&mut d, KeyCode::Char('?'));
-    let output = render(&mut d, 80, 24);
-    assert!(!output.contains("archiv forms"));
-    assert!(!output.contains("boar  Esc"));
-    assert!(!output.contains("column│"));
-    assert!(output
-        .lines()
-        .all(|line| !line.contains("j/k scroll · Esc close")));
-    // The sheet itself never ellipsizes; the header above it may (its chips
-    // truncate long names with an explicit ellipsis).
-    let sheet_rows: Vec<&str> = output.lines().skip(2).collect();
-    assert!(
-        !sheet_rows.iter().any(|line| line.contains('…')),
-        "help sheet must not ellipsize:\n{}",
-        sheet_rows.join("\n")
-    );
-    insta::assert_snapshot!("help_overlay", output);
 }
 
 #[test]
@@ -1314,15 +1281,6 @@ fn render_sized(d: &mut Driver, w: u16, h: u16) -> String {
     render(d, w, h)
 }
 
-#[test]
-fn long_multiline_desc_is_at_least_300_chars_with_newlines() {
-    assert!(LONG_MULTILINE_DESC.len() >= 300, "fixture too short");
-    assert!(
-        LONG_MULTILINE_DESC.contains('\n'),
-        "fixture must be multi-line"
-    );
-}
-
 size_matrix_test!(size_matrix_board, |w, h| {
     let mut d = driver(demo_client().unwrap());
     insta::assert_snapshot!(format!("board_{w}x{h}"), render_sized(&mut d, w, h));
@@ -1347,6 +1305,13 @@ size_matrix_test!(size_matrix_card_detail_popup_and_fullscreen, |w, h| {
 });
 
 form_size_matrix_test!(size_matrix_edit_form_long_multiline_description, |w, h| {
+    // Fixture preconditions (was `long_multiline_desc_is_at_least_300_chars_with_newlines`):
+    // the Bug B regression target must stay >=300 chars and multi-line.
+    assert!(LONG_MULTILINE_DESC.len() >= 300, "fixture too short");
+    assert!(
+        LONG_MULTILINE_DESC.contains('\n'),
+        "fixture must be multi-line"
+    );
     let mut client = demo_client().unwrap();
     let board = client.board_get().unwrap();
     let todo = board
@@ -1427,7 +1392,35 @@ form_size_matrix_test!(size_matrix_edit_form_long_multiline_description, |w, h| 
 sheet_size_matrix_test!(size_matrix_help, |w, h| {
     let mut d = driver(demo_client().unwrap());
     key(&mut d, KeyCode::Char('?'));
-    insta::assert_snapshot!(format!("help_{w}x{h}"), render_sized(&mut d, w, h));
+    let output = render_sized(&mut d, w, h);
+    // Merged from `help_overlay` (80x24): explicit clipping/ellipsis guards.
+    assert!(
+        !output.contains("archiv forms"),
+        "clipped help text at {w}x{h}:\n{output}"
+    );
+    assert!(
+        !output.contains("boar  Esc"),
+        "clipped help text at {w}x{h}:\n{output}"
+    );
+    assert!(
+        !output.contains("column│"),
+        "clipped help text at {w}x{h}:\n{output}"
+    );
+    assert!(
+        output
+            .lines()
+            .all(|line| !line.contains("j/k scroll · Esc close")),
+        "stale help hint at {w}x{h}:\n{output}"
+    );
+    // The sheet itself never ellipsizes; the header above it may (its chips
+    // truncate long names with an explicit ellipsis).
+    let sheet_rows: Vec<&str> = output.lines().skip(2).collect();
+    assert!(
+        !sheet_rows.iter().any(|line| line.contains('…')),
+        "help sheet must not ellipsize at {w}x{h}:\n{}",
+        sheet_rows.join("\n")
+    );
+    insta::assert_snapshot!(format!("help_{w}x{h}"), output);
 });
 
 sheet_size_matrix_test!(size_matrix_picker, |w, h| {
@@ -1520,4 +1513,47 @@ fn reorder_card_mini_mode_esc_cancels() {
     let after: Vec<i64> = d.app.cards_of(column_id).iter().map(|c| c.id).collect();
     assert_eq!(after, original, "Esc must restore the original card order");
     assert_eq!(d.app.sel_card, 0, "selection returns to the original index");
+}
+
+/// Compact board picker (40x20): the live 26 scenario used to assert the
+/// picker's labels and geometry against a real pane. That contract lives
+/// here now against the TestBackend: the sheet titles the Switch-board flow,
+/// names the known `main` board, offers the icon `[ X ]` close affordance
+/// (never the legacy `[ Close ]` label), and Esc returns to the Compact
+/// board view.
+#[test]
+fn compact_board_picker_lists_main_with_icon_close() {
+    let mut d = driver(demo_client().unwrap());
+    key(&mut d, KeyCode::Char('b'));
+    assert_eq!(d.app.screen, Screen::BoardPicker);
+    let output = render_sized(&mut d, 40, 20);
+    assert!(
+        output.contains("Switch board"),
+        "compact picker must title the switch-board flow:\n{output}"
+    );
+    assert!(
+        output.contains("main"),
+        "compact picker must name the known board:\n{output}"
+    );
+    assert!(
+        output.contains("[ X ]"),
+        "compact picker must offer the icon close affordance:\n{output}"
+    );
+    assert!(
+        !output.contains("[ Close ]"),
+        "legacy close label must stay gone:\n{output}"
+    );
+    insta::assert_snapshot!("board_picker_compact_40x20", output);
+
+    key(&mut d, KeyCode::Esc);
+    assert_eq!(d.app.screen, Screen::Board);
+    let back = render_sized(&mut d, 40, 20);
+    assert!(
+        !back.contains("Switch board"),
+        "Esc must leave the picker:\n{back}"
+    );
+    assert!(
+        back.contains("Project:"),
+        "Esc must return to the Compact board view:\n{back}"
+    );
 }

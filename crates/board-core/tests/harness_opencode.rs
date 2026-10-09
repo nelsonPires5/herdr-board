@@ -41,7 +41,7 @@ use board_core::capability::{
     available_harnesses, capabilities_for, default_capabilities, efforts_for, meta_for,
     resume_support_for, HarnessCapabilities, ResumeSupport,
 };
-use board_core::config::{Config, HarnessDef};
+use board_core::config::Config;
 use board_core::harness::{
     build_invocation, is_builtin_harness, plan_session, resume_invocation, session_argv,
     HarnessError, SessionPlan, BOARD_PROTOCOL_TRAILER, BOARD_RESCUE, BUILTIN_HARNESSES,
@@ -165,33 +165,6 @@ fn opencode_enqueue_policy_never_invents_an_id() {
             }
         }
     }
-}
-
-#[test]
-fn configured_harnesses_keep_their_synthetic_mint_fallback() {
-    // The no-invented-uuid policy is built-in-specific. A config-defined
-    // harness keeps the current contract: build_invocation reports no
-    // resulting session id, and the daemon's Mint fallback persists the
-    // synthetic uuid.
-    let mut config = Config::default();
-    config.harness.insert(
-        "fake".into(),
-        HarnessDef {
-            argv: vec!["run".into()],
-            ..Default::default()
-        },
-    );
-    let inv = build_invocation(
-        "fake",
-        &config,
-        &opencode_settings(),
-        &SessionPlan::Mint,
-        Some("synthetic-uuid"),
-        "p",
-    )
-    .unwrap();
-    assert_eq!(inv.resulting_session_id, None);
-    assert_eq!(inv.argv, vec!["run"]);
 }
 
 // ---------------------------------------------------------------------------

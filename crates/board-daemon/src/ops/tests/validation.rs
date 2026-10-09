@@ -21,6 +21,42 @@ fn merged_invalid_updates_are_atomic_and_emit_no_event() {
     .unwrap();
     let card_id = created["id"].as_i64().unwrap();
     let _ = events.try_recv().expect("create event");
+    // Seed durable runs/comments witnesses: the live 18 matrix asserts the
+    // rejected merged clear mutates nothing, including runs and comments.
+    // The seed run is finalized first so the update reaches the merged
+    // validation error (code 1), not the open-run guard (code 3).
+    let run_id = {
+        let db = d.store.lock();
+        let run = db
+            .enqueue_run_uow(&EnqueueRun {
+                card_id,
+                column_id: db.get_card(card_id).unwrap().unwrap().column_id,
+                harness: "claude",
+                argv_json: "[]",
+                prompt_snapshot: "p",
+                system_prompt_snapshot: None,
+                launch_spec_json: None,
+                session_id: None,
+                session: None,
+            })
+            .unwrap();
+        db.promote_run_uow(run.id, None, None, None).unwrap();
+        db.finalize_run_uow(&FinalizeRun {
+            run_id: run.id,
+            outcome: RunOutcome::Ok,
+            summary: None,
+            comments: &[],
+            target_column_id: None,
+            final_status: CardStatus::Idle,
+            final_awaiting_reason: None,
+            next: None,
+        })
+        .unwrap();
+        db.add_comment(card_id, "user", "keep me").unwrap();
+        run.id
+    };
+    let before_runs = d.store.lock().list_runs(card_id).unwrap();
+    let before_comments = d.store.lock().list_comments(card_id).unwrap();
 
     let err = handle_request(
         &d,
@@ -37,6 +73,13 @@ fn merged_invalid_updates_are_atomic_and_emit_no_event() {
     let unchanged = d.store.lock().get_card(card_id).unwrap().unwrap();
     assert_eq!(unchanged.space_ref.as_deref(), Some("feature"));
     assert_eq!(unchanged.space_cwd.as_deref(), Some("/repo"));
+    // Atomicity covers the whole merged row graph, not just the card row.
+    assert_eq!(d.store.lock().list_runs(card_id).unwrap(), before_runs);
+    assert_eq!(
+        d.store.lock().list_comments(card_id).unwrap(),
+        before_comments
+    );
+    assert_eq!(d.store.lock().get_run(run_id).unwrap().id, run_id);
 }
 
 #[test]

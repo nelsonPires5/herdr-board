@@ -3,10 +3,15 @@
 # column through the same column.reorder path as a mouse drag, with a true
 # Esc cancel.
 #
-# Asserts (all provider-free; manual columns, no agent dispatch):
+# Asserts (all provider-free; manual columns, no agent dispatch) as final-state
+# checks against the persisted board (board.get truth source):
 #   - entering `M` shows the centered "Move column" banner,
-#   - Esc after a staged move restores the original column order (0 RPCs),
-#   - Enter commits exactly one column.reorder and the persisted order flips.
+#   - Esc after a staged move leaves the persisted order unchanged,
+#   - Enter commits the staged move and the persisted order flips.
+# Exact RPC counts (zero on Esc, one column.reorder on Enter) are NOT proven
+# here — only the final persisted order is read back. Counts belong to the
+# reducer/driver hermetic tests (board-tui update/scope.rs: single-reorder and
+# esc-emits-nothing cases).
 #
 # The real TUI runs in a disposable Herdr pane; column order is read back
 # straight from the isolated boardd via board.get (the post-Enter truth source),
@@ -82,7 +87,7 @@ ok "M shows the centered 'Move column' banner"
 e2e_herdr_mutate -- pane send-keys "$PANE_ID" right >/dev/null
 e2e_herdr_mutate -- pane send-keys "$PANE_ID" esc >/dev/null
 
-step "Esc must restore the original order without persisting anything"
+step "Esc leaves the persisted order unchanged (final-state check)"
 wait_columns "Todo Alpha Beta"
 ok "Esc cancelled: order unchanged (Todo Alpha Beta)"
 
@@ -92,7 +97,7 @@ e2e_herdr_mutate -- pane send-text "$PANE_ID" M >/dev/null
 e2e_herdr_mutate -- pane send-keys "$PANE_ID" right >/dev/null
 e2e_herdr_mutate -- pane send-keys "$PANE_ID" enter >/dev/null
 
-step "Enter commits exactly one column.reorder; persisted order must flip"
+step "Enter commits the staged move; persisted order must flip (final-state check)"
 wait_columns "Todo Beta Alpha"
 ok "committed column order is Todo Beta Alpha"
 

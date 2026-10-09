@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 # 11-pi-harness.sh — built-in Pi dispatch + retry through real Herdr, fake Pi.
+#
+# M6: this is the deep Pi leg — column system-prompt prefix + full launch
+# contract on the first run, then retry fork (old session -> new id) with the
+# same contract on the second. The generic managed-launch plumbing (ordered
+# identity/idle reports, session path, tty delivery) is proven here for Pi
+# and in 16 for Claude + held tab/pane layout; 16's Pi leg is a smoke that
+# defers to this file.
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/lib.sh"
 
