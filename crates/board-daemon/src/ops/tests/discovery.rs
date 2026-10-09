@@ -109,6 +109,82 @@ fn run_focus_rescues_into_a_new_workspace_when_the_recorded_workspace_is_gone() 
 }
 
 #[test]
+fn run_focus_rescue_honors_explicit_workspace_cwd_when_only_the_board_pane_survives() {
+    // The managed worker and its card tab are gone. Only the persistent board
+    // TUI remains, with a cwd different from the card's explicit working tree.
+    // A unanimous live-pane cwd must not override the existing-workspace cwd
+    // that initial dispatch would use for this card.
+    let fake = fake_rescue_herdr(RescueFakeFaults {
+        anchor_missing: true,
+        multi_cwd: true,
+        ..Default::default()
+    });
+    fake.panes.lock().unwrap()[0].2 = Some("board".to_string());
+    let board_pane = fake.panes.lock().unwrap()[0].clone();
+    let d = test_daemon_with_herdr_spawner(Config::default(), fake.socket.clone());
+    let (card_id, run_id) = add_rescuable_run_with_space(
+        &d,
+        "pi",
+        Some("pi"),
+        Some("conv-1"),
+        true,
+        Some((
+            SpaceKind::Workspace,
+            "ws".to_string(),
+            "/tmp/card-cwd".to_string(),
+        )),
+    );
+    let before = runs_fingerprint(&d, card_id);
+
+    let result = handle_request(
+        &d,
+        "run.focus",
+        json!({"card_id":card_id,"run_id":run_id,"origin_socket":fake.socket}),
+    )
+    .unwrap();
+
+    assert_eq!(result["action"], "rescued");
+    assert_eq!(result["recorded_pane_id"], "w1:p9");
+    assert_eq!(result["session_id"], "conv-1");
+    let pane_id = result["pane_id"].as_str().unwrap();
+    assert!(pane_id.starts_with("w1:"), "pane_id: {pane_id}");
+    let tabs = fake.herdr.requests_for("tab.create");
+    assert_eq!(tabs.len(), 1);
+    assert_eq!(tabs[0]["params"]["workspace_id"], "w1");
+    assert_eq!(
+        tabs[0]["params"]["cwd"], "/tmp/card-cwd",
+        "rescue must use the card's explicit cwd, not the surviving board TUI's cwd"
+    );
+    let splits = fake.herdr.requests_for("pane.split");
+    assert_eq!(splits.len(), 1);
+    assert_eq!(splits[0]["params"]["cwd"], "/tmp/card-cwd");
+    let starts = fake.agent_starts();
+    assert_eq!(starts.len(), 1);
+    assert_eq!(starts[0]["params"]["pane_id"], pane_id);
+    let args = starts[0]["params"]["args"].as_array().unwrap();
+    let resume_at = args.iter().position(|arg| arg == "--session-id").unwrap();
+    assert_eq!(args[resume_at + 1], "conv-1");
+    assert!(args.iter().any(|arg| arg == "recorded-model"));
+    assert_eq!(fake.count("agent.prompt"), 0);
+
+    let again = handle_request(
+        &d,
+        "run.focus",
+        json!({"card_id":card_id,"run_id":run_id,"origin_socket":fake.socket}),
+    )
+    .unwrap();
+    assert_eq!(again["action"], "focused_rescued_pane");
+    assert_eq!(again["pane_id"], pane_id);
+    assert_eq!(fake.count("tab.create"), 1);
+    assert_eq!(fake.count("pane.split"), 1);
+    assert_eq!(fake.count("agent.start"), 1);
+    assert!(fake.workspace_creates().is_empty());
+    assert_eq!(fake.workspace_ids(), vec!["w1".to_string()]);
+    assert!(fake.panes.lock().unwrap().contains(&board_pane));
+    assert_eq!(runs_fingerprint(&d, card_id), before);
+}
+
+#[test]
 fn run_focus_rescue_keeps_ownership_when_an_ambiguous_cwd_resolves_back_to_the_recorded_workspace()
 {
     // The recorded workspace is heterogeneous: its live panes report different
@@ -411,6 +487,268 @@ fn run_focus_propagates_herdr_error_and_returns_success_ids() {
     assert_eq!(result["harness"], "pi");
     assert!(result["session"].is_null());
     assert!(result["session_id"].is_null());
+}
+
+// ---------------------------------------------------------------------------
+// run.open: navigate to the exact recorded pane without rescuing a run
+// ---------------------------------------------------------------------------
+
+fn navigation_state(d: &Arc<Daemon>, card_id: i64) -> Value {
+    let db = d.store.lock();
+    json!({
+        "card": db.require_card(card_id).unwrap(),
+        "runs": db.list_runs(card_id).unwrap(),
+        "comments": db.list_comments(card_id).unwrap(),
+    })
+}
+
+#[test]
+fn run_open_focuses_a_completed_runs_exact_live_pane_without_writes_or_launches() {
+    let fake = fake_rescue_herdr(RescueFakeFaults::default());
+    fake.panes.lock().unwrap().push((
+        "w1:p9".into(),
+        "w1:t1".into(),
+        Some("completed-run-shell".into()),
+        None,
+    ));
+    let mut td = testkit::daemon().herdr_spawner(fake.socket.clone()).build();
+    let d = &td.daemon;
+    let (card_id, run_id) = add_rescuable_run(d, "pi", Some("pi"), Some("conv-1"), true);
+    let before = navigation_state(d, card_id);
+    let panes_before = fake.pane_ids();
+
+    // A later run on another pane must not replace the explicitly selected one.
+    let card = d.store.lock().require_card(card_id).unwrap();
+    let latest = d
+        .store
+        .lock()
+        .enqueue_run_uow(&EnqueueRun {
+            card_id,
+            column_id: card.column_id,
+            harness: "pi",
+            argv_json: "[]",
+            prompt_snapshot: "later task",
+            system_prompt_snapshot: None,
+            launch_spec_json: None,
+            session_id: Some("later-conversation"),
+            session: None,
+        })
+        .unwrap();
+    d.store
+        .lock()
+        .promote_run_uow(latest.id, Some("w1"), Some("w1:foreign"), None)
+        .unwrap();
+    let state_before = navigation_state(d, card_id);
+    assert!(!before["runs"][0]["ended_at"].is_null());
+
+    let result = handle_request(
+        d,
+        "run.open",
+        json!({"card_id":card_id,"run_id":run_id,"origin_socket":fake.socket}),
+    )
+    .unwrap();
+    assert_eq!(result["action"], "focused_recorded_pane");
+    assert_eq!(result["pane_id"], "w1:p9");
+    assert_eq!(result["recorded_pane_id"], "w1:p9");
+    assert_eq!(result["card_id"], card_id);
+    assert_eq!(result["run_id"], run_id);
+    assert_eq!(result["column_id"], card.column_id);
+    assert_eq!(result["harness"], "pi");
+    assert_eq!(result["session_id"], "conv-1");
+    assert!(result["session"].is_null());
+    assert_eq!(
+        fake.herdr.methods(),
+        vec!["ping", "pane.get", "ping", "pane.focus"]
+    );
+    assert_eq!(
+        fake.herdr.requests_for("pane.get")[0]["params"]["pane_id"],
+        "w1:p9"
+    );
+    assert_eq!(
+        fake.herdr.requests_for("pane.focus")[0]["params"]["pane_id"],
+        "w1:p9"
+    );
+    assert_eq!(fake.pane_ids(), panes_before);
+    assert_eq!(navigation_state(d, card_id), state_before);
+    testkit::assert_no_effects(&mut td.events, &mut td.dispatch);
+}
+
+#[test]
+fn run_open_refuses_a_rescuable_stale_pane_without_writes_or_mutations() {
+    let fake = fake_rescue_herdr(RescueFakeFaults::default());
+    let mut td = testkit::daemon().herdr_spawner(fake.socket.clone()).build();
+    let d = &td.daemon;
+    let (card_id, run_id) = add_rescuable_run(d, "pi", Some("pi"), Some("conv-1"), true);
+    let before = navigation_state(d, card_id);
+    let panes_before = fake.pane_ids();
+    let workspaces_before = fake.workspace_ids();
+
+    let err = handle_request(
+        d,
+        "run.open",
+        json!({"card_id":card_id,"run_id":run_id,"origin_socket":fake.socket}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), 2);
+    assert!(err.to_string().contains("w1:p9"), "{err}");
+    assert!(err.to_string().contains("no longer exists"), "{err}");
+    assert_eq!(fake.herdr.methods(), vec!["ping", "pane.get"]);
+    assert_eq!(fake.pane_ids(), panes_before);
+    assert_eq!(fake.workspace_ids(), workspaces_before);
+    assert_eq!(navigation_state(d, card_id), before);
+    testkit::assert_no_effects(&mut td.events, &mut td.dispatch);
+}
+
+#[test]
+fn run_open_refuses_a_rescuable_run_without_a_recorded_pane_locally() {
+    let fake = fake_rescue_herdr(RescueFakeFaults::default());
+    let mut td = testkit::daemon().herdr_spawner(fake.socket.clone()).build();
+    let d = &td.daemon;
+    let (card_id, run_id) = add_rescuable_run_at(
+        d,
+        "pi",
+        Some("pi"),
+        Some("conv-1"),
+        true,
+        None,
+        (None, None),
+    );
+    let before = navigation_state(d, card_id);
+    let err = handle_request(
+        d,
+        "run.open",
+        json!({"card_id":card_id,"run_id":run_id,"origin_socket":fake.socket}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), 2);
+    assert!(err.to_string().contains("no pane recorded"), "{err}");
+    assert!(fake.herdr.methods().is_empty());
+    assert_eq!(navigation_state(d, card_id), before);
+    testkit::assert_no_effects(&mut td.events, &mut td.dispatch);
+}
+
+#[test]
+fn run_open_rejects_other_cards_runs_and_missing_run_ids_before_herdr() {
+    let fake = fake_rescue_herdr(RescueFakeFaults::default());
+    let d = test_daemon_with_herdr_spawner(Config::default(), fake.socket.clone());
+    let (card_id, _) = add_run_with_pane(&d, Some("w1:p1"));
+    let (other_card, other_run) = add_run_with_pane(&d, Some("w1:p2"));
+    for run_id in [other_run, i64::MAX] {
+        let err = handle_request(
+            &d,
+            "run.open",
+            json!({"card_id":card_id,"run_id":run_id,"origin_socket":fake.socket}),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), 2);
+        assert!(
+            !err.to_string().contains(&format!("card {other_card}")),
+            "{err}"
+        );
+    }
+    let err = handle_request(
+        &d,
+        "run.open",
+        json!({"card_id":card_id,"origin_socket":fake.socket}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), 1);
+    assert!(err.to_string().contains("run_id"), "{err}");
+    assert!(fake.herdr.methods().is_empty());
+}
+
+#[test]
+fn run_open_targets_the_recorded_named_session_and_accepts_its_socket_alias() {
+    let target = fake_herdr(
+        "\"result\":{\"type\":\"pane_info\",\"pane\":{\"pane_id\":\"w1:p9\",\"terminal_id\":\"term\",\"workspace_id\":\"w1\",\"tab_id\":\"w1:t1\",\"focused\":true,\"revision\":0,\"agent_status\":\"idle\"}}",
+    );
+    let default = fake_herdr("\"result\":{\"type\":\"ok\"}");
+    let registry = SessionRegistry::with_entries(
+        default.socket.clone(),
+        vec![SessionEntry {
+            name: "selected-session".into(),
+            default: false,
+            running: true,
+            socket_path: target.socket.to_string_lossy().into_owned(),
+        }],
+    );
+    let d = test_daemon_with_registry(Config::default(), Some(registry));
+    let (card_id, run_id) = add_rescuable_run_at(
+        &d,
+        "pi",
+        Some("pi"),
+        Some("conv-1"),
+        true,
+        None,
+        (Some("w1:p9"), Some("selected-session")),
+    );
+    let err = handle_request(
+        &d,
+        "run.open",
+        json!({"card_id":card_id,"run_id":run_id,"origin_socket":default.socket}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), 3);
+    assert!(err.to_string().contains("different Herdr session"), "{err}");
+    assert!(target.methods().is_empty());
+    assert!(default.methods().is_empty());
+
+    let dir = tempfile::tempdir().unwrap();
+    let alias = dir.path().join("origin.sock");
+    std::os::unix::fs::symlink(&target.socket, &alias).unwrap();
+    let result = handle_request(
+        &d,
+        "run.open",
+        json!({"card_id":card_id,"run_id":run_id,"origin_socket":alias}),
+    )
+    .unwrap();
+    assert_eq!(result["session"], "selected-session");
+    assert_eq!(result["pane_id"], "w1:p9");
+    assert_eq!(
+        target.requests_for("pane.focus")[0]["params"]["pane_id"],
+        "w1:p9"
+    );
+    assert!(default.methods().is_empty());
+}
+
+#[test]
+fn run_open_rejects_an_incompatible_herdr_before_pane_lookup() {
+    let fake = fake_herdr_with_protocol(board_herdr::SUPPORTED_HERDR_PROTOCOL - 1);
+    let d = test_daemon_with_herdr_spawner(Config::default(), fake.socket.clone());
+    let (card_id, run_id) = add_run_with_pane(&d, Some("w1:p9"));
+    let err = handle_request(
+        &d,
+        "run.open",
+        json!({"card_id":card_id,"run_id":run_id,"origin_socket":fake.socket}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), 4);
+    assert!(err.to_string().contains("protocol"), "{err}");
+    assert_eq!(fake.methods(), vec!["ping"]);
+}
+
+#[test]
+fn run_open_does_not_rescue_when_the_pane_disappears_during_focus() {
+    let fake =
+        fake_herdr("\"error\":{\"code\":\"pane_not_found\",\"message\":\"gone during focus\"}");
+    let mut td = testkit::daemon().herdr_spawner(fake.socket.clone()).build();
+    let d = &td.daemon;
+    let (card_id, run_id) = add_rescuable_run(d, "pi", Some("pi"), Some("conv-1"), true);
+    let before = navigation_state(d, card_id);
+    let err = handle_request(
+        d,
+        "run.open",
+        json!({"card_id":card_id,"run_id":run_id,"origin_socket":fake.socket}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), 4);
+    assert!(err.to_string().contains("gone during focus"), "{err}");
+    assert_eq!(
+        fake.methods(),
+        vec!["ping", "pane.get", "ping", "pane.focus"]
+    );
+    assert_eq!(navigation_state(d, card_id), before);
+    testkit::assert_no_effects(&mut td.events, &mut td.dispatch);
 }
 
 // ---------------------------------------------------------------------------

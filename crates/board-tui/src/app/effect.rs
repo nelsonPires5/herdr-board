@@ -88,8 +88,10 @@ pub enum Effect {
     RunRetry(i64),
     RunDone(i64, RunOutcome),
     /// Focus one exact run's pane: `(card_id, run_id)`. The run is chosen by
-    /// the TUI (`run.focus` never picks one implicitly).
+    /// the TUI (`run.open` never picks one implicitly or launches a worker).
     FocusRun(i64, i64),
+    /// Explicitly reopen the selected conversation if its pane is gone.
+    ReopenRun(i64, i64),
     /// Hand the focused multiline text field to `$EDITOR`.
     EditFocusedTextArea,
     /// Fetch `harness.capabilities` + `session.list` + `space.list` for the open

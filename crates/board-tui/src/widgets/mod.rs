@@ -72,6 +72,7 @@ pub enum UiAction {
     CommentHistory,
     ToggleDetail,
     FocusRunPane,
+    ReopenRunPane,
     CancelRun,
     RetryRun,
     CloseDetail,

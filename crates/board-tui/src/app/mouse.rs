@@ -429,6 +429,7 @@ fn action_event(screen: Screen, action: UiAction) -> Option<KeyEvent> {
         (Screen::CardDetail, A::CommentHistory) => (KeyCode::Char('h'), KeyModifiers::NONE),
         (Screen::CardDetail, A::ToggleDetail) => (KeyCode::Char('f'), KeyModifiers::NONE),
         (Screen::CardDetail, A::FocusRunPane) => (KeyCode::Char('o'), KeyModifiers::NONE),
+        (Screen::CardDetail, A::ReopenRunPane) => (KeyCode::Char('O'), KeyModifiers::SHIFT),
         (Screen::CardDetail, A::CancelRun) => (KeyCode::Char('x'), KeyModifiers::NONE),
         (Screen::CardDetail, A::RetryRun) => (KeyCode::Char('r'), KeyModifiers::NONE),
         (Screen::CardDetail, A::CloseDetail) => (KeyCode::Esc, KeyModifiers::NONE),

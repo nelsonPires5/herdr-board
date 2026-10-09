@@ -429,7 +429,7 @@ while a non-Git directory keeps its exact canonical CWD. Subdirectories of one r
 a project (and its boards); equal basenames at different paths do not. Moving/renaming a path does
 not migrate its old project, which remains available in the picker.
 
-`o` is daemon-mediated, and **run selection is explicit end to end**: `run.focus` takes a required
+`o` (**Open worker**) is daemon-mediated, and **run selection is explicit end to end**: `run.open` takes a required
 `{card_id, run_id}` and never implicitly picks a run. The TUI passes the run the user *selected* in
 card detail's Runs section — `detail_run_sel`, a cursor separate from the viewport offset, which
 defaults to the newest run (so `o` keeps its familiar meaning), moves with `↑`/`↓` and `k`/`j` while
@@ -443,17 +443,27 @@ jumps are refused. The result carries the focused run's full identity (card, col
 session name, harness conversation id, pane) plus an `action` saying what the daemon had to do, so
 callers can name *which* run they landed on and *how*.
 
+Open never launches a worker: a missing/stale pane is an actionable refusal, including when
+the pane disappears during focus. Older daemons without `run.open` fail closed; clients never
+fall back to the rescue-capable method. A standalone `board tui` stays on the same card and
+selected run after successful navigation: switch back to its Herdr tab to continue. Plugin
+invocations retain their transient-overlay dismissal on successful live-pane focus. Use a
+plain standalone tab for a persistent board, rather than a plugin pane.
+Subscription and reconnect refreshes reload an open detail as well as the board. Run and
+comment selections follow durable IDs, and their viewports remain on the selection rather
+than jumping to the newest item when another worker update arrives.
+
 **Rescuing a run whose pane is gone.** A finished run's pane is an ordinary terminal: the user can
-close it, and then the run's `herdr_pane_id` points at nothing. Rather than dead-ending, `o` reopens
+close it, and then the run's `herdr_pane_id` points at nothing. Explicit **Reopen conversation** (`O`) reopens
 the run by **resuming its harness conversation in a brand-new pane** in the card's `card-<id> <short-name>` tab —
-automatically, with no confirmation prompt, and reported after the fact. The same path covers a run
+using the legacy `run.focus` contract, with the result reported in a toast. The same path covers a run
 that never recorded a pane at all. End to end:
 
-1. the user selects a run in card detail and presses `o` (`Effect::FocusRun(card_id, run_id)`);
+1. the user selects a run in card detail and presses `O` (`Effect::ReopenRun(card_id, run_id)`);
 2. the daemon loads that exact run, resolves its session socket, and enforces the cross-session
    guard;
 3. one `pane.get` decides live vs. dead. Live ⇒ `pane.focus`, `action=focused_recorded_pane`, and
-   the overlay exits (attention now belongs to Herdr);
+   a transient plugin overlay exits while a standalone board tab remains available;
 4. dead ⇒ *rescue*. The run row + config alone must supply a harness conversation id
    (`run.session_id`, **not** `run.session`), a harness that explicitly declares
    `ResumeSupport::ByConversationId`, a durable `launch_spec_json`, and a recorded workspace.
@@ -483,7 +493,7 @@ that never recorded a pane at all. End to end:
 8. `spawner::rescue` takes the same per-card-tab allocation lock as dispatch (so a focus racing
    another focus, or a dispatch, cannot each create a pane or a tab), scans for a *live* pane an
    earlier rescue left (`action=focused_rescued_pane` if found) in the placement workspace — which
-   is also what makes a second `o` after a workspace recreation reuse the replacement (found by its
+   is also what makes a second `O` after a workspace recreation reuse the replacement (found by its
    label) and the pane it holds — closes dead remains carrying this
    run's marker, else splits a new child in the card tab using the same placement helpers as dispatch
    — with `reclaimable_pane_ids` deliberately empty, so reopening one run never closes another's pane
@@ -494,7 +504,7 @@ that never recorded a pane at all. End to end:
    pane it created, plus the tab anchor when placement had to create the tab; it also registers the
    exact tab/anchor it kept, so a later dispatch reuses that tab instead of making another — and
    when this very resolution created the workspace, the failure additionally closes that workspace,
-   so a rescue that created it leaves no partial resource behind and the next `o` resolves (and
+   so a rescue that created it leaves no partial resource behind and the next `O` resolves (and
    creates) a fresh one;
 9. the TUI toasts what happened and **stays up** on a rescue (Herdr already moved focus to the new
    pane, so quitting would only discard the explanation). Refusals and Herdr errors stay visible as a
@@ -523,19 +533,19 @@ execution, not to resurrect it as a run. Two consequences follow and are not wor
   not report anything it does. `board done` from inside it does not apply (the run is closed); the
   pane carries `BOARD_RESCUE=1` to say so. Closing it is the user's job.
 - deduplication rests on a **name, not a record**. The rescued pane's label/agent name
-  `card-<id>-r<run>-rescue` is the only trace a previous rescue can leave, so pressing `o` twice is
+  `card-<id>-r<run>-rescue` is the only trace a previous rescue can leave, so pressing `O` twice is
   reliably idempotent for panes the daemon created, but a user who renames the pane or its agent can
   defeat the scan. This is a diagnostic hint, not an authoritative record, and it is the direct cost
   of the no-database-writes decision. The marker derives from card id + run id only, precisely so
   that renaming a *column* cannot break it. When the recorded workspace is gone, the replacement
   is likewise found by the card's current space config: a `new_workspace` card reuses its
   replacement by **label** (`dispatch::space::resolve_space`'s find-or-create), so a user who
-  renames the replacement workspace defeats that half of the dedup too — a second `o` then creates
+  renames the replacement workspace defeats that half of the dedup too — a second `O` then creates
   yet another workspace (with the configured label) and resumes in it, leaving the renamed one
   alone; the same no-DB-writes trade-off as the pane marker.
 - for a **configured** (unmanaged) harness, a rescued pane that outlived its harness cannot be
   detected. Herdr tracks no `agent` for unmanaged panes, so the label is the only evidence and a
-  leftover shell looks exactly like a live resume; `o` will focus it rather than resuming again.
+  leftover shell looks exactly like a live resume; `O` will focus it rather than resuming again.
   Managed `pi`/`claude` panes do not have this problem — Herdr's agent registration disappears with
   the process (observed live: the pane stays open as a labelled shell with `agent` absent), so the
   daemon re-rescues and reclaims the dead shell. That is a *presence* check: `PaneInfo.agent` is not
@@ -547,7 +557,7 @@ execution, not to resurrect it as a run. Two consequences follow and are not wor
 
 ### TUI interactions (v1)
 
-- **Access: overlay only** — `[[keys.command]]` keybinding (e.g. `prefix+k`) → `plugin pane open --plugin herdr-board --placement overlay`; the board floats over the current workspace from anywhere, dismiss to drop back. No pinned workspace, no sidebar entry (herdr has no sidebar extension point — verified against api schema/config).
+- **Access:** use `board tui` in a dedicated Herdr tab for a persistent board, or the plugin keybinding (e.g. `prefix+k`) for a transient overlay. For remote workers, keep the TUI, daemon and workers in the same remote Herdr session; see [managed-board operations](operations.md#persistent-managed-board-on-a-remote-machine).
 - **Responsive board view, three layout modes by terminal width** (`LayoutMode::from_width`): **Compact** `< 60` cols, **Regular** `60..=119`, **Wide** `>= 120`. Regular/Wide: visible columns divide the content viewport while preserving a readable minimum width (`MIN_COL_W = 26`); when not all columns fit, the selected column drives a full-width sliding window, and the brand/count, centered board dropdown, and right filter rail share one header line. Compact renders exactly one full-width column with row one `◈ herdr-board` plus the global running count, row two the board dropdown plus direct visibility chips, and row three `[ ‹ ]  [ <column name> (M/A) · n/N · cards ]  [ › ]`; the navigator segments are independent tap/click targets and the running count is not repeated there. Cards use status-colored borders and a readable selected background; each status line owns exactly one semantic glyph (▶ running, ⏸ blocked, ✗ failed, ⧗ queued, ? awaiting — yellow, ✓ done — green), while title/id lines stay free of status markers. Cards also carry harness/model metadata and a live run timer; in Compact, card titles word-wrap to up to two lines instead of being truncated.
 - **Per-column card scrolling, all modes:** each column carries its own scroll offset keyed by column id and draws a 1-cell scrollbar on its right edge once its card count exceeds what fits. Previously cards past the bottom of a column were simply not drawn, with no scroll state at all. Mouse wheel over a column scrolls that column's card list (whichever column the pointer hovers, not necessarily the focused one); wheel no longer reorders the focused card — card reordering stays keyboard-only (`H`/`L`; column reordering stays on `M`, below).
 - **Column switcher, Compact only** (`Screen::Switcher`): now columns-only. Tapping the header's center button opens it; it lists the current board's columns with card counts, plus a trailing `⇄ Switch board →` row that opens the **board picker** (the old second level is gone — `b` and the header board chip open the same picker at every breakpoint) and, below it, an `⊞ Apply template` row. The template row is the touch counterpart of the board screen's `T` key — both route through one helper so the template name lives in a single constant — and it stays visible but dimmed when the board is not pristine, activating it then explaining why rather than silently doing nothing. `j`/`k` (or `↑`/`↓`) move, `Enter` activates the selected row, and `q` closes the sheet outright (it is the "get me out" key everywhere else in the TUI, and the switcher used to swallow it). `Esc` closes the sheet outright; there is no level-2 state to back out to anymore. The board picker opened from the switcher returns to the switcher when closed, restoring the selection that was active before drilling in. `SwitcherState::entered_at_boards` is gone; `b` always opens the board picker, at every breakpoint.
@@ -560,21 +570,18 @@ execution, not to resurrect it as a run. Two consequences follow and are not wor
   their content; the description and each comment body word-wrap (`Wrap { trim: false }`) at the
   panel border instead of being truncated, and comments scroll by wrapped row. Runs stay one line.
   Compact card actions use transparent, wrapped `[ Edit ]`, `[ Archive ]`, optional `[ Confirm ]`,
-  `[ Add ]`, `[ Open ]`, `[ Retry ]`, and `[ Cancel ]` chips; the Runs frame reserves its action
+  `[ Add ]`, `[ Open ]`, `[ Reopen ]`, `[ Retry ]`, and `[ Cancel ]` chips; the Runs frame reserves its action
   row before drawing history, so a zero-row body never overwrites a control.
   Comments and runs scroll independently (`Tab` selects, mouse
   wheel scroll — a wheel notch is a raw offset move that then drags the section's cursor into the
   rows it brought into view, so the `▸` marker never leaves the screen and `o`/`e`/`d`/`h` can only
   ever act on a visible row), with a blue divider for the focused history. Histories open at the latest item and
-  show only directional arrows (no counts) when content is hidden. Each run row is deliberately
-  minimal — `#<id> <harness> · <outcome|active> · <duration>`, i.e. run number, harness, status, and
-  how long the run took (an open run is measured against the injected `app.now`, so `active` rows
-  count up) — still budgeted against the section width so a narrow detail truncates instead of
-  overflowing. The column, the **harness conversation id** and a `pane ✓|-` marker are deliberately
-  *not* in the row: the column is implied by the card, the conversation id and the herdr **session
-  name** live in the status fields (and never in the same slot as each other), and since a run whose
-  pane is gone is now reopened by resuming its conversation, a missing pane no longer predicts
-  whether `o` works. With runs focused, arrows/`k`/`j` move a **selected-run** marker (the same
+  show only directional arrows (no counts) when content is hidden. Each run row shows
+  `#<id> <harness> · <outcome|current status> · <duration> · <session>/<pane>`, using the
+  recorded run's worker identity, not the card's editable launch settings. Open runs show
+  the card's current managed status and elapsed time; finished runs keep their own outcome.
+  A recorded pane is not a liveness claim: Open verifies it. Narrow details truncate within
+  their section width. With runs focused, arrows/`k`/`j` move a **selected-run** marker (the same
   bright-blue `▸` gutter and bold row the comments list uses — one shared `focus_row_marker`, so both
   lists mark their cursor identically; bright/intense blue, never the 256-palette navy `Blue`, which
   would lose contrast on a dark background) one run at a time, dragging the viewport along; with
@@ -597,7 +604,7 @@ execution, not to resurrect it as a run. Two consequences follow and are not wor
   between columns / `m` move; `n` new card, `N` new column; `e` edit card; `a` archive/restore; `v`
   cycles `ACTIVE` / `ALL` / `ARCHIVED`; `c` comment, with `e`/`d`/`h` managing the focused one in
   card detail; `Enter` card detail; `o` focuses the **selected** run's
-  pane when it belongs to the current Herdr session (help: `o  jump to selected run pane`); `r` refreshes the selected board
+  pane when it belongs to the current Herdr session; `O` explicitly reopens a closed conversation; `r` refreshes the selected board
   on demand). The live subscription reconnects with bounded backoff after boardd is replaced,
   replaces its stale request connection, and immediately refetches the currently selected board so
   changes from the outage window cannot leave the TUI stale. `?` opens the help overlay listing

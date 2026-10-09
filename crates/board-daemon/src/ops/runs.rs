@@ -150,6 +150,10 @@ pub(super) fn run_focus(d: &Arc<Daemon>, p: RunFocusParams) -> Result<Value> {
     crate::rescue::focus_run(d, p)
 }
 
+pub(super) fn run_open(d: &Arc<Daemon>, p: RunFocusParams) -> Result<Value> {
+    crate::rescue::open_run(d, p)
+}
+
 pub(super) fn run_retry(d: &Arc<Daemon>, p: RunCardParams) -> Result<Value> {
     let card = {
         let mut sched = d.sched.lock().unwrap();

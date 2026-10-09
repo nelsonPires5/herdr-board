@@ -151,6 +151,10 @@ fn fake_run_focus_targets_the_exact_requested_run() {
     let historical = c.run_focus(card.id, older.id, "/tmp/herdr.sock").unwrap();
     assert_eq!(historical.run_id, older.id);
     assert_eq!(historical.pane_id, "p-old");
+    let opened = c.run_open(card.id, older.id, "/tmp/herdr.sock").unwrap();
+    assert_eq!(opened.run_id, older.id);
+    assert_eq!(opened.pane_id, "p-old");
+    assert_eq!(opened.action, RunFocusAction::FocusedRecordedPane);
 
     let no_pane = c
         .card_create(&CardCreateParams {
@@ -160,6 +164,10 @@ fn fake_run_focus_targets_the_exact_requested_run() {
         .unwrap();
     // Unknown run id for a card with no runs at all.
     assert!(c.run_focus(no_pane.id, 1234, "/tmp/herdr.sock").is_err());
+    assert!(c.run_open(no_pane.id, 1234, "/tmp/herdr.sock").is_err());
+    assert!(c
+        .run_open(no_pane.id, latest.id, "/tmp/herdr.sock")
+        .is_err());
     // A real run id that belongs to a *different* card is rejected.
     assert!(c
         .run_focus(no_pane.id, latest.id, "/tmp/herdr.sock")
@@ -248,6 +256,14 @@ fn fake_run_focus_models_the_rescue_decision_without_faking_herdr() {
     let mut c = FakeBoardClient::new().unwrap();
     // pi/claude can resume, so a run with a conversation id would be rescued.
     let (card_id, run_id) = seed(&c, "pi", Some("conv-1"));
+    let before = serde_json::to_value(c.card_get(card_id).unwrap()).unwrap();
+    let error = c.run_open(card_id, run_id, "/tmp/herdr.sock").unwrap_err();
+    assert!(error.to_string().contains("no pane recorded"));
+    assert!(error.to_string().contains("Reopen"));
+    assert_eq!(
+        serde_json::to_value(c.card_get(card_id).unwrap()).unwrap(),
+        before
+    );
     let result = c.run_focus(card_id, run_id, "/tmp/herdr.sock").unwrap();
     assert_eq!(result.action, RunFocusAction::Rescued);
     assert_eq!(result.recorded_pane_id, None);

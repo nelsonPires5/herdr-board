@@ -195,7 +195,7 @@ board move <new-card-id> Execute
 | `←/→` or `h/l` | Focus column | `↑/↓` or `k/j` | Focus card |
 | `p` / `b` | Switch project / board selectors | `n` | New card |
 | `N` | New column | `Enter` | Card detail |
-| `m` | Move card picker | `o` (detail) | Jump to selected run's pane |
+| `m` | Move card picker | `o` / `O` (detail) | Open worker / explicitly reopen conversation |
 | `M` / `O` | Reorder focused column / selected card | `H / L` | Move card left/right |
 | `C` | Duplicate card (board + detail) | `a` | Archive/restore card |
 | `E` | Edit column | `e` | Edit card |
@@ -220,7 +220,7 @@ board move <new-card-id> Execute
 | `d` | delete card | | `c` | add comment |
 | `D` | delete column | | `Tab` | focus comments / runs |
 | `m` | move card picker | | `↑/↓ k/j` | select comment / run (section follows) |
-| `M` | reorder focused column | | `o` | jump to the selected run's same-session pane |
+| `M` | reorder focused column | | `o` / `O` | open selected worker / explicitly reopen conversation |
 | `O` | reorder card in column (`j/k`, `Enter`, `Esc`) | | `H / L` | move card left / right |
 | | | | `Enter` | confirm done (`awaiting` card) |
 | **forms** | | | `x` / `r` | cancel / retry run |

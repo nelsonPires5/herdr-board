@@ -93,6 +93,7 @@ pub(crate) fn cmd_done(
 }
 
 pub(crate) fn cmd_card_run(sub: RunCmd, ctx: &mut Ctx) -> Result<()> {
+    let open_only = matches!(&sub, RunCmd::Open { .. });
     match sub {
         RunCmd::Done {
             card_id,
@@ -106,10 +107,19 @@ pub(crate) fn cmd_card_run(sub: RunCmd, ctx: &mut Ctx) -> Result<()> {
             card_id,
             run_id,
             origin_socket,
+        }
+        | RunCmd::Open {
+            card_id,
+            run_id,
+            origin_socket,
         } => {
             let json = ctx.json();
             let socket = resolve_origin_socket(origin_socket)?;
-            let result = ctx.client()?.run_focus(card_id, run_id, &socket)?;
+            let result = if open_only {
+                ctx.client()?.run_open(card_id, run_id, &socket)?
+            } else {
+                ctx.client()?.run_focus(card_id, run_id, &socket)?
+            };
             let text = match result.action {
                 RunFocusAction::FocusedRecordedPane => format!(
                     "Focused run #{} of card #{} ({}) pane {}",

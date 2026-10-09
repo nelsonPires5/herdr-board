@@ -469,6 +469,30 @@ fake_methods!(db, config, params, {
         })?;
         serde_json::to_value(RunActionResult { run, card })?
     },
+    "run.open" => {
+        let p: RunFocusParams = serde_json::from_value(params)?;
+        let run = db.run_for_card(p.card_id, p.run_id)?;
+        // DB-only: recorded identity can be checked here; live pane/session
+        // checks belong to the daemon's fake-Herdr and live E2E suites.
+        let pane_id = run.herdr_pane_id.clone().ok_or_else(|| {
+            crate::Error::NotFound(format!(
+                "run {} of card {}: it has no pane recorded; use Reopen (O) or \
+                 `board card run focus {} {}` to explicitly resume its recorded conversation if supported",
+                run.id, run.card_id, run.card_id, run.id
+            ))
+        })?;
+        serde_json::to_value(RunFocusResult {
+            action: crate::protocol::RunFocusAction::FocusedRecordedPane,
+            recorded_pane_id: Some(pane_id.clone()),
+            run_id: run.id,
+            card_id: run.card_id,
+            column_id: run.column_id,
+            harness: run.harness,
+            session: run.session,
+            session_id: run.session_id,
+            pane_id,
+        })?
+    },
     "run.focus" => {
         let p: RunFocusParams = serde_json::from_value(params)?;
         // Ownership-validating lookup: a foreign run id is rejected

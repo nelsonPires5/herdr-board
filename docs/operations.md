@@ -27,6 +27,30 @@ serving the old code, use your platform's process manager to stop that specific 
 (after verifying its PID and command) before reinstalling. Do not remove the socket or use a broad
 process-name kill.
 
+## Persistent managed board on a remote machine
+
+Run `board --board <id> tui` in a dedicated, ordinary Herdr tab for a board that
+stays open while you visit workers. Keep the TUI, daemon and workers in the same
+Herdr session; for remote work, run all three remotely and attach your terminal
+client to that session. A remote focus RPC alone does not select a different
+endpoint in a local multi-machine client.
+
+In card detail, select a run and press **o / Open worker**. Open navigates only
+to that run's recorded pane; it never launches a replacement. Switch back to the
+board tab to continue with the same selection. The open detail refreshes worker
+status, completion and comments without jumping away from the selected history.
+Plugin invocations retain their transient-overlay dismissal behavior.
+
+Use **O / Reopen conversation** to explicitly resume a closed conversation, subject
+to the [rescue limits](design.md#tui-interactions-v1). Existing-workspace cards
+honor their explicit task directory even when the surviving board pane is in a
+different directory; reused new-workspace cards still derive it from live panes.
+
+The CLI equivalents are `board card run open <card-id> <run-id>` for navigation
+and the existing `board card run focus <card-id> <run-id>` for navigation/rescue.
+Update the daemon along with the client: an older daemon rejects `run.open`, and
+the new client does not fall back to a rescue-capable operation.
+
 ## Diagnostic logs
 
 boardd writes one JSON object per line to private daily files in the XDG data directory:

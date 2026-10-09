@@ -1,4 +1,4 @@
-//! `run.focus`: focus a run's live pane, or reopen a run whose pane is gone.
+//! `run.open`: navigate to a recorded live pane; `run.focus`: also allow rescue.
 //!
 //! Everything here is the *orchestration* half of the rescue — deciding that a
 //! run can be reopened, and with what. The Herdr-side placement and launch live
@@ -13,7 +13,7 @@ use std::sync::Arc;
 use board_core::capability;
 use board_core::harness;
 use board_core::model::{Card, Run};
-use board_core::protocol::{RunFocusAction, RunFocusParams, RunFocusResult};
+use board_core::protocol::{RunFocusAction, RunFocusParams, RunFocusResult, SpaceKind};
 use board_core::{Error, Result};
 use serde_json::{json, Value};
 
@@ -24,16 +24,38 @@ use crate::spawner::{rescue_run_pane, CardOwnership, RescueOutcome, RescuePlan};
 use crate::state::Daemon;
 
 pub(crate) fn focus_run(d: &Arc<Daemon>, p: RunFocusParams) -> Result<Value> {
+    focus_run_with_rescue(d, p, true)
+}
+
+pub(crate) fn open_run(d: &Arc<Daemon>, p: RunFocusParams) -> Result<Value> {
+    focus_run_with_rescue(d, p, false)
+}
+
+fn open_unavailable(run: &Run) -> Error {
+    let pane_state = match run.herdr_pane_id.as_deref() {
+        Some(pane_id) => format!("its pane {pane_id} no longer exists"),
+        None => "it has no pane recorded".to_string(),
+    };
+    Error::NotFound(format!(
+        "run {} of card {}: {pane_state}; use Reopen (O) or `board card run focus {} {}` \
+         to explicitly resume its recorded conversation if supported",
+        run.id, run.card_id, run.card_id, run.id
+    ))
+}
+
+fn focus_run_with_rescue(d: &Arc<Daemon>, p: RunFocusParams, allow_rescue: bool) -> Result<Value> {
     // The caller names the exact run; ownership is validated in the db layer.
     let run = d.store.lock().run_for_card(p.card_id, p.run_id)?;
     // The card's CURRENT space config is what a rescue falls back to when the
     // run's recorded workspace is gone (see `rescue_run`).
     let card = d.store.lock().require_card(p.card_id)?;
     // Dead-end #1: no recorded pane at all (the run never reached a pane, or
-    // predates pane recording). The rescue below covers it exactly like a pane
-    // that has since disappeared — in both cases there is no live pane for this
-    // run and the only non-destructive option is to resume its conversation.
+    // predates pane recording). Open refuses; explicit rescue covers it exactly
+    // like a pane that has since disappeared.
     let recorded_pane_id = run.herdr_pane_id.clone();
+    if !allow_rescue && recorded_pane_id.is_none() {
+        return Err(open_unavailable(&run));
+    }
     // When nothing is recorded, a rescue is the *only* possible outcome, so
     // validate it locally (run row + config only) before involving Herdr. That
     // keeps "this run can never be reopened" reportable even with Herdr down,
@@ -66,9 +88,8 @@ pub(crate) fn focus_run(d: &Arc<Daemon>, p: RunFocusParams) -> Result<Value> {
 
     // Liveness before focus: one targeted `pane.get` on this exact pane id
     // (cheaper and more direct than pulling a whole `session.snapshot` to test
-    // one membership) turns a stale `herdr_pane_id` into a rescue instead of an
-    // opaque `pane.focus` failure. There is deliberately never a fallback to
-    // another run's pane.
+    // one membership) turns a stale `herdr_pane_id` into an actionable Open
+    // refusal or explicit rescue. There is never a fallback to another run's pane.
     let live_pane = match &recorded_pane_id {
         None => None,
         Some(pane_id) => {
@@ -98,6 +119,10 @@ pub(crate) fn focus_run(d: &Arc<Daemon>, p: RunFocusParams) -> Result<Value> {
             session_id: run.session_id,
             pane_id,
         }));
+    }
+
+    if !allow_rescue {
+        return Err(open_unavailable(&run));
     }
 
     // Dead-end #2 (and #1): there is no live pane for this run. Rescue it by
@@ -298,7 +323,7 @@ fn rescue_run(
     // Deliberately NOT `run_pane_name_unique`, whose `card-<id>-<column-slug>`
     // form is a function of the column's *current* name: renaming the column (or
     // tripping the 24-char slug cap) would change the marker, the scan would miss
-    // the pane it created moments earlier, and `o` would resume the same
+    // the pane it created moments earlier, and Reopen would resume the same
     // conversation a second time. The `-rescue` suffix keeps it from ever
     // colliding with a live original run pane. Treat it as a diagnostic hint, not
     // a record — see `spawner::rescue::find_rescued_pane`.
@@ -327,7 +352,20 @@ fn rescue_run(
         .map_err(|e| Error::HerdrUnavailable(format!("connecting to Herdr: {e}")))?;
     let (recorded_usable, workspace_id, cwd, bootstrap) =
         match workspace_cwd(&mut client, &workspace_id) {
-            Ok(cwd) => (true, workspace_id, std::path::PathBuf::from(cwd), None),
+            Ok(cwd) => {
+                // Match dispatch: an existing-workspace card's explicit cwd
+                // wins even when only the board TUI survives elsewhere. A
+                // reused new_workspace still takes its cwd from live panes.
+                let cwd = match card.space_kind {
+                    SpaceKind::Workspace => card
+                        .space_cwd
+                        .as_deref()
+                        .filter(|cwd| !cwd.trim().is_empty())
+                        .unwrap_or(&cwd),
+                    SpaceKind::NewWorkspace => &cwd,
+                };
+                (true, workspace_id, std::path::PathBuf::from(cwd), None)
+            }
             Err(recorded_error) => {
                 let space = resolve_space(
                     &mut client,

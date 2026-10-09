@@ -69,6 +69,41 @@ impl BoardClient for RecordingClient {
 }
 
 #[test]
+fn run_open_uses_a_distinct_method_and_never_falls_back_to_legacy_focus() {
+    let result = json!({
+        "action": "focused_recorded_pane",
+        "recorded_pane_id": "w1:p9",
+        "pane_id": "w1:p9",
+        "card_id": 42,
+        "run_id": 7,
+        "column_id": 3,
+        "harness": "pi",
+        "session": "work",
+        "session_id": "conversation-1"
+    });
+    let mut client = RecordingClient::new();
+    client.responses.insert("run.open".into(), result.clone());
+    let opened = client.run_open(42, 7, "/tmp/work.sock").unwrap();
+    assert_eq!(serde_json::to_value(opened).unwrap(), result);
+    assert_eq!(
+        client.calls,
+        vec![(
+            "run.open".into(),
+            json!({"card_id":42,"run_id":7,"origin_socket":"/tmp/work.sock"}),
+        )]
+    );
+
+    // An old daemon can answer legacy focus but does not implement run.open.
+    client.calls.clear();
+    client.responses.remove("run.open");
+    client.responses.insert("run.focus".into(), result);
+    let error = client.run_open(42, 7, "/tmp/work.sock").unwrap_err();
+    assert!(error.to_string().contains("run.open"));
+    assert_eq!(client.calls.len(), 1);
+    assert_eq!(client.calls[0].0, "run.open");
+}
+
+#[test]
 fn typed_catalog_and_run_methods_preserve_wire_v1_params_and_results() {
     let mut client = RecordingClient::new();
 

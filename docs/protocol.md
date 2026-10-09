@@ -63,7 +63,7 @@ repeated at each operation boundary rather than treated as a one-time startup ch
   preflight are checked the same way. The `herdr session list --json` registry enumeration is a
   separate CLI discovery step, not a socket call; once it selects a socket, socket operations are
   gated.
-- New pane operations are checked before `pane.get`/`pane.focus` for `run.focus`, `pane.rename` for
+- New pane operations are checked before `pane.get`/`pane.focus` for `run.open` and `run.focus`, `pane.rename` for
   `pane.set_title`, and `pane.list`/`pane.layout`/`pane.split`/`pane.rename`, agent calls, and the
   configured runner used by placement and rescue.
 
@@ -322,9 +322,33 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
   reports; opencode retries with `-s <id> --fork` and persists the new session id the integration
   reports (the captured id supersedes the recorded source id atomically; a fork whose new id was
   never captured keeps the source id instead of wiping it).
+- `run.open {card_id, run_id, origin_socket}` → `RunFocusResult` (the identity/result shape below),
+  always with `action: "focused_recorded_pane"`. **Open is navigation only:** it requires the
+  exact selected run's recorded pane to exist, including when the run has completed or its pane
+  is now a shell. It never starts or resumes a worker, creates a pane/workspace, looks for a
+  rescue pane, picks another run, or writes board state. It does not change dispatch-time pane
+  reuse or model selection.
+
+  `run_id` and `origin_socket` are required. The exact card/run ownership lookup is shared with
+  `run.focus`; a foreign or missing run is error 2. A missing recorded pane is error 2 before
+  contacting Herdr. Otherwise the daemon resolves the **run's** session and compares canonical
+  origin/target socket paths; cross-session navigation is error 3, even if the same pane id
+  exists in both sessions. Socket aliases to the same canonical path are accepted. The Herdr
+  protocol gate precedes targeted `pane.get` and `pane.focus`. A stale pane is error 2 with
+  the pane/run identity and an explicit Reopen hint. A connection, protocol, or focus failure
+  is error 4; a pane disappearing between lookup and focus never triggers rescue.
+
+  Use case: inspect a completed run while preserving the board and its workers. The CLI is
+  `board card run open CARD RUN [--origin-socket PATH]`; the typed client is
+  `run_open(card_id, run_id, origin_socket) -> RunFocusResult`. The TUI's **Open / o** uses this
+  method; explicit **Reopen / O** uses legacy `run.focus`. This is an additive method, **not a
+  flag on `run.focus`**: an older daemon answers unknown method (error 1), and clients must not
+  fall back to focus/rescue. Scenario `e2e/27-rescue-dead-pane.sh` covers completed-live opening
+  and mutation-free stale/pane-less rejection before explicit rescue.
 - `run.focus {card_id, run_id, origin_socket}` →
   `{action, recorded_pane_id?, run_id, card_id, column_id, harness, session, session_id, pane_id}`
-  — focuses **one exact run's** pane, reopening it if necessary. `run_id` is required: the daemon
+  — legacy focus/explicit Reopen (`board card run focus CARD RUN`): focuses **one exact run's**
+  pane, reopening it if necessary. Its rescue semantics are unchanged. `run_id` is required: the daemon
   never implicitly picks the latest run, so a caller that wants "newest run with a pane" resolves
   that itself from the card's `runs[]`. The run must belong to `card_id`; an unknown card, an
   unknown run, and a run owned by another card are error 2 (the message names the requested card
@@ -417,7 +441,7 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
   board-set label untouched, so labelling once before the launch is sufficient. A matching pane only counts as *live* if its harness is
   still there: a Herdr pane label outlives the process, so for a managed harness the pane must still
   have a registered `agent` (a *presence* test — `PaneInfo.agent` is the agent kind, not the chosen
-  name), and in all cases a `done` agent status counts as dead. Otherwise focusing a leftover shell would make `o`
+  name), and in all cases a `done` agent status counts as dead. Otherwise focusing a leftover shell would make `O`
   a permanent no-op after the resumed harness exited. Dead remains carrying this run's exact marker
   are closed before the new pane is split, so repeated presses cannot pile up idle shells that no run
   row could ever reclaim. For a **configured** harness Herdr exposes no `agent` field at all, so a

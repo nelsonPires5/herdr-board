@@ -142,7 +142,7 @@ detail_ready=0
 for _ in $(seq 1 50); do
   detail_screen="$("$HERDR_BIN" pane read "$BOARD_PANE" --source recent-unwrapped --lines 100 2>/dev/null || true)"
   if printf '%s\n' "$detail_screen" | grep -q "Card #$CARD_ID" \
-    && printf '%s\n' "$detail_screen" | grep -q '\[ Open \]' \
+    && printf '%s\n' "$detail_screen" | grep -Eq '\[ Open( worker)? \]' \
     && printf '%s\n' "$detail_screen" | grep -q '\[ Retry \]'; then
     detail_ready=1
     break
@@ -221,5 +221,67 @@ done
 [ "$focused" = "$TARGET_PANE" ] || fail "focused pane '$focused' (expected '$TARGET_PANE')"
 [ "$board_present" = 0 ] || fail "board pane $BOARD_PANE remained after successful jump"
 ok "o focused $TARGET_PANE and closed board pane $BOARD_PANE"
+
+step "Open a persistent standalone board tab and retain its selected run on return"
+# Verified Herdr 0.9.0: tab create --workspace ID --label LABEL --no-focus,
+# pane run ID COMMAND, pane.focus {pane_id}; unlike plugin overlays this is a
+# plain board TUI with no HERDR_PLUGIN_ID and must not exit after navigation.
+tab_json="$(e2e_herdr_mutate -- tab create --workspace "$WS_ID" --label persistent-board --no-focus)"
+PERSISTENT_PANE="$(printf '%s' "$tab_json" | jget pane_id)"
+E2E_TUI_COLS=100 e2e_launch_tui "$PERSISTENT_PANE" \
+  "BOARD_SOCKET=$BOARD_SOCKET BOARD_DB=$BOARD_DB HERDR_BOARD_CONFIG=$HERDR_BOARD_CONFIG BOARD_SCOPE_PATH=$BOARD_SCOPE_PATH"
+e2e_hrpc_mutate -- pane.focus "{\"pane_id\":\"$PERSISTENT_PANE\"}" >/dev/null
+persistent_screen() {
+  "$HERDR_BIN" pane read "$PERSISTENT_PANE" --source visible --lines 120 2>/dev/null || true
+}
+persistent_focused_pane() {
+  hrpc pane.list "{\"workspace_id\":\"$WS_ID\"}" | python3 -c '
+import json,sys
+panes=json.load(sys.stdin)["panes"]
+print(next((p["pane_id"] for p in panes if p.get("focused")), ""))'
+}
+persistent_wait() {
+  local pattern="$1"
+  for _ in $(seq 1 60); do
+    persistent_screen | grep -Eq "$pattern" && return 0
+    sleep .1
+  done
+  persistent_screen >&2
+  fail "persistent board did not render $pattern"
+}
+persistent_wait 'TODO'
+e2e_herdr_mutate -- pane send-keys "$PERSISTENT_PANE" right enter tab >/dev/null
+persistent_wait "▸#$TARGET_RUN "
+RUNS_BEFORE_PERSISTENT="$("$BOARD_BIN" card show "$CARD_ID" --json | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["runs"],sort_keys=True))')"
+e2e_herdr_mutate -- pane send-keys "$PERSISTENT_PANE" o >/dev/null
+for _ in $(seq 1 60); do
+  focused="$(persistent_focused_pane)"
+  [ "$focused" = "$TARGET_PANE" ] && break
+  sleep .1
+done
+[ "$focused" = "$TARGET_PANE" ] || fail "persistent Open did not focus the exact worker"
+hrpc pane.get "{\"pane_id\":\"$PERSISTENT_PANE\"}" >/dev/null || fail "persistent board exited"
+e2e_hrpc_mutate -- pane.focus "{\"pane_id\":\"$PERSISTENT_PANE\"}" >/dev/null
+persistent_wait "Card #$CARD_ID"
+persistent_wait "▸#$TARGET_RUN "
+# A second round-trip proves the returned pane is the same usable application,
+# rather than a shell with a stale final rendering left on screen.
+e2e_herdr_mutate -- pane send-keys "$PERSISTENT_PANE" up o >/dev/null
+persistent_wait "▸#$OLD_RUN "
+persistent_wait "pane $OLD_PANE no longer exists"
+[ "$(persistent_focused_pane)" = "$PERSISTENT_PANE" ] \
+  || fail "opening the stale selected run switched away from the board"
+e2e_herdr_mutate -- pane send-keys "$PERSISTENT_PANE" down o >/dev/null
+for _ in $(seq 1 60); do
+  [ "$(persistent_focused_pane)" = "$TARGET_PANE" ] && break
+  sleep .1
+done
+[ "$(persistent_focused_pane)" = "$TARGET_PANE" ] \
+  || fail "returned board could not open its selected worker again"
+e2e_hrpc_mutate -- pane.focus "{\"pane_id\":\"$PERSISTENT_PANE\"}" >/dev/null
+persistent_wait "▸#$TARGET_RUN "
+[ "$("$BOARD_BIN" card show "$CARD_ID" --json | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["runs"],sort_keys=True))')" = "$RUNS_BEFORE_PERSISTENT" ] \
+  || fail "navigation changed authoritative run history"
+ok "persistent board survived two worker round-trips and a stale-pane refusal on the same card/run"
 
 step "13-jump-to-pane: ALL CHECKS PASSED"

@@ -38,7 +38,9 @@ impl App {
     /// Keep chronological order (oldest → newest) and open both histories at
     /// their bottom so the most recent item is always the last visible row.
     pub fn scroll_detail_to_latest(&mut self) {
-        let Some(detail) = &self.detail else { return };
+        let Some(detail) = &self.detail else {
+            return;
+        };
         let layout = crate::view::detail_layout(self, self.last_area);
         // Comments word-wrap, so their scroll is row-based against the summed
         // wrapped height; runs stay one row each.
@@ -176,6 +178,33 @@ impl App {
             scroll = sel + 1 - visible;
         }
         self.detail_runs_scroll = scroll;
+    }
+
+    /// Preserve the portion being read across background detail refreshes.
+    pub(crate) fn retain_detail_viewports(&mut self) {
+        self.follow_run_focus();
+        let Some(detail) = &self.detail else { return };
+        let layout = crate::view::detail_layout(self, self.last_area);
+        let spans = crate::view::comment_row_spans(detail, layout.comments.width);
+        let (_, visible) = crate::view::comments_viewport(self, &layout);
+        if visible == 0 {
+            return;
+        }
+        let total = spans.last().map(|(start, len)| start + len).unwrap_or(0);
+        self.detail_comments_scroll = self
+            .detail_comments_scroll
+            .min(total.saturating_sub(visible));
+        if let Some(&(start, len)) = spans.get(self.detail_comment_sel) {
+            // Keyboard selection anchors oversized comments at their tail.
+            // A background refresh must instead preserve the portion being read.
+            if len > visible
+                && start < self.detail_comments_scroll + visible
+                && start + len > self.detail_comments_scroll
+            {
+                return;
+            }
+        }
+        self.follow_comment_focus();
     }
 
     /// The mirror image of `follow_*_focus`, for a **raw** scroll (the mouse
@@ -322,14 +351,20 @@ pub(super) fn detail_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
                 app.screen = Screen::CardForm;
             }
         }
-        KeyCode::Char('o') => {
+        KeyCode::Char('o' | 'O') => {
             // Jump to the *selected* run (the highlighted row in the Runs
             // section, the newest run until the user moves the cursor). Never
             // re-derive a "latest run with a pane" here: whether that run's
             // pane is recorded and still exists is the daemon's call, so its
             // error stays the single source of the diagnosis.
             match (card_id, app.focused_run().map(|run| run.id)) {
-                (Some(id), Some(run_id)) => return vec![Effect::FocusRun(id, run_id)],
+                (Some(id), Some(run_id)) => {
+                    return vec![if k.code == KeyCode::Char('O') {
+                        Effect::ReopenRun(id, run_id)
+                    } else {
+                        Effect::FocusRun(id, run_id)
+                    }];
+                }
                 // A loaded card that has never run: nothing to jump to.
                 (Some(_), None) => app.set_toast("this card has no run to jump to", true),
                 // `card.get` has not come back yet (or failed): there is no run

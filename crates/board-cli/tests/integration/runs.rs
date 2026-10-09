@@ -1,9 +1,43 @@
-//! Canonical `card run` verbs against a live run: done, retry, and cancel.
+//! Canonical `card run` verbs: exact-run navigation and live-run actions.
 
 use board_core::client::BoardClient;
 use board_core::protocol::{CardCreateParams, CardStatus, ColumnCreateParams, Trigger};
 
 use super::{json_output, poll, todo_id, TestDaemon};
+
+#[test]
+fn canonical_card_run_open_routes_exact_ids_and_requires_a_run_id() {
+    let td = TestDaemon::start(&[]);
+    let card = td
+        .client()
+        .card_create(&CardCreateParams {
+            title: "navigation only".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let out = td.board(&[
+        "card",
+        "run",
+        "open",
+        &card.id.to_string(),
+        "123",
+        "--origin-socket",
+        "/tmp/unused.sock",
+        "--json",
+    ]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let error: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(error["error"]["code"], 2);
+    assert!(error["error"]["message"].as_str().unwrap().contains("123"));
+
+    let out = td.board(&["card", "run", "open", "999999", "--json"]);
+    assert_eq!(out.status.code(), Some(64));
+}
 
 #[test]
 fn canonical_card_run_done_cancel_and_retry() {
