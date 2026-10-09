@@ -690,9 +690,10 @@ fn overlays_preserve_board_chrome_and_use_icon_run_controls() {
         "detail toggle icon missing:\n{output}"
     );
     assert!(
-        output.contains("[ Open ]"),
+        output.contains("[ Open worker ]"),
         "run open label missing:\n{output}"
     );
+    assert!(output.contains("[ Reopen conversation ]"));
     assert!(
         output.contains("[ Retry ]"),
         "run retry label missing:\n{output}"

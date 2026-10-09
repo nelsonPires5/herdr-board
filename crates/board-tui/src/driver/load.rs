@@ -21,6 +21,9 @@ impl Driver {
         if let Some(snap) = self.guard(r) {
             self.app.board = snap;
             clamp_selection(&mut self.app);
+            if self.app.screen == Screen::CardDetail {
+                self.reload_open_detail();
+            }
         }
     }
 
@@ -310,8 +313,30 @@ impl Driver {
     }
 
     pub(super) fn load_detail(&mut self, id: i64) {
+        let previous = self.app.detail.as_ref().filter(|d| {
+            d.card.id == id
+                && self.app.detail_run_sel != usize::MAX
+                && self.app.detail_comment_sel != usize::MAX
+        });
+        let preserve_view = previous.is_some();
+        let selected_run = previous
+            .and_then(|d| d.runs.get(self.app.detail_run_sel))
+            .map(|r| r.id);
+        let selected_comment = previous
+            .and_then(|d| d.comments.get(self.app.detail_comment_sel))
+            .map(|c| c.id);
         let r = self.client.card_get(id);
         if let Some(detail) = self.guard(r) {
+            if let Some(index) =
+                selected_run.and_then(|id| detail.runs.iter().position(|r| r.id == id))
+            {
+                self.app.detail_run_sel = index;
+            }
+            if let Some(index) =
+                selected_comment.and_then(|id| detail.comments.iter().position(|c| c.id == id))
+            {
+                self.app.detail_comment_sel = index;
+            }
             self.app.detail = Some(detail);
             let len = self
                 .app
@@ -343,7 +368,11 @@ impl Driver {
             } else {
                 self.app.detail_run_sel.min(runs - 1)
             };
-            self.app.scroll_detail_to_latest();
+            if preserve_view {
+                self.app.retain_detail_viewports();
+            } else {
+                self.app.scroll_detail_to_latest();
+            }
         }
     }
 

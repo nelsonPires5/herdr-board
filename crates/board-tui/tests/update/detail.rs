@@ -232,6 +232,81 @@ fn detail_run_selection_defaults_to_newest_and_survives_a_refresh() {
 }
 
 #[test]
+fn subscription_refresh_updates_open_detail_without_losing_historical_run_focus() {
+    use std::sync::{Arc, Mutex};
+    struct ChangingDetail {
+        inner: board_tui::testkit::DemoClient,
+        detail: Arc<Mutex<board_core::protocol::CardDetail>>,
+    }
+    impl BoardClient for ChangingDetail {
+        fn call(
+            &mut self,
+            method: &str,
+            params: serde_json::Value,
+        ) -> anyhow::Result<serde_json::Value> {
+            if method == "card.get" {
+                return Ok(serde_json::to_value(&*self.detail.lock().unwrap())?);
+            }
+            self.inner.call(method, params)
+        }
+        fn subscribe(
+            &mut self,
+        ) -> anyhow::Result<Box<dyn Iterator<Item = board_core::protocol::Event> + Send>> {
+            self.inner.subscribe()
+        }
+    }
+    let mut client = super::helpers::demo_client().unwrap();
+    let card = failed_card(&mut client);
+    seed_runs(&client, &card, 30, true);
+    let mut initial = client.card_get(card.id).unwrap();
+    initial.card.status = CardStatus::Running;
+    initial.runs.last_mut().unwrap().outcome = None;
+    initial.runs.last_mut().unwrap().ended_at = None;
+    let detail = Arc::new(Mutex::new(initial));
+    let mut d = driver_of(ChangingDetail {
+        inner: client,
+        detail: detail.clone(),
+    });
+    d.app.last_area = Rect::new(0, 0, 110, 44);
+    d.app.screen = Screen::CardDetail;
+    d.app.detail = Some(detail.lock().unwrap().clone());
+    d.app.detail_scroll_target = DetailScrollTarget::Runs;
+    d.app.detail_run_sel = 10;
+    d.app.detail_runs_scroll = 9;
+    let selected = d.app.focused_run().unwrap().id;
+    let mut latest = detail.lock().unwrap();
+    latest.card.status = CardStatus::Done;
+    latest.runs.last_mut().unwrap().outcome = Some(RunOutcome::Ok);
+    latest.runs.last_mut().unwrap().ended_at = Some("2026-10-09 13:00:00".into());
+    latest.comments.push(board_core::model::Comment {
+        id: 9999,
+        card_id: card.id,
+        author: "user".into(),
+        body: "new handoff while away".into(),
+        created_at: "2026-10-09 13:00:00".into(),
+    });
+    // Identity, not vector position, must survive a changed response ordering.
+    latest.runs.remove(0);
+    drop(latest);
+    // Runtime uses this message for subscription changes AND reconnect snapshots.
+    d.handle(Msg::Refresh);
+    let loaded = d.app.detail.as_ref().unwrap();
+    assert_eq!(loaded.card.status, CardStatus::Done);
+    assert_eq!(loaded.comments.last().unwrap().id, 9999);
+    assert_eq!(loaded.runs.last().unwrap().outcome, Some(RunOutcome::Ok));
+    assert_eq!(
+        loaded.runs.last().unwrap().ended_at.as_deref(),
+        Some("2026-10-09 13:00:00")
+    );
+    assert_eq!(d.app.focused_run().unwrap().id, selected);
+    assert_eq!(
+        d.app.detail_runs_scroll, 9,
+        "refresh must not scroll back to newest"
+    );
+    assert_eq!(d.app.screen, Screen::CardDetail);
+}
+
+#[test]
 fn detail_run_selection_clamps_when_the_run_list_shrinks() {
     let mut client = super::helpers::demo_client().unwrap();
     let card = failed_card(&mut client);
@@ -254,6 +329,30 @@ fn detail_run_selection_clamps_when_the_run_list_shrinks() {
     update(&mut d.app, key(KeyCode::Tab));
     update(&mut d.app, key(KeyCode::Tab));
     assert_eq!(d.app.detail_run_sel, 1);
+}
+
+#[test]
+fn subscription_refresh_preserves_the_middle_of_an_oversized_comment() {
+    let mut client = super::helpers::demo_client().unwrap();
+    let card = failed_card(&mut client);
+    client
+        .comment_add(card.id, &"long comment line\n".repeat(80), Some("user"))
+        .unwrap();
+    let mut d = driver_with_detail_open(client, card.id);
+    let detail = d.app.detail.as_ref().unwrap();
+    let layout = board_tui::view::detail_layout(&d.app, d.app.last_area);
+    let spans = board_tui::view::comment_row_spans(detail, layout.comments.width);
+    let (start, len) = *spans.last().unwrap();
+    let (_, visible) = board_tui::view::comments_viewport(&d.app, &layout);
+    assert!(len > visible + 10);
+    d.app.detail_comment_sel = detail.comments.len() - 1;
+    d.app.detail_comments_scroll = start + 5;
+    let before = d.app.detail_comments_scroll;
+    d.handle(Msg::Refresh);
+    assert_eq!(
+        d.app.detail_comments_scroll, before,
+        "background refresh must not jump to the comment tail"
+    );
 }
 
 #[test]
@@ -314,13 +413,9 @@ fn detail_runs_selection_moves_with_arrows_and_jk_and_saturates() {
     assert_eq!(d.app.detail_runs_scroll, len - visible);
 }
 
-/// The run row is deliberately minimal: **run number, harness, status, and how
-/// long it ran**, and nothing else. The column, the harness conversation id
-/// (`conv`) and the `pane ✓|-` marker are not in the row — the identity fields
-/// are already elsewhere in the detail, and since a run whose pane is gone is
-/// reopened automatically, `pane -` no longer predicts whether `o` works.
+/// The row carries recorded worker identity alongside outcome and elapsed time.
 #[test]
-fn run_rows_show_only_id_harness_status_and_duration() {
+fn run_rows_show_identity_status_duration_and_recorded_worker() {
     let mut client = super::helpers::demo_client().unwrap();
     let card = failed_card(&mut client);
     let seeded = seed_runs(&client, &card, 2, true);
@@ -346,11 +441,13 @@ fn run_rows_show_only_id_harness_status_and_duration() {
         row.contains(&prefix),
         "row must read `#<id> <harness> · <status> · <duration>`: {row}"
     );
-    // The trailing field is the duration and the row ends there: exactly two
-    // ` · ` separators, so no dropped field can creep back in.
+    // Duration remains independently readable before the qualified worker pane.
     let duration = row
         .split(&prefix)
         .nth(1)
+        .unwrap()
+        .split(" · ")
+        .next()
         .unwrap()
         .trim_end_matches(['"', '│', ' ']);
     assert!(
@@ -359,9 +456,10 @@ fn run_rows_show_only_id_harness_status_and_duration() {
     );
     assert_eq!(
         row.matches(" · ").count(),
-        2,
-        "the row carries exactly id+harness, status and duration: {row}"
+        3,
+        "the row carries id+harness, status, duration and worker: {row}"
     );
+    assert!(row.contains("default/w1:p-1"), "{row}");
     // The explicitly dropped fields.
     assert!(!row.contains("conv"), "conversation id dropped: {row}");
     assert!(!row.contains("pane"), "pane marker dropped: {row}");
@@ -371,7 +469,7 @@ fn run_rows_show_only_id_harness_status_and_duration() {
     );
 }
 
-/// A run that has not ended yet reads `active` and reports how long it has been
+/// A run that has not ended yet reads its managed status and reports how long it has been
 /// running, measured from the injected `app.now` — not `-` and not a frozen 0s.
 #[test]
 fn an_active_run_row_reports_how_long_it_has_been_running() {
@@ -411,7 +509,7 @@ fn an_active_run_row_reports_how_long_it_has_been_running() {
     d.app.now = started + 95;
 
     let rows = rendered_rows(&d.app);
-    let want = format!("#{} claude · active · 1m35s", run.id);
+    let want = format!("#{} claude · running · 1m35s", run.id);
     assert!(
         rows.iter().any(|r| r.contains(&want)),
         "expected {want:?} in: {rows:#?}"
@@ -627,7 +725,7 @@ fn o_focuses_the_selected_older_run_not_the_newest() {
 }
 
 #[test]
-fn o_on_a_run_whose_pane_is_gone_toasts_the_rescue_and_keeps_the_board_usable() {
+fn explicit_reopen_on_a_run_whose_pane_is_gone_toasts_the_rescue() {
     let mut client = super::helpers::demo_client().unwrap();
     let card = failed_card(&mut client);
     // The newest run records no pane but does record a claude conversation id,
@@ -638,7 +736,7 @@ fn o_on_a_run_whose_pane_is_gone_toasts_the_rescue_and_keeps_the_board_usable() 
     d.set_origin_socket(Some("/tmp/herdr.sock".into()));
     assert_eq!(d.app.focused_run().unwrap().id, paneless);
 
-    d.handle(key(KeyCode::Char('o')));
+    d.handle(key(KeyCode::Char('O')));
     assert!(
         !d.app.should_quit,
         "a rescue must keep the board up so its explanation is readable"
@@ -664,7 +762,7 @@ fn o_on_a_run_whose_pane_is_gone_toasts_the_rescue_and_keeps_the_board_usable() 
 }
 
 #[test]
-fn o_on_a_run_that_cannot_be_reopened_toasts_an_error_without_quitting() {
+fn explicit_reopen_without_a_conversation_toasts_an_error_without_quitting() {
     let mut client = super::helpers::demo_client().unwrap();
     let card = failed_card(&mut client);
     // No pane and no conversation id: nothing to focus, nothing to resume.
@@ -702,7 +800,7 @@ fn o_on_a_run_that_cannot_be_reopened_toasts_an_error_without_quitting() {
     let mut d = driver_with_detail_open(client, card.id);
     d.set_origin_socket(Some("/tmp/herdr.sock".into()));
 
-    d.handle(key(KeyCode::Char('o')));
+    d.handle(key(KeyCode::Char('O')));
     assert!(!d.app.should_quit, "a refusal must not exit the board");
     let toast = d.app.toast.as_ref().expect("error toast");
     assert!(toast.is_error);
@@ -727,7 +825,7 @@ fn o_on_a_run_that_cannot_be_reopened_toasts_an_error_without_quitting() {
 }
 
 #[test]
-fn o_on_a_run_whose_harness_cannot_resume_names_the_harness() {
+fn explicit_reopen_whose_harness_cannot_resume_names_the_harness() {
     let mut client = super::helpers::demo_client().unwrap();
     let card = failed_card(&mut client);
     let run = client
@@ -765,7 +863,7 @@ fn o_on_a_run_whose_harness_cannot_resume_names_the_harness() {
     let mut d = driver_with_detail_open(client, card.id);
     d.set_origin_socket(Some("/tmp/herdr.sock".into()));
 
-    d.handle(key(KeyCode::Char('o')));
+    d.handle(key(KeyCode::Char('O')));
     assert!(!d.app.should_quit);
     let toast = d.app.toast.as_ref().expect("error toast");
     assert!(toast.is_error);
@@ -777,7 +875,7 @@ fn o_on_a_run_whose_harness_cannot_resume_names_the_harness() {
 }
 
 #[test]
-fn card_detail_o_emits_focus_and_driver_quits_only_on_success() {
+fn card_detail_open_preserves_persistent_board_and_selection() {
     let mut client = super::helpers::demo_client().unwrap();
     let board = client.board_get().unwrap();
     let running = board
@@ -800,8 +898,16 @@ fn card_detail_o_emits_focus_and_driver_quits_only_on_success() {
     success.set_origin_socket(Some("/tmp/herdr.sock".into()));
     success.handle(key(KeyCode::Right));
     success.handle(key(KeyCode::Enter));
+    let card_before = success.app.detail.as_ref().unwrap().card.id;
+    let run_before = success.app.focused_run().unwrap().id;
     success.handle(key(KeyCode::Char('o')));
-    assert!(success.app.should_quit);
+    assert!(!success.app.should_quit);
+    assert_eq!(success.app.screen, Screen::CardDetail);
+    assert_eq!(success.app.detail.as_ref().unwrap().card.id, card_before);
+    assert_eq!(success.app.focused_run().unwrap().id, run_before);
+    // Returning to the same tab does not rebuild the app or lose its cursor.
+    success.handle(key(KeyCode::Tab));
+    assert_eq!(success.app.focused_run().unwrap().id, run_before);
 
     let mut error = driver_of(super::helpers::demo_client().unwrap());
     error.set_origin_socket(Some("/tmp/herdr.sock".into()));
@@ -821,6 +927,99 @@ fn card_detail_o_emits_focus_and_driver_quits_only_on_success() {
         .toast
         .as_ref()
         .is_some_and(|toast| toast.text.contains("requires Herdr")));
+}
+
+#[test]
+fn open_never_implicitly_resumes_a_paneless_run() {
+    let mut client = super::helpers::demo_client().unwrap();
+    let card = failed_card(&mut client);
+    let run = seed_runs(&client, &card, 1, false)[0];
+    let before = client.card_get(card.id).unwrap().runs;
+    let mut d = driver_with_detail_open(client, card.id);
+    d.set_origin_socket(Some("/tmp/herdr.sock".into()));
+    d.handle(key(KeyCode::Char('o')));
+    assert!(!d.app.should_quit);
+    assert_eq!(d.app.focused_run().unwrap().id, run);
+    assert_eq!(d.app.detail.as_ref().unwrap().runs, before);
+    let toast = d.app.toast.as_ref().expect("closed worker explanation");
+    assert!(
+        toast.is_error,
+        "Open must refuse instead of resuming: {}",
+        toast.text
+    );
+    assert!(toast.text.contains("pane"));
+}
+
+#[test]
+fn open_on_an_older_daemon_never_falls_back_to_rescue() {
+    use std::sync::{Arc, Mutex};
+    struct OlderDaemon {
+        inner: board_tui::testkit::DemoClient,
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+    impl BoardClient for OlderDaemon {
+        fn call(
+            &mut self,
+            method: &str,
+            params: serde_json::Value,
+        ) -> anyhow::Result<serde_json::Value> {
+            self.calls.lock().unwrap().push(method.into());
+            if method == "run.open" {
+                anyhow::bail!("unknown method: run.open");
+            }
+            self.inner.call(method, params)
+        }
+        fn subscribe(
+            &mut self,
+        ) -> anyhow::Result<Box<dyn Iterator<Item = board_core::protocol::Event> + Send>> {
+            self.inner.subscribe()
+        }
+    }
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut d = driver_of(OlderDaemon {
+        inner: super::helpers::demo_client().unwrap(),
+        calls: calls.clone(),
+    });
+    d.set_origin_socket(Some("/tmp/herdr.sock".into()));
+    d.handle(key(KeyCode::Right));
+    d.handle(key(KeyCode::Enter));
+    calls.lock().unwrap().clear();
+    d.handle(key(KeyCode::Char('o')));
+    assert_eq!(*calls.lock().unwrap(), ["run.open"]);
+    assert!(!d.app.should_quit);
+    assert!(d.app.toast.as_ref().unwrap().is_error);
+}
+
+#[test]
+fn transient_plugin_open_still_dismisses_the_overlay() {
+    let mut d = board_tui::testkit::driver_with_origin(
+        super::helpers::demo_client().unwrap(),
+        "",
+        board_tui::OriginContext {
+            origin_socket: Some("/tmp/herdr.sock".into()),
+            plugin_id: Some("herdr-board".into()),
+            ..Default::default()
+        },
+    );
+    d.handle(key(KeyCode::Right));
+    d.handle(key(KeyCode::Enter));
+    d.handle(key(KeyCode::Char('o')));
+    assert!(d.app.should_quit);
+}
+
+#[test]
+fn managed_run_rows_show_recorded_worker_identity_and_current_run_status() {
+    let mut app = demo_app_with_detail(CardStatus::Running);
+    app.last_area = Rect::new(0, 0, 180, 50);
+    app.detail_fullscreen = true;
+    let detail = app.detail.as_mut().unwrap();
+    let run = detail.runs.last_mut().unwrap();
+    run.session = Some("development".into());
+    run.herdr_pane_id = Some("w9:p23".into());
+    run.harness = "opencode".into();
+    let rows = rendered_rows(&app).join("\n");
+    assert!(rows.contains("development/w9:p23"), "{rows}");
+    assert!(rows.contains("opencode · running"), "{rows}");
 }
 
 #[test]

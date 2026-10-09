@@ -79,13 +79,19 @@ fn detail_card_action_buttons(detail: &CardDetail) -> Vec<ActionButton<'static>>
     buttons
 }
 
-fn detail_run_action_buttons() -> [ActionButton<'static>; 3] {
+fn detail_run_action_buttons() -> [ActionButton<'static>; 4] {
     [
         ActionButton {
-            label: "Open",
+            label: "Open worker",
             compact_label: "Open",
             action: UiAction::FocusRunPane,
             tone: ActionTone::Primary,
+        },
+        ActionButton {
+            label: "Reopen conversation",
+            compact_label: "Reopen",
+            action: UiAction::ReopenRunPane,
+            tone: ActionTone::Normal,
         },
         ActionButton {
             label: "Retry",
@@ -1153,26 +1159,24 @@ fn focus_row_marker(focused: bool) -> (Span<'static>, Style) {
     }
 }
 
-/// One run row, deliberately minimal: the **run number**, the **harness**, the
-/// **status** (`outcome`, or `active` while the run is still open) and **how
-/// long it ran** — or has been running, since `run_duration` measures an open
-/// run against `app.now`.
-///
-/// Nothing else. The column is already implied by the card, the harness
-/// **conversation id** and the herdr **session name** are carried by the
-/// detail's status fields (never in the same slot as each other — the confusion
-/// `run.focus`'s separate `session` / `session_id` fields exist to prevent),
-/// and a `pane ✓|-` marker would now be actively misleading: a run whose pane
-/// is gone is reopened by resuming its conversation, so a missing pane no longer
-/// predicts whether `o` works.
+/// Recorded worker identity is qualified by Herdr session, never by the card's
+/// current launch settings. A recorded pane is a navigation target, not a
+/// liveness claim; `run.open` verifies it when the user opens the worker.
 fn run_row_text(app: &App, run: &board_core::model::Run) -> String {
-    let outcome = run.outcome.map(|o| o.as_str()).unwrap_or("active");
+    let outcome = run.outcome.map(|o| o.as_str()).unwrap_or_else(|| {
+        app.detail
+            .as_ref()
+            .map(|d| d.card.status.as_str())
+            .unwrap_or("active")
+    });
     format!(
-        "#{} {} · {} · {}",
+        "#{} {} · {} · {} · {}/{}",
         run.id,
         run.harness,
         outcome,
-        run_duration(app, run)
+        run_duration(app, run),
+        run.session.as_deref().unwrap_or("default"),
+        run.herdr_pane_id.as_deref().unwrap_or("no pane")
     )
 }
 

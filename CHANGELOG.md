@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- [#145](https://github.com/nelsonPires5/herdr-board/pull/145) feat: Visit workers from a persistent board without launching replacements, and explicitly reopen conversations in their task directory.
+
 ## [0.19.0] - 2026-10-06
 
 ### Added

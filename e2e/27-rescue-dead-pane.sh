@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# 27-rescue-dead-pane.sh — `run.focus` reopens a run whose pane is gone by
-# resuming its harness conversation in a NEW, ephemeral pane.
+# 27-rescue-dead-pane.sh — `run.open` only navigates; explicit legacy `run.focus`
+# reopens a run whose pane is gone in a NEW, ephemeral pane.
 #
 # Contract exercised end to end against a real Herdr, provider-free:
-#   1. a managed Pi run completes and its pane is then closed;
+#   1. a managed Pi run completes; Open focuses its live pane, then rejects its
+#      closed pane and a pane-less history fixture without writing or launching;
 #   2. `board card run focus CARD RUN` reports `action=rescued`, creates a new
 #      pane in the card's `card-<id>` tab, and starts the harness in RESUME mode
 #      with the run's recorded conversation id — without re-sending the task;
@@ -67,6 +68,32 @@ import json, sys
 print(json.dumps(json.load(sys.stdin)["runs"], sort_keys=True))
 ' >"$RUNS_BEFORE"
 
+assert_runs_unchanged() {
+  "$BOARD_BIN" card show "$CARD_ID" --json | python3 -c '
+import json, sys
+print(json.dumps(json.load(sys.stdin)["runs"], sort_keys=True))
+' >"$E2E_TMP/runs-navigation-after.json"
+  diff -u "$1" "$E2E_TMP/runs-navigation-after.json" \
+    || fail "navigation changed the run history"
+}
+
+step "Open a completed run: focus its exact existing pane without launching"
+PANES_BEFORE_OPEN="$(pane_count)"
+open_json="$(e2e_board_herdr_mutate -- card run open "$CARD_ID" "$RUN_ID" --json)"
+python3 - "$open_json" "$CARD_ID" "$RUN_ID" "$DEAD_PANE" <<'PY'
+import json, sys
+result = json.loads(sys.argv[1])
+card, run, pane = sys.argv[2:]
+assert result["action"] == "focused_recorded_pane"
+assert result["card_id"] == int(card) and result["run_id"] == int(run)
+assert result["pane_id"] == pane and result["recorded_pane_id"] == pane
+PY
+[ "$(pane_field "$DEAD_PANE" focused)" = True ] || fail "Open did not focus the recorded pane"
+[ "$(pane_count)" = "$PANES_BEFORE_OPEN" ] || fail "Open created a pane"
+[ ! -e "$E2E_TMP/fake-pi-run-$RUN_ID-rescue.json" ] || fail "Open started a rescue worker"
+assert_runs_unchanged "$RUNS_BEFORE"
+ok "Open focused the completed run's existing pane without a new run or worker"
+
 step "HERDR MUTATION: pane.close $DEAD_PANE (the run's terminal is closed)"
 mut "pane.close $DEAD_PANE (disposable board-owned pane of a finished run)"
 e2e_hrpc_mutate -- pane.close "{\"pane_id\":\"$DEAD_PANE\"}" >/dev/null 2>&1 || true
@@ -78,6 +105,60 @@ done
   || fail "recorded pane $DEAD_PANE is still alive; the rescue case cannot be exercised"
 PANES_AFTER_CLOSE="$(pane_count)"
 ok "recorded pane $DEAD_PANE is gone ($PANES_AFTER_CLOSE panes left in $WS_ID)"
+
+assert_open_refused() {
+  local expected="$1" out code
+  set +e
+  out="$(e2e_board_herdr_mutate -- card run open "$CARD_ID" "$RUN_ID" --json 2>&1)"
+  code=$?
+  set -e
+  [ "$code" = 2 ] || fail "Open should reject with not-found (2), got $code: $out"
+  printf '%s\n' "$out" | grep -Fq "$expected" || fail "Open refusal missing '$expected': $out"
+  printf '%s\n' "$out" | grep -Fq 'Reopen' || fail "Open refusal lacks explicit Reopen guidance: $out"
+  [ "$(pane_count)" = "$PANES_AFTER_CLOSE" ] || fail "refused Open created a pane"
+  [ ! -e "$E2E_TMP/fake-pi-run-$RUN_ID-rescue.json" ] || fail "refused Open started a worker"
+}
+
+step "Open a stale run: reject without automatically rescuing it"
+assert_open_refused "$DEAD_PANE"
+assert_runs_unchanged "$RUNS_BEFORE"
+
+step "Open a pane-less historical run: reject before rescue"
+# Fixture-only outage edit, following the recovery scenarios: no daemon writes
+# concurrently. Keep the conversation/launch spec intact, so legacy focus could
+# rescue this row. Restore the exact recorded pane before the existing rescue flow.
+e2e_daemon_stop
+python3 - "$BOARD_DB" "$CARD_ID" "$RUN_ID" "$DEAD_PANE" <<'PY'
+import sqlite3, sys
+path, card, run, pane = sys.argv[1:]
+with sqlite3.connect(path) as db:
+    changed = db.execute(
+        "UPDATE runs SET herdr_pane_id=NULL WHERE id=? AND card_id=? AND herdr_pane_id=? AND ended_at IS NOT NULL",
+        (int(run), int(card), pane),
+    ).rowcount
+    assert changed == 1
+PY
+e2e_daemon_start
+"$BOARD_BIN" card show "$CARD_ID" --json | python3 -c '
+import json, sys
+print(json.dumps(json.load(sys.stdin)["runs"], sort_keys=True))
+' >"$E2E_TMP/runs-no-pane-before.json"
+assert_open_refused 'no pane recorded'
+assert_runs_unchanged "$E2E_TMP/runs-no-pane-before.json"
+e2e_daemon_stop
+python3 - "$BOARD_DB" "$CARD_ID" "$RUN_ID" "$DEAD_PANE" <<'PY'
+import sqlite3, sys
+path, card, run, pane = sys.argv[1:]
+with sqlite3.connect(path) as db:
+    changed = db.execute(
+        "UPDATE runs SET herdr_pane_id=? WHERE id=? AND card_id=? AND herdr_pane_id IS NULL AND ended_at IS NOT NULL",
+        (pane, int(run), int(card)),
+    ).rowcount
+    assert changed == 1
+PY
+e2e_daemon_start
+assert_runs_unchanged "$RUNS_BEFORE"
+ok "stale and pane-less Open requests caused no run changes or worker launches"
 
 step "Focus the run: the daemon must RESCUE it into a new pane"
 rescue_json="$(e2e_board_herdr_mutate -- card run focus "$CARD_ID" "$RUN_ID" --json)"
@@ -119,7 +200,7 @@ PY
 rescue_label="$(pane_field "$RESCUED_PANE" label)"
 # The dedup correlator must depend only on STABLE identity (card id + run id).
 # With no database row permitted, a marker derived from the column's current name
-# would stop matching the moment someone renamed the column, and `o` would resume
+# would stop matching the moment someone renamed the column, and `O` would resume
 # the same conversation a second time.
 [ "$rescue_label" = "card-$CARD_ID-r$RUN_ID-rescue" ] \
   || fail "rescued pane label '$rescue_label' is not 'card-$CARD_ID-r$RUN_ID-rescue'"
@@ -179,10 +260,10 @@ again_action="$(printf '%s' "$again_json" | jget action)"
   || fail "second focus created another pane (was $PANES_AFTER_RESCUE, now $(pane_count))"
 ok "second focus reused $RESCUED_PANE and created no extra pane"
 
-step "A rescued pane that outlives its harness must not make o a permanent no-op"
+step "A rescued pane that outlives its harness must not make Reopen a permanent no-op"
 # A Herdr pane label outlives the process that ran in it, so treating a label
 # match alone as "already rescued" would leave the user staring at an idle shell
-# forever. Kill the resumed harness and require `o` to reopen the run again.
+# forever. Kill the resumed harness and require explicit Reopen to resume again.
 # This is also the live check of what `PaneInfo.agent` does once a managed
 # process is gone — the signal the idempotency rule depends on.
 mut "pane send-keys $RESCUED_PANE C-c (terminate the resumed fake harness)"

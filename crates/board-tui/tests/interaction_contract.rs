@@ -1,6 +1,6 @@
 //! Interaction contract for the functional 1:1 TUI redesign.
 //!
-//! Freezes the exact current interaction surface (the 72-row `view::HELP_KEYS`
+//! Freezes the exact current interaction surface (the `view::HELP_KEYS`
 //! contract): every documented binding, in order. Any keyboard/mouse behavior
 //! change must be mirrored here deliberately — this is the "nothing removed,
 //! nothing added, nothing remapped" gate for the redesign.
@@ -48,7 +48,8 @@ const EXPECTED: &[(Screen, &str, &str)] = &[
     (Screen::CardDetail, "Tab", "focus comments / runs"),
     (Screen::CardDetail, "↑/↓ k/j", "select comment / run"),
     (Screen::CardDetail, "f / click", "toggle popup / fullscreen"),
-    (Screen::CardDetail, "o", "jump to selected run pane"),
+    (Screen::CardDetail, "o", "open selected worker"),
+    (Screen::CardDetail, "O", "reopen conversation"),
     (Screen::CardDetail, "x", "cancel run (asks first)"),
     (Screen::CardDetail, "r", "retry run (asks first)"),
     (Screen::CardDetail, "q / Esc", "back to board"),
@@ -105,11 +106,11 @@ const EXPECTED: &[(Screen, &str, &str)] = &[
 ];
 
 #[test]
-fn contract_freezes_the_exact_72_row_interaction_table() {
+fn contract_freezes_the_exact_interaction_table() {
     assert_eq!(
         HELP_KEYS.len(),
-        87,
-        "the interaction contract must stay at exactly 87 bindings"
+        88,
+        "the interaction contract must stay at exactly 88 bindings"
     );
     assert_eq!(EXPECTED.len(), HELP_KEYS.len());
     for (idx, (expected, actual)) in EXPECTED.iter().zip(HELP_KEYS.iter()).enumerate() {

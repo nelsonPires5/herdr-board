@@ -190,6 +190,27 @@ fn add_rescuable_run_with_space(
     with_launch_spec: bool,
     space: Option<(SpaceKind, String, String)>,
 ) -> (i64, i64) {
+    add_rescuable_run_at(
+        d,
+        harness,
+        agent_kind,
+        session_id,
+        with_launch_spec,
+        space,
+        (Some("w1:p9"), None),
+    )
+}
+
+/// Select the recorded pane/session independently of the resume-capable launch.
+fn add_rescuable_run_at(
+    d: &Arc<Daemon>,
+    harness: &str,
+    agent_kind: Option<&str>,
+    session_id: Option<&str>,
+    with_launch_spec: bool,
+    space: Option<(SpaceKind, String, String)>,
+    location: (Option<&str>, Option<&str>),
+) -> (i64, i64) {
     let db = d.store.lock();
     let card = db
         .create_card(&CardCreateParams {
@@ -235,13 +256,13 @@ fn add_rescuable_run_with_space(
             system_prompt_snapshot: Some("recorded system prompt"),
             launch_spec_json: launch_spec.as_deref(),
             session_id,
-            session: None,
+            session: location.1,
         })
         .unwrap();
     db.promote_run_with_anchor_uow(
         run.id,
         Some("w1"),
-        Some("w1:p9"),
+        location.0,
         Some("w1:anchor"),
         None,
         None,

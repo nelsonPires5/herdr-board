@@ -869,7 +869,7 @@ pub struct RunCardParams {
     pub card_id: i64,
 }
 
-/// `run.focus` params. `origin_socket` identifies the invoking Herdr session.
+/// `run.open` / `run.focus` params. `origin_socket` identifies the invoking Herdr session.
 ///
 /// `run_id` is **required**: the daemon never implicitly picks a run. Callers
 /// that want "the newest run with a pane" resolve that themselves from the
@@ -897,7 +897,7 @@ pub enum RunFocusAction {
     Rescued,
 }
 
-/// `run.focus` result: the full identity of the run that was focused, so the
+/// `run.open` / `run.focus` result: the full identity of the run that was focused, so the
 /// caller can say exactly *which* historical run it landed on, plus what the
 /// daemon had to do to get there.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

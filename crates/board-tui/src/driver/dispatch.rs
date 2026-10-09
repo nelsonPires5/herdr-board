@@ -259,7 +259,8 @@ impl Driver {
                 let r = self.client.run_done(id, outcome, None);
                 self.mutate(r, After::CardThenBoard(id));
             }
-            Effect::FocusRun(card_id, run_id) => self.focus_run(card_id, run_id),
+            Effect::FocusRun(card_id, run_id) => self.focus_run(card_id, run_id, false),
+            Effect::ReopenRun(card_id, run_id) => self.focus_run(card_id, run_id, true),
             Effect::EditFocusedTextArea => self.edit_focused(),
             Effect::LoadFormOptions => self.load_form_options(),
             Effect::SetPaneTitle(filter) => self.set_pane_title(filter),
@@ -290,7 +291,7 @@ impl Driver {
         let _ = self.client.pane_set_title(&pane_id, &title, &origin_socket);
     }
 
-    fn focus_run(&mut self, card_id: i64, run_id: i64) {
+    fn focus_run(&mut self, card_id: i64, run_id: i64, reopen: bool) {
         let Some(origin_socket) = self.origin.origin_socket.clone() else {
             self.app.set_toast(
                 "jump to pane requires Herdr (HERDR_SOCKET_PATH is unset)",
@@ -298,13 +299,29 @@ impl Driver {
             );
             return;
         };
-        match self.client.run_focus(card_id, run_id, &origin_socket) {
-            // Focusing an existing pane means the user's attention now
-            // belongs to Herdr, so the TUI steps aside. A *rescue* is a
-            // new pane the user did not ask for by name, so say what
-            // happened before leaving.
+        let result = if reopen {
+            self.client.run_focus(card_id, run_id, &origin_socket)
+        } else {
+            self.client.run_open(card_id, run_id, &origin_socket)
+        };
+        match result {
             Ok(result) => match result.action {
-                RunFocusAction::FocusedRecordedPane => self.app.should_quit = true,
+                RunFocusAction::FocusedRecordedPane => {
+                    // A standalone board tab is a persistent navigation surface.
+                    // Keep its card, run cursor and scroll positions for return.
+                    // Plugin overlays still dismiss to reveal the target pane.
+                    if self.origin.plugin_id.is_some() {
+                        self.app.should_quit = true;
+                    } else {
+                        self.app.set_toast(
+                            format!(
+                                "Opened run #{} in {}; return to this board tab to continue",
+                                result.run_id, result.pane_id
+                            ),
+                            false,
+                        );
+                    }
+                }
                 // A rescue is not what the user literally asked for, so
                 // it must be explained. Herdr has already moved focus to
                 // the rescued pane, so quitting here would only throw

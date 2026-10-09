@@ -16,7 +16,14 @@ pub(crate) enum RunCmd {
     Cancel { card_id: i64 },
     /// Retry the card in its current column.
     Retry { card_id: i64 },
-    /// Focus one exact run's pane (the run id is required).
+    /// Open one exact run's existing pane without restarting its worker.
+    Open {
+        card_id: i64,
+        run_id: i64,
+        #[arg(long)]
+        origin_socket: Option<String>,
+    },
+    /// Focus one exact run's pane, reopening its conversation if the pane is gone.
     Focus {
         card_id: i64,
         run_id: i64,

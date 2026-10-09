@@ -112,6 +112,7 @@ routes!(d, params, {
     "run.cancel" => runs::run_cancel(d, from(params)?),
     "run.retry" => runs::run_retry(d, from(params)?),
     "run.focus" => runs::run_focus(d, from(params)?),
+    "run.open" => runs::run_open(d, from(params)?),
     "harness.capabilities" => discovery::harness_capabilities(d, from(params)?),
     "harness.list" => discovery::harness_list(d),
     "space.list" => discovery::space_list(d, from(params)?),
