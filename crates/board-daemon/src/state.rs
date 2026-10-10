@@ -169,7 +169,7 @@ pub struct Daemon {
     pub session_registry: Option<SessionRegistry>,
     pub events_tx: broadcast::Sender<Event>,
     pub dispatch_tx: mpsc::UnboundedSender<()>,
-    /// Serializes complete dispatch passes so capacity/space claims remain
+    /// Serializes complete dispatch passes so FIFO run/capacity claims remain
     /// authoritative until their launches have either registered or failed.
     pub dispatch_pass: AsyncMutex<()>,
     pub sched: Mutex<Sched>,

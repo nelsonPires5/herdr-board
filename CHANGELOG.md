@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+
+- Pending PR link: Run multiple cards concurrently in separate tabs of one workspace while preserving the global queue order and concurrency limit.
+
 ## [0.19.0] - 2026-10-06
 
 ### Added

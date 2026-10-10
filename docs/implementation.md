@@ -31,7 +31,7 @@ projects (canonical-path identity, Global as the special project), per-project n
 persistent selection, and capped recency on top of v13's soft-deleted comments and immutable
 comment-history snapshots; the CLI exposes the project/board subcommands while boardd remains the
 sole SQLite writer. The complete live use-case catalog
-is [`../e2e/README.md`](../e2e/README.md), scenarios **01–40** (through `e2e/40-installed-harnesses.sh`); the safe
+is [`../e2e/README.md`](../e2e/README.md), scenarios **01–41** (through `e2e/41-workspace-concurrency.sh`); the safe
 static harness is `e2e/test-harness.sh`, while `e2e/run-all.sh` is the opt-in live gate.
 
 The current Herdr boundary is deliberately narrower than the upstream schema. The 0.9.0/protocol-22
@@ -131,10 +131,10 @@ names (every project's first board is `main`), and adds the `selection`, `board_
 `project_recents`, and `board_recents` tables (recency capped at 3). The v13→v14 migration runs
 outside the transaction with foreign keys disabled, moving every existing board into its project
 as `main` so all ids/cards/columns/runs/history are preserved. The launch spec and system snapshot are both private DB state omitted from board wire DTOs;
-comment history is exposed only through `comment.history`. The typed `SpaceKey` preserves
-session/kind/ref null identity. A per-daemon async pass lock prevents competing passes from duplicating
-claims; each pass claims
-per-space/global slots before concurrently launching independent spaces. That legacy
+comment history is exposed only through `comment.history`. A per-daemon async pass lock prevents
+competing passes from duplicating claims; each pass claims the global FIFO prefix that fits the
+remaining global capacity, including cards sharing a workspace. `SpaceKey` remains a compatible
+public model type but is no longer scheduler exclusion machinery. The launch-spec legacy
 `NULL` is intentional: built-ins keep their persisted all-in-one argv, while configured rows keep
 their historical spawn-time reconstruction. The internal snapshot is omitted from boardd wire
 responses. Every canonical-path board independently seeds one manual `Todo` column.
@@ -182,8 +182,8 @@ A (core+scaffold) → B (herdr client) ∥ C (TUI) → D (daemon+CLI+integration
 - B: unit: envelope encode/decode. Integration (ignored-by-default `#[ignore]` + run when HERDR_SOCK exists): read-only calls `session.snapshot`, `workspace.list` against a Herdr 0.9.0 / protocol-22 live socket.
 - C: insta snapshots via `ratatui::backend::TestBackend` + synthetic key events + FakeBoardClient: empty board (Todo only + hints), board with example pipeline & cards (status glyphs), new-card modal, column form, card detail w/ comments+runs, `?` help, delete-column prompt, move flow.
 - Restart recovery (`board-daemon::supervisor`) is a conservative one-pass classifier. Session resolution and snapshot I/O are injectable and happen before mutation. `Alive` adopts scheduler/watch intent and replays terminal status, `Gone` uses the existing pane-exit finalizer, and `Unknown` does nothing. The apply phase re-reads the open run/card, making duplicate passes idempotent and rejecting stale observations. Startup constructs/runs this pass for the Herdr spawner regardless of whether its initial best-effort client connected. The always-on supervisor then maintains independent per-socket streams and backoff, subscribes before taking a fresh bounded snapshot, and periodically reconciles missed events without resetting healthy sockets.
-- D: integration test (no herdr): start daemon on temp socket + temp DB with LocalSpawner + fake harness script → create card → move to auto column → fake agent comments + done → assert auto-transition, comments, run rows, statuses; timeout path; cancel path; queue serialization (two cards same space key run serially). The daemon comment suite also checks actor ownership, system-comment immutability, soft deletion, audit history, and event routing.
-- E: scenarios `e2e/01-core.sh` through `e2e/40-installed-harnesses.sh` (real Herdr 0.9.0 / socket
+- D: integration test (no herdr): start daemon on temp socket + temp DB with LocalSpawner + fake harness script → create card → move to auto column → fake agent comments + done → assert auto-transition, comments, run rows, statuses; timeout path; cancel path; global-cap admission (two cards in the same workspace have overlapping running intervals). The daemon comment suite also checks actor ownership, system-comment immutability, soft deletion, audit history, and event routing.
+- E: scenarios `e2e/01-core.sh` through `e2e/41-workspace-concurrency.sh` (real Herdr 0.9.0 / socket
   protocol 22, fake harnesses): disposable workspaces, pane-first placement, typed prompt delivery,
   bounded same-pane `agent_pane_busy` retry, supervisor recovery, timer refresh, and
   identity-gated cleanup. The managed fixtures use Pi integration v8 and Claude integration v7

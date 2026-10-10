@@ -61,9 +61,8 @@ pub(crate) struct RescuePlan<'a> {
     /// One-shot bootstrap hint when the placement workspace was created by
     /// this very resolution (a dead recorded workspace replaced from a card
     /// with a `new_workspace` space). `None` for the recorded workspace and
-    /// for reused existing workspaces. Also the signal that an abandoned
-    /// rescue must close the workspace it created, so a failure leaves no
-    /// partial resources behind.
+    /// for reused existing workspaces. It proves only the exact bootstrap
+    /// tab/root, never exclusive ownership of the workspace after creation.
     pub(crate) bootstrap: Option<&'a WorkspaceBootstrapHint>,
     pub(crate) socket: &'a Path,
     /// Exact tab/pane ownership evidence from the card's run rows. Note that
@@ -449,21 +448,8 @@ fn abandon_rescue(
              {cleanup_error}"
         )),
     };
-    // A workspace THIS resolution created and then abandoned must not be left
-    // behind either: everything in it is ours (the adopted initial tab was
-    // cleaned up above), nothing else can own it, and a later `o` would only
-    // hit the same "no live pane cwd" dead end. Closing it lets the next
-    // attempt resolve — and create — a fresh workspace instead. The
-    // `created_tab` guard keeps a concurrent placement that adopted the same
-    // fresh workspace (narrow label-reuse race) from being torn down.
-    if created_tab && plan.bootstrap.is_some() {
-        if let Err(cleanup_error) = client.workspace_close(plan.workspace_id) {
-            return error.context(format!(
-                "additionally failed to close the workspace this rescue created ({}): \
-                 {cleanup_error}",
-                plan.workspace_id
-            ));
-        }
-    }
+    // Never close the workspace: another card may have joined it after our
+    // find-or-create finished. Closing our exact child/anchor is sufficient;
+    // Herdr removes the tab/workspace naturally if those were its last panes.
     error
 }

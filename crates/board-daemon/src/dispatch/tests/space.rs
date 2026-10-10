@@ -4,6 +4,89 @@
 use super::*;
 
 #[test]
+fn concurrent_same_label_resolution_creates_one_workspace_and_one_bootstrap() {
+    let created = Arc::new(AtomicUsize::new(0));
+    let state = created.clone();
+    let herdr = testkit::herdr_server()
+        .handler(move |req, _| {
+            let workspace = serde_json::json!({
+                "workspace_id": "w1", "label": "Shared", "number": 1,
+                "focused": false, "active_tab_id": "w1:t1", "agent_status": "unknown"
+            });
+            match req["method"].as_str().unwrap() {
+                "workspace.list" => testkit::reply(
+                    req,
+                    serde_json::json!({
+                        "workspaces": if state.load(Ordering::SeqCst) == 0 {
+                            vec![]
+                        } else {
+                            vec![workspace]
+                        }
+                    }),
+                ),
+                "workspace.create" => {
+                    state.fetch_add(1, Ordering::SeqCst);
+                    testkit::reply(
+                        req,
+                        serde_json::json!({
+                            "workspace": workspace,
+                            "tab": {"tab_id": "w1:t1", "workspace_id": "w1", "number": 1,
+                                "label": "tab", "focused": false, "pane_count": 1},
+                            "root_pane": testkit::pane_info("w1:p1")
+                        }),
+                    )
+                }
+                "session.snapshot" => {
+                    let mut pane = testkit::pane_info("w1:p1");
+                    pane["cwd"] = Value::String("/repo".into());
+                    testkit::reply(req, serde_json::json!({"snapshot": {"panes": [pane]}}))
+                }
+                method => panic!("unexpected workspace resolution method {method}"),
+            }
+        })
+        .serve();
+    let aliases = tempfile::tempdir().unwrap();
+    let alias = aliases.path().join("alias.sock");
+    std::os::unix::fs::symlink(&herdr.socket, &alias).unwrap();
+    let start = Arc::new(std::sync::Barrier::new(12));
+    let resolutions = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..12)
+            .map(|index| {
+                let socket = if index % 2 == 0 {
+                    herdr.socket.clone()
+                } else {
+                    alias.clone()
+                };
+                let start = start.clone();
+                scope.spawn(move || {
+                    let mut client = HerdrClient::connect(&socket).unwrap();
+                    start.wait();
+                    resolve_space(
+                        &mut client,
+                        SpaceKind::NewWorkspace,
+                        Some(if index % 2 == 0 { "Shared" } else { "SHARED" }),
+                        Some("/repo"),
+                    )
+                    .unwrap()
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|w| w.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(created.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        resolutions.iter().filter(|s| s.bootstrap.is_some()).count(),
+        1
+    );
+    assert!(resolutions
+        .iter()
+        .all(|s| s.workspace_id == "w1" && s.cwd == "/repo"));
+}
+
+#[test]
 fn resolve_ref_by_id_then_label() {
     let all = [ws("w1", "Alpha"), ws("w2", "Beta")];
     assert_eq!(resolve_workspace_ref(&all, "w2").unwrap(), "w2");

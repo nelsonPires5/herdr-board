@@ -15,9 +15,18 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-/// `(session socket, workspace id, card tab label)` — the scope within which a
-/// card tab is allocated at most once.
+/// `(session socket, workspace id, card tab label)` at the caller boundary.
+/// Registry keys normalize the socket and strip a card label's mutable title.
 pub(crate) type CardTabKey = (PathBuf, String, String);
+
+fn identity_key(key: &CardTabKey) -> anyhow::Result<CardTabKey> {
+    let label = if key.2.starts_with("card-") {
+        key.2.split_whitespace().next().unwrap_or(&key.2)
+    } else {
+        &key.2
+    };
+    Ok((key.0.canonicalize()?, key.1.clone(), label.to_owned()))
+}
 
 /// Exact ids of a board-owned card tab and its persistent shell anchor.
 #[derive(Debug, Clone)]
@@ -49,7 +58,7 @@ impl CardTabRegistry {
             .locks
             .lock()
             .map_err(|_| anyhow::anyhow!("card-tab allocation lock poisoned"))?
-            .entry(key.clone())
+            .entry(identity_key(key)?)
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone())
     }
@@ -59,7 +68,7 @@ impl CardTabRegistry {
             .owned
             .lock()
             .map_err(|_| anyhow::anyhow!("card-tab ownership lock poisoned"))?
-            .get(key)
+            .get(&identity_key(key)?)
             .cloned())
     }
 
@@ -76,7 +85,7 @@ impl CardTabRegistry {
             .lock()
             .map_err(|_| anyhow::anyhow!("card-tab ownership lock poisoned"))?
             .insert(
-                key,
+                identity_key(&key)?,
                 OwnedCardTab {
                     tab_id,
                     anchor_pane_id,
@@ -92,7 +101,7 @@ impl CardTabRegistry {
         self.owned
             .lock()
             .map_err(|_| anyhow::anyhow!("card-tab ownership lock poisoned"))?
-            .remove(key);
+            .remove(&identity_key(key)?);
         Ok(())
     }
 }

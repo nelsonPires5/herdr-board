@@ -153,7 +153,7 @@ fn timeout_kills_and_applies_on_fail() {
 }
 
 #[test]
-fn queue_serialization_same_space() {
+fn same_workspace_runs_overlap_under_global_cap() {
     let td = TestDaemon::start(&[("FAKE_AGENT_SLEEP", "2")]);
     let mut c = td.client();
     let todo = todo_id(&mut c);
@@ -164,7 +164,8 @@ fn queue_serialization_same_space() {
             ..col("work", Trigger::Auto)
         })
         .unwrap();
-    // Two cards with the same (default) space key -> must run serially.
+    // Sharing the default space no longer excludes the second card; the
+    // global cap admits both, and their durable running intervals overlap.
     let a = c.card_create(&fake_card(todo)).unwrap();
     let b = c.card_create(&fake_card(todo)).unwrap();
     c.card_move(&CardMoveParams {
@@ -201,8 +202,8 @@ fn queue_serialization_same_space() {
     let first_end = runs[0].ended_at.clone().unwrap();
     let second_start = runs[1].started_at.clone().unwrap();
     assert!(
-        second_start >= first_end,
-        "second run ({second_start}) should start after first ends ({first_end})"
+        second_start < first_end,
+        "second run ({second_start}) should start before first ends ({first_end})"
     );
 }
 

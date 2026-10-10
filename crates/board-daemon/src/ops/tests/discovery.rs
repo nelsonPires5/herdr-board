@@ -176,7 +176,7 @@ fn run_focus_rescue_keeps_ownership_when_an_ambiguous_cwd_resolves_back_to_the_r
 }
 
 #[test]
-fn run_focus_rescue_failure_closes_the_workspace_it_created() {
+fn run_focus_rescue_failure_closes_only_its_panes_and_herdr_removes_the_empty_workspace() {
     // The workspace was created by this very rescue and the harness then
     // refused to start. A failed rescue must leave NO partial resources: the
     // pane, the adopted card tab AND the workspace it created are all undone,
@@ -217,7 +217,7 @@ fn run_focus_rescue_failure_closes_the_workspace_it_created() {
         // A fresh workspace per attempt, and it is closed again on failure —
         // never accumulated, never left empty for the next attempt to trip on.
         assert_eq!(fake.workspace_creates().len(), attempt, "attempt {attempt}");
-        assert_eq!(fake.count("workspace.close"), attempt, "attempt {attempt}");
+        assert_eq!(fake.count("workspace.close"), 0, "attempt {attempt}");
         assert_eq!(
             fake.workspace_ids(),
             Vec::<String>::new(),
@@ -225,6 +225,39 @@ fn run_focus_rescue_failure_closes_the_workspace_it_created() {
         );
         assert_eq!(fake.pane_ids(), Vec::<String>::new(), "attempt {attempt}");
     }
+    assert_eq!(runs_fingerprint(&d, card_id), before);
+}
+
+#[test]
+fn run_focus_failed_workspace_creator_preserves_a_concurrent_joiner() {
+    // Deterministic interleaving: A creates/adopts the workspace, B joins it
+    // in a distinct tab, then A's agent.start fails and triggers rollback.
+    let fake = fake_rescue_herdr(RescueFakeFaults {
+        workspace_gone: true,
+        agent_start_fails: true,
+        join_on_start_failure: true,
+        ..Default::default()
+    });
+    let d = test_daemon_with_herdr_spawner(Config::default(), fake.socket.clone());
+    let (card_id, run_id) = add_rescuable_run_with_space(
+        &d,
+        "pi",
+        Some("pi"),
+        Some("conv-1"),
+        true,
+        Some((SpaceKind::NewWorkspace, "shared".into(), "/repo".into())),
+    );
+    let before = runs_fingerprint(&d, card_id);
+    let err = handle_request(
+        &d,
+        "run.focus",
+        json!({"card_id":card_id,"run_id":run_id,"origin_socket":fake.socket}),
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("harness refused to start"));
+    assert_eq!(fake.pane_ids(), vec!["w2:peer"]);
+    assert_eq!(fake.workspace_ids(), vec!["w2"]);
+    assert_eq!(fake.count("workspace.close"), 0);
     assert_eq!(runs_fingerprint(&d, card_id), before);
 }
 

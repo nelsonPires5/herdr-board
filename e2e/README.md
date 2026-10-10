@@ -9,7 +9,7 @@ exercises the herdr wire integration end to end.
 For the layers below this one (unit, daemon+CLI integration, TUI snapshots), the
 isolation/safety design, and the **how-to-write-a-scenario** guide, see
 [`../docs/testing.md`](../docs/testing.md). This file is the authoritative use-case catalog for board protocol v1 / SQLite schema v15:
-every numbered scenario from **01 through 40** must appear here and in `run-all.sh`. The provider-free
+every numbered scenario from **01 through 41** must appear here and in `run-all.sh`. The provider-free
 safe boundary is `fake-agent.sh`,
 `fake-bin/{pi,claude,codex,opencode,agy}`, and `test-harness.sh`; prompt/system-prompt contents are never logged.
 Scenario 21 is the active-run timer/event-refresh characterization. The CI live gate is configured to
@@ -59,6 +59,8 @@ exercise the complete catalog after the cheaper static checks succeed.
 | Boards and projects archive and restore: `archived_at` durável, `active|all|archived` visibility default `active`, nomes/paths reservados, `Global` nunca arquivável, projeto só arquiva com boards arquivados, recusa atômica com open run, destinos arquivados rejeitam card/envio/template, `board board archive|restore` e `board project archive|restore` com `--visibility`, `active_runs` e `archived_at` em human/JSON, eventos `BoardArchived/BoardRestored/ProjectArchived/ProjectRestored`, seleção recai para board/projeto ativo mais recente e sobrevive a restart, TUI pickers padrão ACTIVE ciclo `v` e `a` confirma/`r` restaura | `38-board-project-archive.sh` | live, zero provider cost |
 | Slow-provider Pi still receives the card prompt after a provider credential delay: idle lifecycle reported first (so Herdr flips interactive), `FAKE_PI_SLOW_PROVIDER` sleep with tty drain (dropped pre-init input), then session identity; `agent.prompt` delivered only after readiness and exactly one tty prompt matched via `agent_session` | `39-managed-slow-provider.sh` | live, checked-in fake `pi`, zero provider cost; slow-provider `FAKE_PI_SLOW_PROVIDER` knob |
 | Installed-harness discovery: `harness.list` keeps only the builtins Herdr's `integration.list` reports available (`antigravity_cli` maps to `antigravity`), a colliding `[harness.claude]` config section never re-adds an uninstalled builtin, an omitted `card.create` uses the filtered default, an explicit or config harness makes no discovery call, and a failing `integration.list` falls back to the full builtin list | `40-installed-harnesses.sh` | live, provider-free; no model invocation |
+
+| Global FIFO/cap admits overlapping open managed workers into distinct tabs of one existing workspace, with explicit task cwd and callback identity; daemon restart preserves promoted pane/tab/run identities without launching duplicates | `41-workspace-concurrency.sh` | live, checked-in fake `pi`, zero provider cost |
 
 ### How the live scenario produces Herdr `done`
 

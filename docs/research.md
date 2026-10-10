@@ -160,7 +160,7 @@ through a temporary `0600` file, waits for `interactive_ready`, and sends the ca
 - **Storage**: SQLite WAL, daemon sole writer; CLI/TUI go through the daemon socket. JSON/md files race with concurrent writers.
 - **Agent→board channel**: tiny CLI (`board comment/move/done`) > MCP for v1 — works from any harness via Bash, allowlistable (`Bash(board *)`), zero per-harness MCP config. MCP wrapper later.
 - **Completion**: explicit agent signal > process exit (headless) > Stop/SessionEnd hook > herdr status events > idle heuristics. Never idle-scraping alone.
-- **Concurrency**: per-space FIFO + global semaphore; worktree mode for parallelism on one repo.
+- **Concurrency (current)**: global FIFO admission and cap, with distinct card tabs sharing a workspace; repository/worktree isolation is agent-owned (see [design.md](design.md#7-queueing--concurrency)).
 - **TUI kanbans that exist** (rust_kanban, kanban-tui/ratatui, kanbanban) are standalone apps, not embeddable libs — we write our own view (ratatui or bubbletea).
 - **Cost/safety**: per-run timeout; `--max-budget-usd` where supported; `bypassPermissions` explicit opt-in only.
 

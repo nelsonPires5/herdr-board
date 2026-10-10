@@ -707,7 +707,7 @@ fn card_tab_with_no_panes_is_replaced_without_label_adoption() {
 }
 
 #[test]
-fn concurrent_first_card_allocations_create_one_owned_tab() {
+fn concurrent_first_card_allocations_share_identity_across_title_and_socket_aliases() {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     let created = Arc::new(AtomicBool::new(false));
@@ -769,7 +769,12 @@ fn concurrent_first_card_allocations_create_one_owned_tab() {
     let mut request = pi_req(None);
     request.tab_label = Some("card-42".into());
     let first_request = request.clone();
-    let second_request = request;
+    let mut second_request = request;
+    second_request.tab_label = Some("card-42 renamed-title".into());
+    let aliases = tempfile::tempdir().unwrap();
+    let alias = aliases.path().join("alias.sock");
+    std::os::unix::fs::symlink(&fake.socket, &alias).unwrap();
+    second_request.herdr_socket = Some(alias);
     let first_spawner = Arc::clone(&spawner);
     let second_spawner = Arc::clone(&spawner);
     let first = std::thread::spawn(move || first_spawner.spawn(&first_request).unwrap());

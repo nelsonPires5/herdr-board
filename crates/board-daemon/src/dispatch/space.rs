@@ -1,8 +1,31 @@
 use board_core::protocol::SpaceKind;
 use board_herdr::{HerdrClient, WorkspaceCreateParams, WorkspaceInfo};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 use crate::spawner::WorkspaceBootstrapHint;
+
+type CreationLocks = BTreeMap<PathBuf, Weak<Mutex<()>>>;
+static CREATION_LOCKS: LazyLock<Mutex<CreationLocks>> = LazyLock::new(Mutex::default);
+
+/// Dispatch and rescue share find-or-create serialization for the actual
+/// session socket (including aliases). Only workspace resolution is guarded:
+/// pane placement, harness readiness and worker lifetime remain independent.
+/// Weak entries avoid retaining locks for sessions that no caller is using.
+fn creation_lock(client: &HerdrClient) -> anyhow::Result<Arc<Mutex<()>>> {
+    let socket = client.socket_path().canonicalize()?;
+    let mut locks = CREATION_LOCKS
+        .lock()
+        .map_err(|_| anyhow::anyhow!("workspace creation locks poisoned"))?;
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&socket).and_then(Weak::upgrade) {
+        return Ok(lock);
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(socket, Arc::downgrade(&lock));
+    Ok(lock)
+}
 
 /// What a card's space resolved to, plus the one-shot bootstrap evidence when
 /// this resolution actually created the workspace.
@@ -41,6 +64,19 @@ pub(crate) fn resolve_space(
             "checking Herdr protocol before workspace resolution: {message}"
         ))
     })?;
+    // Hold across list/match/create/snapshot, with Herdr's bounded request
+    // deadlines. Case variants share this session lock; different sessions do
+    // not block each other. Existing-workspace lookups cannot create a rival.
+    let lock = (kind == SpaceKind::NewWorkspace)
+        .then(|| creation_lock(client))
+        .transpose()?;
+    let _creation = lock
+        .as_ref()
+        .map(|lock| {
+            lock.lock()
+                .map_err(|_| anyhow::anyhow!("workspace creation lock poisoned"))
+        })
+        .transpose()?;
     let workspaces = client.workspace_list()?;
     match kind {
         SpaceKind::Workspace => {

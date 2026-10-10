@@ -275,6 +275,8 @@ struct RescueFakeFaults {
     split_fails: bool,
     /// `agent.start` refuses, i.e. the harness will not start in the new pane.
     agent_start_fails: bool,
+    /// Another card joins the newly created workspace before launch fails.
+    join_on_start_failure: bool,
     /// The card tab (and its shell anchor) are gone too, so nothing can prove a
     /// tab and placement has to `tab.create` a fresh one. An unrelated user pane
     /// remains in the workspace, which is what a real closed card tab looks like
@@ -665,6 +667,11 @@ fn fake_rescue_herdr(faults: RescueFakeFaults) -> RescueFake {
                 "pane.close" => {
                     let target = params["pane_id"].as_str().unwrap().to_string();
                     panes.lock().unwrap().retain(|pane| pane.0 != target);
+                    // Herdr removes a workspace when its last pane closes.
+                    let remaining = snapshot();
+                    workspaces.lock().unwrap().retain(|(id, _)| {
+                        remaining.iter().any(|pane| ws_of(&pane.0) == *id)
+                    });
                     testkit::reply(request, json!({"type":"ok"}))
                 }
                 "pane.focus" => {
@@ -678,6 +685,15 @@ fn fake_rescue_herdr(faults: RescueFakeFaults) -> RescueFake {
                     }
                 }
                 "agent.start" if faults.agent_start_fails => {
+                    if faults.join_on_start_failure {
+                        let ws = ws_of(params["pane_id"].as_str().unwrap());
+                        panes.lock().unwrap().push((
+                            format!("{ws}:peer"),
+                            format!("{ws}:peer-tab"),
+                            Some("card-peer".into()),
+                            Some("pi".into()),
+                        ));
+                    }
                     testkit::error(request, "agent_start_failed", "harness refused to start")
                 }
                 "agent.start" => {

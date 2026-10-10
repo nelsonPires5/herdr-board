@@ -137,7 +137,7 @@ The current parity/schema-v14 change is specified test-first:
   CRUD/audit semantics stay in hermetic core/daemon/CLI tests; the live suite does not duplicate
   every management RPC.
 
-The authoritative [`e2e/README.md`](../e2e/README.md) catalog currently covers scenarios 01–40,
+The authoritative [`e2e/README.md`](../e2e/README.md) catalog currently covers scenarios 01–41,
 and `e2e/run-all.sh` includes every numbered script. Scenarios 18–32 extend the live coverage with
 nullable/validation, late-start and recovery, active-run timing, TUI layout and board transfers,
 pane rescue, Pi catalog behavior, diagnostics, pane reuse, the managed Codex launch contract
@@ -154,6 +154,12 @@ modes. Scenario 40 covers installed-harness discovery through the owned proxy (H
 `integration.list` filtering and target mapping, the filtered create default, no discovery for an
 explicit harness, and the graceful full-list fallback). This document describes the intended coverage
 and gate configuration; it does **not** claim that the full live E2E suite has passed.
+
+Scenario 42 proves overlapping **open/running** managed workers in distinct tabs of one workspace,
+their exact cwd/callback identities, global FIFO/cap, and restart adoption without relaunch after
+promotion. Daemon regressions cover concurrent pass claims, same-label creation through socket
+aliases, title-independent card identity, and failed-creator rollback preserving a joined card.
+These proofs do not establish exactly-once external launch across a crash before durable promotion.
 
 Nullable update coverage in `board-core` is table-driven across every column/card nullable:
 protocol tests verify omitted/null/value serde states, database tests verify set → clear and reopen

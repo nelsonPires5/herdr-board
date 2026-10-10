@@ -1,14 +1,12 @@
-use std::collections::HashSet;
 use std::sync::Arc;
 
-use board_core::model::{Card, Run, SpaceKey};
+use board_core::model::{Card, Run};
 use tracing::Instrument;
 
 use crate::dispatch::launch_plan::spawn_one;
 use crate::state::Daemon;
 
-/// Evaluate the queue and promote as many queued runs as the per-space FIFO and
-/// the global concurrency cap allow.
+/// Admit queued runs in global FIFO order up to the global concurrency cap.
 ///
 /// One span per pass, so the launches it fans out are attributable to the pass
 /// that decided them. Passes are serialized, so this is not a hot loop.
@@ -16,7 +14,7 @@ use crate::state::Daemon;
 pub(crate) async fn dispatch_pass(d: &Arc<Daemon>) {
     // A claim lives in this pass until spawn registration/failure is durable.
     // Serializing passes prevents another caller from observing those claimed
-    // rows as queued and independently claiming the same capacity or space.
+    // rows as queued and independently claiming the same run or capacity.
     let _pass = d.dispatch_pass.lock().await;
     let active = match d.store.active_runs() {
         Ok(v) => v,
@@ -25,11 +23,7 @@ pub(crate) async fn dispatch_pass(d: &Arc<Daemon>) {
             return;
         }
     };
-    let mut busy: HashSet<SpaceKey> = active
-        .iter()
-        .map(|(_, card)| SpaceKey::from_card(card))
-        .collect();
-    let mut active_count = active.len();
+    let active_count = active.len();
     let max = d.config.max_concurrent.max(1);
 
     let queued = match d.store.queued_runs() {
@@ -40,20 +34,14 @@ pub(crate) async fn dispatch_pass(d: &Arc<Daemon>) {
         }
     };
 
-    // Claim capacity and one FIFO head per space before any launch starts.
-    // Independent spaces then launch concurrently; a second run for a claimed
-    // space cannot slip in while its first launch is in flight.
-    let mut claimed = Vec::new();
-    for (run, card) in queued {
-        if active_count >= max {
-            break;
-        }
-        let key = SpaceKey::from_card(&card);
-        if busy.insert(key) {
-            active_count += 1;
-            claimed.push((run, card));
-        }
-    }
+    // The store orders by run id across every board and workspace. Reserve the
+    // oldest available slots before launching; placement/completion may finish
+    // out of order. A workspace is a container for distinct card tabs, not a
+    // worker-lifetime exclusion key. The DB still enforces one open run/card.
+    let claimed: Vec<_> = queued
+        .into_iter()
+        .take(max.saturating_sub(active_count))
+        .collect();
 
     if claimed.is_empty() {
         return;

@@ -165,7 +165,8 @@ instead of touching a foreign pane. Before a later split, exact ended run childr
 to preserve anchor geometry; foreign or open panes are never closed. If older runs provide multiple
 live identities, newest run id wins deterministically. A fresh/recovered split also requires enough
 live geometry for both minimum pane sizes. Per-card first allocation is serialized by `(session
-socket, workspace, card label)`. Legacy pre-v11 rows retain the `kanban` lookup and old root/split
+socket, workspace, stable card id)`, with socket aliases canonicalized and mutable title suffixes
+excluded from registry identity. Legacy pre-v11 rows retain the `kanban` lookup and old root/split
 behavior.
 Placement, cwd, and env are never passed to `agent.start`. A newly allocated child can briefly retain
 Herdr's previous agent state, or its login shell can still be booting toward an interactive prompt, so
@@ -290,6 +291,9 @@ Cards target a **herdr session** plus a space in it. Because two sessions can ea
 On first dispatch of a `new_workspace` card: preflight the selected socket for socket protocol 22,
 then list the session's workspaces; if one's label matches `space_ref`
 (case-insensitive) reuse it, else `workspace.create {label:space_ref, cwd:space_cwd, focus:false}`.
+Dispatch and rescue serialize this bounded find-or-create sequence per canonical session socket,
+including case-varied labels and socket aliases. Only the creator receives the bootstrap hint.
+The lock is released before pane placement or harness startup; other sessions resolve independently.
 Then proceed identically to a `workspace` card (cwd snapshot, pane-first per-card tab placement). An existing `workspace` card may provide `space_cwd` as an explicit override; otherwise its non-empty live pane cwd values must all agree, and heterogeneous candidates fail closed instead of depending on snapshot order. Reused `new_workspace` cards still verify the live workspace rather than treating their creation cwd as an override. If the reused or existing workspace snapshot fails, or contains no live cwd, dispatch fails; it never falls back to process cwd or a stale snapshot. A workspace this dispatch **created** additionally
 threads its exact initial tab/root pane as a one-shot bootstrap hint: the first card-tab
 allocation adopts that tab (renamed to `card-<id> <short-name>`, root renamed to `card-<id>-anchor`) instead
@@ -493,9 +497,8 @@ that never recorded a pane at all. End to end:
    rescues keep their persistent anchor). A failed launch closes the
    pane it created, plus the tab anchor when placement had to create the tab; it also registers the
    exact tab/anchor it kept, so a later dispatch reuses that tab instead of making another — and
-   when this very resolution created the workspace, the failure additionally closes that workspace,
-   so a rescue that created it leaves no partial resource behind and the next `o` resolves (and
-   creates) a fresh one;
+   cleanup never closes an entire workspace: another card may already have joined it. Herdr removes
+   an empty tab/workspace naturally when the exact owned child and anchor were its last panes;
 9. the TUI toasts what happened and **stays up** on a rescue (Herdr already moved focus to the new
    pane, so quitting would only discard the explanation). Refusals and Herdr errors stay visible as a
    non-fatal toast that leaves the board usable, and never fall back to a different run's pane.
@@ -771,8 +774,8 @@ opens the script, the residual configured-script orphan is an accepted asynchron
 
 1. **Create** card in *Todo*: title "Add retry to MELI scraper", description (prompt), harness=pi (default), model omitted (Pi configured default), effort=low, no permission mode, space=workspace `w4`.
 2. **User drags card → Plan** (TUI → boardd `card.move`).
-3. Column engine: *Plan* is `trigger=auto` → **enqueue run** on the card's space queue.
-4. Dispatcher (respecting per-space serial queue + global cap):
+3. Column engine: *Plan* is `trigger=auto` → **enqueue run** in the global FIFO queue.
+4. Dispatcher (respecting global FIFO admission + global cap):
    a. Resolve the card's session socket and `ping` it. Anything except socket protocol 22 fails before workspace discovery/creation. Then reuse workspace `w4`, or create/reuse the card's labeled `new_workspace`; repository worktree isolation remains an agent prompt responsibility.
    b. Preflight the selected socket again at the spawner boundary. For a new durable run, the card's **`card-<id> <short-name>` tab** is resolved by exact owned id (reconstructed from the newest matching durable pane in the same session/workspace when boardd restarts), or `tab.create {workspace_id,cwd,env,…}` supplies a new shell anchor — unless the dispatch just created the workspace, in which case the workspace's own initial tab is adopted (verified, then renamed) instead of leaving an unused tab. The anchor is labeled `card-<id>-anchor`, its exact id is persisted on the promoted run (NULL for managed runs, whose anchor is closed after a successful launch), and the run child is always created by `pane.split` from that anchor; `agent.start`/`pane run` never target the root. A renamed anchor is still selected only by exact identity; a closed anchor is recreated only from a durable board-run child in the exact proven tab, and missing proof creates a fresh tab without selecting a duplicate-label user tab. Exact ended children may be reclaimed before a later split so the anchor keeps usable geometry. The child receives the run env; the anchor receives only stable card identity. If multiple historical panes are live, newest run id wins; legacy rows retain their old lookup. Placement, cwd, and environment are not `agent.start` fields; the call receives neither the workspace placement nor the anchor pane id.
     c. For Pi/Claude, write the snapshotted system prompt to a mode-`0600` temporary file; issue `agent.start {name,kind,pane_id,args}` on the split child with prompt-free startup args; a typed `agent_pane_busy` retries the exact request on that same child with bounded 100ms/200ms backoff (never another split); poll `agent.get` for readiness; then send only the task snapshot through `agent.prompt`. Remove the file. For codex/opencode/antigravity, no prompt file exists: after the same readiness poll the daemon bounded-polls `agent.get.agent_session` (at most 5 probes / 10s) for the integration-reported id (expected agent, `kind:"id"`, non-empty `value`; opencode and antigravity also pin the integration source, `herdr:opencode` / `herdr:antigravity_cli`) and persists it atomically with the promotion — **codex captures before delivering the prompt, opencode and antigravity after it** (real OpenCode mints `agent_session` only once the first `agent.prompt` lands; antigravity likewise reports its conversation id only after the first prompt) — and the prompt is a delimited `system + task` block on a Mint, the task alone on a resume/fork fresh pane. Card status → `running`; record the exact child pane/workspace ids. The pane is **visible** — you can watch or type into it anytime.
@@ -852,17 +855,23 @@ executes the returned plan; it performs no Herdr or SQLite I/O in the pure decis
   then wake dispatch. The shared scheduler→store lock order supplies only transient mutual
   exclusion; no separate finalizing-card state participates in durable decisions. A rejected merged
   state or failed transaction therefore cannot leave a partial row, event, or process effect.
-- **Per-space FIFO**: two agents mutating one working tree collide; cards sharing the typed
-  `SpaceKey(session, space_kind, space_ref)` run serially. Null/default values remain typed and are
-  never separator-encoded.
+- **Global FIFO admission**: the oldest queued run ids claim the available slots across every
+  board, workspace and session. Sharing a workspace never excludes a card or lets a later run
+  overtake it. Claims are ordered; concurrent placement, startup and completion need not finish in
+  that order. Distinct cards use distinct exact-owned tabs, with explicit per-task `space_cwd`
+  recommended for shared workspaces. Repository/worktree isolation remains the agent's responsibility.
 - **Active-run timer source**: board snapshots expose only additive summaries for started, open
   runs. The TUI joins those summaries by card id, so comments/card edits cannot reset the elapsed
   timer; `started_at` remains the authoritative clock across event refreshes.
-- **Global concurrency cap** (default 3) limits active runs across spaces. A per-daemon async mutex
-  serializes complete dispatch passes through launch registration/failure. Inside that lock, a pass
-  claims capacity and each space's FIFO head before any launch starts; claimed independent spaces
-  launch concurrently, while a second run for either space remains queued.
-- A `new_workspace` card that opens a distinct workspace per label gets its own queue key, so distinct labels run in parallel (up to the global cap). Agent-driven worktree isolation (see §3) is what escapes a per-repo bottleneck now.
+- **Global concurrency cap** (default 3) counts every durable started/open run, including blocked,
+  awaiting and unresolved-recovery runs. A per-daemon async mutex serializes dispatch passes through
+  launch registration/failure. A pass claims the available FIFO prefix before concurrently launching
+  it; the mutex never spans worker lifetime. The unique open-run-per-card constraint remains authoritative.
+- **Recovery boundary**: promoted overlapping workers retain their exact durable identities and
+  occupy capacity after restart, without relaunch. As before, an external launch can precede its
+  durable promotion: a daemon crash in that window can leave an unrecorded pane and a queued row.
+  This is not an all-crash exactly-once guarantee. Closing that window requires durable launch-intent
+  reconciliation, beyond this admission/placement change; inspect unresolved launches before retrying.
 
 ## 8. Failure & safety rails
 

@@ -436,9 +436,9 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
   creation failure, and a
   harness that will not start in the new pane are error 4. A failed launch closes the pane it
   created **and**, when placement had to create the card tab, that tab's shell anchor too
-  (which removes the empty tab) — and when this very resolution created the workspace, the failure
-  also closes that workspace, so a refused or failed rescue leaves nothing behind — a rescue has
-  neither a retry nor a run row, so anything orphaned here would be permanent. A `pane.focus` that
+  (which removes the empty tab). Cleanup never closes the whole workspace: another card may
+  have joined it since creation. Herdr removes the workspace naturally when its last panes
+  disappear. A `pane.focus` that
   fails *after* a successful launch is logged as a warning and still reported as `rescued`: the pane
   exists and the conversation is resumed, only the focus move was lost. The daemon resolves the run's
   session socket and canonicalizes both it and `origin_socket` before any of this. The CLI resolves
