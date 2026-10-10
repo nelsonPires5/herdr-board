@@ -119,7 +119,7 @@ for before in proof['runs']:
     assert len(rows) == 1
     after = dict(rows[0])
     for key, value in before.items():
-        if key not in ('tab_id', 'cwd'): assert after[key] == value, (key, after, before)
+        if key not in ('tab_id', 'cwd'): assert after[key] == value
     pane = next(p for p in panes if p['pane_id'] == before['herdr_pane_id'])
     assert pane['tab_id'] == before['tab_id']
     # Every actual fake launch exclusively creates a transcript with its PID.
