@@ -8,7 +8,7 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
-- Pending PR link: Run multiple cards concurrently in separate tabs of one workspace while preserving the global queue order and concurrency limit.
+- [#147](https://github.com/nelsonPires5/herdr-board/pull/147) feat: Run multiple cards concurrently in separate workspace tabs while preserving queue order and the worker limit.
 
 ## [0.19.0] - 2026-10-06
 
