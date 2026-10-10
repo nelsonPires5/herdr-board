@@ -109,6 +109,69 @@ fn run_focus_rescues_into_a_new_workspace_when_the_recorded_workspace_is_gone() 
 }
 
 #[test]
+fn run_focus_rescue_honors_explicit_workspace_cwd_when_only_the_board_pane_survives() {
+    // A unanimous surviving-pane cwd must not override this card's task cwd.
+    let fake = fake_rescue_herdr(RescueFakeFaults {
+        anchor_missing: true,
+        multi_cwd: true,
+        ..Default::default()
+    });
+    fake.panes.lock().unwrap()[0].2 = Some("board".to_string());
+    let board_pane = fake.panes.lock().unwrap()[0].clone();
+    let d = test_daemon_with_herdr_spawner(Config::default(), fake.socket.clone());
+    let (card_id, run_id) = add_rescuable_run_with_space(
+        &d,
+        "pi",
+        Some("pi"),
+        Some("conv-1"),
+        true,
+        Some((
+            SpaceKind::Workspace,
+            "ws".to_string(),
+            "/tmp/card-cwd".to_string(),
+        )),
+    );
+    let before = runs_fingerprint(&d, card_id);
+    let result = handle_request(
+        &d,
+        "run.focus",
+        json!({"card_id":card_id,"run_id":run_id,"origin_socket":fake.socket}),
+    )
+    .unwrap();
+    assert_eq!(result["action"], "rescued");
+    assert_eq!(result["session_id"], "conv-1");
+    let pane_id = result["pane_id"].as_str().unwrap();
+    let tabs = fake.herdr.requests_for("tab.create");
+    assert_eq!(tabs.len(), 1);
+    assert_eq!(tabs[0]["params"]["cwd"], "/tmp/card-cwd");
+    let splits = fake.herdr.requests_for("pane.split");
+    assert_eq!(splits.len(), 1);
+    assert_eq!(splits[0]["params"]["cwd"], "/tmp/card-cwd");
+    let starts = fake.agent_starts();
+    assert_eq!(starts.len(), 1);
+    assert_eq!(starts[0]["params"]["pane_id"], pane_id);
+    let args = starts[0]["params"]["args"].as_array().unwrap();
+    let resume_at = args.iter().position(|arg| arg == "--session-id").unwrap();
+    assert_eq!(args[resume_at + 1], "conv-1");
+    assert!(args.iter().any(|arg| arg == "recorded-model"));
+    assert_eq!(fake.count("agent.prompt"), 0);
+    let again = handle_request(
+        &d,
+        "run.focus",
+        json!({"card_id":card_id,"run_id":run_id,"origin_socket":fake.socket}),
+    )
+    .unwrap();
+    assert_eq!(again["action"], "focused_rescued_pane");
+    assert_eq!(again["pane_id"], pane_id);
+    assert_eq!(fake.count("tab.create"), 1);
+    assert_eq!(fake.count("pane.split"), 1);
+    assert_eq!(fake.count("agent.start"), 1);
+    assert!(fake.workspace_creates().is_empty());
+    assert!(fake.panes.lock().unwrap().contains(&board_pane));
+    assert_eq!(runs_fingerprint(&d, card_id), before);
+}
+
+#[test]
 fn run_focus_rescue_keeps_ownership_when_an_ambiguous_cwd_resolves_back_to_the_recorded_workspace()
 {
     // The recorded workspace is heterogeneous: its live panes report different

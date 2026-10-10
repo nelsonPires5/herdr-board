@@ -13,7 +13,7 @@ use std::sync::Arc;
 use board_core::capability;
 use board_core::harness;
 use board_core::model::{Card, Run};
-use board_core::protocol::{RunFocusAction, RunFocusParams, RunFocusResult};
+use board_core::protocol::{RunFocusAction, RunFocusParams, RunFocusResult, SpaceKind};
 use board_core::{Error, Result};
 use serde_json::{json, Value};
 
@@ -327,7 +327,20 @@ fn rescue_run(
         .map_err(|e| Error::HerdrUnavailable(format!("connecting to Herdr: {e}")))?;
     let (recorded_usable, workspace_id, cwd, bootstrap) =
         match workspace_cwd(&mut client, &workspace_id) {
-            Ok(cwd) => (true, workspace_id, std::path::PathBuf::from(cwd), None),
+            Ok(cwd) => {
+                // Match dispatch: an existing-workspace card's explicit cwd
+                // wins even when only the board TUI survives elsewhere. A
+                // reused new_workspace still takes its cwd from live panes.
+                let cwd = match card.space_kind {
+                    SpaceKind::Workspace => card
+                        .space_cwd
+                        .as_deref()
+                        .filter(|cwd| !cwd.trim().is_empty())
+                        .unwrap_or(&cwd),
+                    SpaceKind::NewWorkspace => &cwd,
+                };
+                (true, workspace_id, std::path::PathBuf::from(cwd), None)
+            }
             Err(recorded_error) => {
                 let space = resolve_space(
                     &mut client,

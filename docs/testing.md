@@ -155,7 +155,7 @@ modes. Scenario 40 covers installed-harness discovery through the owned proxy (H
 explicit harness, and the graceful full-list fallback). This document describes the intended coverage
 and gate configuration; it does **not** claim that the full live E2E suite has passed.
 
-Scenario 42 proves overlapping **open/running** managed workers in distinct tabs of one workspace,
+Scenario 41 proves overlapping **open/running** managed workers in distinct tabs of one workspace,
 their exact cwd/callback identities, global FIFO/cap, and restart adoption without relaunch after
 promotion. Daemon regressions cover concurrent pass claims, same-label creation through socket
 aliases, title-independent card identity, and failed-creator rollback preserving a joined card.
