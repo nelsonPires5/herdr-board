@@ -245,6 +245,7 @@ pub const HELP_KEYS: &[(Screen, &str, &str)] = &[
     (Screen::CardDetail, "x", "cancel run (asks first)"),
     (Screen::CardDetail, "r", "retry run (asks first)"),
     (Screen::CardDetail, "1-9", "run configured action"),
+    (Screen::CardDetail, "←/→ < >", "page action rail"),
     (Screen::CardDetail, "q / Esc", "back to board"),
     (Screen::CardForm, "--", "-- forms --"),
     (Screen::CardForm, "Tab", "next field"),
@@ -303,7 +304,8 @@ mod overlays;
 
 pub use detail::{
     comment_row_spans, comment_wrapped_rows, comments_action_bar_shown, comments_viewport,
-    detail_layout, detail_toggle_rect, runs_viewport_height, DetailLayout,
+    detail_layout, detail_rail_rows, detail_rail_single_row_rows, detail_toggle_rect,
+    rail_page_count, rail_page_window, rail_single_row_split, runs_viewport_height, DetailLayout,
 };
 pub use layout::{board_layout, BoardLayout, ColLayout, CompactHeader, ScrollInfo};
 pub use overlays::{

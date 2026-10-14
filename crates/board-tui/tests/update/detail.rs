@@ -1356,6 +1356,82 @@ fn detail_digit_runs_the_matching_card_action_with_card_context() {
 }
 
 #[test]
+fn detail_action_refuses_space_card_without_a_configured_cwd() {
+    let mut app = demo_app_with_detail(CardStatus::Done);
+    let detail = app.detail.as_mut().unwrap();
+    detail.actions = vec![review_action()];
+    detail.card.space_ref = Some("ws-1".into());
+    detail.card.space_cwd = None;
+
+    let effects = update(&mut app, key(KeyCode::Char('1')));
+    assert!(
+        effects.is_empty(),
+        "must refuse instead of running in the TUI cwd (got {} effects)",
+        effects.len()
+    );
+    let toast = app.toast.as_ref().expect("refusal toast");
+    assert!(toast.text.contains("no configured cwd"), "{}", toast.text);
+    assert_eq!(app.screen, Screen::CardDetail);
+}
+
+#[test]
+fn detail_action_allows_a_no_space_card_to_use_the_tui_cwd() {
+    let mut app = demo_app_with_detail(CardStatus::Done);
+    let detail = app.detail.as_mut().unwrap();
+    detail.actions = vec![review_action()];
+    detail.card.space_ref = None;
+    detail.card.space_cwd = None;
+
+    let effects = update(&mut app, key(KeyCode::Char('1')));
+    let [Effect::RunCardAction(spec)] = effects.as_slice() else {
+        panic!("expected one RunCardAction effect");
+    };
+    assert_eq!(spec.cwd, None);
+    // A no-space card carries no stale space context for the child to inherit.
+    assert!(
+        !spec.env.iter().any(|(k, _)| k == "BOARD_ACTION_SPACE_REF"),
+        "no-space action must not set BOARD_ACTION_SPACE_REF"
+    );
+}
+
+#[test]
+fn detail_action_refuses_whitespace_only_space_cwd() {
+    let mut app = demo_app_with_detail(CardStatus::Done);
+    let detail = app.detail.as_mut().unwrap();
+    detail.actions = vec![review_action()];
+    detail.card.space_ref = Some("ws-1".into());
+    detail.card.space_cwd = Some("   ".into());
+
+    let effects = update(&mut app, key(KeyCode::Char('1')));
+    assert!(
+        effects.is_empty(),
+        "blank cwd must refuse instead of running in the TUI cwd"
+    );
+    let toast = app.toast.as_ref().expect("refusal toast");
+    assert!(toast.text.contains("no configured cwd"), "{}", toast.text);
+}
+
+#[test]
+fn detail_action_preserves_whitespace_bearing_cwd_verbatim() {
+    // A nonblank path with legitimate leading/trailing spaces must reach the
+    // spawn boundary unchanged; only whitespace-*only* values refuse.
+    let mut app = demo_app_with_detail(CardStatus::Done);
+    let detail = app.detail.as_mut().unwrap();
+    detail.actions = vec![review_action()];
+    detail.card.space_ref = Some("ws-1".into());
+    detail.card.space_cwd = Some("/work/repo ".into());
+
+    let effects = update(&mut app, key(KeyCode::Char('1')));
+    let [Effect::RunCardAction(spec)] = effects.as_slice() else {
+        panic!("expected one RunCardAction effect");
+    };
+    assert_eq!(
+        spec.cwd.as_deref(),
+        Some(std::path::Path::new("/work/repo "))
+    );
+}
+
+#[test]
 fn detail_digits_do_nothing_without_card_actions() {
     let mut app = demo_app_with_detail(CardStatus::Done);
     assert!(app.detail.as_ref().unwrap().actions.is_empty());
@@ -1379,6 +1455,134 @@ fn card_action_buttons_render_only_when_configured() {
             rendered_rows(&app).join("\n").contains("[ Review ]"),
             "{w}x{h}: configured action button missing"
         );
+    }
+}
+
+#[test]
+fn nine_card_actions_render_as_identifiable_chips() {
+    for (w, h) in [(40, 20), (80, 24), (120, 40)] {
+        let mut app = demo_app_with_detail(CardStatus::Done);
+        app.last_area = Rect::new(0, 0, w, h);
+        app.detail.as_mut().unwrap().actions = (1..=9)
+            .map(|i| board_core::protocol::CardAction {
+                label: format!("Act {i}"),
+                argv: vec![format!("tool-{i}")],
+            })
+            .collect();
+        let text = rendered_rows(&app).join("\n");
+        for i in 1..=9 {
+            assert!(
+                text.contains(&format!("[ Act {i} ]")),
+                "{w}x{h}: configured action {i} is not identifiable\n{text}"
+            );
+        }
+        // Built-in controls stay visible next to the configured nine.
+        assert!(text.contains("[ Edit"), "{w}x{h}: Edit missing\n{text}");
+    }
+}
+
+#[test]
+fn nine_card_actions_in_awaiting_state_stay_identifiable() {
+    // An awaiting card adds `[ Confirm done ]` to the rail; the nine
+    // configured actions must stay identifiable next to it in every layout.
+    for (w, h) in [(40, 20), (80, 24), (120, 40)] {
+        let mut app = demo_app_with_detail(CardStatus::Awaiting);
+        app.last_area = Rect::new(0, 0, w, h);
+        app.detail.as_mut().unwrap().actions = (1..=9)
+            .map(|i| board_core::protocol::CardAction {
+                label: format!("Act {i}"),
+                argv: vec![format!("tool-{i}")],
+            })
+            .collect();
+        let text = rendered_rows(&app).join("\n");
+        for i in 1..=9 {
+            assert!(
+                text.contains(&format!("[ Act {i} ]")),
+                "{w}x{h}: configured action {i} is not identifiable\n{text}"
+            );
+        }
+        assert!(
+            text.contains("[ Confirm"),
+            "{w}x{h}: awaiting Confirm missing\n{text}"
+        );
+        assert!(text.contains("[ Edit"), "{w}x{h}: Edit missing\n{text}");
+        assert!(
+            text.contains("[ Archive") || text.contains("[ Restore"),
+            "{w}x{h}: Archive/Restore missing\n{text}"
+        );
+    }
+}
+
+#[test]
+fn compact_long_actions_height_capped_pages_with_keys_and_digits() {
+    // Height-capped Compact rail: nine long Awaiting actions cannot all fit.
+    // The last rail row shows the `+N more ‹i/n›` pager; `←`/`→` (or `<`/`>`)
+    // reveals every packed row, while digits `1`-`9` run on every page.
+    for (w, h) in [(40, 20), (40, 14)] {
+        let mut app = demo_app_with_detail(CardStatus::Awaiting);
+        app.last_area = Rect::new(0, 0, w, h);
+        let detail = app.detail.as_mut().unwrap();
+        detail.card.space_ref = None;
+        detail.card.space_cwd = None;
+        detail.actions = (1..=9)
+            .map(|i| board_core::protocol::CardAction {
+                label: format!("Deploy service {i} to production"),
+                argv: vec![format!("tool-{i}")],
+            })
+            .collect();
+        let text = rendered_rows(&app).join("\n");
+        assert!(
+            text.contains("more") && text.contains("‹") && text.contains("›"),
+            "{w}x{h}: capped rail must show the pager affordance\n{text}"
+        );
+        assert_eq!(app.detail_rail_page, 0);
+        // The ninth action starts off-page, with its label unrevealable
+        // until the rail pages.
+        assert!(
+            !rendered_rows(&app).join("\n").contains("Deploy service 9"),
+            "{w}x{h}: ninth action must start hidden\n{text}"
+        );
+        // `→` pages forward (bounded: the rail holds a dozen rows at most)
+        // until the ninth label is revealed; `>` is the same path.
+        let mut paged = false;
+        for _ in 0..16 {
+            update(&mut app, key(KeyCode::Right));
+            if rendered_rows(&app).join("\n").contains("Deploy service 9") {
+                paged = true;
+                break;
+            }
+        }
+        assert!(paged, "{w}x{h}: paging must reveal the ninth label");
+        assert!(app.detail_rail_page > 0, "{w}x{h}: page must advance");
+        update(&mut app, key(KeyCode::Char('>')));
+        let after_gt = app.detail_rail_page;
+        update(&mut app, key(KeyCode::Char('<')));
+        assert!(
+            app.detail_rail_page < after_gt.max(1) || after_gt == 0,
+            "{w}x{h}: `<` must page back"
+        );
+        // `←` returns all the way to the first page with its built-ins.
+        for _ in 0..16 {
+            update(&mut app, key(KeyCode::Left));
+        }
+        assert_eq!(app.detail_rail_page, 0, "{w}x{h}: paging clamps at page 0");
+        assert!(
+            rendered_rows(&app).join("\n").contains("[ Edit"),
+            "{w}x{h}: first page keeps the built-ins"
+        );
+        // Digits run from any page — including a hidden ninth action.
+        for _ in 0..16 {
+            update(&mut app, key(KeyCode::Right));
+        }
+        let effects = update(&mut app, key(KeyCode::Char('9')));
+        let [Effect::RunCardAction(spec)] = effects.as_slice() else {
+            panic!("{w}x{h}: ninth action must stay keyboard-reachable");
+        };
+        assert_eq!(spec.argv, vec!["tool-9".to_string()]);
+        // Paging past the last page clamps instead of stranding the rail.
+        let last = app.detail_rail_page;
+        update(&mut app, key(KeyCode::Right));
+        assert_eq!(app.detail_rail_page, last, "{w}x{h}: paging clamps at last");
     }
 }
 
@@ -1410,4 +1614,439 @@ fn driver_runs_card_action_and_toasts_a_failing_exit() {
     // The detail was reloaded from the daemon and stays open.
     assert_eq!(d.app.screen, Screen::CardDetail);
     assert_eq!(d.app.detail.as_ref().unwrap().card.id, card_id);
+}
+
+#[test]
+fn driver_reports_card_action_spawn_failure_and_requests_redraw() {
+    use board_tui::command::{CommandLauncher, CommandResult, CommandSpec};
+
+    struct FailCommands;
+    impl CommandLauncher for FailCommands {
+        fn run(&self, _spec: &CommandSpec) -> anyhow::Result<CommandResult> {
+            Err(anyhow::anyhow!("review-tool: No such file or directory"))
+        }
+    }
+
+    let mut d = driver_of(super::helpers::demo_client().unwrap());
+    d.set_command_launcher(Box::new(FailCommands));
+    d.handle(key(KeyCode::Enter));
+    assert_eq!(d.app.screen, Screen::CardDetail);
+    d.app.detail.as_mut().unwrap().actions = vec![review_action()];
+
+    d.handle(key(KeyCode::Char('1')));
+    let toast = d.app.toast.as_ref().expect("spawn-failure toast");
+    assert!(
+        toast.text.contains("review-tool"),
+        "spawn error must name the program: {}",
+        toast.text
+    );
+    assert!(
+        d.take_needs_full_redraw(),
+        "a spawn failure suspends/restores the terminal, so the next draw must repaint"
+    );
+    assert_eq!(d.app.screen, Screen::CardDetail);
+}
+
+#[test]
+fn compact_single_row_rail_shares_action_and_pager() {
+    use board_tui::widgets::Zone;
+
+    // A 1-row rail (40x13, or 40x14 with a toast stealing one content row)
+    // must keep one action row plus the pager mouse-usable: the single row
+    // is split between the page's packed row and the pager, never pager-only.
+    for (w, h, toast) in [(40, 13, false), (40, 14, true)] {
+        let mut app = demo_app_with_detail(CardStatus::Awaiting);
+        app.last_area = Rect::new(0, 0, w, h);
+        let detail = app.detail.as_mut().unwrap();
+        detail.card.space_ref = None;
+        detail.card.space_cwd = None;
+        detail.actions = (1..=9)
+            .map(|i| board_core::protocol::CardAction {
+                label: format!("Deploy service {i} to production"),
+                argv: vec![format!("tool-{i}")],
+            })
+            .collect();
+        if toast {
+            app.set_toast("card action refused: no configured cwd", true);
+        }
+        let layout = board_tui::view::detail_layout(&app, app.last_area);
+        assert_eq!(
+            layout.card_actions.height, 1,
+            "{w}x{h} toast={toast}: fixture must allocate a 1-row rail"
+        );
+        let rows = board_tui::view::detail_rail_rows(app.detail.as_ref().unwrap(), &layout, true);
+        assert!(
+            rows.len() > 1,
+            "{w}x{h} toast={toast}: nine long actions must overflow one row"
+        );
+        let pages = board_tui::view::rail_page_count(&rows, 1);
+        assert_eq!(
+            pages,
+            rows.len(),
+            "{w}x{h} toast={toast}: single-row overflow pages one packed row each"
+        );
+        assert_eq!(
+            board_tui::view::rail_page_window(rows.len(), 1, 0),
+            (0, 1),
+            "{w}x{h} toast={toast}: page 0 must show the first packed row"
+        );
+
+        // Page 0 keeps the first action labelled alongside the pager.
+        let text = rendered_rows(&app).join("\n");
+        assert!(
+            text.contains("[ Edit"),
+            "{w}x{h} toast={toast}: first action must stay visible\n{text}"
+        );
+        assert!(
+            text.contains("more") && text.contains("‹") && text.contains("›"),
+            "{w}x{h} toast={toast}: single-row rail must show the pager\n{text}"
+        );
+        // The ninth action starts hidden (label and mouse zone).
+        assert!(
+            !text.contains("Deploy service 9"),
+            "{w}x{h} toast={toast}: ninth action must start hidden\n{text}"
+        );
+        let rail = layout.card_actions;
+        let zones: Vec<((u16, u16), Zone)> = {
+            let map = app.hit_map.borrow();
+            let mut out = Vec::new();
+            let mut seen: Vec<Zone> = Vec::new();
+            for y in 0..h {
+                for x in 0..w {
+                    if let Some(zone) = map.hit(x, y) {
+                        if !seen.contains(&zone) {
+                            seen.push(zone);
+                            out.push(((x, y), zone));
+                        }
+                    }
+                }
+            }
+            out
+        };
+        let edit_point = zones
+            .iter()
+            .find_map(|(p, z)| {
+                (z == &Zone::Action(board_tui::widgets::UiAction::EditCard)).then_some(*p)
+            })
+            .unwrap_or_else(|| {
+                panic!("{w}x{h} toast={toast}: Edit must stay clickable: {zones:?}")
+            });
+        assert!(
+            edit_point.0 >= rail.x
+                && edit_point.0 < rail.x.saturating_add(rail.width)
+                && edit_point.1 >= rail.y
+                && edit_point.1 < rail.y.saturating_add(rail.height),
+            "{w}x{h} toast={toast}: Edit zone {edit_point:?} outside rail {rail:?}"
+        );
+        assert!(
+            zones.iter().any(|(_, z)| z == &Zone::RailPagePrev),
+            "{w}x{h} toast={toast}: pager needs a prev zone"
+        );
+        assert!(
+            zones.iter().any(|(_, z)| z == &Zone::RailPageNext),
+            "{w}x{h} toast={toast}: pager needs a next zone"
+        );
+        assert!(
+            !zones
+                .iter()
+                .any(|(_, z)| z == &Zone::Action(board_tui::widgets::UiAction::CardAction(8))),
+            "{w}x{h} toast={toast}: hidden ninth action must keep no mouse zone on page 0"
+        );
+        // Every pager zone stays inside the single rail row.
+        for ((x, y), zone) in zones.iter() {
+            if matches!(zone, Zone::RailPagePrev | Zone::RailPageNext) {
+                assert!(
+                    *x >= rail.x && *x < rail.x.saturating_add(rail.width) && *y == rail.y,
+                    "{w}x{h} toast={toast}: pager zone {zone:?} at ({x},{y}) outside rail {rail:?}"
+                );
+            }
+        }
+
+        // Digits run on every page, including the hidden ninth action.
+        let effects = update(&mut app, key(KeyCode::Char('9')));
+        let [Effect::RunCardAction(spec)] = effects.as_slice() else {
+            panic!("{w}x{h} toast={toast}: ninth action must stay keyboard-reachable");
+        };
+        assert_eq!(spec.argv, vec!["tool-9".to_string()]);
+
+        // Paging reveals the ninth label with an in-bounds mouse zone.
+        let mut paged = false;
+        for _ in 0..32 {
+            update(&mut app, key(KeyCode::Right));
+            if rendered_rows(&app).join("\n").contains("Deploy service 9") {
+                paged = true;
+                break;
+            }
+        }
+        assert!(
+            paged,
+            "{w}x{h} toast={toast}: paging must reveal the ninth label"
+        );
+        assert!(
+            app.detail_rail_page > 0,
+            "{w}x{h} toast={toast}: page must advance"
+        );
+        let rail = board_tui::view::detail_layout(&app, app.last_area).card_actions;
+        let ninth_inside = {
+            let map = app.hit_map.borrow();
+            let mut found = None;
+            for y in 0..h {
+                for x in 0..w {
+                    if map.hit(x, y)
+                        == Some(Zone::Action(board_tui::widgets::UiAction::CardAction(8)))
+                    {
+                        found = Some((x, y));
+                        break;
+                    }
+                }
+            }
+            found
+        };
+        let (nx, ny) = ninth_inside
+            .unwrap_or_else(|| panic!("{w}x{h} toast={toast}: ninth action needs a mouse zone"));
+        assert!(
+            nx >= rail.x
+                && nx < rail.x.saturating_add(rail.width)
+                && ny >= rail.y
+                && ny < rail.y.saturating_add(rail.height),
+            "{w}x{h} toast={toast}: ninth zone at ({nx},{ny}) outside rail {rail:?}"
+        );
+        // Digits still run from the revealing page.
+        let effects = update(&mut app, key(KeyCode::Char('9')));
+        let [Effect::RunCardAction(spec)] = effects.as_slice() else {
+            panic!("{w}x{h} toast={toast}: ninth digit must work on its page");
+        };
+        assert_eq!(spec.argv, vec!["tool-9".to_string()]);
+
+        // Paging clamps at both ends and returns to the built-ins.
+        for _ in 0..32 {
+            update(&mut app, key(KeyCode::Left));
+        }
+        assert_eq!(
+            app.detail_rail_page, 0,
+            "{w}x{h} toast={toast}: paging clamps at page 0"
+        );
+        assert!(
+            rendered_rows(&app).join("\n").contains("[ Edit"),
+            "{w}x{h} toast={toast}: first page keeps the built-ins"
+        );
+        for _ in 0..32 {
+            update(&mut app, key(KeyCode::Right));
+        }
+        let last = app.detail_rail_page;
+        update(&mut app, key(KeyCode::Right));
+        assert_eq!(
+            app.detail_rail_page, last,
+            "{w}x{h} toast={toast}: paging clamps at last"
+        );
+    }
+}
+
+#[test]
+fn compact_single_row_short_labels_stay_identifiable_and_mapped() {
+    use board_tui::widgets::{UiAction, Zone};
+    for (w, h, toast) in [(40, 13, false), (40, 14, true)] {
+        let mut app = demo_app_with_detail(CardStatus::Done);
+        app.last_area = Rect::new(0, 0, w, h);
+        let detail = app.detail.as_mut().unwrap();
+        detail.card.space_ref = None;
+        detail.card.space_cwd = None;
+        detail.actions = (1..=9)
+            .map(|i| board_core::protocol::CardAction {
+                label: format!("A{i}"),
+                argv: vec![format!("tool-{i}")],
+            })
+            .collect();
+        if toast {
+            app.set_toast("card action refused: no configured cwd", true);
+        }
+        let layout = board_tui::view::detail_layout(&app, app.last_area);
+        assert_eq!(layout.card_actions.height, 1);
+        let (action_rect, pager_rect) = board_tui::view::rail_single_row_split(layout.card_actions);
+        assert_eq!(action_rect.width, 22);
+        let single_owned: Vec<Vec<(String, UiAction)>> =
+            board_tui::view::detail_rail_single_row_rows(
+                app.detail.as_ref().unwrap(),
+                &layout,
+                true,
+                action_rect.width,
+            )
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|b| (b.compact_label.to_string(), b.action))
+                    .collect()
+            })
+            .collect();
+        assert!(single_owned.len() > 1);
+        for (i, row) in single_owned.iter().enumerate() {
+            let used: u16 = row
+                .iter()
+                .map(|(label, _)| board_tui::widgets::button_text(label).chars().count() as u16)
+                .sum();
+            let gaps = row.len().saturating_sub(1) as u16;
+            assert!(used + gaps <= action_rect.width, "row {i} must fit 22");
+        }
+        let pages = board_tui::view::rail_page_count(
+            &board_tui::view::detail_rail_single_row_rows(
+                app.detail.as_ref().unwrap(),
+                &board_tui::view::detail_layout(&app, app.last_area),
+                true,
+                action_rect.width,
+            ),
+            1,
+        );
+        assert_eq!(pages, single_owned.len());
+        let mut seen_short: Vec<String> = Vec::new();
+        let mut seen_edit = false;
+        for page in 0..pages {
+            for _ in 0..32 {
+                update(&mut app, key(KeyCode::Left));
+            }
+            for _ in 0..page {
+                update(&mut app, key(KeyCode::Right));
+            }
+            assert_eq!(app.detail_rail_page, page);
+            let rows = rendered_rows(&app);
+            let text = rows.join("\n");
+            let rail = board_tui::view::detail_layout(&app, app.last_area).card_actions;
+            assert_eq!(rail.height, 1);
+            let rail_text = rows
+                .get(rail.y as usize)
+                .unwrap_or_else(|| panic!("no rail row {rail:?}\n{text}"));
+            assert!(
+                !rail_text.contains("[  ]"),
+                "blank chip page {page}\n{rail_text}"
+            );
+            assert!(
+                !rail_text.contains("[ \u{2026} ]") && !rail_text.contains("[ \u{2026}"),
+                "anonymous chip page {page}\n{rail_text}"
+            );
+            let expected = single_owned[page].clone();
+            for (label, _action) in &expected {
+                let want = format!("[ {label} ]");
+                assert!(rail_text.contains(&want), "{want:?} missing\n{rail_text}");
+                if label.starts_with('A') && !seen_short.contains(label) {
+                    seen_short.push(label.clone());
+                }
+                if *_action == UiAction::EditCard {
+                    seen_edit = true;
+                }
+            }
+            let map = app.hit_map.borrow();
+            let mut page_zones: Vec<Zone> = Vec::new();
+            for y in 0..h {
+                for x in 0..w {
+                    // Only the rail row matters: board zones leak elsewhere
+                    // underneath the popup but are inert on CardDetail.
+                    if y != rail.y || x < rail.x || x >= rail.x.saturating_add(rail.width) {
+                        continue;
+                    }
+                    if let Some(zone) = map.hit(x, y) {
+                        match zone {
+                            Zone::Action(_) => {
+                                assert!(
+                                    x >= action_rect.x && x < action_rect.x + action_rect.width,
+                                    "action zone {zone:?} at ({x},{y}) outside {action_rect:?}"
+                                );
+                                if !page_zones.contains(&zone) {
+                                    page_zones.push(zone);
+                                }
+                            }
+                            Zone::RailPagePrev | Zone::RailPageNext => {
+                                assert!(
+                                    x >= pager_rect.x && x < pager_rect.x + pager_rect.width,
+                                    "pager zone {zone:?} at ({x},{y}) outside {pager_rect:?}"
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            assert_eq!(page_zones.len(), expected.len());
+            for (label, action) in &expected {
+                assert!(page_zones.contains(&Zone::Action(*action)));
+                assert!(rail_text.contains(label.as_str()));
+            }
+            for (ri, row) in single_owned.iter().enumerate() {
+                if ri == page {
+                    continue;
+                }
+                for (_, action) in row {
+                    if !expected.iter().any(|(_, a)| a == action) {
+                        assert!(!page_zones.contains(&Zone::Action(*action)));
+                    }
+                }
+            }
+            drop(map);
+            let effects = update(&mut app, key(KeyCode::Char('9')));
+            let [Effect::RunCardAction(spec)] = effects.as_slice() else {
+                panic!("digit 9 must run tool-9");
+            };
+            assert_eq!(spec.argv, vec!["tool-9".to_string()]);
+            assert_eq!(app.detail_rail_page, page);
+        }
+        for i in 1..=9 {
+            assert!(seen_short.contains(&format!("A{i}")), "A{i} never visible");
+        }
+        assert!(seen_edit, "Edit never visible");
+        for _ in 0..32 {
+            update(&mut app, key(KeyCode::Right));
+        }
+        let last = app.detail_rail_page;
+        assert_eq!(last, pages - 1);
+        update(&mut app, key(KeyCode::Right));
+        assert_eq!(app.detail_rail_page, last);
+        for _ in 0..32 {
+            update(&mut app, key(KeyCode::Left));
+        }
+        assert_eq!(app.detail_rail_page, 0);
+    }
+}
+#[test]
+fn regular_single_row_short_labels_repack_for_action_half() {
+    let mut app = demo_app_with_detail(CardStatus::Done);
+    app.last_area = Rect::new(0, 0, 60, 10);
+    let detail = app.detail.as_mut().unwrap();
+    detail.card.space_ref = None;
+    detail.card.space_cwd = None;
+    detail.actions = (1..=9)
+        .map(|i| board_core::protocol::CardAction {
+            label: format!("A{i}"),
+            argv: vec![format!("tool-{i}")],
+        })
+        .collect();
+    let layout = board_tui::view::detail_layout(&app, app.last_area);
+    assert_eq!(layout.card_actions.height, 1);
+    let (action_rect, _) = board_tui::view::rail_single_row_split(layout.card_actions);
+    let single_owned: Vec<Vec<(String, board_tui::widgets::UiAction)>> =
+        board_tui::view::detail_rail_single_row_rows(
+            app.detail.as_ref().unwrap(),
+            &layout,
+            false,
+            action_rect.width,
+        )
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|b| (b.compact_label.to_string(), b.action))
+                .collect()
+        })
+        .collect();
+    assert!(single_owned.len() > 1);
+    for row in &single_owned {
+        let used: u16 = row
+            .iter()
+            .map(|(label, _)| board_tui::widgets::button_text(label).chars().count() as u16)
+            .sum();
+        assert!(used + row.len().saturating_sub(1) as u16 <= action_rect.width);
+    }
+    let rows = rendered_rows(&app);
+    let rail_text = rows
+        .get(layout.card_actions.y as usize)
+        .cloned()
+        .unwrap_or_default();
+    assert!(!rail_text.contains("[  ]"));
+    assert!(!rail_text.contains("[ \u{2026} ]"));
 }

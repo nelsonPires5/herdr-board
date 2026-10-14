@@ -142,6 +142,53 @@ fn pack_compact_action_rows<'a>(
     rows
 }
 
+/// Intrinsic width a rail control wants: its full `[ Label ]` chip when that
+/// fits the row, otherwise the shorter compact chip.
+fn detail_rail_button_width(button: &ActionButton<'_>, row_width: u16) -> u16 {
+    let full = button_text(button.label).chars().count() as u16;
+    if full <= row_width {
+        full
+    } else {
+        button_text(button.compact_label).chars().count() as u16
+    }
+}
+
+/// True when the whole rail still fits on one row with full labels — the
+/// single-row layout every pre-card-action build produced. Kept so ordinary
+/// detail views render exactly as before; only a rail that cannot fit wraps.
+fn card_rail_fits_one_row(buttons: &[ActionButton<'_>], width: u16) -> bool {
+    let full: u16 = buttons
+        .iter()
+        .map(|button| button_text(button.label).chars().count() as u16)
+        .sum();
+    let gaps = buttons.len().saturating_sub(1) as u16;
+    full.saturating_add(gaps) <= width
+}
+
+/// Greedy multi-row packing for the Regular/Wide card rail. Every row's
+/// controls are individually identifiable (full chip width when it fits,
+/// compact otherwise) and each row fits `width` with one-column gaps.
+fn pack_detail_action_rows<'a>(
+    buttons: &[ActionButton<'a>],
+    width: u16,
+) -> Vec<Vec<ActionButton<'a>>> {
+    let mut rows: Vec<Vec<ActionButton<'a>>> = Vec::new();
+    for button in buttons.iter().copied() {
+        let bw = detail_rail_button_width(&button, width);
+        let can_append = rows.last().is_some_and(|row| {
+            let used: u16 = row.iter().map(|b| detail_rail_button_width(b, width)).sum();
+            let gaps = row.len() as u16; // existing gaps + the new one
+            used.saturating_add(gaps).saturating_add(bw) <= width
+        });
+        if can_append {
+            rows.last_mut().expect("row exists").push(button);
+        } else {
+            rows.push(vec![button]);
+        }
+    }
+    rows
+}
+
 /// Compact detail action rows keep the card controls together and the three
 /// run controls together. At the 40-column content width an awaiting card's
 /// final `[ Add ]` cell shares the second row with `[ Open ] [ Retry ]
@@ -165,6 +212,218 @@ fn compact_detail_action_rows(detail: &CardDetail, width: u16) -> Vec<Vec<Action
 
     rows.extend(pack_compact_action_rows(&runs, width));
     rows
+}
+
+/// The packed action-rail rows for the current detail and geometry: the
+/// exact row list the renderer draws at full rail width. Compact keeps card
+/// and run controls in their grouped rows; Regular/Wide uses the measured
+/// single- or multi-row rail (Add comment and the run controls join/leave
+/// the rail exactly as the renderer decides, so paging, hit-testing, and
+/// drawing always agree).
+/// A single-row Regular/Wide rail is one row holding every control, matching
+/// the unchanged one-row layout ordinary cards always produced.
+///
+/// NOTE: a 1-row *overflowing* rail does not draw these full-width rows.
+/// The single physical row is shared with the pager (`rail_single_row_split`),
+/// so the renderer repacks for the narrower action half via
+/// `detail_rail_single_row_rows` and pages those rows instead — same rows in
+/// drawing and navigation, so every page's chips fit visibly in 22 cells.
+pub fn detail_rail_rows<'a>(
+    detail: &'a CardDetail,
+    layout: &DetailLayout,
+    compact: bool,
+) -> Vec<Vec<ActionButton<'a>>> {
+    if compact {
+        return compact_detail_action_rows(detail, layout.card_actions.width);
+    }
+    let mut card_buttons = detail_card_action_buttons(detail);
+    // Add comment lives in its contextual section bar whenever that bar
+    // fits; otherwise it stays in this card rail with the other controls.
+    if comment_actions_fit(layout) {
+        card_buttons.pop();
+    }
+    if !run_actions_fit(layout) {
+        card_buttons.extend(detail_run_action_buttons());
+    }
+    if card_rail_fits_one_row(&card_buttons, layout.card_actions.width) {
+        vec![card_buttons]
+    } else {
+        pack_detail_action_rows(&card_buttons, layout.card_actions.width)
+    }
+}
+
+/// The packed action-rail rows repacked for a 1-row overflowing rail's
+/// *action half* (`rail_single_row_split().0.width`, 22 at the 40-column
+/// floor): the exact row list the single-row renderer draws and pages.
+/// Same button order and card/run grouping as `detail_rail_rows`, only
+/// packed narrower — so each page holds solely controls that fit visibly in
+/// the action area, and `render_compact`/`render_full_row` never squeeze a
+/// full-width multi-control row into 22 anonymous cells. A lone oversized
+/// control stays one-per-page with its identifiable truncated prefix.
+pub fn detail_rail_single_row_rows<'a>(
+    detail: &'a CardDetail,
+    layout: &DetailLayout,
+    compact: bool,
+    action_width: u16,
+) -> Vec<Vec<ActionButton<'a>>> {
+    if compact {
+        return compact_detail_action_rows(detail, action_width);
+    }
+    let mut card_buttons = detail_card_action_buttons(detail);
+    if comment_actions_fit(layout) {
+        card_buttons.pop();
+    }
+    if !run_actions_fit(layout) {
+        card_buttons.extend(detail_run_action_buttons());
+    }
+    if card_rail_fits_one_row(&card_buttons, action_width) {
+        vec![card_buttons]
+    } else {
+        pack_detail_action_rows(&card_buttons, action_width)
+    }
+}
+/// How many rail pages the packed `rows` need at `height` rows. A fitting
+/// rail is a single page (no pager row); an overflowing rail with `height >= 2`
+/// reserves its last row for the pager, so each page holds `height - 1`
+/// packed rows. A 1-row overflowing rail shows one packed row per page and
+/// shares that row with a compact pager (see `rail_single_row_split`).
+pub fn rail_page_count(rows: &[Vec<ActionButton<'_>>], height: u16) -> usize {
+    if height == 0 {
+        return 1;
+    }
+    if rows.len() as u16 <= height {
+        return 1;
+    }
+    let per_page = (height - 1).max(1) as usize;
+    rows.len().div_ceil(per_page)
+}
+
+/// Which packed rows the current page shows: `[start, end)` into `rows`.
+/// A fitting rail shows everything; an overflowing rail with `height >= 2`
+/// shows one page's window (`height - 1` rows, the last rail row being the
+/// pager). A 1-row overflowing rail shows exactly one packed row per page
+/// (`row_count` pages); the renderer shares that single row between the
+/// row's chips and the pager, so every page keeps a labelled, clickable
+/// action alongside the paging affordance — digits stay the execution path
+/// for hidden rows on every height.
+pub fn rail_page_window(row_count: usize, height: u16, page: usize) -> (usize, usize) {
+    if height == 0 {
+        return (0, 0);
+    }
+    if row_count as u16 <= height {
+        return (0, row_count);
+    }
+    if height <= 1 {
+        // Single-row overflow: one packed row per page; the renderer draws
+        // that row's chips alongside the pager in the same physical row.
+        let pages = row_count.max(1);
+        let current = page.min(pages - 1);
+        return (current, (current + 1).min(row_count));
+    }
+    let per_page = (height - 1) as usize;
+    let pages = row_count.div_ceil(per_page).max(1);
+    let current = page.min(pages - 1);
+    let start = current * per_page;
+    (start, (start + per_page).min(row_count))
+}
+
+/// Number of rail controls hidden off the current page (the pager's `+N`).
+fn rail_hidden_count(rows: &[Vec<ActionButton<'_>>], start: usize, end: usize) -> usize {
+    rows.iter()
+        .enumerate()
+        .filter(|(i, _)| *i < start || *i >= end)
+        .map(|(_, row)| row.len())
+        .sum()
+}
+
+/// Split a 1-row overflowing rail into its action half (left) and pager half
+/// (right) with a single blank column between them. The pager gets up to 15
+/// cells — exactly `"+NN more ‹NN/NN›"` — while the action keeps at least 8
+/// (`"[ Edit ]"`), so at the 40-column content width (rail width 38) the
+/// split is 22 action + 1 gap + 15 pager: the first page keeps `[ Edit ]`
+/// legible and every long-label page keeps its `"Deploy service N"`
+/// prefix alongside a `‹i/n›` pager with both click halves. Below width 3
+/// the dialog cannot show both; the caller documents that floor and digits
+/// remain the execution path there.
+///
+/// Public so navigation (`app::detail_rail_page`) repacks against the same
+/// action-half width the renderer draws — never the full rail width.
+pub fn rail_single_row_split(rect: Rect) -> (Rect, Rect) {
+    if rect.width == 2 {
+        return (
+            Rect::new(rect.x, rect.y, 1, 1),
+            Rect::new(rect.x.saturating_add(1), rect.y, 1, 1),
+        );
+    }
+    if rect.width <= 1 {
+        return (rect, Rect::default());
+    }
+    // Reserve the pager's 15 cells while keeping 8 + 1 gap for the action.
+    // At narrower widths the pager shrinks first; both halves stay non-empty
+    // whenever the rail is at least 3 wide.
+    let pager_w = 15
+        .min(rect.width.saturating_sub(9))
+        .max(1)
+        .min(rect.width.saturating_sub(2));
+    let action_w = rect.width.saturating_sub(pager_w).saturating_sub(1);
+    let action = Rect::new(rect.x, rect.y, action_w, 1);
+    let pager = Rect::new(
+        rect.x.saturating_add(action_w).saturating_add(1),
+        rect.y,
+        pager_w,
+        1,
+    );
+    (action, pager)
+}
+
+/// Bounded pager for a height-capped action rail, drawn in the last
+/// allocated rail row: `+N more ‹i/n› (1-9 ←/→)`. Every packed row stays one
+/// `←`/`→` (or `<`/`>`/wheel/`‹`/`›` click) away, so hidden labels are
+/// revealed on demand and every control keeps a mouse target on its page —
+/// hidden rows register no hit zones. The pager's own halves page
+/// (`RailPagePrev`/`RailPageNext`), so the affordance itself is clickable.
+fn render_rail_pager(
+    f: &mut Frame,
+    rect: Rect,
+    page: usize,
+    pages: usize,
+    hidden: usize,
+    hit_map: &mut crate::widgets::HitMap,
+) {
+    use crate::widgets::Zone;
+
+    if rect.is_empty() {
+        return;
+    }
+    let text = truncate(
+        &format!("+{hidden} more ‹{}/{}› (1-9 ←/→)", page + 1, pages),
+        rect.width as usize,
+    );
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            text,
+            Style::default().fg(Color::Gray),
+        )))
+        .alignment(ratatui::layout::Alignment::Center),
+        rect,
+    );
+    // Two halves so the affordance pages both ways by mouse. No overlap
+    // with the action rows above (different y), and empty halves (a 1-wide
+    // pager) register nothing.
+    let mid = rect.width / 2;
+    let prev = Rect::new(rect.x, rect.y, mid, 1);
+    let next = Rect::new(
+        rect.x.saturating_add(mid),
+        rect.y,
+        rect.width.saturating_sub(mid),
+        1,
+    );
+    if !prev.is_empty() {
+        hit_map.push(prev, Zone::RailPagePrev);
+    }
+    if !next.is_empty() {
+        hit_map.push(next, Zone::RailPageNext);
+    }
 }
 
 /// Click target for the popup/fullscreen action rendered in the detail title.
@@ -485,7 +744,41 @@ pub fn detail_layout(app: &App, area: Rect) -> DetailLayout {
             ),
         ];
         let status_height = preferred_section_height(columns[0].height, 3);
-        let action_height = 1.min(columns[0].height.saturating_sub(status_height));
+        // Comment / run histories are single full-height cards; their
+        // contextual action bar lives on the last inner row.
+        let runs = if columns[1].height >= MIN_CLOSED_SECTION_HEIGHT {
+            columns[1]
+        } else {
+            Rect::default()
+        };
+        let comments = if columns[2].height >= MIN_CLOSED_SECTION_HEIGHT {
+            columns[2]
+        } else {
+            Rect::default()
+        };
+        let run_actions = Rect::new(runs.x, runs.bottom().saturating_sub(2), runs.width, 1);
+        let comment_actions = Rect::new(
+            comments.x,
+            comments.bottom().saturating_sub(2),
+            comments.width,
+            1,
+        );
+        // The card rail is measured, not fixed at one row: it grows to as many
+        // rows as the controls need so no configured action degenerates into a
+        // blank, unidentifiable click target.
+        let mut rail = detail_card_action_buttons(detail);
+        if !comment_actions.is_empty() {
+            rail.pop(); // Add comment lives in its contextual bar.
+        }
+        if run_actions.is_empty() {
+            rail.extend(detail_run_action_buttons());
+        }
+        let wanted_rows = if card_rail_fits_one_row(&rail, columns[0].width) {
+            1
+        } else {
+            pack_detail_action_rows(&rail, columns[0].width).len() as u16
+        };
+        let action_height = wanted_rows.min(columns[0].height.saturating_sub(status_height));
         let (configuration, session) = detail_metadata(detail);
         let metadata_heights = metadata_section_heights(
             &configuration,
@@ -506,25 +799,6 @@ pub fn detail_layout(app: &App, area: Rect) -> DetailLayout {
             Constraint::Length(action_height),
         ])
         .split(columns[0]);
-        // Comment / run histories are single full-height cards; the action
-        // bar lives on their last inner row (in-card buttons).
-        let runs = if columns[1].height >= MIN_CLOSED_SECTION_HEIGHT {
-            columns[1]
-        } else {
-            Rect::default()
-        };
-        let comments = if columns[2].height >= MIN_CLOSED_SECTION_HEIGHT {
-            columns[2]
-        } else {
-            Rect::default()
-        };
-        let run_actions = Rect::new(runs.x, runs.bottom().saturating_sub(2), runs.width, 1);
-        let comment_actions = Rect::new(
-            comments.x,
-            comments.bottom().saturating_sub(2),
-            comments.width,
-            1,
-        );
         return DetailLayout {
             panel,
             status: left[0],
@@ -547,12 +821,53 @@ pub fn detail_layout(app: &App, area: Rect) -> DetailLayout {
     let (configuration, session) = detail_metadata(detail);
     let compact = app.layout_mode() == super::LayoutMode::Compact;
     let status_height = preferred_section_height(inner.height, 3);
+    let max_action_height = inner.height.saturating_sub(status_height);
+    let comments_active = !compact && app.detail_scroll_target == DetailScrollTarget::Comments;
     let action_height = if compact {
         compact_detail_action_rows(detail, inner.width)
             .len()
-            .min(inner.height.saturating_sub(status_height) as usize) as u16
+            .min(max_action_height as usize) as u16
     } else {
-        1.min(inner.height.saturating_sub(status_height))
+        // The card rail can absorb the run controls when the Run section is too
+        // short, so its row count depends on the heights it leaves below it.
+        // Resolve the (monotone, height-bounded) fixed point.
+        let mut height = 1u16;
+        loop {
+            let metadata_available = inner.height.saturating_sub(status_height + height);
+            let probe_metadata = metadata_section_heights(
+                &configuration,
+                &session,
+                inner.width.saturating_sub(2),
+                metadata_available,
+            );
+            let section_budget = inner
+                .height
+                .saturating_sub(status_height + probe_metadata[0] + probe_metadata[1] + height);
+            let (section_h, _) = detail_section_heights(
+                detail,
+                inner.width.saturating_sub(1),
+                section_budget,
+                comments_active,
+            );
+            let mut rail = detail_card_action_buttons(detail);
+            if section_h[1] >= MIN_CLOSED_SECTION_HEIGHT {
+                rail.pop(); // Add comment lives in the comments bar.
+            }
+            if section_h[2] < MIN_CLOSED_SECTION_HEIGHT {
+                rail.extend(detail_run_action_buttons());
+            }
+            let rows = if card_rail_fits_one_row(&rail, inner.width) {
+                1
+            } else {
+                pack_detail_action_rows(&rail, inner.width).len() as u16
+            };
+            let next = rows.min(max_action_height);
+            if next <= height {
+                break;
+            }
+            height = next;
+        }
+        height
     };
     let metadata_available = inner.height.saturating_sub(status_height + action_height);
     // At the 40x20 content size, two named action rows leave room for one
@@ -573,7 +888,6 @@ pub fn detail_layout(app: &App, area: Rect) -> DetailLayout {
     let section_budget = inner
         .height
         .saturating_sub(status_height + metadata_heights[0] + metadata_heights[1] + action_height);
-    let comments_active = !compact && app.detail_scroll_target == DetailScrollTarget::Comments;
     let (section_h, spacer) = detail_section_heights(
         detail,
         inner.width.saturating_sub(1),
@@ -918,16 +1232,63 @@ pub(super) fn draw_detail(app: &App, f: &mut Frame, area: Rect) {
     let comments_fit = comment_actions_fit(&layout);
     let runs_fit = run_actions_fit(&layout);
     if compact {
-        let rows = compact_detail_action_rows(detail, layout.card_actions.width);
+        let rows = detail_rail_rows(detail, &layout, true);
+        let height = layout.card_actions.height;
+        let pages = rail_page_count(&rows, height);
+        let page = app.detail_rail_page.min(pages.saturating_sub(1));
+        // Never paint or hit-test outside the rectangle the layout
+        // allocated. A fitting rail draws every row; a capped rail draws
+        // the current page's rows and pages the rest through the pager.
+        // A 1-row overflowing rail shares its single row between the page's
+        // packed row and the pager, so one action stays labelled/clickable.
+        let (start, end) = rail_page_window(rows.len(), height, page);
         let mut hit_map = app.hit_map.borrow_mut();
-        for (row, buttons) in rows.iter().enumerate() {
-            let rect = Rect::new(
-                layout.card_actions.x,
-                layout.card_actions.y.saturating_add(row as u16),
-                layout.card_actions.width,
-                1,
+        if pages > 1 && height == 1 {
+            let (action_rect, pager_rect) = rail_single_row_split(layout.card_actions);
+            // Repack for the action half — never squeeze full-width rows
+            // into 22 cells. Each single-row page then holds only controls
+            // that fit visibly; zones exist solely for those visible chips.
+            let single_rows = detail_rail_single_row_rows(detail, &layout, true, action_rect.width);
+            let single_pages = rail_page_count(&single_rows, 1).max(1);
+            let single_page = app.detail_rail_page.min(single_pages - 1);
+            let (s_start, s_end) = rail_page_window(single_rows.len(), 1, single_page);
+            if let Some(buttons) = single_rows.get(s_start) {
+                ActionStrip { buttons }.render_compact(f, action_rect, &mut hit_map);
+            }
+            render_rail_pager(
+                f,
+                pager_rect,
+                single_page,
+                single_pages,
+                rail_hidden_count(&single_rows, s_start, s_end),
+                &mut hit_map,
             );
-            ActionStrip { buttons }.render_compact(f, rect, &mut hit_map);
+        } else {
+            for (row, buttons) in rows.iter().enumerate().take(end).skip(start) {
+                let rect = Rect::new(
+                    layout.card_actions.x,
+                    layout.card_actions.y.saturating_add((row - start) as u16),
+                    layout.card_actions.width,
+                    1,
+                );
+                ActionStrip { buttons }.render_compact(f, rect, &mut hit_map);
+            }
+            if pages > 1 && height > 0 {
+                let pager = Rect::new(
+                    layout.card_actions.x,
+                    layout.card_actions.y.saturating_add(height - 1),
+                    layout.card_actions.width,
+                    1,
+                );
+                render_rail_pager(
+                    f,
+                    pager,
+                    page,
+                    pages,
+                    rail_hidden_count(&rows, start, end),
+                    &mut hit_map,
+                );
+            }
         }
     } else {
         let mut card_buttons = detail_card_action_buttons(detail);
@@ -939,10 +1300,88 @@ pub(super) fn draw_detail(app: &App, f: &mut Frame, area: Rect) {
         if !runs_fit {
             card_buttons.extend(run_buttons.iter().copied());
         }
-        ActionStrip {
-            buttons: &card_buttons,
+        let mut hit_map = app.hit_map.borrow_mut();
+        let rows = detail_rail_rows(detail, &layout, false);
+        let height = layout.card_actions.height;
+        let pages = rail_page_count(&rows, height);
+        if height == 0 {
+            // No allocated rail: paint and register nothing.
+        } else if pages <= 1 {
+            if card_rail_fits_one_row(&card_buttons, layout.card_actions.width) {
+                // Unchanged single-row layout for ordinary cards.
+                ActionStrip {
+                    buttons: &card_buttons,
+                }
+                .render(f, layout.card_actions, &mut hit_map);
+            } else {
+                // Measured, wrapped rail: every visible control gets its
+                // intrinsic chip width on one of the allocated rows, so nine
+                // configured actions stay identifiable instead of collapsing
+                // into blank click targets.
+                for (row, buttons) in rows.iter().enumerate() {
+                    let rect = Rect::new(
+                        layout.card_actions.x,
+                        layout.card_actions.y.saturating_add(row as u16),
+                        layout.card_actions.width,
+                        1,
+                    );
+                    ActionStrip { buttons }.render_full_row(f, rect, &mut hit_map);
+                }
+            }
+        } else if height > 0 {
+            // Height-capped rail: the current page's rows keep their chips
+            // (and hit zones) and the last rail row pages the rest; hidden
+            // rows keep no mouse zones while staying on `1`-`9`. A 1-row
+            // overflow shares its single row between the page's packed row
+            // and the pager instead of going pager-only.
+            let page = app.detail_rail_page.min(pages.saturating_sub(1));
+            let (start, end) = rail_page_window(rows.len(), height, page);
+            if pages > 1 && height == 1 {
+                let (action_rect, pager_rect) = rail_single_row_split(layout.card_actions);
+                // Same action-half repack as Compact: page controls packed
+                // for 22 cells, never full-width rows squeezed into the half.
+                let single_rows =
+                    detail_rail_single_row_rows(detail, &layout, false, action_rect.width);
+                let single_pages = rail_page_count(&single_rows, 1).max(1);
+                let single_page = app.detail_rail_page.min(single_pages - 1);
+                let (s_start, s_end) = rail_page_window(single_rows.len(), 1, single_page);
+                if let Some(buttons) = single_rows.get(s_start) {
+                    ActionStrip { buttons }.render_full_row(f, action_rect, &mut hit_map);
+                }
+                render_rail_pager(
+                    f,
+                    pager_rect,
+                    single_page,
+                    single_pages,
+                    rail_hidden_count(&single_rows, s_start, s_end),
+                    &mut hit_map,
+                );
+            } else {
+                for (row, buttons) in rows.iter().enumerate().take(end).skip(start) {
+                    let rect = Rect::new(
+                        layout.card_actions.x,
+                        layout.card_actions.y.saturating_add((row - start) as u16),
+                        layout.card_actions.width,
+                        1,
+                    );
+                    ActionStrip { buttons }.render_full_row(f, rect, &mut hit_map);
+                }
+                let pager = Rect::new(
+                    layout.card_actions.x,
+                    layout.card_actions.y.saturating_add(height - 1),
+                    layout.card_actions.width,
+                    1,
+                );
+                render_rail_pager(
+                    f,
+                    pager,
+                    page,
+                    pages,
+                    rail_hidden_count(&rows, start, end),
+                    &mut hit_map,
+                );
+            }
         }
-        .render(f, layout.card_actions, &mut app.hit_map.borrow_mut());
     }
 
     draw_comments(app, f, detail, &layout);

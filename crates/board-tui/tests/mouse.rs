@@ -1464,3 +1464,710 @@ fn card_detail_card_action_button_click_runs_the_action() {
         assert_eq!(d.app.screen, Screen::CardDetail);
     }
 }
+
+#[test]
+fn card_detail_nine_actions_stay_clickable_in_every_layout() {
+    use board_tui::command::FakeCommand;
+
+    for (w, h) in [(40, 20), (80, 24), (120, 40)] {
+        let mut d = setup_card_detail();
+        let commands = FakeCommand::default();
+        d.set_command_launcher(Box::new(commands.clone()));
+        // The card is on `Done` (no space), so the actions are allowed to run
+        // from the TUI's own directory.
+        d.app.detail.as_mut().unwrap().actions = (1..=9)
+            .map(|i| board_core::protocol::CardAction {
+                label: format!("Act {i}"),
+                argv: vec![format!("tool-{i}")],
+            })
+            .collect();
+
+        let text = render_at(&mut d, w, h);
+        for i in 1..=9 {
+            assert!(
+                text.contains(&format!("[ Act {i} ]")),
+                "{w}x{h}: action {i} not rendered\n{text}"
+            );
+        }
+
+        let zones = hit_zones(&d, w, h);
+        let action_zones: Vec<u8> = zones
+            .iter()
+            .filter_map(|(_, z)| match z {
+                Zone::Action(UiAction::CardAction(i)) => Some(*i),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            action_zones.len(),
+            9,
+            "{w}x{h}: every configured action needs exactly one hit zone: {action_zones:?}"
+        );
+        // No action hit zone may live outside the allocated rail rect.
+        let rail = board_tui::view::detail_layout(&d.app, Rect::new(0, 0, w, h)).card_actions;
+        assert!(!rail.is_empty(), "{w}x{h}: rail must be allocated");
+        for ((x, y), zone) in zones.iter() {
+            if matches!(zone, Zone::Action(UiAction::CardAction(_))) {
+                assert!(
+                    *x >= rail.x
+                        && *x < rail.x.saturating_add(rail.width)
+                        && *y >= rail.y
+                        && *y < rail.y.saturating_add(rail.height),
+                    "{w}x{h}: action zone {zone:?} at ({x},{y}) outside rail {rail:?}"
+                );
+            }
+        }
+
+        // Clicking the ninth control runs the ninth argv.
+        let (x, y) = zones
+            .into_iter()
+            .find_map(|(p, z)| (z == Zone::Action(UiAction::CardAction(8))).then_some(p))
+            .unwrap_or_else(|| panic!("{w}x{h}: ninth action button"));
+        d.handle(left_down(x, y));
+        let calls = commands.calls.borrow();
+        assert_eq!(calls.len(), 1, "{w}x{h}");
+        assert_eq!(calls[0].argv, vec!["tool-9".to_string()]);
+    }
+}
+
+#[test]
+fn card_detail_nine_long_actions_awaiting_stay_clickable_and_bounded() {
+    use board_tui::command::FakeCommand;
+
+    // Awaiting adds `[ Confirm done ]`; long labels force the Regular/Wide
+    // rail onto several measured rows. Every control must stay identifiable
+    // with its hit zone inside the allocated rail.
+    for (w, h) in [(80, 24), (120, 40)] {
+        let mut d = setup_card_detail();
+        let commands = FakeCommand::default();
+        d.set_command_launcher(Box::new(commands.clone()));
+        let detail = d.app.detail.as_mut().unwrap();
+        detail.card.status = board_core::protocol::CardStatus::Awaiting;
+        detail.card.space_ref = None;
+        detail.card.space_cwd = None;
+        detail.actions = (1..=9)
+            .map(|i| board_core::protocol::CardAction {
+                label: format!("Deploy service {i}"),
+                argv: vec![format!("tool-{i}")],
+            })
+            .collect();
+
+        let text = render_at(&mut d, w, h);
+        for i in 1..=9 {
+            assert!(
+                text.contains(&format!("Deploy service {i}")),
+                "{w}x{h}: action {i} not identifiable\n{text}"
+            );
+        }
+        assert!(
+            text.contains("[ Confirm"),
+            "{w}x{h}: Confirm missing\n{text}"
+        );
+        assert!(text.contains("[ Edit"), "{w}x{h}: Edit missing\n{text}");
+
+        let zones = hit_zones(&d, w, h);
+        let action_zones: Vec<u8> = zones
+            .iter()
+            .filter_map(|(_, z)| match z {
+                Zone::Action(UiAction::CardAction(i)) => Some(*i),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            action_zones.len(),
+            9,
+            "{w}x{h}: every configured action needs exactly one hit zone: {action_zones:?}"
+        );
+        let rail = board_tui::view::detail_layout(&d.app, Rect::new(0, 0, w, h)).card_actions;
+        assert!(
+            rail.height > 1,
+            "{w}x{h}: long nine-action rail must wrap (height {0})",
+            rail.height
+        );
+        // Regular/Wide have room to grow here, so no pager may appear.
+        assert!(
+            !text.contains("‹") && !text.contains("more"),
+            "{w}x{h}: uncapped rail must not show the pager"
+        );
+        for ((x, y), zone) in zones.iter() {
+            if matches!(zone, Zone::Action(UiAction::CardAction(_))) {
+                assert!(
+                    *x >= rail.x
+                        && *x < rail.x.saturating_add(rail.width)
+                        && *y >= rail.y
+                        && *y < rail.y.saturating_add(rail.height),
+                    "{w}x{h}: action zone {zone:?} at ({x},{y}) outside rail {rail:?}"
+                );
+            }
+        }
+
+        let (x, y) = zones
+            .into_iter()
+            .find_map(|(p, z)| (z == Zone::Action(UiAction::CardAction(8))).then_some(p))
+            .unwrap_or_else(|| panic!("{w}x{h}: ninth action button"));
+        d.handle(left_down(x, y));
+        let calls = commands.calls.borrow();
+        assert_eq!(calls.len(), 1, "{w}x{h}");
+        assert_eq!(calls[0].argv, vec!["tool-9".to_string()]);
+    }
+}
+
+#[test]
+fn card_detail_compact_long_actions_overflow_pages_with_mouse_and_keys() {
+    use board_tui::command::FakeCommand;
+
+    // Compact + Awaiting + nine long labels exhausts the capped rail: the
+    // last rail row shows the `+N more ‹i/n›` pager with clickable `‹`/`›`
+    // halves, every page keeps hit zones inside the rail, and paging reveals
+    // every label with a mouse target — including the ninth argv and the
+    // built-ins. Hidden rows keep no mouse zones; digits work on all pages.
+    for (w, h) in [(40, 20), (40, 14)] {
+        let mut d = setup_card_detail();
+        let commands = FakeCommand::default();
+        d.set_command_launcher(Box::new(commands.clone()));
+        let detail = d.app.detail.as_mut().unwrap();
+        detail.card.status = board_core::protocol::CardStatus::Awaiting;
+        detail.card.space_ref = None;
+        detail.card.space_cwd = None;
+        detail.actions = (1..=9)
+            .map(|i| board_core::protocol::CardAction {
+                label: format!("Deploy service {i} to production"),
+                argv: vec![format!("tool-{i}")],
+            })
+            .collect();
+
+        let text = render_at(&mut d, w, h);
+        assert!(
+            text.contains("more") && text.contains("‹") && text.contains("›"),
+            "{w}x{h}: capped rail must show the pager\n{text}"
+        );
+        assert_eq!(d.app.detail_rail_page, 0);
+        // Built-ins are reachable on the first page: `[ Edit ]` has a zone.
+        let zones = hit_zones(&d, w, h);
+        let edit_point = zones
+            .iter()
+            .find_map(|(p, z)| (z == &Zone::Action(UiAction::EditCard)).then_some(*p))
+            .unwrap_or_else(|| panic!("{w}x{h}: first page must keep Edit"));
+        let rail = board_tui::view::detail_layout(&d.app, Rect::new(0, 0, w, h)).card_actions;
+        assert!(!rail.is_empty(), "{w}x{h}: rail must be allocated");
+        // The pager halves themselves are clickable.
+        let next_point = zones
+            .iter()
+            .find_map(|(p, z)| (z == &Zone::RailPageNext).then_some(*p))
+            .unwrap_or_else(|| panic!("{w}x{h}: pager needs a next zone"));
+        assert!(
+            zones.iter().any(|(_, z)| z == &Zone::RailPagePrev),
+            "{w}x{h}: pager needs a prev zone"
+        );
+        // The ninth action starts with no mouse zone anywhere.
+        assert!(
+            !zones
+                .iter()
+                .any(|(_, z)| z == &Zone::Action(UiAction::CardAction(8))),
+            "{w}x{h}: hidden ninth action must keep no mouse zone on page 0"
+        );
+        // Clicking `›` pages forward and reveals new labels.
+        d.handle(left_down(next_point.0, next_point.1));
+        assert_eq!(d.app.detail_rail_page, 1, "{w}x{h}: pager click must page");
+        // The wheel over the rail pages too (back up to the first page).
+        let rail = board_tui::view::detail_layout(&d.app, Rect::new(0, 0, w, h)).card_actions;
+        d.handle(board_tui::testkit::mouse(
+            MouseEventKind::ScrollUp,
+            rail.x + 1,
+            rail.y,
+        ));
+        assert_eq!(d.app.detail_rail_page, 0, "{w}x{h}: rail wheel must page");
+        // Page to the last page: the trailing built-ins (`[ Add ]` plus
+        // `[ Open ] [ Retry ] [ Cancel ]`, which join the rail here because
+        // the Runs section has no room) must all keep mouse zones there.
+        for _ in 0..16 {
+            let before = d.app.detail_rail_page;
+            d.handle(key_msg(KeyCode::Right));
+            if d.app.detail_rail_page == before {
+                break;
+            }
+        }
+        let last_zones = hit_zones_after_render(&mut d, w, h);
+        for (label, action) in [
+            ("Add", UiAction::AddComment),
+            ("Open", UiAction::FocusRunPane),
+            ("Retry", UiAction::RetryRun),
+            ("Cancel", UiAction::CancelRun),
+        ] {
+            assert!(
+                last_zones.iter().any(|(_, z)| z == &Zone::Action(action)),
+                "{w}x{h}: last page must keep {label} clickable"
+            );
+        }
+        // Page back (bounded) until the ninth control gains a mouse zone
+        // inside the rail, then click it: the ninth argv runs by mouse.
+        let mut ninth: Option<(u16, u16)> = None;
+        for _ in 0..16 {
+            let zones = hit_zones_after_render(&mut d, w, h);
+            if let Some((p, _)) = zones
+                .iter()
+                .find(|(_, z)| z == &Zone::Action(UiAction::CardAction(8)))
+            {
+                ninth = Some(*p);
+                break;
+            }
+            d.handle(key_msg(KeyCode::Left));
+        }
+        let (x, y) = ninth.unwrap_or_else(|| {
+            panic!(
+                "{w}x{h}: paging must reveal the ninth mouse zone\n{}",
+                render_at(&mut d, w, h)
+            )
+        });
+        let rail = board_tui::view::detail_layout(&d.app, Rect::new(0, 0, w, h)).card_actions;
+        assert!(
+            x >= rail.x
+                && x < rail.x.saturating_add(rail.width)
+                && y >= rail.y
+                && y < rail.y.saturating_add(rail.height),
+            "{w}x{h}: ninth zone at ({x},{y}) outside rail {rail:?}"
+        );
+        assert!(
+            render_at(&mut d, w, h).contains("Deploy service 9"),
+            "{w}x{h}: ninth label must be revealed before clicking"
+        );
+        d.handle(left_down(x, y));
+        let calls = commands.calls.borrow();
+        assert_eq!(calls.len(), 1, "{w}x{h}: ninth action click must run");
+        assert_eq!(calls[0].argv, vec!["tool-9".to_string()]);
+        drop(calls);
+        // Every zone on every visited page stayed inside the rail.
+        for ((zx, zy), zone) in hit_zones(&d, w, h) {
+            if matches!(zone, Zone::Action(UiAction::CardAction(_))) {
+                assert!(
+                    zx >= rail.x
+                        && zx < rail.x.saturating_add(rail.width)
+                        && zy >= rail.y
+                        && zy < rail.y.saturating_add(rail.height),
+                    "{w}x{h}: action zone {zone:?} at ({zx},{zy}) outside rail {rail:?}"
+                );
+            }
+        }
+        // Built-in mouse execution at short height: a fresh detail keeps
+        // `[ Edit ]` clickable on page 0 and opens the card form.
+        let mut e = setup_card_detail();
+        e.set_command_launcher(Box::new(FakeCommand::default()));
+        let detail = e.app.detail.as_mut().unwrap();
+        detail.card.status = board_core::protocol::CardStatus::Awaiting;
+        detail.card.space_ref = None;
+        detail.card.space_cwd = None;
+        detail.actions = (1..=9)
+            .map(|i| board_core::protocol::CardAction {
+                label: format!("Deploy service {i} to production"),
+                argv: vec![format!("tool-{i}")],
+            })
+            .collect();
+        render_at(&mut e, w, h);
+        let (ex, ey) = hit_zones(&e, w, h)
+            .into_iter()
+            .find_map(|(p, z)| (z == Zone::Action(UiAction::EditCard)).then_some(p))
+            .unwrap_or_else(|| panic!("{w}x{h}: Edit must stay clickable"));
+        // Silence unused-variable clarity: verified above via edit_point.
+        let _ = edit_point;
+        e.handle(left_down(ex, ey));
+        assert_eq!(
+            e.app.screen,
+            Screen::CardForm,
+            "{w}x{h}: clicking Edit must open the card form"
+        );
+    }
+}
+
+#[test]
+fn card_detail_compact_single_row_rail_keeps_action_and_pager_clickable() {
+    use board_tui::command::FakeCommand;
+
+    // Single-row rail (40x13, or 40x14 with a toast): the row is split between
+    // the page's packed row and the pager, so the first action and both pager
+    // halves stay clickable, paging reveals the ninth label with an in-bounds
+    // zone that runs tool-9 by mouse, and the trailing built-ins stay reachable.
+    for (w, h, toast) in [(40, 13, false), (40, 14, true)] {
+        let mut d = setup_card_detail();
+        let commands = FakeCommand::default();
+        d.set_command_launcher(Box::new(commands.clone()));
+        let detail = d.app.detail.as_mut().unwrap();
+        detail.card.status = board_core::protocol::CardStatus::Awaiting;
+        detail.card.space_ref = None;
+        detail.card.space_cwd = None;
+        detail.actions = (1..=9)
+            .map(|i| board_core::protocol::CardAction {
+                label: format!("Deploy service {i} to production"),
+                argv: vec![format!("tool-{i}")],
+            })
+            .collect();
+        if toast {
+            d.app
+                .set_toast("card action refused: no configured cwd", true);
+        }
+
+        let text = render_at(&mut d, w, h);
+        let rail = board_tui::view::detail_layout(&d.app, Rect::new(0, 0, w, h)).card_actions;
+        assert_eq!(
+            rail.height, 1,
+            "{w}x{h} toast={toast}: single-row rail fixture"
+        );
+        assert!(
+            text.contains("[ Edit"),
+            "{w}x{h} toast={toast}: first action must stay visible\n{text}"
+        );
+        assert!(
+            text.contains("more") && text.contains("‹") && text.contains("›"),
+            "{w}x{h} toast={toast}: pager must stay visible\n{text}"
+        );
+        assert!(
+            !text.contains("Deploy service 9"),
+            "{w}x{h} toast={toast}: ninth action must start hidden\n{text}"
+        );
+        let zones = hit_zones(&d, w, h);
+        let edit_point = zones
+            .iter()
+            .find_map(|(p, z)| (z == &Zone::Action(UiAction::EditCard)).then_some(*p))
+            .unwrap_or_else(|| panic!("{w}x{h} toast={toast}: Edit must stay clickable"));
+        assert!(
+            edit_point.0 >= rail.x
+                && edit_point.0 < rail.x.saturating_add(rail.width)
+                && edit_point.1 == rail.y,
+            "{w}x{h} toast={toast}: Edit at {edit_point:?} outside rail {rail:?}"
+        );
+        let next_point = zones
+            .iter()
+            .find_map(|(p, z)| (z == &Zone::RailPageNext).then_some(*p))
+            .unwrap_or_else(|| panic!("{w}x{h} toast={toast}: pager needs a next zone"));
+        assert!(
+            zones.iter().any(|(_, z)| z == &Zone::RailPagePrev),
+            "{w}x{h} toast={toast}: pager needs a prev zone"
+        );
+        assert!(
+            !zones
+                .iter()
+                .any(|(_, z)| z == &Zone::Action(UiAction::CardAction(8))),
+            "{w}x{h} toast={toast}: hidden ninth must keep no zone on page 0"
+        );
+
+        // Clicking › pages forward; the wheel pages back.
+        d.handle(left_down(next_point.0, next_point.1));
+        assert_eq!(
+            d.app.detail_rail_page, 1,
+            "{w}x{h} toast={toast}: pager click must page"
+        );
+        let rail = board_tui::view::detail_layout(&d.app, Rect::new(0, 0, w, h)).card_actions;
+        d.handle(board_tui::testkit::mouse(
+            MouseEventKind::ScrollUp,
+            rail.x + 1,
+            rail.y,
+        ));
+        assert_eq!(
+            d.app.detail_rail_page, 0,
+            "{w}x{h} toast={toast}: rail wheel must page"
+        );
+
+        // Single-row pages are repacked for the 22-cell action half, so the
+        // trailing run controls no longer share one squeezed row: each keeps
+        // a labelled, in-rail zone on its own page. Scan every page and
+        // require each label + zone to appear together somewhere.
+        for _ in 0..32 {
+            let before = d.app.detail_rail_page;
+            d.handle(key_msg(KeyCode::Right));
+            if d.app.detail_rail_page == before {
+                break;
+            }
+        }
+        let last_page = d.app.detail_rail_page;
+        for _ in 0..32 {
+            d.handle(key_msg(KeyCode::Left));
+            if d.app.detail_rail_page == 0 {
+                break;
+            }
+        }
+        let mut seen: Vec<(Zone, String, (u16, u16))> = Vec::new();
+        for _ in 0..=last_page {
+            let text = render_at(&mut d, w, h);
+            let rail = board_tui::view::detail_layout(&d.app, Rect::new(0, 0, w, h)).card_actions;
+            for (pt, zone) in hit_zones(&d, w, h) {
+                if matches!(
+                    zone,
+                    Zone::Action(
+                        UiAction::AddComment
+                            | UiAction::FocusRunPane
+                            | UiAction::RetryRun
+                            | UiAction::CancelRun
+                    )
+                ) && pt.1 == rail.y
+                    && pt.0 >= rail.x
+                    && pt.0 < rail.x.saturating_add(rail.width)
+                    && !seen.iter().any(|(z, _, _)| *z == zone)
+                {
+                    seen.push((zone, text.clone(), pt));
+                }
+            }
+            d.handle(key_msg(KeyCode::Right));
+        }
+        for (label, action) in [
+            ("Open", UiAction::FocusRunPane),
+            ("Retry", UiAction::RetryRun),
+            ("Cancel", UiAction::CancelRun),
+        ] {
+            let (_, text, pt) = seen
+                .iter()
+                .find(|(z, _, _)| *z == Zone::Action(action))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{w}x{h} toast={toast}: {label} must be reachable on some single-row page"
+                    )
+                });
+            assert!(
+                text.contains(&format!("[ {label}")),
+                "{w}x{h} toast={toast}: {label} zone at {pt:?} needs its label visible\n{text}"
+            );
+        }
+
+        // Page back until the ninth control gains an in-bounds zone, then
+        // click it: the ninth argv runs by mouse with its label revealed.
+        let mut ninth: Option<(u16, u16)> = None;
+        for _ in 0..32 {
+            let zones = hit_zones_after_render(&mut d, w, h);
+            if let Some((p, _)) = zones
+                .iter()
+                .find(|(_, z)| z == &Zone::Action(UiAction::CardAction(8)))
+            {
+                ninth = Some(*p);
+                break;
+            }
+            d.handle(key_msg(KeyCode::Left));
+        }
+        let (x, y) = ninth.unwrap_or_else(|| {
+            panic!(
+                "{w}x{h} toast={toast}: paging must reveal the ninth mouse zone\n{}",
+                render_at(&mut d, w, h)
+            )
+        });
+        let rail = board_tui::view::detail_layout(&d.app, Rect::new(0, 0, w, h)).card_actions;
+        assert!(
+            x >= rail.x
+                && x < rail.x.saturating_add(rail.width)
+                && y >= rail.y
+                && y < rail.y.saturating_add(rail.height),
+            "{w}x{h} toast={toast}: ninth zone at ({x},{y}) outside rail {rail:?}"
+        );
+        assert!(
+            render_at(&mut d, w, h).contains("Deploy service 9"),
+            "{w}x{h} toast={toast}: ninth label must be revealed before clicking"
+        );
+        d.handle(left_down(x, y));
+        let calls = commands.calls.borrow();
+        assert_eq!(
+            calls.len(),
+            1,
+            "{w}x{h} toast={toast}: ninth click must run"
+        );
+        assert_eq!(calls[0].argv, vec!["tool-9".to_string()]);
+        drop(calls);
+
+        // Built-in mouse execution at single-row height: a fresh detail keeps
+        // `[ Edit ]` clickable on page 0 and opens the card form.
+        let mut e = setup_card_detail();
+        e.set_command_launcher(Box::new(FakeCommand::default()));
+        let detail = e.app.detail.as_mut().unwrap();
+        detail.card.status = board_core::protocol::CardStatus::Awaiting;
+        detail.card.space_ref = None;
+        detail.card.space_cwd = None;
+        detail.actions = (1..=9)
+            .map(|i| board_core::protocol::CardAction {
+                label: format!("Deploy service {i} to production"),
+                argv: vec![format!("tool-{i}")],
+            })
+            .collect();
+        if toast {
+            e.app
+                .set_toast("card action refused: no configured cwd", true);
+        }
+        render_at(&mut e, w, h);
+        let (ex, ey) = hit_zones(&e, w, h)
+            .into_iter()
+            .find_map(|(p, z)| (z == Zone::Action(UiAction::EditCard)).then_some(p))
+            .unwrap_or_else(|| panic!("{w}x{h} toast={toast}: Edit must stay clickable"));
+        e.handle(left_down(ex, ey));
+        assert_eq!(
+            e.app.screen,
+            Screen::CardForm,
+            "{w}x{h} toast={toast}: clicking Edit must open the card form"
+        );
+    }
+}
+#[test]
+fn card_detail_compact_single_row_short_labels_stay_clickable() {
+    use board_tui::command::FakeCommand;
+    for (w, h, toast) in [(40, 13, false), (40, 14, true)] {
+        let mut d = setup_card_detail();
+        let commands = FakeCommand::default();
+        d.set_command_launcher(Box::new(commands.clone()));
+        let detail = d.app.detail.as_mut().unwrap();
+        detail.card.status = board_core::protocol::CardStatus::Done;
+        detail.card.space_ref = None;
+        detail.card.space_cwd = None;
+        detail.actions = (1..=9)
+            .map(|i| board_core::protocol::CardAction {
+                label: format!("A{i}"),
+                argv: vec![format!("tool-{i}")],
+            })
+            .collect();
+        if toast {
+            d.app
+                .set_toast("card action refused: no configured cwd", true);
+        }
+        let text = render_at(&mut d, w, h);
+        let layout = board_tui::view::detail_layout(&d.app, Rect::new(0, 0, w, h));
+        let rail = layout.card_actions;
+        assert_eq!(rail.height, 1, "{w}x{h} toast={toast}: single-row rail");
+        let (action_rect, pager_rect) = board_tui::view::rail_single_row_split(rail);
+        assert_eq!(action_rect.width, 22);
+        let single_owned: Vec<Vec<(String, UiAction)>> =
+            board_tui::view::detail_rail_single_row_rows(
+                d.app.detail.as_ref().unwrap(),
+                &layout,
+                true,
+                action_rect.width,
+            )
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|b| (b.compact_label.to_string(), b.action))
+                    .collect()
+            })
+            .collect();
+        assert!(single_owned.len() > 1);
+        assert!(
+            text.contains("[ Edit"),
+            "{w}x{h} toast={toast}: Edit visible\n{text}"
+        );
+        assert!(
+            text.contains("more") && text.contains("\u{2039}") && text.contains("\u{203a}"),
+            "{w}x{h} toast={toast}: pager visible\n{text}"
+        );
+        let rail_row = text.lines().nth(rail.y as usize).unwrap_or("");
+        assert!(!rail_row.contains("[  ]"), "blank chip\n{rail_row}");
+        assert!(
+            !rail_row.contains("[ \u{2026} ]") && !rail_row.contains("[ \u{2026}"),
+            "anonymous chip\n{rail_row}"
+        );
+        let mut seen: Vec<String> = Vec::new();
+        let last_page = {
+            let mut last = 0;
+            for _ in 0..32 {
+                let before = d.app.detail_rail_page;
+                d.handle(key_msg(KeyCode::Right));
+                if d.app.detail_rail_page == before {
+                    break;
+                }
+                last = d.app.detail_rail_page;
+            }
+            for _ in 0..32 {
+                d.handle(key_msg(KeyCode::Left));
+                if d.app.detail_rail_page == 0 {
+                    break;
+                }
+            }
+            last
+        };
+        let mut ninth_point: Option<(u16, u16)> = None;
+        for page in 0..=last_page {
+            let t = render_at(&mut d, w, h);
+            let rail = board_tui::view::detail_layout(&d.app, Rect::new(0, 0, w, h)).card_actions;
+            let rail_row = t.lines().nth(rail.y as usize).unwrap_or("");
+            assert!(!rail_row.contains("[  ]"), "blank page {page}\n{rail_row}");
+            assert!(
+                !rail_row.contains("[ \u{2026} ]"),
+                "anonymous page {page}\n{rail_row}"
+            );
+            let zones = hit_zones(&d, w, h);
+            let expected = single_owned[d.app.detail_rail_page].clone();
+            for (label, _action) in &expected {
+                let want = format!("[ {label} ]");
+                assert!(t.contains(&want), "{want:?} missing page {page}\n{t}");
+                if label.starts_with('A') && !seen.contains(label) {
+                    seen.push(label.clone());
+                }
+            }
+            for (pt, zone) in &zones {
+                if pt.1 != rail.y || pt.0 < rail.x || pt.0 >= rail.x + rail.width {
+                    continue;
+                }
+                match zone {
+                    Zone::Action(a) => {
+                        assert!(
+                            pt.0 >= action_rect.x && pt.0 < action_rect.x + action_rect.width,
+                            "action {a:?} at {pt:?} outside {action_rect:?}"
+                        );
+                        let owned_has = expected.iter().any(|(_, ea)| ea == a);
+                        assert!(owned_has, "zone {a:?} not on page {page}");
+                        let label = expected
+                            .iter()
+                            .find(|(_, ea)| ea == a)
+                            .map(|(l, _)| l.clone())
+                            .unwrap();
+                        assert!(
+                            rail_row.contains(label.as_str()),
+                            "zone {a:?} without label page {page}\n{rail_row}"
+                        );
+                        if *a == UiAction::CardAction(8) && ninth_point.is_none() {
+                            ninth_point = Some(*pt);
+                        }
+                    }
+                    Zone::RailPagePrev | Zone::RailPageNext => {
+                        assert!(
+                            pt.0 >= pager_rect.x && pt.0 < pager_rect.x + pager_rect.width,
+                            "pager {zone:?} at {pt:?} outside {pager_rect:?}"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            let rail_actions: Vec<Zone> = zones
+                .iter()
+                .filter(|(pt, z)| {
+                    pt.1 == rail.y
+                        && pt.0 >= action_rect.x
+                        && pt.0 < action_rect.x + action_rect.width
+                        && matches!(z, Zone::Action(_))
+                })
+                .map(|(_, z)| *z)
+                .collect();
+            assert_eq!(rail_actions.len(), expected.len());
+            d.handle(key_msg(KeyCode::Right));
+        }
+        for i in 1..=9 {
+            assert!(seen.contains(&format!("A{i}")), "A{i} never visible");
+        }
+        assert!(
+            ninth_point.is_some(),
+            "{w}x{h} toast={toast}: ninth must gain a zone on its page"
+        );
+        // Page back until the ninth zone is current, then click it with its
+        // label freshly verified visible.
+        let (x, y) = loop {
+            let zones = hit_zones_after_render(&mut d, w, h);
+            if let Some((pt, _)) = zones
+                .iter()
+                .find(|(_, z)| *z == Zone::Action(UiAction::CardAction(8)))
+            {
+                let text = render_at(&mut d, w, h);
+                assert!(
+                    text.contains("[ A9 ]"),
+                    "{w}x{h} toast={toast}: ninth label visible before click\n{text}"
+                );
+                break *pt;
+            }
+            d.handle(key_msg(KeyCode::Left));
+        };
+        d.handle(left_down(x, y));
+        let calls = commands.calls.borrow();
+        assert_eq!(calls.len(), 1, "ninth click must run");
+        assert_eq!(calls[0].argv, vec!["tool-9".to_string()]);
+        drop(calls);
+    }
+}

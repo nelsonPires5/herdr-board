@@ -130,7 +130,8 @@ pub struct CardActionDef {
     /// Empty = every column.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub columns: Vec<String>,
-    /// Command the TUI runs in the foreground, in the card's space directory.
+    /// Literal command the TUI runs in the foreground in the card's configured
+    /// space directory (an explicit cwd is required for a card with a space).
     pub argv: Vec<String>,
 }
 

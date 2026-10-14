@@ -214,7 +214,9 @@ impl Driver {
                 }
             }
             Err(e) => {
-                // A spawn failure still suspended and restored the terminal.
+                // The terminal was suspended before the spawn was attempted
+                // (unless argv was empty, which is rejected up front), so a
+                // spawn failure still needs a full redraw.
                 self.needs_full_redraw = true;
                 self.app.set_toast(e.to_string(), true);
             }

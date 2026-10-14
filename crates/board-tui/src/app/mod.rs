@@ -167,6 +167,11 @@ pub struct App {
     /// the selection stays meaningful while comments have key focus — see
     /// `focused_run`.
     pub detail_run_sel: usize,
+    /// Page index into the card detail's action rail while it overflows its
+    /// allocated height (`←`/`→` or `<`/`>` pages it; the wheel over the rail
+    /// and the pager's `‹`/`›` halves do the same). Reset when detail opens,
+    /// clamped on every load/render so a reload never strands it past the end.
+    pub detail_rail_page: usize,
     /// The comment-history sheet's state (`Screen::CommentHistory`); `None`
     /// when not open.
     pub comment_history: Option<CommentHistoryView>,
@@ -234,6 +239,7 @@ impl App {
             detail_runs_scroll: 0,
             detail_comment_sel: 0,
             detail_run_sel: 0,
+            detail_rail_page: 0,
             comment_history: None,
             form: None,
             picker: None,
@@ -287,6 +293,7 @@ impl App {
         self.detail_runs_scroll = 0;
         self.detail_comment_sel = 0;
         self.detail_run_sel = 0;
+        self.detail_rail_page = 0;
         self.comment_history = None;
         self.form = None;
         self.picker = None;

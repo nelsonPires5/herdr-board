@@ -160,13 +160,33 @@ argv = ["my-review-tool", "--base", "origin/main"]
   before `[ Add comment ]` and bound to the keys `1`–`9`. Further matches are ignored.
 - The TUI runs `argv` in the foreground: it suspends itself, runs the command attached to the
   terminal, waits for it, then redraws and reloads the card. A non-zero exit is reported as a toast.
-- The command runs in the card's space directory when it has one, else in the TUI's own directory,
-  with `BOARD_ACTION_CARD_ID`, `BOARD_ACTION_BOARD_ID`, `BOARD_ACTION_COLUMN_ID`, and (for a card
-  with a space) `BOARD_ACTION_SPACE_REF` set. `BOARD_CARD_ID` is deliberately not set, so a
-  `board comment`/`board done` inside the action is never mistaken for the run's agent.
-- The daemon never runs card actions; it only reports the ones that apply in `card.get` (see
-  [`protocol.md`](protocol.md)). An action with an empty `label` or without a program in `argv` is
-  a config error.
+- The command runs in the card's configured space directory (`space_cwd`). A card associated with a
+  space but without a configured cwd is **refused** with a toast rather than silently running in the
+  TUI's own directory; a configured cwd that no longer exists makes the spawn fail and surfaces as an
+  error. Only a card with no space at all runs in the TUI's own directory.
+- `argv` is executed literally (program plus argument vector), with no shell and no automatic variable
+  expansion. To use `$BOARD_ACTION_CARD_ID` or another variable, wrap the command explicitly, e.g.
+  `argv = ["sh", "-c", "my-tool --card \"$BOARD_ACTION_CARD_ID\""]`.
+- The child gets `BOARD_ACTION_CARD_ID`, `BOARD_ACTION_BOARD_ID`, `BOARD_ACTION_COLUMN_ID`, and (for a
+  card with a space) `BOARD_ACTION_SPACE_REF` set fresh. Inherited actor credentials
+  (`BOARD_CARD_ID`, `BOARD_RUN_ID`, `HERDR_PANE_ID`) and any stale `BOARD_ACTION_*` values are
+  removed first, so `board comment`/`board done` inside an action can never be attributed to the
+  agent run or pane that launched the TUI. Pass `$BOARD_ACTION_CARD_ID` explicitly (see the `sh -c`
+  example) when the action needs to name the open card.
+- The action rail wraps onto as many rows as fit in its allocated height in every layout. When
+  the rail is height-capped (many long labels on a short terminal), it pages: the last rail
+  row shows a pager like `+N more ‹i/n› (1-9 ←/→)`. Page with `←`/`→` (or `<`/`>`), the mouse
+  wheel over the rail, or by clicking the pager's `‹`/`›` halves; every page keeps mouse hit
+  zones only on its visible chips. When only one rail row fits (40x13, or 40x14 while a toast
+  is visible), that row is shared — the page's action chips on the left, the pager on the
+  right — so one action stays labelled and clickable on every page. With no rail row at all
+  there is no action mouse target; digits `1`–`9` (and the built-in keys below) still run on
+  every page and at every height where the detail dialog itself has an area (floor: at 40 wide
+  the Compact detail keeps a mouse target down to 40x13, 40x14 while a toast is visible; below
+  that only the keyboard remains, and with no content rows the dialog has no area). Every configured action stays runnable via its `1`–`9` key on
+  every page, and hidden built-ins via their keys (`e`/`C`/`a`/`Enter`/`c`/`o`/`r`/`x`). The daemon never runs card actions; it only reports the ones that apply in
+  `card.get` (see [`protocol.md`](protocol.md)). An action with an empty `label` or without a program
+  in `argv` is a config error.
 
 ### Environment variables
 
@@ -178,8 +198,8 @@ argv = ["my-review-tool", "--base", "origin/main"]
 | `HERDR_BOARD_CONFIG` | Configuration path override. |
 | `BOARD_SCOPE_PATH` | Canonicalizable scope override for CLI/TUI automation; when no selection exists yet it selects the project at CLI/TUI startup (the selected project otherwise prevails over the current directory). |
 | `BOARD_SPAWNER` | `herdr` or `local`; overrides `[daemon] spawner`. |
-| `BOARD_CARD_ID` / `BOARD_RUN_ID` | Injected into runs; `comment`/`done` use them by default. |
-| `BOARD_ACTION_CARD_ID` / `BOARD_ACTION_BOARD_ID` / `BOARD_ACTION_COLUMN_ID` / `BOARD_ACTION_SPACE_REF` | Set by the TUI on a [card action](#card-actions) command. |
+| `BOARD_CARD_ID` / `BOARD_RUN_ID` | Injected into runs; `comment`/`done` use them by default. Both (and `HERDR_PANE_ID`) are removed from the environment of a [card action](#card-actions) command. |
+| `BOARD_ACTION_CARD_ID` / `BOARD_ACTION_BOARD_ID` / `BOARD_ACTION_COLUMN_ID` / `BOARD_ACTION_SPACE_REF` | Set fresh by the TUI on a [card action](#card-actions) command. |
 | `BOARD_PROMPT` / `BOARD_SYSTEM_PROMPT` | Prompt delivery for custom harnesses. |
 | `BOARD_RESCUE` / `BOARD_RESUME_SESSION_ID` / `BOARD_RESCUED_RUN_ID` | Set on a *reopened* run pane only: marks it as an ephemeral rescue (not a tracked run), names the conversation to resume, and labels which run it continues. A reopened pane gets `BOARD_CARD_ID`/`BOARD_SOCKET`/`BOARD_BIN` but explicitly clears `BOARD_RUN_ID` to empty (treated as unset) — that is the actor credential for `comment`/`done`, and a rescued pane must not be able to write to the finished run. |
 | `OPENCODE_BIN` | OpenCode binary used for live `opencode models --verbose` model discovery; default `opencode` on `PATH`. An unset/invalid binary keeps the static fallback catalog. |

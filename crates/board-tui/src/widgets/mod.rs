@@ -135,6 +135,11 @@ pub enum Zone {
     PickerRow(usize),
     HelpScrollUp,
     HelpScrollDown,
+    /// Card detail action-rail pager halves (`‹` previous, `›` next) shown
+    /// in the last rail row while the rail overflows its allocated height.
+    /// Like `HelpScrollUp`/`Down` they replay the rail's own key path.
+    RailPagePrev,
+    RailPageNext,
     HistoryScrollUp,
     HistoryScrollDown,
     /// Modal background shield; child zones are pushed later and win.
@@ -233,6 +238,19 @@ fn action_button_text(button: &ActionButton<'_>, max_width: u16) -> Option<Strin
         return Some(compact);
     }
     fit_button_text(button.compact_label, max_width)
+}
+
+fn is_anonymous_chip(text: &str) -> bool {
+    // A chip whose inner label is blank or only an ellipsis carries no
+    // action identity (`[ … ]`): it must never own a mouse zone, even as a
+    // last-resort fallback. Truncated-but-identifiable chips
+    // (`[ Deploy service 9 … ]`) keep their prefix and stay clickable.
+    let inner = text
+        .strip_prefix("[ ")
+        .and_then(|s| s.strip_suffix(" ]"))
+        .unwrap_or(text);
+    let inner = inner.trim();
+    inner.is_empty() || inner.chars().all(|c| c == '…' || c.is_whitespace())
 }
 
 fn chip_style(modifier: Modifier) -> Style {
@@ -381,9 +399,18 @@ impl<'a> ActionStrip<'a> {
                 continue;
             }
             let Some(text) = action_button_text(button, rect.width) else {
-                hit_map.push(rect, Zone::Action(button.action));
+                // No identifiable chip fits this cell: register nothing.
+                // A blank clickable rectangle would be an anonymous control.
                 continue;
             };
+            if is_anonymous_chip(&text) {
+                // `[ … ]` carries no identity: paint without a mouse zone.
+                f.render_widget(
+                    Paragraph::new(Span::styled(text, chip_style(Modifier::empty()))),
+                    rect,
+                );
+                continue;
+            }
             render_chip_text(
                 f,
                 rect,
@@ -412,9 +439,9 @@ impl<'a> ActionStrip<'a> {
         let gaps = self.buttons.len().saturating_sub(1) as u16;
         let minimum = min_widths.iter().copied().fold(gaps, u16::saturating_add);
         if minimum > area.width {
-            // This is only a last-resort sub-mobile viewport. Keep the
-            // semantic zones alive and let the shared fitter choose the best
-            // bounded representation rather than dropping a control.
+            // Narrower than one packed row: degrade to the equal-width
+            // fitter, which registers zones only for identifiable chips
+            // and never for blank/anonymous cells.
             self.render(f, area, hit_map);
             return;
         }
@@ -427,13 +454,24 @@ impl<'a> ActionStrip<'a> {
             let width = min_width + per_cell + u16::from((idx as u16) < remainder);
             let rect = Rect::new(x, area.y, width, 1);
             let Some(text) = fit_button_text(button.compact_label, width) else {
-                hit_map.push(rect, Zone::Action(button.action));
+                // No identifiable chip fits: no zone, no blank clickable.
                 x = x.saturating_add(width);
                 if idx + 1 < self.buttons.len() {
                     x = x.saturating_add(1);
                 }
                 continue;
             };
+            if is_anonymous_chip(&text) {
+                f.render_widget(
+                    Paragraph::new(Span::styled(text, chip_style(Modifier::empty()))),
+                    rect,
+                );
+                x = x.saturating_add(width);
+                if idx + 1 < self.buttons.len() {
+                    x = x.saturating_add(1);
+                }
+                continue;
+            }
             render_chip_text(
                 f,
                 rect,
@@ -442,6 +480,65 @@ impl<'a> ActionStrip<'a> {
                 Zone::Action(button.action),
                 Modifier::empty(),
             );
+            x = x.saturating_add(width);
+            if idx + 1 < self.buttons.len() {
+                x = x.saturating_add(1);
+            }
+        }
+    }
+
+    /// Render one already-packed detail-rail row for Regular/Wide. Unlike
+    /// [`Self::render_compact`], it prefers each control's full `[ Label ]`
+    /// chip and registers a hit zone only when that chip actually fits, so a
+    /// wrapped nine-action rail never exposes anonymous blank click cells.
+    pub fn render_full_row(&self, f: &mut Frame, area: Rect, hit_map: &mut HitMap) {
+        if self.buttons.is_empty() || area.is_empty() {
+            return;
+        }
+        let min_widths: Vec<u16> = self
+            .buttons
+            .iter()
+            .map(|button| {
+                let full = button_text(button.label).chars().count() as u16;
+                if full <= area.width {
+                    full
+                } else {
+                    button_text(button.compact_label).chars().count() as u16
+                }
+            })
+            .collect();
+        let gaps = self.buttons.len().saturating_sub(1) as u16;
+        let minimum = min_widths.iter().copied().fold(gaps, u16::saturating_add);
+        if minimum > area.width {
+            // A control is wider than the row: degrade to the compact
+            // representation rather than painting an unidentifiable blank cell.
+            self.render_compact(f, area, hit_map);
+            return;
+        }
+        let extra = area.width - minimum;
+        let per_cell = extra / self.buttons.len() as u16;
+        let remainder = extra % self.buttons.len() as u16;
+        let mut x = area.x;
+        for (idx, (button, min_width)) in self.buttons.iter().zip(min_widths).enumerate() {
+            let width = min_width + per_cell + u16::from((idx as u16) < remainder);
+            let rect = Rect::new(x, area.y, width, 1);
+            if let Some(text) = action_button_text(button, width) {
+                if is_anonymous_chip(&text) {
+                    f.render_widget(
+                        Paragraph::new(Span::styled(text, chip_style(Modifier::empty()))),
+                        rect,
+                    );
+                } else {
+                    render_chip_text(
+                        f,
+                        rect,
+                        &text,
+                        hit_map,
+                        Zone::Action(button.action),
+                        Modifier::empty(),
+                    );
+                }
+            }
             x = x.saturating_add(width);
             if idx + 1 < self.buttons.len() {
                 x = x.saturating_add(1);
