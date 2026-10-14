@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- [#138](https://github.com/nelsonPires5/herdr-board/pull/138) feat: Config-defined card actions (`[[card_action]]`) shown as buttons and bound to `1`-`9` in the TUI card detail dialog.
+
 ## [0.19.1] - 2026-10-14
 
 ### Fixed

@@ -258,7 +258,10 @@ A card selects a **herdr session** (`session`, `null` = the daemon's default ses
   card inside its column and every card's position is recompacted contiguously. A same-column
   reorder never enqueues, never changes status (open runs included), and never triggers the
   column's automatic dispatch, even on an `auto` column with a dispatchable card.
-- `card.get {id}` → `{card, comments:[…], runs:[…]}`. Run objects deliberately omit the internal
+- `card.get {id}` → `{card, comments:[…], runs:[…], actions?:[{label, argv}]}`. `actions` lists the
+  config-defined card actions (`[[card_action]]`, see [`configuration.md`](configuration.md)) that
+  apply to the card's current column, capped at nine; it is omitted when none apply. The daemon
+  never runs them — the TUI does, on the user's request. Run objects deliberately omit the internal
   `system_prompt_snapshot` field and its contents; missing snapshot input deserializes as legacy
   `null`, but the field is never serialized onto the board wire. Schema v7 writes this nullable
   snapshot only for new runs; legacy `NULL` rows are not backfilled and retain their historical

@@ -343,6 +343,10 @@ impl Driver {
             } else {
                 self.app.detail_run_sel.min(runs - 1)
             };
+            // Reloads preserve the rail page when it still exists and pull
+            // it back when the reloaded rail is shorter — mirroring the
+            // comment/run cursor rule above.
+            self.app.clamp_detail_rail_page();
             self.app.scroll_detail_to_latest();
         }
     }

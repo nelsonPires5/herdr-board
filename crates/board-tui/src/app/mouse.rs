@@ -54,6 +54,16 @@ pub(super) fn on_mouse(app: &mut App, m: MouseEvent) -> Vec<Effect> {
                 }
             }
             MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+                // The wheel over the action rail pages it (same as `←`/`→`)
+                // instead of scrolling a history section.
+                if in_rect(detail_layout.card_actions) && !detail_layout.card_actions.is_empty() {
+                    app.page_detail_rail(if matches!(m.kind, MouseEventKind::ScrollDown) {
+                        1
+                    } else {
+                        -1
+                    });
+                    return vec![];
+                }
                 if in_rect(detail_layout.comments) {
                     app.detail_scroll_target = DetailScrollTarget::Comments;
                 } else if in_rect(detail_layout.runs) {
@@ -344,6 +354,14 @@ fn handle_zone(app: &mut App, zone: Zone) -> Option<Vec<Effect>> {
         Zone::HelpScrollDown if app.screen == Screen::Help => {
             Some(super::on_key(app, key(KeyCode::Down)))
         }
+        Zone::RailPagePrev if app.screen == Screen::CardDetail => {
+            app.page_detail_rail(-1);
+            Some(vec![])
+        }
+        Zone::RailPageNext if app.screen == Screen::CardDetail => {
+            app.page_detail_rail(1);
+            Some(vec![])
+        }
         Zone::HistoryScrollUp if app.screen == Screen::CommentHistory => {
             Some(super::on_key(app, key(KeyCode::Up)))
         }
@@ -432,6 +450,9 @@ fn action_event(screen: Screen, action: UiAction) -> Option<KeyEvent> {
         (Screen::CardDetail, A::CancelRun) => (KeyCode::Char('x'), KeyModifiers::NONE),
         (Screen::CardDetail, A::RetryRun) => (KeyCode::Char('r'), KeyModifiers::NONE),
         (Screen::CardDetail, A::CloseDetail) => (KeyCode::Esc, KeyModifiers::NONE),
+        (Screen::CardDetail, A::CardAction(i)) if i < 9 => {
+            (KeyCode::Char(char::from(b'1' + i)), KeyModifiers::NONE)
+        }
 
         (Screen::CardForm | Screen::ColumnForm, A::SubmitForm) => {
             (KeyCode::Enter, KeyModifiers::NONE)

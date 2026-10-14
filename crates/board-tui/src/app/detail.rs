@@ -8,9 +8,10 @@
 //! should land given that geometry, so it stays pure and testable.
 
 use board_core::model::Comment;
-use board_core::protocol::{CardStatus, RunOutcome};
+use board_core::protocol::{CardDetail, CardStatus, RunOutcome};
 use crossterm::event::{KeyCode, KeyEvent};
 
+use crate::command::CommandSpec;
 use crate::forms::Form;
 
 use super::nav::{nav_delta, step_clamped};
@@ -31,6 +32,7 @@ impl App {
         self.detail_runs_scroll = 0;
         self.detail_comment_sel = usize::MAX;
         self.detail_run_sel = usize::MAX;
+        self.detail_rail_page = 0;
         self.screen = Screen::CardDetail;
         vec![Effect::LoadDetail(id)]
     }
@@ -247,6 +249,7 @@ pub(super) fn detail_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
             app.detail_runs_scroll = 0;
             app.detail_comment_sel = 0;
             app.detail_run_sel = 0;
+            app.detail_rail_page = 0;
             app.comment_history = None;
         }
         KeyCode::Char('f') => app.toggle_detail_fullscreen(),
@@ -316,6 +319,23 @@ pub(super) fn detail_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
                 return vec![Effect::CardDuplicate(id)];
             }
         }
+        // `1`-`9` run the card's config-defined actions, in button order.
+        // Digits work on every rail page: paging only changes which controls
+        // are visible, never which index a key runs.
+        KeyCode::Char(c @ '1'..='9') => {
+            let index = usize::from(c as u8 - b'1');
+            match app.detail.as_ref().and_then(|d| card_action_spec(d, index)) {
+                Some(Ok(spec)) => return vec![Effect::RunCardAction(spec)],
+                // Fail closed: never run a space action from an unrelated cwd.
+                Some(Err(reason)) => app.set_toast(reason, true),
+                None => {}
+            }
+        }
+        // A capped action rail pages its packed rows instead of hiding them:
+        // `←`/`→` (and `<`/`>`) move one page, clamped, and are no-ops when
+        // the whole rail fits. Paging never changes digit bindings.
+        KeyCode::Left | KeyCode::Char('<') => app.page_detail_rail(-1),
+        KeyCode::Right | KeyCode::Char('>') => app.page_detail_rail(1),
         KeyCode::Char('c') => {
             if let Some(id) = card_id {
                 app.form = Some(Form::comment(id).returning_to(Screen::CardDetail));
@@ -381,6 +401,55 @@ pub(super) fn detail_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
     vec![]
 }
 
+/// The command for the card's `index`-th action, carrying the card context as
+/// `BOARD_ACTION_*` variables (not `BOARD_CARD_ID`/`BOARD_RUN_ID`/`HERDR_PANE_ID`,
+/// which mark an agent run and are removed at the spawn boundary).
+///
+/// Returns `None` when there is no such action. Returns `Err` when the action
+/// exists but cannot run safely: a card associated with a space must carry an
+/// explicit configured cwd, so the action never silently executes in the TUI's
+/// own directory. Actions should pass `$BOARD_ACTION_CARD_ID` explicitly to
+/// `board` CLI calls.
+fn card_action_spec(detail: &CardDetail, index: usize) -> Option<Result<CommandSpec, String>> {
+    let action = detail.actions.get(index)?;
+    let card = &detail.card;
+    // Whitespace-only cwd is refused like a missing one, but any other path
+    // is preserved verbatim: legitimate leading/trailing-space paths must
+    // not be trimmed before the spawn boundary.
+    let cwd = match card.space_cwd.as_deref() {
+        Some(path) if !path.trim().is_empty() => Some(std::path::PathBuf::from(path)),
+        _ => {
+            if card.space_ref.is_some() {
+                return Some(Err(
+                    "card action refused: this card's space has no configured cwd \
+                     (set the card's space cwd, or use a card without a space)"
+                        .to_string(),
+                ));
+            }
+            None
+        }
+    };
+    let mut env = vec![
+        ("BOARD_ACTION_CARD_ID".to_string(), card.id.to_string()),
+        (
+            "BOARD_ACTION_BOARD_ID".to_string(),
+            card.board_id.to_string(),
+        ),
+        (
+            "BOARD_ACTION_COLUMN_ID".to_string(),
+            card.column_id.to_string(),
+        ),
+    ];
+    if let Some(space) = &card.space_ref {
+        env.push(("BOARD_ACTION_SPACE_REF".to_string(), space.clone()));
+    }
+    Some(Ok(CommandSpec {
+        argv: action.argv.clone(),
+        env,
+        cwd,
+    }))
+}
+
 /// `↑`/`↓` in card detail: move the focused section's cursor when that section
 /// has rows, otherwise fall back to a raw scroll of the whole viewport.
 fn detail_nav(app: &mut App, delta: isize) {
@@ -396,6 +465,55 @@ fn detail_nav(app: &mut App, delta: isize) {
         app.follow_run_focus();
     } else {
         app.scroll_detail(delta);
+    }
+}
+
+impl App {
+    /// Rail pages for the current detail and geometry (0 when the rail fits
+    /// or no detail is open). Single source for the key, pager-click, and
+    /// wheel paths so all three agree on the last page.
+    fn rail_pages(&self) -> usize {
+        let Some(detail) = &self.detail else {
+            return 0;
+        };
+        let layout = crate::view::detail_layout(self, self.last_area);
+        let compact = self.layout_mode() == crate::view::LayoutMode::Compact;
+        let rows = crate::view::detail_rail_rows(detail, &layout, compact);
+        let height = layout.card_actions.height;
+        // A 1-row overflowing rail shares its row with the pager, so pages
+        // are packed for the narrower action half — the same rows the
+        // renderer draws. Otherwise navigation would index full-width rows
+        // while drawing action-half rows (squeezed anonymous clickables).
+        if height == 1 && crate::view::rail_page_count(&rows, height) > 1 {
+            let (action_rect, _) = crate::view::rail_single_row_split(layout.card_actions);
+            let single_rows = crate::view::detail_rail_single_row_rows(
+                detail,
+                &layout,
+                compact,
+                action_rect.width,
+            );
+            return crate::view::rail_page_count(&single_rows, 1);
+        }
+        crate::view::rail_page_count(&rows, height)
+    }
+
+    /// Clamp the rail page after a load or resize: reloads preserve the page
+    /// when it still exists, and a shrunken rail pulls it back in bounds.
+    pub fn clamp_detail_rail_page(&mut self) {
+        let pages = self.rail_pages();
+        self.detail_rail_page = self.detail_rail_page.min(pages.saturating_sub(1));
+    }
+
+    /// Move the action-rail page by `delta`, saturating at both ends. A
+    /// no-op outside card detail or when the whole rail fits.
+    pub(super) fn page_detail_rail(&mut self, delta: isize) {
+        if self.screen != Screen::CardDetail {
+            return;
+        }
+        let pages = self.rail_pages();
+        let max = pages.saturating_sub(1);
+        let current = self.detail_rail_page.min(max);
+        self.detail_rail_page = (current as isize + delta).clamp(0, max as isize) as usize;
     }
 }
 
