@@ -763,6 +763,18 @@ pub struct CardDetail {
     pub card: Card,
     pub comments: Vec<Comment>,
     pub runs: Vec<Run>,
+    /// Config-defined actions offered for the card's column
+    /// (`[[card_action]]`). Omitted when none apply.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<CardAction>,
+}
+
+/// A user-defined card action reported in [`CardDetail`]: the TUI shows it as
+/// a button and runs `argv` itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CardAction {
+    pub label: String,
+    pub argv: Vec<String>,
 }
 
 /// Display labels for a card's optionals, stamped daemon-side. The wire fields

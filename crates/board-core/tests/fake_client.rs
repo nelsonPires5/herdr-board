@@ -2,7 +2,7 @@
 #![cfg(feature = "fake-client")]
 
 use board_core::client::{BoardClient, FakeBoardClient};
-use board_core::config::{Config, HarnessDef};
+use board_core::config::{CardActionDef, Config, HarnessDef};
 use board_core::db::{EnqueueRun, FinalizeRun};
 use board_core::launch::{ExecutionSpec, RunLaunchSpec};
 use board_core::protocol::{
@@ -516,4 +516,42 @@ fn fake_card_move_transfers_across_boards() {
         })
         .unwrap_err();
     assert!(err.to_string().contains("belongs to board"));
+}
+
+#[test]
+fn fake_card_get_reports_config_card_actions_for_the_cards_column() {
+    let config = Config {
+        card_actions: vec![CardActionDef {
+            label: "Review".into(),
+            columns: vec!["review".into()],
+            argv: vec!["review-tool".into()],
+        }],
+        ..Default::default()
+    };
+    let mut c = FakeBoardClient::new().unwrap().with_config(config);
+    let review = c
+        .column_create(&ColumnCreateParams {
+            name: "Review".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let card = c
+        .card_create(&CardCreateParams {
+            title: "t".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(c.card_get(card.id).unwrap().actions.is_empty());
+
+    c.card_move(&CardMoveParams {
+        id: card.id,
+        column_id: review.id,
+        board_id: None,
+        position: None,
+    })
+    .unwrap();
+    let actions = c.card_get(card.id).unwrap().actions;
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0].label, "Review");
+    assert_eq!(actions[0].argv, vec!["review-tool".to_string()]);
 }
