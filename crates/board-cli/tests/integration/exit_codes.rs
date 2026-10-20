@@ -6,8 +6,8 @@
 //! pass through to the exit status; anything else the daemon may report is
 //! clamped to `70`, and errors raised by the CLI itself exit `64`.
 
+use board_ipc::LocalListener;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixListener;
 use std::process::{Command, Output, Stdio};
 
 use board_core::protocol::{Request, Response};
@@ -89,9 +89,9 @@ fn cli_local_errors_exit_outside_the_protocol_range() {
 fn out_of_range_rpc_codes_are_clamped_but_kept_in_the_envelope() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("odd-code.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
+    let listener = LocalListener::bind(&socket).unwrap();
     let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
+        let mut stream = listener.accept().unwrap();
         let mut line = String::new();
         BufReader::new(stream.try_clone().unwrap())
             .read_line(&mut line)

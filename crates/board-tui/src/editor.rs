@@ -25,7 +25,20 @@ pub trait EditorLauncher {
     fn edit(&self, initial: &str) -> anyhow::Result<EditResult>;
 }
 
-/// Production launcher: `$EDITOR` (fallback `vi`) on a tempfile.
+/// Editor used when neither `$EDITOR` nor `$VISUAL` is set: `vi` on unix,
+/// `notepad` on Windows (always present, and blocks until the window closes).
+const DEFAULT_EDITOR: &str = if cfg!(windows) { "notepad" } else { "vi" };
+
+/// Pick the editor program: `$EDITOR`, else `$VISUAL`, else
+/// [`DEFAULT_EDITOR`]. Takes the raw env values so it stays pure.
+fn editor_program(editor: Option<String>, visual: Option<String>) -> String {
+    editor
+        .or(visual)
+        .unwrap_or_else(|| DEFAULT_EDITOR.to_string())
+}
+
+/// Production launcher: `$EDITOR` (fallback `vi`, `notepad` on Windows) on a
+/// tempfile.
 pub struct RealEditor;
 
 impl EditorLauncher for RealEditor {
@@ -34,9 +47,7 @@ impl EditorLauncher for RealEditor {
             disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
         };
 
-        let editor = std::env::var("EDITOR")
-            .or_else(|_| std::env::var("VISUAL"))
-            .unwrap_or_else(|_| "vi".to_string());
+        let editor = editor_program(std::env::var("EDITOR").ok(), std::env::var("VISUAL").ok());
 
         let mut tmp = tempfile::Builder::new()
             .prefix("board-edit-")
@@ -51,7 +62,9 @@ impl EditorLauncher for RealEditor {
         let _ = crossterm::execute!(out, LeaveAlternateScreen);
         let _ = disable_raw_mode();
 
-        let status = std::process::Command::new(&editor).arg(&path).status();
+        // Resolved like every other spawned program, so `code.cmd`-style
+        // shims work on Windows; unix keeps `Command`'s own PATH search.
+        let status = board_core::exec::command(&editor).arg(&path).status();
 
         // Resume the TUI regardless of the editor's exit status.
         let _ = enable_raw_mode();
@@ -97,5 +110,25 @@ impl EditorLauncher for FakeEditor {
             text: self.result.clone(),
             needs_full_redraw: false,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn editor_env_wins_over_visual_then_platform_default() {
+        assert_eq!(
+            editor_program(Some("nano".into()), Some("code".into())),
+            "nano"
+        );
+        assert_eq!(editor_program(None, Some("code".into())), "code");
+        let fallback = editor_program(None, None);
+        if cfg!(windows) {
+            assert_eq!(fallback, "notepad");
+        } else {
+            assert_eq!(fallback, "vi");
+        }
     }
 }

@@ -7,7 +7,7 @@
 //! per invocation.
 
 use anyhow::{anyhow, Result};
-use board_core::client::UnixClient;
+use board_core::client::LocalClient;
 use board_core::model::Column;
 use board_core::protocol::BoardSnapshot;
 
@@ -18,7 +18,7 @@ pub(crate) struct Ctx<'a> {
     selector: Option<&'a str>,
     project_selector: Option<&'a str>,
     json: bool,
-    client: Option<UnixClient>,
+    client: Option<LocalClient>,
     board: Option<BoardSnapshot>,
 }
 
@@ -49,7 +49,7 @@ impl<'a> Ctx<'a> {
     }
 
     /// The boardd client, connecting (and auto-starting boardd) on first use.
-    pub(crate) fn client(&mut self) -> Result<&mut UnixClient> {
+    pub(crate) fn client(&mut self) -> Result<&mut LocalClient> {
         if self.client.is_none() {
             self.client = Some(connect_or_start()?);
         }
@@ -103,7 +103,7 @@ impl<'a> Ctx<'a> {
 
     /// Give up the context, keeping the already-connected client (the TUI takes
     /// ownership of it).
-    pub(crate) fn into_client(self) -> Result<UnixClient> {
+    pub(crate) fn into_client(self) -> Result<LocalClient> {
         match self.client {
             Some(client) => Ok(client),
             None => connect_or_start(),

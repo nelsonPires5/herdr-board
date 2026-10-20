@@ -1,5 +1,5 @@
+use board_ipc::LocalStream;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 use board_core::client::BoardClient;
@@ -38,7 +38,7 @@ fn subscribe_receives_board_changed_on_card_create() {
 #[test]
 fn delayed_event_reader_survives_board_change_flood() {
     let td = TestDaemon::start(&[]);
-    let mut stream = UnixStream::connect(&td.socket).unwrap();
+    let mut stream = LocalStream::connect(&td.socket).unwrap();
     stream
         .write_all(b"{\"id\":\"sub\",\"method\":\"events.subscribe\",\"params\":{}}\n")
         .unwrap();

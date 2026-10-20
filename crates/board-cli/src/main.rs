@@ -11,7 +11,7 @@ mod scope;
 use std::io::Write;
 
 use anyhow::{anyhow, Result};
-use board_core::client::{BoardClient, RpcClientError, UnixClient};
+use board_core::client::{BoardClient, LocalClient, RpcClientError};
 use clap::{error::ErrorKind, Parser};
 use serde_json::{json, Value};
 
@@ -155,7 +155,7 @@ fn run_daemon(foreground: bool) -> Result<()> {
 }
 
 fn cmd_version(json_output: bool) -> Result<()> {
-    let daemon_version = match UnixClient::connect(&board_core::paths::socket_path()) {
+    let daemon_version = match LocalClient::connect(&board_core::paths::socket_path()) {
         Ok(mut client) => client.daemon_status().ok().map(|status| status.version),
         Err(_) => None,
     };

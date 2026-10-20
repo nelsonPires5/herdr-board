@@ -161,8 +161,7 @@ fn resolve_board(ctx: &mut Ctx, value: &str) -> Result<BoardSnapshot> {
     if let Ok(id) = value.parse::<i64>() {
         return ctx.client()?.board_get_by_id(id);
     }
-    let path = Path::new(value);
-    if value.contains('/') || path.exists() {
+    if is_path_selector(value) {
         let scope = resolved_scope_path(value)?;
         return ctx.client()?.board_open(&scope);
     }
@@ -176,8 +175,7 @@ fn resolve_board_for_restore(ctx: &mut Ctx, value: &str) -> Result<BoardSnapshot
     if let Ok(id) = value.parse::<i64>() {
         return ctx.client()?.board_get_by_id(id);
     }
-    let path = Path::new(value);
-    if value.contains('/') || path.exists() {
+    if is_path_selector(value) {
         let scope = resolved_scope_path(value)?;
         return ctx.client()?.board_open(&scope);
     }
@@ -189,6 +187,31 @@ fn resolve_board_for_restore(ctx: &mut Ctx, value: &str) -> Result<BoardSnapshot
         .boards;
     let board = resolve_board_in_list(&boards, value, &format!("project {project_id}"))?;
     ctx.client()?.board_get_by_id(board.id)
+}
+
+/// Whether a non-numeric `<ID|PATH|NAME>` selector names a path rather than a
+/// board: anything spelled like a path, or that exists on disk.
+fn is_path_selector(value: &str) -> bool {
+    has_path_syntax(value, cfg!(windows)) || Path::new(value).exists()
+}
+
+/// Path spelling alone, independent of the filesystem. A `/` always marks a
+/// path. On Windows a `\` does too, as does a drive form (`C:`, `C:\x`,
+/// `C:/x`) or anything else the platform calls absolute (`\\server\share`);
+/// on unix those characters stay part of a board name, as before.
+fn has_path_syntax(value: &str, windows: bool) -> bool {
+    if value.contains('/') {
+        return true;
+    }
+    if !windows {
+        return false;
+    }
+    let bytes = value.as_bytes();
+    let drive = bytes.len() >= 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes.get(2), None | Some(b'\\' | b'/'));
+    value.contains('\\') || drive || Path::new(value).is_absolute()
 }
 
 /// Resolve an id-or-name board reference within one project's board list. A
@@ -211,4 +234,45 @@ pub(crate) fn resolve_board_in_list(
         .find(|board| board.name.eq_ignore_ascii_case(reference))
         .cloned()
         .ok_or_else(|| anyhow!("no board named {reference:?} in {project_label}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::has_path_syntax;
+
+    #[test]
+    fn a_slash_is_a_path_on_every_platform() {
+        for windows in [false, true] {
+            assert!(has_path_syntax("./repo", windows));
+            assert!(has_path_syntax("/srv/repo", windows));
+            assert!(has_path_syntax("C:/repo", windows));
+            assert!(!has_path_syntax("release", windows));
+            assert!(!has_path_syntax("my board", windows));
+        }
+    }
+
+    #[test]
+    fn unix_keeps_backslashes_and_colons_in_board_names() {
+        for name in [r"a\b", r"C:\repo", "C:", r"\\server\share"] {
+            assert!(!has_path_syntax(name, false), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn windows_backslash_drive_and_unc_forms_are_paths() {
+        for path in [
+            r"repo\sub",
+            r".\repo",
+            r"C:\repo",
+            "C:",
+            "c:",
+            r"\\server\share",
+        ] {
+            assert!(has_path_syntax(path, true), "{path:?}");
+        }
+        // A colon that is not a drive form stays a board name.
+        for name in ["Q1:release", "v2:", "release"] {
+            assert!(!has_path_syntax(name, true), "{name:?}");
+        }
+    }
 }

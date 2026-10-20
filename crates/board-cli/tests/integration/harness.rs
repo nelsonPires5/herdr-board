@@ -1,7 +1,7 @@
 use board_core::client::BoardClient;
 use serde_json::Value;
 
-use super::{fake_card, json_output, todo_id, TestDaemon};
+use super::{fake_card, json_output, stdout_fixture_bin, todo_id, TestDaemon};
 
 // -- harness / space CLI verbs -----------------------------------------------
 
@@ -340,9 +340,7 @@ fn harness_opencode_models_overlay_live_catalog_from_cli() {
     // the wire; a valid model with no variants (nemotron) stays listed with
     // EMPTY efforts.
     let dir = tempfile::tempdir().unwrap();
-    let script = r#"#!/bin/sh
-cat <<'HBEOF'
-opencode/nemotron-3-ultra-free
+    let catalog = r#"opencode/nemotron-3-ultra-free
 {
   "id": "nemotron-3-ultra-free",
   "variants": {}
@@ -355,16 +353,8 @@ opencode/deepseek-v4-flash-free
     "high": {"reasoningEffort": "high"},
     "max": {"reasoningEffort": "max"}
   }
-}
-HBEOF
-"#;
-    let bin = dir.path().join("opencode-fixture");
-    std::fs::write(&bin, script).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-    }
+}"#;
+    let bin = stdout_fixture_bin(dir.path(), "opencode-fixture", catalog);
     let td = TestDaemon::start(&[("OPENCODE_BIN", bin.to_str().unwrap())]);
 
     let out = td.board(&["harness", "models", "opencode", "--json"]);
@@ -1046,8 +1036,6 @@ fn harness_antigravity_models_lists_live_catalog_when_agy_bin_resolves() {
     // With AGY_BIN pointing at a fixture CLI, the daemon overlays the live
     // normalized catalog: variant ids merge onto base models, fixed-effort
     // models carry no efforts, and the harness stops being free-form.
-    use std::os::unix::fs::PermissionsExt;
-
     let fixture = r#"{
   "conversation_id": "",
   "status": "SUCCESS",
@@ -1066,13 +1054,7 @@ fn harness_antigravity_models_lists_live_catalog_when_agy_bin_resolves() {
 }
 "#;
     let dir = tempfile::tempdir().unwrap();
-    let bin = dir.path().join("agy-fixture");
-    std::fs::write(
-        &bin,
-        format!("#!/bin/sh\ncat <<'HBEOF'\n{fixture}\nHBEOF\n"),
-    )
-    .unwrap();
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let bin = stdout_fixture_bin(dir.path(), "agy-fixture", fixture);
     let td = TestDaemon::start(&[("AGY_BIN", bin.to_str().unwrap())]);
 
     let out = td.board(&["harness", "models", "antigravity", "--json"]);

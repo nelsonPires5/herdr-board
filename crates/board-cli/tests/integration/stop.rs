@@ -1,7 +1,7 @@
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use board_core::client::{BoardClient, UnixClient};
+use board_core::client::{BoardClient, LocalClient};
 
 use super::{run_board_stop, FakeListener, FakeStop, TestDaemon};
 
@@ -17,7 +17,7 @@ fn daemon_stop_rpc_error_preserves_live_socket_for_new_rpc() {
         "RPC failure must preserve live socket"
     );
 
-    let mut client = UnixClient::connect(fake.path()).expect("live socket accepts a new RPC");
+    let mut client = LocalClient::connect(fake.path()).expect("live socket accepts a new RPC");
     let status = client.daemon_status().expect("new RPC after stop error");
     assert_eq!(status.version, "fake");
 }
@@ -133,6 +133,127 @@ fn daemon_stop_honors_json() {
         serde_json::from_slice(&absent.stdout).expect("daemon stop emits JSON");
     assert_eq!(report["stopped"], true);
     assert_eq!(report["was_running"], false);
+}
+
+/// An auto-started daemon in a private temp environment; stopped on drop so a
+/// failing assertion never leaves it running.
+struct AutoStarted {
+    dir: tempfile::TempDir,
+}
+
+impl AutoStarted {
+    /// Run `board` and capture its output, bounded: a detached daemon that
+    /// kept the caller's stdout/stderr pipes open would otherwise hang the
+    /// capture forever instead of failing.
+    fn board(&self, args: &[&str]) -> std::process::Output {
+        let mut command = self.command(args);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(command.output());
+        });
+        rx.recv_timeout(Duration::from_secs(60))
+            .expect("board output never reached EOF: the daemon holds the caller's pipes")
+            .expect("run board")
+    }
+
+    fn command(&self, args: &[&str]) -> Command {
+        let dir = self.dir.path();
+        let mut command = Command::new(super::BOARD_BIN);
+        command
+            .args(args)
+            .current_dir(dir)
+            .env("BOARD_SOCKET", self.socket())
+            .env("BOARD_DB", dir.join("board.db"))
+            .env("BOARD_LOG_DIR", dir.join("logs"))
+            .env("HERDR_BOARD_CONFIG", dir.join("missing-config.toml"))
+            .env("HOME", dir)
+            .env_remove("BOARD_SCOPE_PATH")
+            .env_remove("HERDR_PLUGIN_CONTEXT_JSON")
+            .env_remove("BOARD_RUN_ID")
+            .stdin(std::process::Stdio::null());
+        command
+    }
+
+    fn socket(&self) -> std::path::PathBuf {
+        self.dir.path().join("boardd.sock")
+    }
+
+    /// Whether a daemon still holds this directory's single-instance lock
+    /// (taken first thing at startup, released at exit).
+    fn daemon_holds_lock(&self) -> bool {
+        let Ok(file) = std::fs::File::open(self.dir.path().join("board.db.lock")) else {
+            return false;
+        };
+        matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock))
+    }
+}
+
+impl Drop for AutoStarted {
+    fn drop(&mut self) {
+        // A daemon still starting up (slow under a loaded parallel test run)
+        // answers `stop` with "not running" yet listens moments later; keep
+        // stopping until nothing holds the instance lock, so no daemon
+        // outlives the test holding its directory or the runner's pipes.
+        // `stop` never auto-starts, so its own capture cannot be held open.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let _ = self.command(&["daemon", "stop"]).output();
+            if !self.daemon_holds_lock() || Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+}
+
+/// The detached auto-start and the identity-checked stop, end to end: the
+/// first command starts boardd, `daemon stop` sees it go, and the endpoint's
+/// on-disk trace (socket file or Windows marker) leaves with it.
+#[test]
+fn auto_started_daemon_serves_then_stops_cleanly() {
+    let env = AutoStarted {
+        dir: tempfile::tempdir().unwrap(),
+    };
+
+    // The CLI waits a fixed 3s for an auto-started daemon; a debug build
+    // under a fully parallel test run can take longer to come up, so a
+    // "could not connect" first attempt is retried (finding it live, or
+    // starting a second one that exits on the instance lock).
+    let mut listed = env.board(&["card", "list", "--json"]);
+    for _ in 0..3 {
+        if listed.status.success()
+            || !String::from_utf8_lossy(&listed.stderr).contains("could not connect to boardd")
+        {
+            break;
+        }
+        listed = env.board(&["card", "list", "--json"]);
+    }
+    assert!(
+        listed.status.success(),
+        "auto-start: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    assert!(
+        env.socket().exists(),
+        "a live boardd leaves its endpoint trace"
+    );
+    let mut client = LocalClient::connect(&env.socket()).expect("auto-started boardd is live");
+    assert!(client.daemon_status().is_ok());
+    drop(client);
+
+    let stopped = env.board(&["daemon", "stop", "--json"]);
+    assert!(
+        stopped.status.success(),
+        "stop: {}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&stopped.stdout).expect("JSON");
+    assert_eq!(report["was_running"], true);
+    assert!(
+        !env.socket().exists(),
+        "a clean stop leaves no endpoint trace"
+    );
+    assert!(LocalClient::connect(&env.socket()).is_err());
 }
 
 #[test]

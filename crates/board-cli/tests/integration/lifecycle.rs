@@ -277,7 +277,7 @@ fn local_spawner_missing_pi_surfaces_clean_run_failure() {
     let td = TestDaemon::start(&[("PATH", "/usr/bin:/bin")]);
     let mut c = td.client();
     let board = c
-        .board_open(td._dir.path().canonicalize().unwrap().to_str().unwrap())
+        .board_open(super::canonical(td._dir.path()).to_str().unwrap())
         .unwrap()
         .board;
     c.column_create(&ColumnCreateParams {
@@ -288,7 +288,11 @@ fn local_spawner_missing_pi_surfaces_clean_run_failure() {
     let out = td.board(&[
         "card", "new", "--title", "missing", "--column", "work", "--json",
     ]);
-    assert!(out.status.success());
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let card: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let id = card["id"].as_i64().unwrap();
     assert!(poll(&mut c, 10, |client| {
@@ -308,7 +312,7 @@ fn scoped_template_dispatches_and_transitions_with_local_spawner() {
     let td = TestDaemon::start(&[]);
     let scope = td._dir.path().join("scoped-pipeline");
     std::fs::create_dir_all(&scope).unwrap();
-    let scope = scope.canonicalize().unwrap();
+    let scope = super::canonical(scope);
     let mut client = td.client();
     let board = client.board_open(scope.to_str().unwrap()).unwrap().board;
     let columns = client

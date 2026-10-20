@@ -2,12 +2,12 @@ use std::io::{self, IsTerminal, Write};
 
 use anyhow::{anyhow, bail, Result};
 use board_core::capability::HarnessCapabilities;
-use board_core::client::{BoardClient, UnixClient};
+use board_core::client::{BoardClient, LocalClient};
 use board_core::protocol::{CardVisibility, Effort, RunOutcome, SpaceKind, Trigger};
 
 /// Fetch a harness's capability catalog (`harness.capabilities`).
 pub(crate) fn harness_capabilities(
-    c: &mut UnixClient,
+    c: &mut LocalClient,
     harness: &str,
 ) -> Result<HarnessCapabilities> {
     c.harness_capabilities(harness)

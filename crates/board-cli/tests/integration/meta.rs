@@ -1,13 +1,15 @@
 //! Cross-cutting CLI surface: the command tree's refusals, `template apply`,
 //! version/status separation, `skill`, and the JSON error envelope.
 
-use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
 
 use super::{json_error, json_output, TestDaemon};
 
+#[cfg(unix)]
 #[test]
 fn daemon_socket_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
     let td = TestDaemon::start(&[]);
     let mode = std::fs::metadata(&td.socket)
         .expect("boardd socket metadata")
@@ -16,6 +18,23 @@ fn daemon_socket_is_owner_only() {
         & 0o777;
 
     assert_eq!(mode, 0o600, "boardd socket must be owner-only");
+}
+
+/// Windows has no socket file: the endpoint is a named pipe (owner-only by
+/// its DACL), and the path holds boardd's `<pid>:<nanos>` marker naming the
+/// very process that serves the pipe.
+#[cfg(windows)]
+#[test]
+fn daemon_marker_names_the_pipe_server() {
+    let td = TestDaemon::start(&[]);
+    let marker = std::fs::read_to_string(&td.socket).expect("boardd marker");
+    let (pid, nanos) = marker.split_once(':').expect("<pid>:<nanos>");
+    assert!(nanos.parse::<u128>().is_ok(), "{marker:?}");
+    let pid: u32 = pid.parse().expect("numeric pid");
+    assert_eq!(pid, td.pid());
+
+    let stream = board_ipc::LocalStream::connect(&td.socket).expect("connect");
+    assert_eq!(stream.server_process_id().expect("server pid"), pid);
 }
 
 #[test]

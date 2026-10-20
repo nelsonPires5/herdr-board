@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use board_core::client::{BoardClient, UnixClient};
+use board_core::client::{BoardClient, LocalClient};
 use board_core::protocol::BoardSnapshot;
 use board_core::scope::{resolve_scope_path, select_scope_candidate};
 
@@ -31,7 +31,7 @@ pub(crate) fn resolved_scope_path(path: &str) -> Result<String> {
 /// daemon's persisted selection prevails; when no selection exists yet
 /// (post-migration), the current directory's project is opened (bootstrap).
 pub(crate) fn context_board(
-    c: &mut UnixClient,
+    c: &mut LocalClient,
     project: Option<&str>,
     selector: Option<&str>,
 ) -> Result<BoardSnapshot> {

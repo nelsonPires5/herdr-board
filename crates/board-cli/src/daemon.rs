@@ -1,34 +1,104 @@
-use std::fs::OpenOptions;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::os::unix::process::CommandExt;
+//! Auto-start and stop for boardd, the CLI side of the daemon lifecycle.
+//!
+//! The decisions here are portable; what differs per platform lives behind
+//! `platform`:
+//!
+//! - **unix** — the endpoint is a socket file. Its `(dev, inode, type)` is the
+//!   identity a stale-socket cleanup must match before unlinking, and the
+//!   auto-started daemon leads its own process group.
+//! - **Windows** — the endpoint is a named pipe with nothing on disk; boardd
+//!   writes a `<pid>:<nanos>` marker file at the socket path instead. The
+//!   marker text is the identity a stale cleanup must match, and a live pipe
+//!   whose server process is not the marker's pid is a replacement.
+//!
+//! On both, only an *absent* endpoint (`board_core::client::is_daemon_absent`)
+//! means "boardd is not running". A busy or slow endpoint is a live daemon:
+//! it is never answered with a second daemon or a cleanup.
+
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use board_core::client::{BoardClient, UnixClient};
+use board_core::client::{is_daemon_absent, BoardClient, LocalClient};
 use board_core::paths;
 use serde_json::json;
 
 use crate::render::emit_line;
 
-/// Connect to the daemon socket, auto-starting the daemon if absent.
-pub(crate) fn connect_or_start() -> Result<UnixClient> {
-    let path = paths::socket_path();
-    if let Ok(c) = UnixClient::connect(&path) {
-        return Ok(c);
-    }
-    spawn_daemon().context("auto-starting boardd")?;
+#[cfg(unix)]
+#[path = "daemon/unix.rs"]
+mod platform;
+#[cfg(windows)]
+#[path = "daemon/windows.rs"]
+mod platform;
 
-    let deadline = Instant::now() + Duration::from_secs(3);
+/// What one connect attempt says about the daemon at an endpoint.
+#[derive(Debug)]
+enum Probe<C> {
+    /// Connected.
+    Live(C),
+    /// Nothing listens there: the only outcome that may start or clean up.
+    Absent,
+    /// Something is there but did not accept this connection (a busy pipe, a
+    /// timeout, a permission error): treated as a live daemon.
+    Unreachable(anyhow::Error),
+}
+
+fn classify<C>(result: Result<C>) -> Probe<C> {
+    match result {
+        Ok(client) => Probe::Live(client),
+        Err(error) if is_daemon_absent(&error) => Probe::Absent,
+        Err(error) => Probe::Unreachable(error),
+    }
+}
+
+/// Connect to the daemon socket, auto-starting the daemon if absent.
+pub(crate) fn connect_or_start() -> Result<LocalClient> {
+    connect_or_start_with(
+        &paths::socket_path(),
+        LocalClient::connect,
+        || spawn_daemon().context("auto-starting boardd"),
+        Duration::from_secs(3),
+    )
+}
+
+/// [`connect_or_start`] with its effects injected. A daemon is spawned only
+/// when the first probe finds the endpoint absent; an unreachable one is
+/// waited on like a starting daemon instead, so a busy boardd never gets a
+/// competing second start.
+fn connect_or_start_with<C>(
+    path: &Path,
+    mut connect: impl FnMut(&Path) -> Result<C>,
+    spawn: impl FnOnce() -> Result<()>,
+    wait: Duration,
+) -> Result<C> {
+    let mut last_error = match classify(connect(path)) {
+        Probe::Live(client) => return Ok(client),
+        Probe::Absent => {
+            spawn()?;
+            None
+        }
+        Probe::Unreachable(error) => Some(error),
+    };
+
+    let deadline = Instant::now() + wait;
     let mut delay = Duration::from_millis(50);
     loop {
         std::thread::sleep(delay);
-        if let Ok(c) = UnixClient::connect(&path) {
-            return Ok(c);
+        match classify(connect(path)) {
+            Probe::Live(client) => return Ok(client),
+            Probe::Absent => {}
+            Probe::Unreachable(error) => last_error = Some(error),
         }
         if Instant::now() >= deadline {
-            bail!("could not connect to boardd at {}", path.display());
+            let message = format!("could not connect to boardd at {}", path.display());
+            return Err(match last_error {
+                // Context goes on top: the boardd message stays the headline
+                // and the OS cause follows as "Caused by".
+                Some(cause) => cause.context(message),
+                None => anyhow::anyhow!(message),
+            });
         }
         delay = (delay * 2).min(Duration::from_millis(500));
     }
@@ -38,101 +108,67 @@ fn spawn_daemon() -> Result<()> {
     let exe = std::env::current_exe()?;
     let bootstrap_path = paths::bootstrap_log_path();
     if let Some(parent) = bootstrap_path.parent() {
-        match std::fs::symlink_metadata(parent) {
-            Ok(metadata) if !metadata.file_type().is_dir() => {
-                anyhow::bail!("diagnostic log path is not a directory");
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::create_dir_all(parent)?;
-            }
-            Err(error) => return Err(error.into()),
-        }
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+        prepare_log_dir(parent)?;
     }
-    daemon_command(&exe, &bootstrap_path)?.spawn()?;
+    platform::spawn_detached(daemon_command(&exe, &bootstrap_path)?)?;
     Ok(())
 }
 
-/// Build the detached daemon child without a double-fork or a session-wide
-/// `setsid`. The child is its own process-group leader (`setpgid(0, 0)` via
-/// [`CommandExt::process_group`]) and is therefore independent of the CLI's
-/// process group while remaining addressable by its exact PID for diagnostics.
-/// Lifecycle control still goes through `daemon.stop`; the process group is not
-/// used as a broad cleanup authority.
+/// Create (or accept) the private diagnostic log directory. `symlink_metadata`
+/// does not follow links, so a symlink — or, on Windows, a junction — in its
+/// place is refused rather than written through.
+fn prepare_log_dir(dir: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(dir) {
+        Ok(metadata) if !metadata.file_type().is_dir() => {
+            anyhow::bail!("diagnostic log path is not a directory");
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(dir)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    platform::restrict_log_dir(dir)
+}
+
+/// Build the detached daemon child: stdin/stdout null, stderr into the
+/// bootstrap log (truncated per start, never through a link), detached from
+/// the CLI as the platform allows (see `platform::detach`). Lifecycle control
+/// still goes through `daemon.stop`; the detachment is not a cleanup
+/// authority.
 pub(crate) fn daemon_command(exe: &Path, bootstrap_path: &Path) -> Result<Command> {
     // Truncate on each auto-start: this file contains only failures emitted
     // before the structured subscriber is available and cannot grow forever.
-    let err = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(bootstrap_path)?;
-    err.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    let err = platform::open_bootstrap_log(bootstrap_path)?;
     let mut cmd = Command::new(exe);
     cmd.arg("daemon")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(err);
-    // One child, one owned process group. Do not replace this with a
-    // double-fork/setsid sequence: it would lose the exact child identity that
-    // callers and the safe harness use for ownership checks.
-    cmd.process_group(0);
+    platform::detach(&mut cmd);
     Ok(cmd)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct FileIdentity {
-    device: u64,
-    inode: u64,
-    file_type: u32,
-}
-
-const SOCKET_FILE_TYPE: u32 = 0o140000;
-
-fn file_identity(path: &Path) -> Option<FileIdentity> {
-    std::fs::symlink_metadata(path)
-        .ok()
-        .map(|metadata| FileIdentity {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-            file_type: metadata.mode() & 0o170000,
-        })
-}
-
+/// The result of re-checking an endpoint whose connect failed.
+#[derive(Debug, PartialEq, Eq)]
 enum ListenerCheck {
     Live,
     Gone,
     Replaced,
 }
 
-/// Confirm that a failed fresh connect means this exact socket is stale. The
-/// identity is checked again immediately before unlinking; a missing path is
-/// already clean, while a replacement (including a non-socket) fails closed.
+/// Confirm that a failed fresh connect means this exact endpoint is stale.
+/// A live (or merely unreachable) endpoint is left alone; an absent one has
+/// its leftover on-disk trace removed only while it still matches
+/// `original`, so a replacement fails closed.
 fn check_listener_after_connect_failure(
     path: &Path,
-    original: Option<FileIdentity>,
+    original: &platform::Identity,
 ) -> ListenerCheck {
-    if UnixClient::connect(path).is_ok() {
+    if !matches!(classify(platform::probe(path)), Probe::Absent) {
         return ListenerCheck::Live;
     }
-
-    let Some(current) = file_identity(path) else {
-        return ListenerCheck::Gone;
-    };
-    if original != Some(current) || current.file_type != SOCKET_FILE_TYPE {
-        return ListenerCheck::Replaced;
-    }
-    if file_identity(path) != Some(current) {
-        return ListenerCheck::Replaced;
-    }
-    if std::fs::remove_file(path).is_ok() && file_identity(path).is_none() {
-        ListenerCheck::Gone
-    } else {
-        ListenerCheck::Replaced
-    }
+    platform::remove_stale(path, original)
 }
 
 /// `board daemon stop` (and the retained `board daemon --stop`): request a
@@ -142,11 +178,11 @@ fn check_listener_after_connect_failure(
 /// through the shared output path and honors `--json`.
 pub(crate) fn stop_daemon(json: bool) -> Result<()> {
     let path = paths::socket_path();
-    let original = file_identity(&path);
+    let original = platform::identity(&path);
 
-    let mut client = match UnixClient::connect(&path) {
-        Ok(c) => c,
-        Err(_) => match check_listener_after_connect_failure(&path, original) {
+    let mut client = match classify(LocalClient::connect(&path)) {
+        Probe::Live(client) => client,
+        Probe::Absent => match check_listener_after_connect_failure(&path, &original) {
             ListenerCheck::Gone => {
                 return emit_line(
                     &json!({ "stopped": true, "was_running": false }),
@@ -161,6 +197,12 @@ pub(crate) fn stop_daemon(json: bool) -> Result<()> {
                 );
             }
         },
+        Probe::Unreachable(error) => {
+            return Err(error).context(format!(
+                "could not connect to boardd at {}; socket preserved",
+                path.display()
+            ));
+        }
     };
 
     let stop_result = client.daemon_stop();
@@ -173,8 +215,8 @@ pub(crate) fn stop_daemon(json: bool) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut delay = Duration::from_millis(25);
     while Instant::now() < deadline {
-        if UnixClient::connect(&path).is_err() {
-            match check_listener_after_connect_failure(&path, original) {
+        match classify(platform::probe(&path)) {
+            Probe::Absent => match check_listener_after_connect_failure(&path, &original) {
                 ListenerCheck::Gone => {
                     return emit_line(
                         &json!({ "stopped": true, "was_running": true }),
@@ -186,7 +228,13 @@ pub(crate) fn stop_daemon(json: bool) -> Result<()> {
                     bail!("boardd socket identity changed; socket preserved");
                 }
                 ListenerCheck::Live => {}
+            },
+            Probe::Live(stream) => {
+                if !platform::serves_identity(&stream, &original) {
+                    bail!("boardd socket identity changed; socket preserved");
+                }
             }
+            Probe::Unreachable(_) => {}
         }
         std::thread::sleep(delay);
         delay = (delay * 2).min(Duration::from_millis(200));

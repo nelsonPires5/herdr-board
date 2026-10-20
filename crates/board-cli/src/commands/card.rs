@@ -251,7 +251,7 @@ pub(crate) fn cmd_move(
 /// reference as id-or-name within the project, else the project's selected
 /// board, else its first board (`main`). Never touches selection or recency.
 fn destination_board_in_project(
-    c: &mut board_core::client::UnixClient,
+    c: &mut board_core::client::LocalClient,
     scope: &str,
     destination: Option<&str>,
 ) -> Result<BoardSnapshot> {
@@ -279,7 +279,7 @@ fn destination_board_in_project(
 /// Resolve the legacy `<ID|PATH>` move destination: an id in any project,
 /// else `board.open` for a canonical scope path. Non-selecting.
 fn destination_board_legacy(
-    c: &mut board_core::client::UnixClient,
+    c: &mut board_core::client::LocalClient,
     selector: &str,
 ) -> Result<BoardSnapshot> {
     if let Ok(id) = selector.parse::<i64>() {

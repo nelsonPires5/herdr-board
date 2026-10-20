@@ -1,5 +1,4 @@
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::{
@@ -9,10 +8,11 @@ use std::sync::{
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use board_core::client::{BoardClient, UnixClient};
+use board_core::client::{BoardClient, LocalClient};
 use board_core::protocol::{
     CardCreateParams, CardStatus, ColumnCreateParams, DaemonStatus, Request, Response, Trigger,
 };
+use board_ipc::{LocalListener, LocalStream};
 use serde_json::Value;
 
 pub(crate) const BOARD_BIN: &str = env!("CARGO_BIN_EXE_board");
@@ -34,12 +34,11 @@ impl TestDaemon {
         let db = dir.path().join("board.db");
         let socket = dir.path().join("boardd.sock");
         let cfg = dir.path().join("config.toml");
-        let fake = fixtures_dir().join("fake-agent.sh");
         std::fs::write(
             &cfg,
             format!(
-                "[harness.fake]\nargv = [\"bash\", \"{}\"]\n\n[daemon]\nspawner = \"local\"\n",
-                fake.display()
+                "[harness.fake]\nargv = {}\n\n[daemon]\nspawner = \"local\"\n",
+                toml_array(&fake_agent_argv())
             ),
         )
         .unwrap();
@@ -58,6 +57,13 @@ impl TestDaemon {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        // `HOME` isolates harness discovery on unix. Windows resolves the home
+        // from the profile folder instead, so point the per-harness overrides
+        // at nothing explicitly; a test's `extra` still wins.
+        #[cfg(windows)]
+        cmd.env("CODEX_HOME", dir.path().join(".codex"))
+            .env("AGY_BIN", dir.path().join("no-agy"))
+            .env("OPENCODE_BIN", dir.path().join("no-opencode"));
         for (k, v) in extra {
             cmd.env(k, v);
         }
@@ -75,7 +81,7 @@ impl TestDaemon {
     fn wait_ready(&self) {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            if let Ok(mut c) = UnixClient::connect(&self.socket) {
+            if let Ok(mut c) = LocalClient::connect(&self.socket) {
                 if c.daemon_status().is_ok() {
                     return;
                 }
@@ -87,8 +93,14 @@ impl TestDaemon {
         }
     }
 
-    pub(crate) fn client(&self) -> UnixClient {
-        UnixClient::connect(&self.socket).expect("connect")
+    /// The daemon's process id.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    pub(crate) fn client(&self) -> LocalClient {
+        LocalClient::connect(&self.socket).expect("connect")
     }
 
     /// Run the `board` binary against this daemon's socket and capture its output.
@@ -138,7 +150,7 @@ impl Drop for TestDaemon {
     fn drop(&mut self) {
         let mut cancelled_open_work = false;
 
-        if let Ok(mut client) = UnixClient::connect(&self.socket) {
+        if let Ok(mut client) = LocalClient::connect(&self.socket) {
             // Cancel every kind of open card. A cancellation wakes dispatch, so
             // rescan briefly to catch work that was queued at the same time.
             let cancel_deadline = Instant::now() + Duration::from_millis(350);
@@ -190,7 +202,7 @@ impl Drop for TestDaemon {
             std::thread::sleep(Duration::from_millis(750));
         }
 
-        if let Ok(mut client) = UnixClient::connect(&self.socket) {
+        if let Ok(mut client) = LocalClient::connect(&self.socket) {
             let _ = client.daemon_stop();
         }
 
@@ -208,6 +220,102 @@ impl Drop for TestDaemon {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// The fake harness argv: `fake-agent.sh` under bash on unix, its
+/// `fake-agent.ps1` twin under PowerShell on Windows (where a bare `bash` may
+/// resolve to WSL rather than a POSIX shell that can see this tree).
+fn fake_agent_argv() -> Vec<String> {
+    #[cfg(unix)]
+    {
+        vec![
+            "bash".to_string(),
+            fixtures_dir().join("fake-agent.sh").display().to_string(),
+        ]
+    }
+    #[cfg(windows)]
+    {
+        let host = if board_core::exec::resolve_program("pwsh").is_some() {
+            "pwsh"
+        } else {
+            "powershell"
+        };
+        [
+            host,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .chain([fixtures_dir().join("fake-agent.ps1").display().to_string()])
+        .collect()
+    }
+}
+
+/// A fake CLI that prints `stdout` plus a newline and exits 0: a `/bin/sh`
+/// script on unix; on Windows a `<name>.cmd` that types a data file. The
+/// extensionless path is returned either way, which Windows resolves through
+/// `PATHEXT` exactly like an npm-style shim.
+pub(crate) fn stdout_fixture_bin(dir: &Path, name: &str, stdout: &str) -> PathBuf {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let bin = dir.join(name);
+        std::fs::write(&bin, format!("#!/bin/sh\ncat <<'HBEOF'\n{stdout}\nHBEOF\n")).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        bin
+    }
+    #[cfg(windows)]
+    {
+        let data = dir.join(format!("{name}.txt"));
+        std::fs::write(&data, format!("{stdout}\n")).unwrap();
+        std::fs::write(
+            dir.join(format!("{name}.cmd")),
+            format!("@type \"{}\"\r\n", data.display()),
+        )
+        .unwrap();
+        dir.join(name)
+    }
+}
+
+/// `path` in the CLI's canonical scope spelling: `std::fs::canonicalize`,
+/// except that on Windows the `\\?\` verbatim prefix std adds is dropped
+/// whenever the path reads the same without it (the `dunce` rule
+/// `board_core::scope` applies), so tests name the same project the CLI does.
+pub(crate) fn canonical(path: impl AsRef<Path>) -> PathBuf {
+    let path = std::fs::canonicalize(path).expect("canonicalize test path");
+    #[cfg(windows)]
+    {
+        let text = path.to_str().expect("UTF-8 test path");
+        if let Some(rest) = text.strip_prefix(r"\\?\") {
+            let bytes = rest.as_bytes();
+            if bytes.len() >= 3
+                && bytes[0].is_ascii_alphabetic()
+                && bytes[1] == b':'
+                && bytes[2] == b'\\'
+            {
+                return PathBuf::from(rest);
+            }
+        }
+    }
+    path
+}
+
+/// A TOML array of basic strings (Windows paths carry backslashes).
+fn toml_array(items: &[String]) -> String {
+    let quoted: Vec<String> = items
+        .iter()
+        .map(|item| {
+            let escaped = item.replace('\\', "\\\\").replace('"', "\\\"");
+            format!("\"{escaped}\"")
+        })
+        .collect();
+    format!("[{}]", quoted.join(", "))
 }
 
 // -- assertion helpers --------------------------------------------------------
@@ -263,15 +371,15 @@ pub(crate) fn fake_card(column_id: i64) -> CardCreateParams {
     }
 }
 
-pub(crate) fn todo_id(c: &mut UnixClient) -> i64 {
+pub(crate) fn todo_id(c: &mut LocalClient) -> i64 {
     c.board_get().unwrap().columns[0].id
 }
 
 /// Poll `pred` until it returns true or the timeout elapses.
 pub(crate) fn poll(
-    c: &mut UnixClient,
+    c: &mut LocalClient,
     secs: u64,
-    mut pred: impl FnMut(&mut UnixClient) -> bool,
+    mut pred: impl FnMut(&mut LocalClient) -> bool,
 ) -> bool {
     let deadline = Instant::now() + Duration::from_secs(secs);
     loop {
@@ -293,7 +401,9 @@ pub(crate) enum FakeStop {
     Replace,
 }
 
-/// Minimal boardd-shaped listener for daemon-stop state-machine tests.
+/// Minimal boardd-shaped listener for daemon-stop state-machine tests. On
+/// Windows the endpoint is a named pipe with nothing on disk, so the fake also
+/// writes boardd's `<pid>:<nanos>` marker at the path, as the real daemon does.
 pub(crate) struct FakeListener {
     path: PathBuf,
     stop: Arc<AtomicBool>,
@@ -303,7 +413,9 @@ pub(crate) struct FakeListener {
 impl FakeListener {
     pub(crate) fn bind(dir: &Path, mode: FakeStop) -> Self {
         let path = dir.join("fake-boardd.sock");
-        let listener = UnixListener::bind(&path).expect("bind fake boardd listener");
+        let listener = LocalListener::bind(&path).expect("bind fake boardd listener");
+        #[cfg(windows)]
+        std::fs::write(&path, live_marker()).expect("write fake boardd marker");
         listener
             .set_nonblocking(true)
             .expect("set fake listener nonblocking");
@@ -313,7 +425,7 @@ impl FakeListener {
         let thread = std::thread::spawn(move || {
             while !thread_stop.load(Ordering::SeqCst) {
                 match listener.accept() {
-                    Ok((stream, _)) => {
+                    Ok(stream) => {
                         if handle_fake_connection(stream, &thread_path, mode) {
                             break;
                         }
@@ -342,14 +454,14 @@ impl Drop for FakeListener {
         self.stop.store(true, Ordering::SeqCst);
         // Wake accept so the test thread can be joined without removing the
         // socket path (stale-socket tests intentionally inspect that path).
-        let _ = UnixStream::connect(&self.path);
+        let _ = LocalStream::connect(&self.path);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
     }
 }
 
-fn handle_fake_connection(mut stream: UnixStream, path: &Path, mode: FakeStop) -> bool {
+fn handle_fake_connection(mut stream: LocalStream, path: &Path, mode: FakeStop) -> bool {
     // Test listeners must also work on macOS, where SO_RCVTIMEO can return
     // EINVAL for AF_UNIX streams. A short nonblocking loop still lets Drop's
     // request-less wake connection terminate promptly.
@@ -427,6 +539,16 @@ fn handle_fake_connection(mut stream: UnixStream, path: &Path, mode: FakeStop) -
         }
         _ => false,
     }
+}
+
+/// A boardd marker naming this process, distinct per call.
+#[cfg(windows)]
+pub(crate) fn live_marker() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_nanos();
+    format!("{}:{nanos}", std::process::id())
 }
 
 pub(crate) fn run_board_stop(socket: &Path) -> std::process::Output {

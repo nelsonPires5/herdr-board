@@ -15,8 +15,8 @@ fn cli_scopes_plain_cwds_and_preserves_global() {
     let two = td._dir.path().join("plain-two");
     std::fs::create_dir_all(&one).unwrap();
     std::fs::create_dir_all(&two).unwrap();
-    let one = one.canonicalize().unwrap();
-    let two = two.canonicalize().unwrap();
+    let one = super::canonical(one);
+    let two = super::canonical(two);
 
     // The first card new bootstraps plain-one (an explicit open — it selects
     // and persists). A second project must be created explicitly before it can
@@ -110,8 +110,8 @@ fn move_resolves_column_in_cards_board_not_current_cwd() {
     let beta_path = td._dir.path().join("beta");
     std::fs::create_dir_all(&alpha_path).unwrap();
     std::fs::create_dir_all(&beta_path).unwrap();
-    let alpha_path = alpha_path.canonicalize().unwrap();
-    let beta_path = beta_path.canonicalize().unwrap();
+    let alpha_path = super::canonical(alpha_path);
+    let beta_path = super::canonical(beta_path);
 
     let mut client = td.client();
     let alpha = client
@@ -167,8 +167,8 @@ fn cross_board_move_prefers_destination_board_and_deprecates_the_selector() {
     let beta_path = td._dir.path().join("beta-move");
     std::fs::create_dir_all(&alpha_path).unwrap();
     std::fs::create_dir_all(&beta_path).unwrap();
-    let alpha_path = alpha_path.canonicalize().unwrap();
-    let beta_path = beta_path.canonicalize().unwrap();
+    let alpha_path = super::canonical(alpha_path);
+    let beta_path = super::canonical(beta_path);
 
     let mut client = td.client();
     let alpha = client
@@ -263,7 +263,7 @@ fn same_project_move_via_global_project_selector_stays_quiet() {
     let td = TestDaemon::start(&[]);
     let proj_path = td._dir.path().join("proj-move");
     std::fs::create_dir_all(&proj_path).unwrap();
-    let proj = proj_path.canonicalize().unwrap();
+    let proj = super::canonical(proj_path);
 
     td.board(&["project", "create", proj.to_str().unwrap(), "--json"]);
 

@@ -1,8 +1,8 @@
 //! Nested `card comment` CRUD/history, the structured JSON error envelope for
 //! a rejected comment mutation, and agent-run ownership policy.
 
+use board_ipc::LocalListener;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixListener;
 use std::process::{Command, Stdio};
 
 use board_core::client::BoardClient;
@@ -67,11 +67,11 @@ fn canonical_card_comment_lifecycle_has_history() {
 fn nested_comment_json_errors_preserve_structured_rpc_fields() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("comment-error.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
+    let listener = LocalListener::bind(&socket).unwrap();
     let server = std::thread::spawn(move || {
         // One invocation dials boardd exactly once: the command context owns a
         // single lazily connected client for the whole dispatch.
-        let (mut stream, _) = listener.accept().unwrap();
+        let mut stream = listener.accept().unwrap();
         let mut line = String::new();
         BufReader::new(stream.try_clone().unwrap())
             .read_line(&mut line)
