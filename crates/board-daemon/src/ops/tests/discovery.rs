@@ -290,10 +290,10 @@ fn run_focus_rejects_missing_pane_and_cross_session_socket() {
 
     let target_dir = tempfile::tempdir().unwrap();
     let target = target_dir.path().join("target.sock");
-    let _listener = UnixListener::bind(&target).unwrap();
+    let _listener = live_endpoint(&target);
     let origin_dir = tempfile::tempdir().unwrap();
     let origin = origin_dir.path().join("origin.sock");
-    let _origin_listener = UnixListener::bind(&origin).unwrap();
+    let _origin_listener = live_endpoint(&origin);
     let d = test_daemon_with_registry(
         Config::default(),
         Some(SessionRegistry::new(target.clone())),
@@ -1085,13 +1085,7 @@ fn harness_capabilities_codex_falls_back_to_static_on_malformed_cache() {
 
 /// A fake `opencode` executable printing the verbose model catalog shape.
 fn fixture_opencode_bin(dir: &tempfile::TempDir, stdout: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
-    let script = format!("#!/bin/sh\ncat <<'HBEOF'\n{stdout}\nHBEOF\n");
-    let bin = dir.path().join("opencode-fixture");
-    std::fs::write(&bin, script).unwrap();
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-    bin
+    testkit::stdout_fixture_bin(dir.path(), "opencode-fixture", stdout)
 }
 
 /// Mirror of `opencode models --verbose` (repeated `provider/model` header
@@ -1300,8 +1294,7 @@ fn space_list_rejects_a_socket_with_the_wrong_protocol() {
 fn run_focus_rejects_a_socket_with_the_wrong_protocol() {
     let herdr = fake_herdr_with_protocol(board_herdr::SUPPORTED_HERDR_PROTOCOL - 1);
     let origin_dir = tempfile::tempdir().unwrap();
-    let origin = origin_dir.path().join("origin.sock");
-    std::os::unix::fs::symlink(&herdr.socket, &origin).unwrap();
+    let origin = socket_alias(&herdr.socket, origin_dir.path());
     let d = test_daemon_with_registry(
         Config::default(),
         Some(SessionRegistry::new(herdr.socket.clone())),
@@ -1355,12 +1348,7 @@ const AGY_JSON_FIXTURE: &str = r#"{
 "#;
 
 fn fixture_agy_bin(dir: &tempfile::TempDir, stdout: &str) -> std::path::PathBuf {
-    let script = format!("#!/bin/sh\ncat <<'HBEOF'\n{stdout}\nHBEOF\n");
-    let bin = dir.path().join("agy-fixture");
-    std::fs::write(&bin, script).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-    bin
+    testkit::stdout_fixture_bin(dir.path(), "agy-fixture", stdout)
 }
 
 #[test]

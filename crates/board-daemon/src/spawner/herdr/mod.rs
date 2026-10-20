@@ -21,7 +21,10 @@ use super::{HerdrLaunchPlan, RuntimeHandle, SpawnError, Spawner};
 use crate::herdr_conn::connect_checked_for;
 
 #[cfg(test)]
-pub(crate) use configured::{configured_script, posix_quote, remove_file_if_exists};
+pub(crate) use configured::{
+    configured_script, configured_script_ps1, posix_quote, powershell_quote,
+    pwsh_batch_argv_problem, remove_file_if_exists, windows_pane_command,
+};
 pub(crate) use configured::{launch_configured, HerdrCliPaneRunner, PaneRunner};
 pub(crate) use managed::{launch_managed, DelayFn, DEFAULT_AGENT_START_DELAY};
 

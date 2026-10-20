@@ -7,6 +7,8 @@ use std::time::Duration;
 mod card_tabs;
 mod error;
 mod herdr;
+#[cfg(windows)]
+mod job_object;
 mod local;
 mod placement;
 mod rescue;

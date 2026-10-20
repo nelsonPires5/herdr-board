@@ -285,8 +285,6 @@ fn persistent_busy_closes_only_new_split_child_not_anchor() {
 
 #[test]
 fn configured_pane_run_failure_removes_script_and_closes_owned_pane() {
-    use std::os::unix::fs::PermissionsExt;
-
     let selected = serve_recording_herdr(|req, _| match req["method"].as_str().unwrap() {
         "tab.list" => empty_tab_list(req),
         "tab.create" => tab_created(req, "w1:p9"),
@@ -307,11 +305,16 @@ fn configured_pane_run_failure_removes_script_and_closes_owned_pane() {
             assert_eq!(socket, selected_socket.as_path());
             assert_eq!(&argv[..3], ["pane", "run", "w1:p9"]);
             assert_eq!(argv.len(), 4);
-            let path = PathBuf::from(&argv[3]);
-            assert_eq!(
-                std::fs::metadata(&path)?.permissions().mode() & 0o777,
-                0o700,
-            );
+            let path = pane_run_script_path(argv).expect("startup script path");
+            assert!(path.exists(), "the runner sees the written script");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    std::fs::metadata(&path)?.permissions().mode() & 0o777,
+                    0o700,
+                );
+            }
             *runner_path2.lock().unwrap() = Some(path);
             anyhow::bail!("herdr pane run failed on selected session")
         }),
@@ -341,7 +344,7 @@ fn configured_pane_run_failure_removes_script_and_closes_owned_pane() {
     assert_eq!(call.len(), 1);
     assert_eq!(call[0].socket, selected.socket);
     assert_eq!(&call[0].argv[..3], ["pane", "run", "w1:p9"]);
-    assert_eq!(call[0].argv[3], path.to_string_lossy());
+    assert_eq!(pane_run_script_path(&call[0].argv), Some(path));
 
     let requests = selected.requests.lock().unwrap();
     let closes: Vec<_> = requests

@@ -6,7 +6,9 @@ use crate::testkit::{
 };
 
 use super::herdr::{
-    configured_script, posix_quote, remove_file_if_exists, HerdrCliPaneRunner, PaneRunner,
+    configured_script, configured_script_ps1, posix_quote, powershell_quote,
+    pwsh_batch_argv_problem, remove_file_if_exists, windows_pane_command, HerdrCliPaneRunner,
+    PaneRunner,
 };
 use super::local::materialize_local_argv;
 use super::placement::grid_slot;
@@ -64,10 +66,7 @@ impl Drop for RecordingPaneRunner {
             .map(|calls| {
                 calls
                     .iter()
-                    .filter(|call| {
-                        call.argv.len() == 4 && call.argv[0] == "pane" && call.argv[1] == "run"
-                    })
-                    .map(|call| PathBuf::from(&call.argv[3]))
+                    .filter_map(|call| pane_run_script_path(&call.argv))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
@@ -84,14 +83,41 @@ impl Drop for RecordingPaneRunner {
                 // before running the child, so absence is expected.
                 continue;
             };
-            let expected_header = format!(
-                "#!/bin/sh\nrm -f -- {}\n",
-                posix_quote(&path.to_string_lossy())
-            );
-            if script.starts_with(&expected_header) {
+            if is_generated_startup_script(&path, &script) {
                 let _ = remove_file_if_exists(&path);
             }
         }
+    }
+}
+
+/// The startup-script path a recorded `herdr pane run` argv hands the pane:
+/// the bare path on unix, the double-quoted `-File` operand of the typed
+/// PowerShell line on Windows.
+fn pane_run_script_path(argv: &[String]) -> Option<PathBuf> {
+    if argv.len() != 4 || argv[0] != "pane" || argv[1] != "run" {
+        return None;
+    }
+    if cfg!(windows) {
+        let line = argv[3].strip_suffix('"')?;
+        let start = line.rfind('"')?;
+        Some(PathBuf::from(&line[start + 1..]))
+    } else {
+        Some(PathBuf::from(&argv[3]))
+    }
+}
+
+/// Whether `script` is the generator's output for `path` (and so safe for a
+/// test to clean up), judged by its self-removal header.
+fn is_generated_startup_script(path: &Path, script: &str) -> bool {
+    let path = path.to_string_lossy();
+    if cfg!(windows) {
+        script.starts_with('\u{feff}')
+            && script.contains(&format!(
+                "\nRemove-Item -LiteralPath {} -Force",
+                powershell_quote(&path)
+            ))
+    } else {
+        script.starts_with(&format!("#!/bin/sh\nrm -f -- {}\n", posix_quote(&path)))
     }
 }
 
@@ -337,8 +363,6 @@ fn assert_startup_prompt_file(
     expected_flag: &str,
     expected_contents: &str,
 ) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
     let args = req["params"]["args"].as_array().unwrap();
     let actual_base: Vec<_> = args[..expected_base_args.len()]
         .iter()
@@ -349,11 +373,16 @@ fn assert_startup_prompt_file(
     assert_eq!(args[expected_base_args.len()], expected_flag);
     let path = PathBuf::from(args.last().unwrap().as_str().unwrap());
     assert_eq!(std::fs::read_to_string(&path).unwrap(), expected_contents);
-    assert_eq!(
-        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-        0o600,
-        "authoritative system prompt must never be group/world-readable",
-    );
+    // Windows has no mode bits; the per-user %TEMP% ACL protects the file.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "authoritative system prompt must never be group/world-readable",
+        );
+    }
     path
 }
 

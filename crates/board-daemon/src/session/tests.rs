@@ -72,17 +72,29 @@ fn session_infos_maps_shape() {
 
 /// A stand-in `herdr` binary in a short-path tempdir (AF_UNIX-safe habit, and
 /// `argv[1..]` is always `session list --json`, which the script ignores).
-fn fake_herdr_bin(body: &str) -> (tempfile::TempDir, String) {
+/// `unix` is a `/bin/sh` body; `windows` is the body of the `.cmd` shim that
+/// stands in for it there (the shape npm installs).
+#[cfg(unix)]
+fn fake_herdr_bin(unix: &str, _windows: &str) -> (tempfile::TempDir, String) {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("herdr");
     let mut file = std::fs::File::create(&path).unwrap();
-    write!(file, "#!/bin/sh\n{body}\n").unwrap();
+    write!(file, "#!/bin/sh\n{unix}\n").unwrap();
     file.flush().unwrap();
     drop(file);
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let bin = path.to_string_lossy().into_owned();
+    (dir, bin)
+}
+
+#[cfg(windows)]
+fn fake_herdr_bin(_unix: &str, windows: &str) -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("herdr.cmd");
+    std::fs::write(&path, format!("@echo off\r\n{windows}\r\n")).unwrap();
     let bin = path.to_string_lossy().into_owned();
     (dir, bin)
 }
@@ -102,7 +114,7 @@ fn fetch_kills_a_hung_herdr_and_reports_the_deadline() {
     // `sleep 60` stands in for a wedged herdr: without a deadline this pins a
     // blocking-pool thread forever. The assertion is that `list` returns within
     // a small multiple of the budget, not after the child's own 60s.
-    let (_dir, bin) = fake_herdr_bin("sleep 60");
+    let (_dir, bin) = fake_herdr_bin("sleep 60", "ping -n 61 127.0.0.1 >nul");
     let reg = registry_with_bin(bin, Duration::from_millis(150));
     let started = Instant::now();
     let error = reg.list().unwrap_err().to_string();
@@ -113,7 +125,13 @@ fn fetch_kills_a_hung_herdr_and_reports_the_deadline() {
 
 #[test]
 fn fetch_reads_a_prompt_reply_within_the_deadline() {
-    let (_dir, bin) = fake_herdr_bin(&format!("cat <<'EOF'\n{SAMPLE}\nEOF"));
+    let data = tempfile::tempdir().unwrap();
+    let sample = data.path().join("sessions.json");
+    std::fs::write(&sample, SAMPLE).unwrap();
+    let (_dir, bin) = fake_herdr_bin(
+        &format!("cat <<'EOF'\n{SAMPLE}\nEOF"),
+        &format!("type \"{}\"", sample.display()),
+    );
     let reg = registry_with_bin(bin, Duration::from_secs(10));
     let entries = reg.list().unwrap();
     assert_eq!(entries.len(), 3);
@@ -122,8 +140,38 @@ fn fetch_reads_a_prompt_reply_within_the_deadline() {
 
 #[test]
 fn fetch_surfaces_a_nonzero_exit_with_stderr() {
-    let (_dir, bin) = fake_herdr_bin("echo 'no session dir' >&2; exit 3");
+    let (_dir, bin) = fake_herdr_bin(
+        "echo 'no session dir' >&2; exit 3",
+        "echo no session dir 1>&2\r\nexit /b 3",
+    );
     let reg = registry_with_bin(bin, Duration::from_secs(10));
     let error = reg.list().unwrap_err().to_string();
     assert!(error.contains("no session dir"), "{error}");
+}
+
+#[test]
+fn resolve_none_names_the_listed_default_socket() {
+    // The listing and the daemon's own socket can be spelled differently on
+    // Windows (`herdr session list` prints backslashed on-disk paths, the
+    // configured socket may use other case or separators); the default
+    // session's name must still be found.
+    #[cfg(windows)]
+    let (listed, own) = (
+        r"C:\Users\jon\AppData\Roaming\herdr\sessions\work\herdr.sock",
+        "c:/users/jon/appdata/roaming/herdr/sessions/work/herdr.sock",
+    );
+    #[cfg(unix)]
+    let (listed, own) = (
+        "/home/np/.config/herdr/sessions/work/herdr.sock",
+        "/home/np/.config/herdr/sessions/work/herdr.sock",
+    );
+    let payload = serde_json::json!({"sessions": [
+        {"name": "work", "default": false, "running": true, "socket_path": listed}
+    ]})
+    .to_string();
+    let reg =
+        SessionRegistry::with_entries(PathBuf::from(own), parse_session_list(&payload).unwrap());
+    let resolved = reg.resolve(None).unwrap();
+    assert_eq!(resolved.name, "work");
+    assert_eq!(resolved.socket, PathBuf::from(own));
 }

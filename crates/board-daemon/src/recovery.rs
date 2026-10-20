@@ -62,7 +62,7 @@ async fn adopt_runs(d: &Arc<Daemon>) {
         let herdr_socket = d.session_registry.as_ref().and_then(|reg| {
             reg.resolve(run.session.as_deref())
                 .ok()
-                .filter(|r| Some(r.socket.as_path()) != Some(reg.default_socket()))
+                .filter(|r| !crate::herdr_conn::same_socket(&r.socket, reg.default_socket()))
                 .map(|r| r.socket)
         });
         let handle = RuntimeHandle {

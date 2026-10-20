@@ -3,9 +3,9 @@ use crate::session::{SessionEntry, SessionRegistry};
 use crate::testkit::{self, FakeHerdr};
 use board_core::config::{Config, HarnessDef};
 use board_core::db::{Db, EnqueueRun, FinalizeRun, LifecycleFaultPoint, BOARD_ID};
+use board_ipc::LocalListener;
 use std::collections::BTreeMap;
-use std::os::unix::net::UnixListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tokio::sync::broadcast;
 
@@ -101,6 +101,35 @@ fn add_reused_pane_runs(d: &Arc<Daemon>) -> (i64, i64, i64) {
     db.promote_run_uow(current.id, Some("w1"), Some("w1:p-shared"), None)
         .unwrap();
     (card.id, first.id, current.id)
+}
+
+/// A live but silent Herdr endpoint at `path`: a bound listener (kept alive by
+/// the caller) plus, on Windows, the on-disk marker a real Herdr writes next to
+/// its named pipe, so `normalize_socket` accepts the path on every platform.
+fn live_endpoint(path: &Path) -> LocalListener {
+    let listener = LocalListener::bind(path).unwrap();
+    #[cfg(windows)]
+    std::fs::write(path, format!("{}:0", std::process::id())).unwrap();
+    listener
+}
+
+/// Another spelling of the same Herdr socket, created under `dir` when it has
+/// to exist on disk. unix: a symlink to it (canonicalization resolves it).
+/// Windows: the same path with forward slashes and upper case — the pipe name
+/// is the path string, so a link would name a different pipe, but Win32 pipe
+/// names are separator- and case-insensitive.
+fn socket_alias(socket: &Path, dir: &Path) -> PathBuf {
+    #[cfg(unix)]
+    {
+        let alias = dir.join("origin.sock");
+        std::os::unix::fs::symlink(socket, &alias).unwrap();
+        alias
+    }
+    #[cfg(windows)]
+    {
+        let _ = dir;
+        PathBuf::from(socket.to_string_lossy().replace('\\', "/").to_uppercase())
+    }
 }
 
 /// A fake Herdr for `run.focus`: `pane.get` reports the recorded pane as still

@@ -177,7 +177,7 @@ pub(super) async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result
             Ok(resolved) => {
                 // Only stamp a non-default socket on the req (keeps the default
                 // path implicit, matching the spawner's fallback).
-                if resolved.socket.as_path() != reg.default_socket() {
+                if !crate::herdr_conn::same_socket(&resolved.socket, reg.default_socket()) {
                     req.herdr_socket = Some(resolved.socket);
                 }
             }

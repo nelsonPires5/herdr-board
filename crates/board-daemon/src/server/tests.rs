@@ -121,12 +121,12 @@ fn test_daemon() -> Arc<Daemon> {
         .build_daemon()
 }
 
-/// A served socket in a short `/tmp` dir (AF_UNIX paths cap at 108 bytes).
+/// A served endpoint in a short tempdir (AF_UNIX paths cap at 108 bytes).
 fn serve_on_tempdir(rt: &tokio::runtime::Runtime, d: Arc<Daemon>) -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("b.sock");
     let guard = rt.enter();
-    let listener = UnixListener::bind(&socket).unwrap();
+    let listener = AsyncLocalListener::bind(&socket).unwrap();
     drop(guard);
     rt.spawn(serve(d, listener));
     (dir, socket)
@@ -140,13 +140,13 @@ fn serve_on_tempdir(rt: &tokio::runtime::Runtime, d: Arc<Daemon>) -> (tempfile::
 /// failing it. A socket read timeout is enforced by the kernel, so the
 /// regression fails fast and loudly.
 struct Client {
-    reader: std::io::BufReader<std::os::unix::net::UnixStream>,
-    write: std::os::unix::net::UnixStream,
+    reader: std::io::BufReader<board_ipc::LocalStream>,
+    write: board_ipc::LocalStream,
 }
 
 impl Client {
     fn connect(socket: &std::path::Path) -> Client {
-        let write = std::os::unix::net::UnixStream::connect(socket).unwrap();
+        let write = board_ipc::LocalStream::connect(socket).unwrap();
         let read = write.try_clone().unwrap();
         read.set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();

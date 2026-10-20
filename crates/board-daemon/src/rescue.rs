@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 
 use crate::dispatch::workspace_cwd;
 use crate::dispatch::{owned_pane_ids, reconstruct_owned_tab_id, resolve_space, OwnedPanes};
-use crate::herdr_conn::normalize_socket;
+use crate::herdr_conn::{normalize_socket, same_socket};
 use crate::spawner::{rescue_run_pane, CardOwnership, RescueOutcome, RescuePlan};
 use crate::state::Daemon;
 
@@ -57,7 +57,7 @@ pub(crate) fn focus_run(d: &Arc<Daemon>, p: RunFocusParams) -> Result<Value> {
     };
     let origin_socket = normalize_socket(Path::new(&p.origin_socket), "origin")?;
     let target_socket = normalize_socket(&target_socket, "target")?;
-    if origin_socket != target_socket {
+    if !same_socket(&origin_socket, &target_socket) {
         return Err(Error::InvalidState(
             "run pane belongs to a different Herdr session; cross-session jump is not supported"
                 .into(),

@@ -1,5 +1,6 @@
-//! The NDJSON Unix-socket server: accept loop, per-connection request handling,
-//! and `events.subscribe` fan-out.
+//! The NDJSON local-endpoint server (a Unix socket, or a named pipe on Windows;
+//! see `board_ipc`): accept loop, per-connection request handling, and
+//! `events.subscribe` fan-out.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -7,10 +8,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use board_core::protocol::{BoardChangedReason, Event, Request, Response, SubscribeResult};
+use board_ipc::{AsyncLocalListener, AsyncLocalStream};
 use serde::Serialize;
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, Mutex, Notify};
 
 use crate::ops;
@@ -164,12 +165,12 @@ impl Outbox {
 }
 
 /// Accept connections until shutdown.
-pub async fn serve(d: Arc<Daemon>, listener: UnixListener) {
+pub async fn serve(d: Arc<Daemon>, mut listener: AsyncLocalListener) {
     let mut rx = d.shutdown_rx();
     loop {
         tokio::select! {
             accepted = listener.accept() => match accepted {
-                Ok((stream, _)) => {
+                Ok(stream) => {
                     let conn_id = NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed);
                     tokio::spawn(handle_conn(d.clone(), stream, conn_id));
                 }
@@ -190,7 +191,7 @@ pub async fn serve(d: Arc<Daemon>, listener: UnixListener) {
 /// at a time and only pushes the next response after awaiting the previous
 /// one, so a client always sees one response per request, in request order —
 /// even though every handler now runs on the blocking pool.
-async fn handle_conn(d: Arc<Daemon>, stream: UnixStream, conn_id: u64) {
+async fn handle_conn(d: Arc<Daemon>, stream: AsyncLocalStream, conn_id: u64) {
     let (read_half, write_half) = stream.into_split();
     let outbox = Arc::new(Outbox::new(OUTBOUND_CAPACITY));
     let writer_outbox = outbox.clone();
@@ -273,7 +274,7 @@ async fn handle_conn(d: Arc<Daemon>, stream: UnixStream, conn_id: u64) {
 /// Run one request handler off the async runtime.
 ///
 /// `ops::handle_request` is fully blocking: it takes the SQLite mutex, makes
-/// blocking AF_UNIX Herdr RPCs whose transport deadlines stack into tens of
+/// blocking Herdr socket/pipe RPCs whose transport deadlines stack into tens of
 /// seconds, and shells out to `herdr session list`. Running that inline in the
 /// per-connection task pinned a tokio worker thread for the whole call, so
 /// enough concurrent requests starved the accept loop, the dispatcher, and

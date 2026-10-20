@@ -1,7 +1,12 @@
-//! Single-instance guard: an exclusive `flock` on `<db>.lock`.
+//! Single-instance guard: an exclusive, non-blocking lock on `<db>.lock`.
+//!
+//! `File::try_lock` is `flock(LOCK_EX | LOCK_NB)` on unix — exactly the call
+//! this guard always made — and `LockFileEx(EXCLUSIVE | FAIL_IMMEDIATELY)` on
+//! Windows. Both locks belong to the open file, conflict across separate opens
+//! (even within one process), and are released when the file is closed or the
+//! process dies, so a crashed daemon never leaves a stale lock behind.
 
-use std::fs::{File, OpenOptions};
-use std::os::unix::io::AsRawFd;
+use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 
 /// Path of the lock file for a given db path (`board.db` → `board.db.lock`).
@@ -25,13 +30,41 @@ pub fn acquire(db_path: &Path) -> anyhow::Result<Option<File>> {
         .write(true)
         .truncate(false)
         .open(&path)?;
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if rc == 0 {
-        return Ok(Some(file));
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(TryLockError::Error(err)) => Err(err.into()),
     }
-    let err = std::io::Error::last_os_error();
-    match err.raw_os_error() {
-        Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN => Ok(None),
-        _ => Err(err.into()),
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_second_acquire_loses_until_the_holder_releases() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("board.db");
+
+        let held = super::acquire(&db).unwrap().expect("first acquire wins");
+        assert!(
+            super::acquire(&db).unwrap().is_none(),
+            "a second daemon must see the lock as held"
+        );
+        assert!(super::lock_path(&db).is_file());
+
+        drop(held);
+        assert!(
+            super::acquire(&db).unwrap().is_some(),
+            "closing the holder's file releases the lock"
+        );
+    }
+
+    #[test]
+    fn acquire_creates_the_missing_parent_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("nested").join("board.db");
+
+        let held = super::acquire(&db).unwrap();
+        assert!(held.is_some());
+        assert!(super::lock_path(&db).is_file());
     }
 }

@@ -337,3 +337,116 @@ fn validate_space_resolvable_new_workspace_only_needs_a_label() {
         .expect_err("an empty new_workspace label must be rejected");
     assert!(err.to_string().contains("label"));
 }
+
+// ---------------------------------------------------------------------------
+// Pane cwd identity: Windows spellings of one directory agree
+// ---------------------------------------------------------------------------
+
+use crate::dispatch::space::{cwd_identity, display_cwd};
+
+#[test]
+fn unix_cwd_identity_and_display_are_the_raw_string() {
+    for raw in ["/repo", "/repo/", "/Repo", "relative/dir", r"C:\repo\"] {
+        assert_eq!(cwd_identity(raw, false), raw);
+        assert_eq!(display_cwd(raw, false), raw);
+    }
+    assert_ne!(cwd_identity("/repo", false), cwd_identity("/repo/", false));
+    assert_ne!(cwd_identity("/repo", false), cwd_identity("/Repo", false));
+}
+
+#[test]
+fn windows_cwd_identity_ignores_trailing_separator_slash_direction_case_and_verbatim_prefix() {
+    let key = cwd_identity(r"C:\Users\Jon\Repo", true);
+    for spelling in [
+        r"C:\Users\Jon\Repo\",
+        r"c:\users\jon\repo",
+        "C:/Users/Jon/Repo/",
+        "\\\\?\\C:\\Users\\Jon\\Repo",
+        "C:\\Users\\Jon\\Repo\\\\",
+        "C:/Users/Jon\\Repo",
+    ] {
+        assert_eq!(cwd_identity(spelling, true), key, "{spelling}");
+    }
+    assert_ne!(cwd_identity(r"C:\Users\Jon\Repo2", true), key);
+    assert_eq!(
+        cwd_identity("\\\\?\\UNC\\server\\share\\dir\\", true),
+        cwd_identity("\\\\Server\\Share\\dir", true)
+    );
+}
+
+#[test]
+fn windows_display_cwd_trims_trailing_separators_but_keeps_roots_spelling_and_case() {
+    assert_eq!(
+        display_cwd(r"C:\Users\Jon\Repo\", true),
+        r"C:\Users\Jon\Repo"
+    );
+    // Separators are only compared loosely; the reported spelling is kept.
+    assert_eq!(display_cwd("C:/Users/Jon/Repo/", true), "C:/Users/Jon/Repo");
+    assert_eq!(display_cwd("/repo", true), "/repo");
+    assert_eq!(display_cwd("\\\\?\\D:\\work\\", true), r"D:\work");
+    assert_eq!(
+        display_cwd("\\\\?\\UNC\\srv\\share\\", true),
+        "\\\\srv\\share"
+    );
+    assert_eq!(display_cwd(r"C:\", true), r"C:\");
+    assert_eq!(display_cwd("C:/", true), "C:/");
+    assert_eq!(display_cwd(r"\", true), r"\");
+    assert_eq!(display_cwd("/", true), "/");
+}
+
+/// The live snapshot of one workspace whose two panes report `cwds`.
+fn two_pane_snapshot(first: &str, second: &str) -> Value {
+    serde_json::json!({
+        "panes": [
+            {
+                "pane_id": "w1:p2", "workspace_id": "w1", "tab_id": "w1:t2",
+                "cwd": second, "focused": false, "revision": 1
+            },
+            {
+                "pane_id": "w1:p1", "workspace_id": "w1", "tab_id": "w1:t1",
+                "cwd": first, "focused": true, "revision": 1
+            }
+        ]
+    })
+}
+
+#[cfg(windows)]
+#[test]
+fn workspace_resolution_treats_windows_spellings_of_one_cwd_as_one_candidate() {
+    // Herdr on Windows reports pane cwds with a trailing backslash; another
+    // pane (or a user `cd`) may spell the same directory differently.
+    let herdr = workspace_resolution_server(Some(two_pane_snapshot(
+        r"C:\Users\Jon\Repo\",
+        "c:/users/jon/repo",
+    )));
+    let mut client = HerdrClient::connect(&herdr.socket).unwrap();
+    let resolved = resolve_space(&mut client, SpaceKind::Workspace, Some("w1"), None)
+        .expect("one directory spelled two ways is not ambiguous");
+    assert_eq!(resolved.cwd, r"C:\Users\Jon\Repo");
+
+    let herdr = workspace_resolution_server(Some(two_pane_snapshot(
+        r"C:\Users\Jon\Repo\",
+        r"C:\Users\Jon\Other\",
+    )));
+    let mut client = HerdrClient::connect(&herdr.socket).unwrap();
+    let err = resolve_space(&mut client, SpaceKind::Workspace, Some("w1"), None)
+        .expect_err("distinct directories stay ambiguous");
+    assert!(
+        err.to_string().contains("multiple live pane cwd"),
+        "{err:#}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_resolution_keeps_unix_cwds_exact() {
+    // unix behaviour is unchanged: a trailing slash is a different string.
+    let herdr = workspace_resolution_server(Some(two_pane_snapshot("/repo", "/repo/")));
+    let mut client = HerdrClient::connect(&herdr.socket).unwrap();
+    let err = resolve_space(&mut client, SpaceKind::Workspace, Some("w1"), None)
+        .expect_err("unix cwds compare exactly");
+    assert!(
+        err.to_string().contains("multiple live pane cwd"),
+        "{err:#}"
+    );
+}

@@ -14,8 +14,10 @@
 //! and an inter-attempt `is_interactive` check, then confirmation polls
 //! `agent.get` until the agent leaves `Idle` or its session appears/changes.
 
+#[cfg(unix)]
 use std::fs;
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::thread;
@@ -489,6 +491,9 @@ fn launch_managed_prompt_file(
         .prefix("herdr-board-system-")
         .tempfile()
         .context("creating managed system-prompt file")?;
+    // Windows has no mode bits; the file lands in the per-user `%TEMP%`,
+    // whose inherited ACL already keeps other users out.
+    #[cfg(unix)]
     fs::set_permissions(prompt_file.path(), fs::Permissions::from_mode(0o600))
         .context("setting managed system-prompt file mode to 0600")?;
     prompt_file

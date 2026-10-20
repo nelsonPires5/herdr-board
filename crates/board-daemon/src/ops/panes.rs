@@ -16,7 +16,7 @@ use board_herdr::PaneRenameParams;
 /// Takes no [`Daemon`](crate::state::Daemon): this touches no board state, only
 /// the caller's own Herdr session. That session is named by `origin_socket`
 /// exactly as it is for `run.focus`, because only the caller knows which Herdr
-/// it is running inside; the socket is canonicalized and then opened through
+/// it is running inside; the socket is normalized and then opened through
 /// [`crate::herdr_conn`], so the pinned protocol-22 gate applies before the
 /// rename reaches it.
 ///

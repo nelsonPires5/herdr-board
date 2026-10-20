@@ -1,8 +1,13 @@
 //! Structured daemon diagnostics: private daily NDJSON files and retention.
+//!
+//! Privacy is enforced per platform. unix: the directory is `0700`, each file
+//! `0600`, and the daily file is opened `O_NOFOLLOW`. Windows: the directory
+//! gets a protected DACL naming only the current user, which every daily file
+//! inherits, and every reparse point (symlink or junction) is refused, both
+//! as the directory and as the daily file.
 
 use std::fs::{self, OpenOptions};
 use std::io;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -97,14 +102,44 @@ fn unix_now() -> i64 {
 
 fn ensure_private_dir(path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) if !metadata.file_type().is_dir() => {
+        Ok(metadata) if !metadata.file_type().is_dir() || is_reparse_point(&metadata) => {
             return Err(io::Error::other("diagnostic log path is not a directory"));
         }
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => fs::create_dir_all(path)?,
         Err(error) => return Err(error),
     }
+    restrict_dir(path)
+}
+
+#[cfg(unix)]
+fn restrict_dir(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+}
+
+/// A protected DACL naming only the current user, inherited by the files
+/// inside: `BOARD_LOG_DIR` may point outside the private profile, where the
+/// parent's ACL could let other users read or plant files.
+#[cfg(windows)]
+fn restrict_dir(path: &Path) -> io::Result<()> {
+    board_ipc::owner_only::restrict_dir(path)
+}
+
+/// A symlink is never a directory in `symlink_metadata`, which is all unix
+/// needs.
+#[cfg(unix)]
+fn is_reparse_point(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
+/// Any reparse point — a symlink, but also a junction or another name
+/// surrogate — redirects the path somewhere the daemon did not choose.
+#[cfg(windows)]
+fn is_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
 /// Remove only exact owned regular daily files modified more than 30 days ago.
@@ -231,15 +266,44 @@ impl DailyFile {
     fn open(dir: &Path) -> io::Result<Self> {
         ensure_private_dir(dir)?;
         let path = daily_path(dir, unix_now());
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(path)?;
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
-        Ok(Self::File(file))
+        Ok(Self::File(open_private_append(&path)?))
     }
+}
+
+/// Open (creating) a daily file for append without following a link, and make
+/// an existing one private before any record is written.
+#[cfg(unix)]
+fn open_private_append(path: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    Ok(file)
+}
+
+/// `FILE_FLAG_OPEN_REPARSE_POINT` opens a link itself rather than its target
+/// (the `O_NOFOLLOW` analogue); a handle that turns out to be a reparse point
+/// or not a regular file is refused before anything is written through it.
+#[cfg(windows)]
+fn open_private_append(path: &Path) -> io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if is_reparse_point(&metadata) || !metadata.is_file() {
+        return Err(io::Error::other(
+            "diagnostic log file is a link or not a regular file",
+        ));
+    }
+    Ok(file)
 }
 
 impl io::Write for DailyFile {
@@ -268,11 +332,57 @@ impl io::Write for DailyFile {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::os::unix::fs::{symlink, PermissionsExt};
     use std::process::Command;
     use std::time::{Duration, UNIX_EPOCH};
 
     const SENTINEL: &str = "DIAGNOSTIC_SECRET_PROMPT_7b90";
+
+    /// Create a file symlink. `false` (the caller skips its link assertions)
+    /// on Windows when this account may not create symlinks — that needs
+    /// Developer Mode or `SeCreateSymbolicLinkPrivilege`.
+    #[cfg(unix)]
+    fn symlink(target: &std::path::Path, link: &std::path::Path) -> bool {
+        std::os::unix::fs::symlink(target, link).unwrap();
+        true
+    }
+
+    #[cfg(windows)]
+    fn symlink(target: &std::path::Path, link: &std::path::Path) -> bool {
+        const ERROR_PRIVILEGE_NOT_HELD: i32 = 1314;
+        match std::os::windows::fs::symlink_file(target, link) {
+            Ok(()) => true,
+            Err(error) if error.raw_os_error() == Some(ERROR_PRIVILEGE_NOT_HELD) => {
+                eprintln!("symlink creation not permitted here; link assertions skipped");
+                false
+            }
+            Err(error) => panic!("symlink_file: {error}"),
+        }
+    }
+
+    /// unix: the file's permission bits equal `mode`. Windows has no mode
+    /// bits; privacy there is the profile ACL, so there is nothing to check.
+    fn assert_mode(path: &std::path::Path, mode: u32) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                mode
+            );
+        }
+        #[cfg(windows)]
+        let _ = (path, mode);
+    }
+
+    fn set_mode(path: &std::path::Path, mode: u32) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+        }
+        #[cfg(windows)]
+        let _ = (path, mode);
+    }
 
     #[test]
     fn logging_child_probe() {
@@ -310,7 +420,7 @@ mod tests {
             .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1)))
             .unwrap();
         fs::write(&boundary, "{}\n").unwrap();
-        fs::set_permissions(&boundary, fs::Permissions::from_mode(0o600)).unwrap();
+        set_mode(&boundary, 0o600);
         fs::write(&unrelated, SENTINEL).unwrap();
         fs::write(&positive_signed_year, "malformed").unwrap();
         fs::write(&negative_signed_year, "malformed").unwrap();
@@ -324,7 +434,7 @@ mod tests {
                 .unwrap();
         }
         fs::create_dir(&directory).unwrap();
-        symlink(&expired, &link).unwrap();
+        let linked = symlink(&expired, &link);
         let status = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -349,10 +459,12 @@ mod tests {
         );
         assert!(nondigit_year.exists(), "non-digit year must fail closed");
         assert!(directory.is_dir());
-        assert!(fs::symlink_metadata(&link)
-            .unwrap()
-            .file_type()
-            .is_symlink());
+        if linked {
+            assert!(fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+        }
         let daily: Vec<_> = fs::read_dir(&log_dir)
             .unwrap()
             .map(|e| e.unwrap().path())
@@ -367,10 +479,7 @@ mod tests {
         assert!(!daily.is_empty());
         let mut found_record = false;
         for path in daily {
-            assert_eq!(
-                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-                0o600
-            );
+            assert_mode(&path, 0o600);
             for line in fs::read_to_string(&path)
                 .unwrap()
                 .lines()
@@ -386,10 +495,7 @@ mod tests {
             assert!(!fs::read_to_string(&path).unwrap().contains(SENTINEL));
         }
         assert!(found_record, "generated diagnostic record must be present");
-        assert_eq!(
-            fs::metadata(&log_dir).unwrap().permissions().mode() & 0o777,
-            0o700
-        );
+        assert_mode(&log_dir, 0o700);
     }
 
     #[test]
@@ -428,7 +534,9 @@ mod tests {
         fs::create_dir_all(&log_dir).unwrap();
         let target = dir.path().join("symlink-target");
         fs::write(&target, "untouched").unwrap();
-        symlink(&target, super::daily_path(&log_dir, super::unix_now())).unwrap();
+        if !symlink(&target, &super::daily_path(&log_dir, super::unix_now())) {
+            return;
+        }
         let bootstrap = dir.path().join("bootstrap.log");
         let stderr = fs::File::create(&bootstrap).unwrap();
         let status = Command::new(std::env::current_exe().unwrap())
@@ -462,13 +570,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = super::daily_path(dir.path(), super::unix_now());
         fs::write(&path, "existing\n").unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        set_mode(&path, 0o644);
 
         let writer = super::DailyFile::open(dir.path()).unwrap();
-        assert_eq!(
-            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
+        assert_mode(&path, 0o600);
         drop(writer);
         assert_eq!(fs::read_to_string(path).unwrap(), "existing\n");
     }
@@ -479,10 +584,80 @@ mod tests {
         let target = dir.path().join("target");
         fs::write(&target, "sentinel").unwrap();
         let path = super::daily_path(dir.path(), super::unix_now());
-        symlink(&target, &path).unwrap();
+        if !symlink(&target, &path) {
+            return;
+        }
 
         assert!(super::DailyFile::open(dir.path()).is_err());
         assert_eq!(fs::read_to_string(&target).unwrap(), "sentinel");
         assert!(fs::symlink_metadata(path).unwrap().file_type().is_symlink());
+    }
+
+    /// A directory junction: unlike a symlink it needs no privilege, so the
+    /// reparse-point refusal is exercised on every Windows host.
+    #[cfg(windows)]
+    fn junction(target: &std::path::Path, link: &std::path::Path) {
+        let status = Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(link)
+            .arg(target)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "mklink /J failed");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_refuses_a_junctioned_log_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let link = dir.path().join("logs");
+        junction(&real, &link);
+
+        assert!(super::ensure_private_dir(&link).is_err());
+        assert!(super::DailyFile::open(&link).is_err());
+        assert!(
+            fs::read_dir(&real).unwrap().next().is_none(),
+            "nothing may be written through the junction"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_refuses_a_junction_at_the_daily_file_name() {
+        // A directory reparse point where the daily file should be: the open
+        // must fail rather than write anywhere.
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = dir.path().join("elsewhere");
+        fs::create_dir(&elsewhere).unwrap();
+        let logs = dir.path().join("logs");
+        fs::create_dir(&logs).unwrap();
+        junction(&elsewhere, &super::daily_path(&logs, super::unix_now()));
+
+        assert!(super::DailyFile::open(&logs).is_err());
+        assert!(fs::read_dir(&elsewhere).unwrap().next().is_none());
+    }
+
+    /// The log directory's DACL names only the current user, whether the
+    /// daemon created it or it already existed (e.g. a `BOARD_LOG_DIR`
+    /// outside the profile that would inherit a broad parent ACL).
+    #[cfg(windows)]
+    #[test]
+    fn windows_log_directory_is_owner_only() {
+        let me = board_ipc::owner_only::current_user_sid().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("existing");
+        fs::create_dir(&existing).unwrap();
+        for logs in [dir.path().join("fresh").join("logs"), existing] {
+            super::ensure_private_dir(&logs).unwrap();
+            let sddl = board_ipc::owner_only::dacl_sddl(&logs).unwrap();
+            assert!(sddl.starts_with("D:P"), "{sddl}");
+            assert_eq!(sddl.matches('(').count(), 1, "{sddl}");
+            assert!(sddl.contains(&format!("(A;OICI;FA;;;{me})")), "{sddl}");
+        }
     }
 }

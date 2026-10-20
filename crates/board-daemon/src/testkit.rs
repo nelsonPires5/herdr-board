@@ -4,24 +4,27 @@
 //! sibling test modules:
 //!
 //! 1. [`daemon`] — one builder for the twelve-argument [`Daemon::new`].
-//! 2. [`herdr_server`] — one fake Herdr 0.9.0 / protocol 22 Unix socket server,
+//! 2. [`herdr_server`] — one fake Herdr 0.9.0 / protocol 22 local-endpoint
+//!    server (a Unix socket, or on Windows a named pipe plus Herdr's marker file),
 //!    with a configurable protocol/version (so protocol-gate tests can serve a
 //!    *wrong* one), per-method canned responses, an optional accept count, and
 //!    recorded request inspection. The generic supported-contract JSON
 //!    constructors used to build those responses live here too.
 //! 3. The "nothing escaped" assertions and the armed lifecycle-fault `Db`.
+//! 4. [`stdout_fixture_bin`] — a fake CLI (`opencode`, `agy`, …) that prints a
+//!    fixed stdout: a `/bin/sh` script on unix, a `.cmd` shim on Windows.
 //!
 //! This module is compiled only under `cfg(test)`; nothing here is production
 //! code.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use board_ipc::{LocalListener, LocalStream};
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, mpsc, watch};
 
@@ -188,7 +191,10 @@ impl DaemonBuilder {
 type MethodHandler = Box<dyn Fn(&Value) -> Value + Send + Sync>;
 type IndexedHandler = Box<dyn Fn(&Value, usize) -> Value + Send + Sync>;
 
-/// A running fake Herdr on a private Unix socket.
+/// A running fake Herdr on a private local endpoint. On Windows the endpoint
+/// is the named pipe for `socket`, and `socket` itself holds a
+/// `<pid>:<nanos>` marker file exactly as a real Herdr writes one, so code
+/// that requires the on-disk path to exist sees what it would in the field.
 pub(crate) struct FakeHerdr {
     _dir: tempfile::TempDir,
     pub socket: PathBuf,
@@ -295,7 +301,9 @@ impl FakeHerdrBuilder {
     pub(crate) fn serve(self) -> FakeHerdr {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("herdr.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
+        let listener = LocalListener::bind(&socket).unwrap();
+        #[cfg(windows)]
+        std::fs::write(&socket, format!("{}:0", std::process::id())).unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&requests);
 
@@ -308,7 +316,7 @@ impl FakeHerdrBuilder {
         } = self;
 
         thread::spawn(move || {
-            let incoming: Box<dyn Iterator<Item = std::io::Result<UnixStream>>> = match take {
+            let incoming: Box<dyn Iterator<Item = std::io::Result<LocalStream>>> = match take {
                 Some(n) => Box::new(listener.incoming().take(n)),
                 None => Box::new(listener.incoming()),
             };
@@ -506,4 +514,39 @@ pub(crate) fn fault_db(
     })
     .unwrap();
     (db, FaultSwitch { armed, observed })
+}
+
+// ---------------------------------------------------------------------------
+// 4. Fake CLI executables
+// ---------------------------------------------------------------------------
+
+/// A fake CLI named `name` in `dir` that prints `stdout` verbatim and exits 0.
+///
+/// unix: an owner-only `/bin/sh` heredoc script, returned by its path.
+/// Windows: a `.cmd` shim (the shape npm installs) that `type`s a sibling data
+/// file; the extension-less path is returned so resolution goes through
+/// `PATHEXT` exactly as it does for a real `opencode`/`agy` install.
+pub(crate) fn stdout_fixture_bin(dir: &Path, name: &str, stdout: &str) -> PathBuf {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let script = format!("#!/bin/sh\ncat <<'HBEOF'\n{stdout}\nHBEOF\n");
+        let bin = dir.join(name);
+        std::fs::write(&bin, script).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        bin
+    }
+    #[cfg(windows)]
+    {
+        // `cat <<HBEOF` ends the output with a newline; keep that shape.
+        let data = dir.join(format!("{name}.txt"));
+        std::fs::write(&data, format!("{stdout}\n")).unwrap();
+        std::fs::write(
+            dir.join(format!("{name}.cmd")),
+            format!("@type \"{}\"\r\n", data.display()),
+        )
+        .unwrap();
+        dir.join(name)
+    }
 }

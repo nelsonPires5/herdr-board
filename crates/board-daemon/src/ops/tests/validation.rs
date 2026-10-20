@@ -249,12 +249,7 @@ fn duplicate_board_rename_is_a_bad_request_over_the_rpc() {
 // discovery overlay tests.
 
 fn agy_catalog_fixture(dir: &tempfile::TempDir, stdout: &str) -> std::path::PathBuf {
-    let script = format!("#!/bin/sh\ncat <<'HBEOF'\n{stdout}\nHBEOF\n");
-    let bin = dir.path().join("agy-fixture");
-    std::fs::write(&bin, script).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-    bin
+    testkit::stdout_fixture_bin(dir.path(), "agy-fixture", stdout)
 }
 
 const AGY_CATALOG_UP_FIXTURE: &str = r#"{

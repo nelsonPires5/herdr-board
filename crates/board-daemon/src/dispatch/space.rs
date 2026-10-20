@@ -147,9 +147,16 @@ pub(crate) fn workspace_cwd(
         anyhow::bail!("workspace '{workspace_id}' has no live pane cwd");
     }
 
-    let distinct: BTreeSet<_> = panes.iter().map(|(_, cwd)| *cwd).collect();
+    let distinct: BTreeSet<_> = panes
+        .iter()
+        .map(|(_, cwd)| cwd_identity(cwd, WINDOWS_PATHS))
+        .collect();
     if distinct.len() == 1 {
-        return Ok((*distinct.first().expect("one distinct cwd")).to_owned());
+        // Equivalent spellings agree; report the smallest raw one (snapshot
+        // order must not pick it) in its display form.
+        if let Some(first) = panes.iter().map(|(_, cwd)| *cwd).min() {
+            return Ok(display_cwd(first, WINDOWS_PATHS));
+        }
     }
 
     let mut candidates: Vec<_> = panes
@@ -161,6 +168,47 @@ pub(crate) fn workspace_cwd(
         "workspace '{workspace_id}' has multiple live pane cwd candidates: {}; set an explicit space_cwd for the card",
         candidates.join(", ")
     )
+}
+
+/// Whether pane cwds follow Windows path rules (see [`cwd_identity`]).
+const WINDOWS_PATHS: bool = cfg!(windows);
+
+/// The comparison key for a live pane cwd. On unix this is the raw string:
+/// paths are case-sensitive and Herdr reports them exactly. Windows paths are
+/// compared the way the filesystem does: `/` and `\` are one separator, a
+/// `\\?\` verbatim prefix and a trailing separator are noise (Herdr reports
+/// `C:\repo\`), and case does not matter. Otherwise one directory spelled two
+/// ways would read as "multiple live pane cwd candidates".
+pub(crate) fn cwd_identity(cwd: &str, windows: bool) -> String {
+    if windows {
+        display_cwd(cwd, true).replace('/', r"\").to_lowercase()
+    } else {
+        cwd.to_owned()
+    }
+}
+
+/// A live pane cwd in the form handed on to placement. Identity on unix. On
+/// Windows: no `\\?\` prefix and no trailing separator except on a root
+/// (`C:\`, `\`); the reported spelling and case are otherwise kept.
+pub(crate) fn display_cwd(cwd: &str, windows: bool) -> String {
+    if !windows {
+        return cwd.to_owned();
+    }
+    let mut path = if let Some(rest) = cwd.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else {
+        cwd.strip_prefix(r"\\?\").unwrap_or(cwd).to_owned()
+    };
+    while path.ends_with(['\\', '/']) && !is_windows_root(&path) {
+        path.pop();
+    }
+    path
+}
+
+/// `\`, or a drive root such as `C:\`, where the trailing separator is the
+/// whole point.
+fn is_windows_root(path: &str) -> bool {
+    path.len() == 1 || (path.len() == 3 && path.as_bytes()[1] == b':')
 }
 
 /// Resolve a `workspace` space_ref (id, else case-insensitive label) to a

@@ -2,7 +2,8 @@
 //!
 //! Session enumeration is NOT part of the herdr socket API — a session only
 //! knows itself. So the registry shells out to `herdr session list --json`
-//! (binary from `$HERDR_BIN_PATH`, else `herdr` on `$PATH`) and caches the
+//! (binary from `$HERDR_BIN_PATH`, else `herdr` on `$PATH`, resolved through
+//! [`board_core::exec`] so a Windows `PATHEXT` shim works) and caches the
 //! parsed result for a few seconds.
 //!
 //! It also resolves a card/run's `session` field (`Option<&str>`, `None` =
@@ -12,7 +13,7 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -139,7 +140,7 @@ impl SessionRegistry {
     /// would leak blocking threads until the pool is exhausted. Stays
     /// synchronous on purpose: the caller is already off the async runtime.
     fn fetch(&self) -> anyhow::Result<Vec<SessionEntry>> {
-        let mut child = Command::new(&self.herdr_bin)
+        let mut child = board_core::exec::command(&self.herdr_bin)
             .args(["session", "list", "--json"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -259,8 +260,11 @@ fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<V
     })
 }
 
+/// Whether a listed `socket_path` is the daemon's default socket. Herdr on
+/// Windows lists backslashed on-disk paths whose case may differ from
+/// `HERDR_SOCKET_PATH`; [`crate::herdr_conn::same_socket`] owns that rule.
 fn socket_eq(a: &str, b: &Path) -> bool {
-    !a.is_empty() && Path::new(a) == b
+    !a.is_empty() && crate::herdr_conn::same_socket(Path::new(a), b)
 }
 
 fn known_running(entries: &[SessionEntry]) -> String {

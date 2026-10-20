@@ -1,10 +1,12 @@
 //! board-daemon — boardd server (OWNED BY PHASE D).
 //!
-//! The single SQLite writer, run queue, column-engine executor, and NDJSON Unix
-//! socket server. Started by `board daemon`; talks to herdr (or a local child
-//! spawner) to launch agents.
+//! The single SQLite writer, run queue, column-engine executor, and NDJSON
+//! local-endpoint server (a Unix socket, or a named pipe on Windows). Started
+//! by `board daemon`; talks to herdr (or a local child spawner) to launch
+//! agents.
 
 mod dispatch;
+mod endpoint;
 mod herdr_conn;
 mod herdr_snapshot;
 mod logging;
@@ -23,12 +25,9 @@ mod supervisor;
 mod testkit;
 mod watchers;
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-
-use anyhow::Context;
 
 use crate::spawner::Spawner;
 use board_core::config::{Config, RootConfig};
@@ -61,7 +60,7 @@ pub fn run(foreground: bool) -> anyhow::Result<()> {
     let db_path = paths::db_path();
     let socket_path = paths::socket_path();
 
-    // Single instance: exclusive flock on <db>.lock. Losing the race = exit 0.
+    // Single instance: exclusive lock on <db>.lock. Losing the race = exit 0.
     let _lock = match singleton::acquire(&db_path)? {
         Some(f) => f,
         None => return Ok(()),
@@ -206,17 +205,9 @@ async fn async_main(db_path: PathBuf, socket_path: PathBuf) -> anyhow::Result<()
     recovery::startup_recovery(&daemon).await;
     daemon.wake_dispatch();
 
-    // Bind the socket (removing any stale file first) and serve.
-    let _ = std::fs::remove_file(&socket_path);
-    if let Some(parent) = socket_path.parent() {
-        // Name the directory: without it the failure resurfaces below as an
-        // opaque `bind` error about the socket path instead.
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("cannot create the boardd socket directory {parent:?}"))?;
-    }
-    let listener = bind_secured_socket(&socket_path, |path| {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-    })?;
+    // Bind the endpoint (unix: removing any stale socket file first, then
+    // chmod 0600; Windows: owner-only pipe plus the identity marker) and serve.
+    let (listener, endpoint) = endpoint::bind(&socket_path)?;
     tracing::info!("boardd listening");
 
     server::serve(daemon.clone(), listener).await;
@@ -229,95 +220,85 @@ async fn async_main(db_path: PathBuf, socket_path: PathBuf) -> anyhow::Result<()
         );
     }
 
-    // Graceful: leave running panes alone; just clean up the socket.
-    let _ = std::fs::remove_file(&socket_path);
+    // Graceful: leave running panes alone; just clean up the endpoint.
+    endpoint.release();
     Ok(())
 }
 
 fn spawn_signal_handler(d: Arc<Daemon>) {
     tokio::spawn(async move {
-        use tokio::signal::unix::{signal, SignalKind};
-        let mut term = match signal(SignalKind::terminate()) {
-            Ok(s) => s,
-            Err(_) => {
-                tracing::warn!(
-                    error_category = "signal_handler",
-                    "SIGTERM handler setup failed"
-                );
-                return;
-            }
-        };
-        let mut int = match signal(SignalKind::interrupt()) {
-            Ok(s) => s,
-            Err(_) => {
-                tracing::warn!(
-                    error_category = "signal_handler",
-                    "SIGINT handler setup failed"
-                );
-                return;
-            }
-        };
-        tokio::select! {
-            _ = term.recv() => tracing::info!("SIGTERM received"),
-            _ = int.recv() => tracing::info!("SIGINT received"),
+        if wait_for_shutdown_signal().await {
+            d.trigger_shutdown();
         }
-        d.trigger_shutdown();
     });
 }
 
-/// Bind the daemon socket and make it owner-only. When securing the socket
-/// fails, remove the half-created file so a later start is not blocked by a
-/// stale socket, then surface the security error. `secure` is injectable so
-/// tests can force a permission-change failure deterministically.
-///
-/// The bind→chmod window is deliberately left un-temporarized: (1) the span is
-/// fully synchronous with no await points, so no other task can observe or
-/// connect through the socket mid-window; (2) an AF_UNIX `connect` requires
-/// write permission on the socket file, and under the default directory umask
-/// (0755) group/other lack it; (3) any chmod failure is fail-closed — the
-/// half-created file is removed and startup errors. Do NOT "harden" this by
-/// binding a temp name and renaming it into place: that would reopen a window
-/// where the well-known path does not yet point at the secured file.
-fn bind_secured_socket(
-    socket_path: &Path,
-    secure: impl FnOnce(&Path) -> std::io::Result<()>,
-) -> anyhow::Result<tokio::net::UnixListener> {
-    let listener = tokio::net::UnixListener::bind(socket_path)
-        .with_context(|| format!("cannot bind the boardd socket {socket_path:?}"))?;
-    if let Err(error) = secure(socket_path) {
-        let _ = std::fs::remove_file(socket_path);
-        return Err(error)
-            .with_context(|| format!("cannot secure the boardd socket {socket_path:?}"));
+/// Wait for a process-level stop request. `false` means the handlers could not
+/// be installed (already logged); the daemon then stops only via `daemon.stop`.
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() -> bool {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut term = match signal(SignalKind::terminate()) {
+        Ok(s) => s,
+        Err(_) => {
+            tracing::warn!(
+                error_category = "signal_handler",
+                "SIGTERM handler setup failed"
+            );
+            return false;
+        }
+    };
+    let mut int = match signal(SignalKind::interrupt()) {
+        Ok(s) => s,
+        Err(_) => {
+            tracing::warn!(
+                error_category = "signal_handler",
+                "SIGINT handler setup failed"
+            );
+            return false;
+        }
+    };
+    tokio::select! {
+        _ = term.recv() => tracing::info!("SIGTERM received"),
+        _ = int.recv() => tracing::info!("SIGINT received"),
     }
-    Ok(listener)
+    true
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Windows has no SIGTERM: the console control events are the equivalent.
+/// Ctrl+C / Ctrl+Break interrupt a foreground daemon; close, logoff and
+/// shutdown arrive when its console or session goes away. A detached daemon has
+/// no console and stops via `daemon.stop`, exactly as `board daemon stop` does
+/// on every platform.
+#[cfg(windows)]
+async fn wait_for_shutdown_signal() -> bool {
+    use tokio::signal::windows;
 
-    #[tokio::test]
-    async fn failed_socket_securing_removes_the_partial_socket() {
-        let dir = tempfile::tempdir().unwrap();
-        let socket_path = dir.path().join("boardd.sock");
-
-        let error = bind_secured_socket(&socket_path, |_| {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "injected chmod failure",
-            ))
-        })
-        .expect_err("a failed security step must fail startup");
-
-        assert!(
-            error
-                .to_string()
-                .contains("cannot secure the boardd socket"),
-            "error must name the security step: {error}"
-        );
-        assert!(
-            !socket_path.exists(),
-            "the half-created socket must be removed after a security failure"
-        );
+    macro_rules! install {
+        ($ctor:path, $name:literal) => {
+            match $ctor() {
+                Ok(s) => s,
+                Err(_) => {
+                    tracing::warn!(
+                        error_category = "signal_handler",
+                        concat!($name, " handler setup failed")
+                    );
+                    return false;
+                }
+            }
+        };
     }
+    let mut ctrl_c = install!(windows::ctrl_c, "CTRL_C");
+    let mut ctrl_break = install!(windows::ctrl_break, "CTRL_BREAK");
+    let mut ctrl_close = install!(windows::ctrl_close, "CTRL_CLOSE");
+    let mut ctrl_logoff = install!(windows::ctrl_logoff, "CTRL_LOGOFF");
+    let mut ctrl_shutdown = install!(windows::ctrl_shutdown, "CTRL_SHUTDOWN");
+    tokio::select! {
+        _ = ctrl_c.recv() => tracing::info!("CTRL_C received"),
+        _ = ctrl_break.recv() => tracing::info!("CTRL_BREAK received"),
+        _ = ctrl_close.recv() => tracing::info!("CTRL_CLOSE received"),
+        _ = ctrl_logoff.recv() => tracing::info!("CTRL_LOGOFF received"),
+        _ = ctrl_shutdown.recv() => tracing::info!("CTRL_SHUTDOWN received"),
+    }
+    true
 }
