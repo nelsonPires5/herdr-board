@@ -229,7 +229,21 @@ fn fixture_agy_bin(dir: &tempfile::TempDir, stdout: &str) -> std::path::PathBuf 
     bin
 }
 
-#[cfg(unix)]
+/// Windows twin: a `.cmd` shim (the shape npm installs) that types the
+/// fixture from a data file. The extension-less path is returned, exactly as
+/// the daemon passes a bare `agy`, so resolution goes through `PATHEXT`.
+#[cfg(windows)]
+fn fixture_agy_bin(dir: &tempfile::TempDir, stdout: &str) -> std::path::PathBuf {
+    let data = dir.path().join("agy-fixture.txt");
+    fs::write(&data, stdout).unwrap();
+    fs::write(
+        dir.path().join("agy-fixture.cmd"),
+        format!("@type \"{}\"\r\n", data.display()),
+    )
+    .unwrap();
+    dir.path().join("agy-fixture")
+}
+
 #[test]
 fn load_from_cli_parses_the_live_envelope() {
     let dir = tempfile::tempdir().unwrap();
@@ -247,15 +261,28 @@ fn load_from_cli_parses_the_live_envelope() {
     );
 }
 
+/// A fixture that exits non-zero without printing a model list.
 #[cfg(unix)]
+fn failing_agy_bin(dir: &tempfile::TempDir) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let failing = dir.path().join("agy-failing");
+    fs::write(&failing, "#!/bin/sh\nexit 3\n").unwrap();
+    fs::set_permissions(&failing, fs::Permissions::from_mode(0o700)).unwrap();
+    failing
+}
+
+#[cfg(windows)]
+fn failing_agy_bin(dir: &tempfile::TempDir) -> std::path::PathBuf {
+    fs::write(dir.path().join("agy-failing.cmd"), "@exit /b 3\r\n").unwrap();
+    dir.path().join("agy-failing")
+}
+
 #[test]
 fn load_from_cli_failing_binary_yields_none() {
     let dir = tempfile::tempdir().unwrap();
     // A script that exits non-zero (no model list) → None.
-    let failing = dir.path().join("agy-failing");
-    fs::write(&failing, "#!/bin/sh\nexit 3\n").unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&failing, fs::Permissions::from_mode(0o700)).unwrap();
+    let failing = failing_agy_bin(&dir);
     assert!(load_from_cli(failing.to_str().unwrap()).is_none());
 
     // A missing binary → None.
@@ -371,4 +398,23 @@ fn live_models_disabled_without_a_bin() {
     // `live_models(None)` is the daemon's no-configured-bin path (tests leave
     // it unset): catalog unavailable → None, so the harness is free-form.
     assert!(live_models(None).is_none());
+}
+
+/// Windows: a hung `.cmd` shim whose grandchild (`ping`, standing in for
+/// `node`) keeps the stdout pipe open after `cmd.exe` is killed. The bounded
+/// run must return near its deadline rather than wait for the grandchild.
+#[cfg(windows)]
+#[test]
+fn load_from_cli_bounded_times_out_past_a_pipe_holding_grandchild() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("agy-hang.cmd"), "@ping -n 30 127.0.0.1\r\n").unwrap();
+    let bin = dir.path().join("agy-hang");
+    let started = Instant::now();
+    let models = load_from_cli_bounded(bin.to_str().unwrap(), Duration::from_secs(2));
+    let elapsed = started.elapsed();
+    assert!(models.is_none(), "a hung CLI must yield None");
+    assert!(
+        elapsed < Duration::from_secs(15),
+        "the timeout path must not wait on the grandchild (took {elapsed:?})"
+    );
 }

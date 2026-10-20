@@ -19,25 +19,31 @@
 //! Everything here is pure file/subprocess reading; nothing mutates state.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::time::Duration;
 
 use serde::Deserialize;
 
 use crate::capability::ModelInfo;
 use crate::protocol::Effort;
 
+/// Wall-clock budget for one `pi --list-models` run: the fallback sits on the
+/// daemon's request path, so a hung CLI must not block forever.
+pub const CLI_TIMEOUT: Duration = Duration::from_secs(30);
+/// Hard cap on the raw stdout bytes retained from one `pi --list-models` run;
+/// a human model table is far smaller, so anything past this is garbage.
+pub const MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+
 /// Resolve the pi agent dir: `$PI_CODING_AGENT_DIR` else `~/.pi/agent`.
-/// Mirrors pi's own `getAgentDir()`. Returns `None` when no home dir.
+/// Mirrors pi's own `getAgentDir()` (node's `os.homedir()`, i.e. the profile
+/// folder on Windows — see [`crate::paths::home_dir`]). Returns `None` when
+/// no home dir.
 pub fn default_agent_dir() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("PI_CODING_AGENT_DIR") {
         if !dir.is_empty() {
             return Some(PathBuf::from(dir));
         }
     }
-    std::env::var("HOME")
-        .ok()
-        .filter(|h| !h.is_empty())
-        .map(|h| PathBuf::from(h).join(".pi").join("agent"))
+    crate::paths::home_dir().map(|h| h.join(".pi").join("agent"))
 }
 
 // -- auth.json (provider allow-list) ----------------------------------------
@@ -153,7 +159,17 @@ pub fn load_from_files(agent_dir: &Path) -> Option<Vec<ModelInfo>> {
 /// the table's `provider model …` rows. Used only when the on-disk files are
 /// unavailable. Fragile (human table, no JSON flag), hence a fallback.
 pub fn load_from_cli(pi_bin: &str) -> Option<Vec<ModelInfo>> {
-    let out = Command::new(pi_bin).arg("--list-models").output().ok()?;
+    load_from_cli_bounded(pi_bin, CLI_TIMEOUT)
+}
+
+/// The bounded core of [`load_from_cli`] with a caller-chosen wall-clock
+/// budget (the tests use a short controlled timeout; production uses
+/// [`CLI_TIMEOUT`]). The run goes through [`crate::exec::run_bounded`]: the
+/// binary is resolved (`pi.cmd` on Windows), a hung CLI is killed at the
+/// deadline, and stdout is capped at [`MAX_OUTPUT_BYTES`].
+pub fn load_from_cli_bounded(pi_bin: &str, timeout: Duration) -> Option<Vec<ModelInfo>> {
+    let argv = [pi_bin.to_string(), "--list-models".to_string()];
+    let out = crate::exec::run_bounded(&argv, timeout, MAX_OUTPUT_BYTES)?;
     if !out.status.success() {
         return None;
     }

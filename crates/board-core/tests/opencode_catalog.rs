@@ -269,7 +269,38 @@ fn fixture_opencode_bin(dir: &tempfile::TempDir, stdout: &str) -> std::path::Pat
     bin
 }
 
+/// Windows twin: a `.cmd` shim (the shape npm installs) that types the
+/// fixture from a data file. The extension-less path is returned, exactly as
+/// the daemon passes a bare `opencode`, so resolution goes through `PATHEXT`.
+#[cfg(windows)]
+fn fixture_opencode_bin(dir: &tempfile::TempDir, stdout: &str) -> std::path::PathBuf {
+    let data = dir.path().join("opencode-fixture.txt");
+    fs::write(&data, stdout).unwrap();
+    fs::write(
+        dir.path().join("opencode-fixture.cmd"),
+        format!("@type \"{}\"\r\n", data.display()),
+    )
+    .unwrap();
+    dir.path().join("opencode-fixture")
+}
+
+/// A fixture that exits non-zero without printing a model list.
 #[cfg(unix)]
+fn failing_opencode_bin(dir: &tempfile::TempDir) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let failing = dir.path().join("opencode-failing");
+    fs::write(&failing, "#!/bin/sh\nexit 3\n").unwrap();
+    fs::set_permissions(&failing, fs::Permissions::from_mode(0o700)).unwrap();
+    failing
+}
+
+#[cfg(windows)]
+fn failing_opencode_bin(dir: &tempfile::TempDir) -> std::path::PathBuf {
+    fs::write(dir.path().join("opencode-failing.cmd"), "@exit /b 3\r\n").unwrap();
+    dir.path().join("opencode-failing")
+}
+
 #[test]
 fn load_from_cli_parses_the_verbose_output() {
     let dir = tempfile::tempdir().unwrap();
@@ -289,15 +320,11 @@ fn load_from_cli_parses_the_verbose_output() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn load_from_cli_failing_binary_yields_none() {
     let dir = tempfile::tempdir().unwrap();
     // A script that exits non-zero (no model list) → None.
-    let failing = dir.path().join("opencode-failing");
-    fs::write(&failing, "#!/bin/sh\nexit 3\n").unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&failing, fs::Permissions::from_mode(0o700)).unwrap();
+    let failing = failing_opencode_bin(&dir);
     assert!(load_from_cli(failing.to_str().unwrap()).is_none());
 
     // A missing binary → None.
@@ -439,5 +466,28 @@ fn fallback_models_truthfully_define_nemotron_and_the_fixture_model() {
     assert_eq!(
         models[1].efforts,
         vec![Effort::Low, Effort::High, Effort::Max]
+    );
+}
+
+/// Windows: a hung `.cmd` shim whose grandchild (`ping`, standing in for
+/// `node`) keeps the stdout pipe open after `cmd.exe` is killed. The bounded
+/// run must return near its deadline rather than wait for the grandchild.
+#[cfg(windows)]
+#[test]
+fn load_from_cli_bounded_times_out_past_a_pipe_holding_grandchild() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("opencode-hang.cmd"),
+        "@ping -n 30 127.0.0.1\r\n",
+    )
+    .unwrap();
+    let bin = dir.path().join("opencode-hang");
+    let started = Instant::now();
+    let models = load_from_cli_bounded(bin.to_str().unwrap(), Duration::from_secs(2));
+    let elapsed = started.elapsed();
+    assert!(models.is_none(), "a hung CLI must yield None");
+    assert!(
+        elapsed < Duration::from_secs(15),
+        "the timeout path must not wait on the grandchild (took {elapsed:?})"
     );
 }

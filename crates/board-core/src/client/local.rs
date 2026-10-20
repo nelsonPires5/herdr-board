@@ -1,11 +1,12 @@
+//! The real boardd client over the platform's local endpoint: an AF_UNIX
+//! socket on unix, a named pipe on Windows (both via [`board_ipc`]).
+
 use std::io::{BufRead, BufReader, Write};
-
-use std::os::unix::net::UnixStream;
-
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Context;
+use board_ipc::LocalStream;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -20,7 +21,7 @@ use super::BoardClient;
 /// freezing the caller forever.
 const SUBSCRIBE_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Structured error returned by boardd over the Unix RPC transport.
+/// Structured error returned by boardd over the local RPC transport.
 ///
 /// This is deliberately a public `std::error::Error` so callers retaining the
 /// existing `anyhow::Result` APIs can still downcast and render protocol
@@ -94,19 +95,39 @@ struct WireRpcError {
     details: Option<Value>,
 }
 
-/// The real Unix-socket client.
-pub struct UnixClient {
+/// True when `error` (as returned by [`LocalClient::connect`] or
+/// [`LocalClient::connect_default`]) means nothing is listening at the
+/// endpoint — no socket file / refused on unix, no pipe on Windows — as
+/// opposed to a busy, timed-out, or otherwise failing daemon.
+///
+/// The connect error keeps the underlying `std::io::Error` in its chain, so
+/// this is [`board_ipc::endpoint::is_absent`] applied to that cause.
+pub fn is_daemon_absent(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .any(board_ipc::endpoint::is_absent)
+}
+
+/// The real boardd client over the local endpoint (unix socket / named pipe).
+pub struct LocalClient {
     path: PathBuf,
-    reader: BufReader<UnixStream>,
-    writer: UnixStream,
+    reader: BufReader<LocalStream>,
+    writer: LocalStream,
     next_id: u64,
 }
 
-impl UnixClient {
-    pub fn connect(path: &Path) -> anyhow::Result<UnixClient> {
-        let stream = UnixStream::connect(path)?;
+/// Historical name kept for existing callers; the client is no longer
+/// unix-only.
+pub type UnixClient = LocalClient;
+
+impl LocalClient {
+    /// Connect to boardd at `path`. A failure carries the `std::io::Error`
+    /// as its root cause; see [`is_daemon_absent`] to classify it.
+    pub fn connect(path: &Path) -> anyhow::Result<LocalClient> {
+        let stream = LocalStream::connect(path)?;
         let reader = BufReader::new(stream.try_clone()?);
-        Ok(UnixClient {
+        Ok(LocalClient {
             path: path.to_path_buf(),
             reader,
             writer: stream,
@@ -114,12 +135,12 @@ impl UnixClient {
         })
     }
 
-    pub fn connect_default() -> anyhow::Result<UnixClient> {
-        UnixClient::connect(&crate::paths::socket_path())
+    pub fn connect_default() -> anyhow::Result<LocalClient> {
+        LocalClient::connect(&crate::paths::socket_path())
     }
 }
 
-impl BoardClient for UnixClient {
+impl BoardClient for LocalClient {
     fn call(&mut self, method: &str, params: Value) -> anyhow::Result<Value> {
         self.next_id += 1;
         let id = self.next_id.to_string();
@@ -160,7 +181,7 @@ impl BoardClient for UnixClient {
     }
 
     fn subscribe(&mut self) -> anyhow::Result<Box<dyn Iterator<Item = Event> + Send>> {
-        let stream = UnixStream::connect(&self.path)?;
+        let stream = LocalStream::connect(&self.path)?;
         let mut writer = stream.try_clone()?;
         let mut reader = BufReader::new(stream);
         let req = Request {
@@ -234,7 +255,7 @@ impl BoardClient for UnixClient {
 
 /// Iterator over streamed events; skips the subscribe ack and any non-event lines.
 pub struct EventStream {
-    reader: BufReader<UnixStream>,
+    reader: BufReader<LocalStream>,
 }
 
 impl Iterator for EventStream {

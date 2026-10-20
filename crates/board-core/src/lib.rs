@@ -11,6 +11,7 @@
 //!   Antigravity and config harnesses.
 //! - [`config`]: `~/.config/herdr-board/config.toml` loader.
 //! - [`paths`]: db/socket/log/config path resolution.
+//! - [`exec`]: cross-platform program resolution + bounded subprocess runs.
 //! - [`client`]: blocking NDJSON `BoardClient` (+ `FakeBoardClient` behind a feature).
 //! - [`launch`]: durable, harness-neutral execution specifications.
 
@@ -21,6 +22,7 @@ pub mod codex_catalog;
 pub mod config;
 pub mod db;
 pub mod engine;
+pub mod exec;
 pub mod harness;
 pub mod labels;
 pub mod launch;

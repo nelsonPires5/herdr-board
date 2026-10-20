@@ -5,7 +5,7 @@ use board_core::config::{Config, HarnessDef};
 use board_core::harness::{
     build_invocation, build_invocation_for_card, claude_argv, is_builtin_harness, pi_argv,
     plan_session, resume_invocation, session_argv, CardScope, HarnessError, SessionPlan,
-    BOARD_PROTOCOL_TRAILER, DEFAULT_HARNESS,
+    BOARD_PROTOCOL_TRAILER, CLAUDE_ALLOWED_TOOLS, DEFAULT_HARNESS,
 };
 use board_core::launch::ExecutionSpec;
 use board_core::prompt::EffectiveSettings;
@@ -33,6 +33,39 @@ fn pi_settings() -> EffectiveSettings {
         fresh_session: false,
         timeout_minutes: None,
     }
+}
+
+/// The pinned unix argv lists `--allowedTools Bash(board:*)`; on Windows the
+/// same flag also carries `PowerShell(board:*)` right after it.
+fn with_platform_tools(argv: Vec<&str>) -> Vec<String> {
+    let mut out = Vec::with_capacity(argv.len() + 1);
+    for arg in argv {
+        out.push(arg.to_string());
+        if cfg!(windows) && arg == "Bash(board:*)" {
+            out.push("PowerShell(board:*)".to_string());
+        }
+    }
+    out
+}
+
+#[test]
+fn claude_allowed_tools_are_pinned_per_platform() {
+    if cfg!(windows) {
+        assert_eq!(
+            CLAUDE_ALLOWED_TOOLS,
+            ["Bash(board:*)", "PowerShell(board:*)"]
+        );
+    } else {
+        // Unix argv stays byte-identical to every release before Windows.
+        assert_eq!(CLAUDE_ALLOWED_TOOLS, ["Bash(board:*)"]);
+    }
+    let argv = claude_argv(&settings(), &SessionPlan::Resume("s".into()), None, "p").unwrap();
+    let at = argv.iter().position(|a| a == "--allowedTools").unwrap();
+    assert_eq!(
+        &argv[at + 1..at + 1 + CLAUDE_ALLOWED_TOOLS.len()],
+        CLAUDE_ALLOWED_TOOLS
+    );
+    assert_eq!(argv[at + 1 + CLAUDE_ALLOWED_TOOLS.len()], "--resume");
 }
 
 #[test]
@@ -67,7 +100,7 @@ fn claude_fresh_session_mints_uuid() {
     let argv = claude_argv(&settings(), &SessionPlan::Mint, Some(uuid), "prompt text").unwrap();
     assert_eq!(
         argv,
-        vec![
+        with_platform_tools(vec![
             "claude",
             "--model",
             "sonnet",
@@ -83,7 +116,7 @@ fn claude_fresh_session_mints_uuid() {
             uuid,
             "--",
             "prompt text",
-        ]
+        ])
     );
 }
 
@@ -123,7 +156,7 @@ fn claude_omits_unset_overrides() {
     // No column prompt → the system prompt is exactly the protocol trailer.
     assert_eq!(
         argv,
-        vec![
+        with_platform_tools(vec![
             "claude",
             "--append-system-prompt",
             BOARD_PROTOCOL_TRAILER,
@@ -133,7 +166,7 @@ fn claude_omits_unset_overrides() {
             "x",
             "--",
             "p",
-        ]
+        ])
     );
 }
 

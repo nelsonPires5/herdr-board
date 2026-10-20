@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixListener;
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
-use board_core::client::{BoardClient, UnixClient};
+use board_core::client::{is_daemon_absent, BoardClient, LocalClient, RpcClientError, UnixClient};
 use board_core::protocol::{BoardChangedReason, Event};
+use board_ipc::LocalListener;
 use serde_json::{json, Value};
 
 struct RecordingClient {
@@ -108,7 +109,7 @@ fn typed_catalog_and_run_methods_preserve_wire_v1_params_and_results() {
 fn subscribe_waits_for_the_daemon_acknowledgement_before_returning() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("boardd.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
+    let listener = LocalListener::bind(&socket).unwrap();
 
     let (ack_release_tx, ack_release_rx) = mpsc::channel::<()>();
     let (returned_tx, returned_rx) =
@@ -118,8 +119,8 @@ fn subscribe_waits_for_the_daemon_acknowledgement_before_returning() {
     // dedicated subscription socket, hold the acknowledgement until the test
     // releases it, and stream one event afterwards.
     let daemon = std::thread::spawn(move || {
-        let (_handshake, _) = listener.accept().unwrap();
-        let (mut stream, _) = listener.accept().unwrap();
+        let _handshake = listener.accept().unwrap();
+        let mut stream = listener.accept().unwrap();
         let mut reader = BufReader::new(stream.try_clone().unwrap());
         let mut line = String::new();
         reader.read_line(&mut line).unwrap();
@@ -185,11 +186,11 @@ fn subscribe_rejects_an_event_streamed_before_the_ack() {
     // between "waits for an ack" and "waits for any line".
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("boardd.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
+    let listener = LocalListener::bind(&socket).unwrap();
 
     let daemon = std::thread::spawn(move || {
-        let (_handshake, _) = listener.accept().unwrap();
-        let (mut stream, _) = listener.accept().unwrap();
+        let _handshake = listener.accept().unwrap();
+        let mut stream = listener.accept().unwrap();
         let mut reader = BufReader::new(stream.try_clone().unwrap());
         let mut line = String::new();
         reader.read_line(&mut line).unwrap();
@@ -234,11 +235,11 @@ fn subscribe_rejects_a_negative_or_error_ack() {
     ] {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("boardd.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
+        let listener = LocalListener::bind(&socket).unwrap();
 
         let daemon = std::thread::spawn(move || {
-            let (_handshake, _) = listener.accept().unwrap();
-            let (mut stream, _) = listener.accept().unwrap();
+            let _handshake = listener.accept().unwrap();
+            let mut stream = listener.accept().unwrap();
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut line = String::new();
             reader.read_line(&mut line).unwrap();
@@ -258,6 +259,134 @@ fn subscribe_rejects_a_negative_or_error_ack() {
         );
         daemon.join().unwrap();
     }
+}
+
+#[test]
+fn unix_client_alias_names_the_local_client() {
+    // board-cli and board-tui still spell the client `UnixClient`; the alias
+    // must stay the same type as the platform-neutral `LocalClient`.
+    fn same(_: fn(&std::path::Path) -> anyhow::Result<LocalClient>) {}
+    same(UnixClient::connect);
+}
+
+#[test]
+fn connect_to_a_missing_endpoint_reports_the_daemon_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("boardd.sock");
+    let error = LocalClient::connect(&socket)
+        .err()
+        .expect("nothing listens at a fresh path");
+    assert!(
+        is_daemon_absent(&error),
+        "a missing endpoint must classify as absent, got: {error:?}"
+    );
+}
+
+#[test]
+fn connect_after_the_listener_is_dropped_reports_the_daemon_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("boardd.sock");
+    drop(LocalListener::bind(&socket).unwrap());
+    let error = LocalClient::connect(&socket)
+        .err()
+        .expect("a dropped listener accepts no connections");
+    assert!(
+        is_daemon_absent(&error),
+        "a dead endpoint must classify as absent, got: {error:?}"
+    );
+}
+
+#[test]
+fn non_io_and_timeout_errors_are_not_daemon_absent() {
+    assert!(!is_daemon_absent(&anyhow::anyhow!("boardd error")));
+    let timed_out = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::TimedOut));
+    assert!(!is_daemon_absent(&timed_out));
+    let not_found = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::NotFound))
+        .context("connecting to boardd");
+    assert!(
+        is_daemon_absent(&not_found),
+        "the io cause is found through added context"
+    );
+}
+
+#[test]
+fn call_round_trips_results_and_structured_errors_over_the_endpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("boardd.sock");
+    let listener = LocalListener::bind(&socket).unwrap();
+
+    let daemon = std::thread::spawn(move || {
+        let mut stream = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        for _ in 0..2 {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(line.trim_end()).unwrap();
+            let id = request["id"].as_str().unwrap().to_string();
+            // A stray non-response line before the reply must be skipped.
+            writeln!(stream, r#"{{"event":"noise"}}"#).unwrap();
+            let reply = if request["method"] == "ping" {
+                json!({ "id": id, "result": { "pong": true } })
+            } else {
+                json!({
+                    "id": id,
+                    "error": { "code": -32601, "kind": "not_found", "message": "no such method" }
+                })
+            };
+            writeln!(stream, "{reply}").unwrap();
+        }
+    });
+
+    let mut client = LocalClient::connect(&socket).unwrap();
+    assert_eq!(
+        client.call("ping", json!({})).unwrap(),
+        json!({ "pong": true })
+    );
+    let error = client.call("nope", json!({})).unwrap_err();
+    let rpc = error
+        .downcast_ref::<RpcClientError>()
+        .expect("structured boardd errors downcast");
+    assert_eq!(rpc.code, -32601);
+    assert_eq!(rpc.kind(), Some("not_found"));
+    assert_eq!(client.reconnect_path(), Some(socket.clone()));
+    daemon.join().unwrap();
+}
+
+#[test]
+fn subscribe_times_out_when_the_daemon_never_acknowledges() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("boardd.sock");
+    let listener = LocalListener::bind(&socket).unwrap();
+    let (done_tx, done_rx) = mpsc::channel::<()>();
+
+    // Accept both connections and read the subscribe request, but never
+    // answer, holding the stream open until the client has given up.
+    let daemon = std::thread::spawn(move || {
+        let _handshake = listener.accept().unwrap();
+        let stream = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        done_rx.recv().unwrap();
+    });
+
+    let mut client = LocalClient::connect(&socket).unwrap();
+    let started = Instant::now();
+    let error = client
+        .subscribe()
+        .err()
+        .expect("a silent daemon must fail the subscription");
+    let elapsed = started.elapsed();
+    done_tx.send(()).unwrap();
+    assert!(
+        error.to_string().contains("timed out"),
+        "a missing ack must surface as a timeout, got: {error}"
+    );
+    assert!(
+        elapsed >= Duration::from_secs(4) && elapsed < Duration::from_secs(20),
+        "the ack wait is bounded by the 5s subscribe timeout, took {elapsed:?}"
+    );
+    daemon.join().unwrap();
 }
 
 fn action_result() -> Value {

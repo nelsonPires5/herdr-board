@@ -46,7 +46,7 @@ fn git_subdirectory_resolves_to_canonical_root() {
 
     assert_eq!(
         resolve_scope_path(&subdir).unwrap(),
-        root.canonicalize().unwrap()
+        dunce::canonicalize(&root).unwrap()
     );
 }
 
@@ -58,8 +58,45 @@ fn non_git_directory_resolves_to_canonical_cwd() {
 
     assert_eq!(
         resolve_scope_path(&dir).unwrap(),
-        dir.canonicalize().unwrap()
+        dunce::canonicalize(&dir).unwrap()
     );
+}
+
+/// Project keys and pane cwds must never carry Windows' `\\?\` verbatim
+/// prefix (std's `canonicalize` adds it; Herdr and git never report it).
+/// On unix `dunce` is plain `canonicalize`, so this also pins equality with
+/// std there.
+#[test]
+fn resolved_scope_paths_carry_no_verbatim_prefix() {
+    let tmp = tempfile::tempdir().unwrap();
+    let plain = tmp.path().join("plain");
+    std::fs::create_dir(&plain).unwrap();
+    let repo = tmp.path().join("repo");
+    let nested = repo.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    let status = std::process::Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    for (candidate, expected) in [(&plain, &plain), (&nested, &repo)] {
+        let resolved = resolve_scope_path(candidate).unwrap();
+        let spelled = resolved.to_string_lossy();
+        assert!(
+            !spelled.starts_with(r"\\?\"),
+            "verbatim prefix leaked into {spelled:?}"
+        );
+        assert!(resolved.is_absolute(), "{spelled:?} must stay absolute");
+        #[cfg(unix)]
+        assert_eq!(resolved, expected.canonicalize().unwrap());
+        #[cfg(not(unix))]
+        assert!(
+            resolved.ends_with(expected.file_name().unwrap()),
+            "{spelled:?} must resolve to {expected:?}"
+        );
+    }
 }
 
 #[cfg(unix)]

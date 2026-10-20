@@ -58,14 +58,39 @@ pub fn legacy_log_path() -> PathBuf {
 ///
 /// A named session's socket lives at `…/sessions/<name>/herdr.sock`; anything
 /// else (unset, or the plain default `…/herdr.sock`) means the daemon's default
-/// session, represented as `None`. This function is pure so production
-/// composition can inject its result without test-time environment reads.
+/// session, represented as `None`. Both `/` and `\` separate segments, so a
+/// Windows value (`C:\…\herdr\sessions\<name>\herdr.sock`, which Herdr
+/// serves as a named pipe of the same name) parses like its unix counterpart.
+/// This function is pure so production composition can inject its result
+/// without test-time environment reads.
 pub fn session_name_from_socket(path: Option<&str>) -> Option<String> {
+    const SEPARATORS: [char; 2] = ['/', '\\'];
     // Expect the tail `sessions/<name>/herdr.sock`.
-    let rest = path?.strip_suffix("/herdr.sock")?;
-    let (parent, name) = rest.rsplit_once('/')?;
-    let last_seg = parent.rsplit('/').next().unwrap_or(parent);
+    let rest = path?.strip_suffix("herdr.sock")?;
+    let rest = rest.strip_suffix(SEPARATORS)?;
+    let (parent, name) = rest.rsplit_once(SEPARATORS)?;
+    let last_seg = parent.rsplit(SEPARATORS).next().unwrap_or(parent);
     (last_seg == "sessions" && !name.is_empty()).then(|| name.to_string())
+}
+
+/// The user's home directory, as the harness CLIs themselves resolve it.
+///
+/// - **unix**: `$HOME` verbatim (unset or empty → `None`), so `HOME=…`
+///   overrides keep pointing discovery at a fixture home.
+/// - **Windows**: `$HOME` is not a native concept (Git Bash sets it, a plain
+///   console does not); node's `os.homedir()` and Rust CLIs use the profile
+///   folder, so this does too (`directories::BaseDirs::home_dir`).
+pub fn home_dir() -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        std::env::var_os("HOME")
+            .filter(|home| !home.is_empty())
+            .map(PathBuf::from)
+    }
+    #[cfg(not(unix))]
+    {
+        BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf())
+    }
 }
 
 /// Config file path: `$HERDR_BOARD_CONFIG` else `<config>/config.toml`.

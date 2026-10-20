@@ -88,10 +88,16 @@ fn claude_invocation_preserves_authoritative_system_prompt_and_exact_startup_tai
             "acceptEdits".into(),
             "--allowedTools".into(),
             "Bash(board:*)".into(),
+        ]
+        .into_iter()
+        // Windows also allows Claude's PowerShell tool for `board`.
+        .chain(cfg!(windows).then(|| "PowerShell(board:*)".to_string()))
+        .chain([
             "--resume".into(),
             "claude-source".into(),
             "--fork-session".into(),
-        ],
+        ])
+        .collect::<Vec<String>>(),
         "the daemon preserves this argv[1..] tail, then adds --append-system-prompt-file plus its temporary path; only the card task is submitted later",
     );
 }

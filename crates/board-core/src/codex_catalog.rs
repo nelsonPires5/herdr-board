@@ -33,17 +33,15 @@ use crate::capability::ModelInfo;
 use crate::protocol::Effort;
 
 /// Resolve the codex home: `$CODEX_HOME` else `~/.codex`. Mirrors the codex
-/// CLI's own default. Returns `None` when no home dir is known.
+/// CLI's own default (the profile folder on Windows — see
+/// [`crate::paths::home_dir`]). Returns `None` when no home dir is known.
 pub fn default_codex_home() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("CODEX_HOME") {
         if !dir.is_empty() {
             return Some(PathBuf::from(dir));
         }
     }
-    std::env::var("HOME")
-        .ok()
-        .filter(|h| !h.is_empty())
-        .map(|h| PathBuf::from(h).join(".codex"))
+    crate::paths::home_dir().map(|h| h.join(".codex"))
 }
 
 /// The board's canonical ascending effort order (also the order codex's

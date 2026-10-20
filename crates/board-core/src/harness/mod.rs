@@ -339,6 +339,19 @@ pub fn protocol_system_prompt(column_prompt: Option<&str>) -> String {
     }
 }
 
+/// The values passed to Claude's `--allowedTools` so `board comment`/`done`
+/// never hit a permission prompt under restrictive permission modes.
+///
+/// On unix this is exactly `Bash(board:*)` (the argv is pinned byte for byte
+/// across crates). On Windows Claude Code may run commands through its
+/// PowerShell tool instead of Bash, so `PowerShell(board:*)` is allowed too,
+/// as a second value of the same variadic flag.
+pub const CLAUDE_ALLOWED_TOOLS: &[&str] = if cfg!(windows) {
+    &["Bash(board:*)", "PowerShell(board:*)"]
+} else {
+    &["Bash(board:*)"]
+};
+
 /// Build the legacy all-in-one argv for the builtin `claude` harness.
 ///
 /// This public helper is retained for existing callers; managed Herdr dispatch
@@ -347,8 +360,9 @@ pub fn protocol_system_prompt(column_prompt: Option<&str>) -> String {
 /// `claude [--model M] [--effort E] [--permission-mode P] --append-system-prompt SP
 /// --allowedTools "Bash(board:*)" (--session-id UUID | --resume ID) [--fork-session]
 /// -- "PROMPT"`. The system prompt is the column's (if any) plus
-/// [`BOARD_PROTOCOL_TRAILER`]; `--allowedTools` keeps `board comment`/`done` from
-/// hitting a permission prompt under restrictive permission modes.
+/// [`BOARD_PROTOCOL_TRAILER`]; `--allowedTools` ([`CLAUDE_ALLOWED_TOOLS`]) keeps
+/// `board comment`/`done` from hitting a permission prompt under restrictive
+/// permission modes.
 pub fn claude_argv(
     settings: &EffectiveSettings,
     session: &SessionPlan,
@@ -372,7 +386,7 @@ pub fn claude_argv(
     argv.push("--append-system-prompt".to_string());
     argv.push(protocol_system_prompt(settings.system_prompt.as_deref()));
     argv.push("--allowedTools".to_string());
-    argv.push("Bash(board:*)".to_string());
+    argv.extend(CLAUDE_ALLOWED_TOOLS.iter().map(|tool| tool.to_string()));
 
     argv.extend(session_argv("claude", session, minted_uuid)?.0);
 
@@ -575,7 +589,8 @@ fn managed_claude_invocation(
     if let Some(permission) = &settings.permission_mode {
         argv.extend(["--permission-mode".to_string(), permission.clone()]);
     }
-    argv.extend(["--allowedTools".to_string(), "Bash(board:*)".to_string()]);
+    argv.push("--allowedTools".to_string());
+    argv.extend(CLAUDE_ALLOWED_TOOLS.iter().map(|tool| tool.to_string()));
 
     let (session_flags, resulting_session_id) = session_argv("claude", session, minted_uuid)?;
     argv.extend(session_flags);

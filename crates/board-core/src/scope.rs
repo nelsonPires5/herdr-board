@@ -1,7 +1,6 @@
 //! Resolve the board scope from CLI/plugin context and a filesystem path.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::Deserialize;
 
@@ -41,9 +40,15 @@ pub fn select_scope_candidate(
 
 /// Canonicalize a candidate and use its Git root when it belongs to a repo.
 /// A missing/failing Git command deliberately falls back to the canonical cwd.
+///
+/// Canonicalization goes through `dunce`: identical to `std` on unix, while on
+/// Windows it strips the `\\?\` verbatim prefix `std` adds whenever the path is
+/// representable without it, so project keys and pane cwds stay the familiar
+/// `C:\…` spelling that Herdr and `git` report. Git's own `--show-toplevel`
+/// output (forward slashes on Windows) is normalized the same way.
 pub fn resolve_scope_path(candidate: &Path) -> Result<PathBuf> {
-    let canonical = candidate.canonicalize()?;
-    let output = Command::new("git")
+    let canonical = dunce::canonicalize(candidate)?;
+    let output = crate::exec::command("git")
         .arg("-C")
         .arg(&canonical)
         .args(["rev-parse", "--show-toplevel"])
@@ -54,7 +59,7 @@ pub fn resolve_scope_path(candidate: &Path) -> Result<PathBuf> {
             let root = String::from_utf8_lossy(&output.stdout);
             let root = root.trim();
             if !root.is_empty() {
-                if let Ok(root) = Path::new(root).canonicalize() {
+                if let Ok(root) = dunce::canonicalize(root) {
                     return Ok(root);
                 }
             }

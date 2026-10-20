@@ -1,8 +1,10 @@
 //! Live Pi model catalog discovery (auth.json + models-store.json).
 
 use std::fs;
+use std::process::Command;
+use std::time::{Duration, Instant};
 
-use board_core::pi_catalog::{load_from_cli, load_from_files};
+use board_core::pi_catalog::{load_from_cli, load_from_cli_bounded, load_from_files};
 use board_core::protocol::Effort;
 
 /// Write `auth.json` + `models-store.json` into a temp agent dir.
@@ -138,6 +140,122 @@ fn cli_fallback_keeps_provider_prefixed_models_and_existing_default_ladder() {
             Effort::Xhigh,
             Effort::Max,
         ]));
+}
+
+/// Windows twin of the unix fixture above: npm installs `pi` as a `pi.cmd`
+/// shim, which only resolves through `PATHEXT` (the caller passes the bare,
+/// extension-less name exactly as the daemon passes `pi`).
+#[cfg(windows)]
+#[test]
+fn cli_fallback_resolves_a_cmd_shim() {
+    let dir = tempfile::tempdir().unwrap();
+    let table = dir.path().join("table.txt");
+    fs::write(
+        &table,
+        "provider model context input reasoning\r\nopenai-codex gpt-test 1 text yes\r\nzai glm-test 1 text yes\r\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("pi-list-models.cmd"),
+        format!("@type \"{}\"\r\n", table.display()),
+    )
+    .unwrap();
+
+    let bin = dir.path().join("pi-list-models");
+    let models = load_from_cli(bin.to_str().unwrap()).unwrap();
+    assert_eq!(
+        models
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["openai-codex/gpt-test", "zai/glm-test"]
+    );
+}
+
+/// A `pi` that never answers: before the bounded runner, `pi --list-models`
+/// ran through `Command::output()` with no deadline at all.
+#[cfg(unix)]
+fn hanging_pi(dir: &tempfile::TempDir) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = dir.path().join("pi-hang");
+    fs::write(&bin, "#!/bin/sh\nexec sleep 30\n").unwrap();
+    fs::set_permissions(&bin, fs::Permissions::from_mode(0o700)).unwrap();
+    bin
+}
+
+#[cfg(windows)]
+fn hanging_pi(dir: &tempfile::TempDir) -> std::path::PathBuf {
+    fs::write(dir.path().join("pi-hang.cmd"), "@ping -n 30 127.0.0.1\r\n").unwrap();
+    dir.path().join("pi-hang")
+}
+
+#[test]
+fn cli_fallback_is_bounded_by_a_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = hanging_pi(&dir);
+    let started = Instant::now();
+    let models = load_from_cli_bounded(bin.to_str().unwrap(), Duration::from_secs(2));
+    let elapsed = started.elapsed();
+    assert!(models.is_none(), "a hung pi must yield None");
+    assert!(
+        elapsed < Duration::from_secs(15),
+        "a hung pi must be abandoned at the deadline (took {elapsed:?})"
+    );
+}
+
+#[test]
+fn missing_cli_yields_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("no-such-pi");
+    assert!(load_from_cli(missing.to_str().unwrap()).is_none());
+}
+
+/// `default_agent_dir()` reads the process environment, so it runs in a
+/// child test process with a controlled env (the parent never mutates its
+/// own). Unix honors `HOME` verbatim — fixture homes keep working — while
+/// Windows uses the profile folder, as pi's own `os.homedir()` does.
+#[test]
+fn default_agent_dir_follows_the_platform_home() {
+    const CHILD_ENV: &str = "BOARD_CORE_PI_HOME_CHILD";
+    if std::env::var_os(CHILD_ENV).is_some() {
+        let dir = board_core::pi_catalog::default_agent_dir();
+        println!(
+            "AGENT_DIR={}",
+            dir.map(|d| d.display().to_string()).unwrap_or_default()
+        );
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "default_agent_dir_follows_the_platform_home",
+            "--nocapture",
+        ])
+        .env(CHILD_ENV, "1")
+        .env_remove("PI_CODING_AGENT_DIR")
+        .env("HOME", home.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let line = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("AGENT_DIR="))
+        .expect("child printed its agent dir");
+    let dir = std::path::PathBuf::from(line);
+    assert!(
+        dir.ends_with(std::path::Path::new(".pi").join("agent")),
+        "{dir:?}"
+    );
+    if cfg!(unix) {
+        assert_eq!(dir, home.path().join(".pi").join("agent"));
+    } else {
+        assert!(
+            !dir.starts_with(home.path()),
+            "Windows must not treat a stray HOME as the profile: {dir:?}"
+        );
+    }
 }
 
 #[test]

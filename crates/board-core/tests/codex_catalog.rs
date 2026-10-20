@@ -172,3 +172,48 @@ fn live_models_falls_back_to_static_on_missing_cache() {
     let dir = tempfile::tempdir().unwrap();
     assert!(live_models(Some(dir.path())).is_empty());
 }
+
+/// `default_codex_home()` reads the process environment, so it runs in a
+/// child test process with a controlled env (the parent never mutates its
+/// own). Unix honors `HOME` verbatim — fixture homes keep working — while
+/// Windows uses the profile folder, as the codex CLI itself does.
+#[test]
+fn default_codex_home_follows_the_platform_home() {
+    const CHILD_ENV: &str = "BOARD_CORE_CODEX_HOME_CHILD";
+    if std::env::var_os(CHILD_ENV).is_some() {
+        let dir = board_core::codex_catalog::default_codex_home();
+        println!(
+            "CODEX_HOME_DIR={}",
+            dir.map(|d| d.display().to_string()).unwrap_or_default()
+        );
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "default_codex_home_follows_the_platform_home",
+            "--nocapture",
+        ])
+        .env(CHILD_ENV, "1")
+        .env_remove("CODEX_HOME")
+        .env("HOME", home.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let line = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("CODEX_HOME_DIR="))
+        .expect("child printed its codex home");
+    let dir = std::path::PathBuf::from(line);
+    assert!(dir.ends_with(".codex"), "{dir:?}");
+    if cfg!(unix) {
+        assert_eq!(dir, home.path().join(".codex"));
+    } else {
+        assert!(
+            !dir.starts_with(home.path()),
+            "Windows must not treat a stray HOME as the profile: {dir:?}"
+        );
+    }
+}

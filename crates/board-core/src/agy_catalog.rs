@@ -56,10 +56,7 @@
 //! nothing mutates state.
 
 use std::collections::BTreeMap;
-use std::io::Read;
-use std::process::{Command, Stdio};
-use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -213,85 +210,19 @@ pub fn load_from_cli(agy_bin: &str) -> Option<Vec<ModelInfo>> {
 ///   and deadlock the child), so an unparsable firehose cannot exhaust
 ///   memory.
 ///
+/// Both bounds live in [`crate::exec::run_bounded`], which also resolves the
+/// binary (`agy.cmd`/`agy.exe` on Windows) and never waits on a grandchild
+/// still holding the pipe after the kill.
+///
 /// Returns `None` on spawn failure, timeout, oversized output, a failed
-/// read, a non-zero exit, or a lost reader thread.
+/// read, or a non-zero exit.
 pub fn load_from_cli_bounded(agy_bin: &str, timeout: Duration) -> Option<Vec<ModelInfo>> {
-    let argv = models_argv(agy_bin);
-    let mut child = Command::new(&argv[0])
-        .args(&argv[1..])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let mut stdout = child.stdout.take()?;
-    let (tx, rx) = mpsc::sync_channel(1);
-    let reader = std::thread::spawn(move || {
-        let mut buffer: Vec<u8> = Vec::new();
-        let mut chunk = [0_u8; 8 * 1024];
-        loop {
-            match stdout.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if buffer.len() + n > MAX_OUTPUT_BYTES {
-                        let _ = tx.send(None);
-                        return;
-                    }
-                    buffer.extend_from_slice(&chunk[..n]);
-                }
-                Err(_) => {
-                    let _ = tx.send(None);
-                    return;
-                }
-            }
-        }
-        let _ = tx.send(Some(buffer));
-    });
-    let deadline = Instant::now() + timeout;
-    let stdout = match rx.recv_timeout(timeout) {
-        Ok(Some(buffer)) => buffer,
-        // Timeout, oversized output, or read failure: kill the child so its
-        // pipe closes, reap it, and join the reader. The channel is dropped
-        // first so a reader blocked on a final send cannot hang the join.
-        Ok(None) | Err(_) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            drop(rx);
-            let _ = reader.join();
-            return None;
-        }
-    };
-    // The reader saw EOF, but the process itself may still be exiting (a
-    // grandchild could hold the pipe). Reap it within the same deadline;
-    // a child that will not exit after EOF is killed like a timeout.
-    let status = loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            break None;
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) => std::thread::sleep(remaining.min(POLL_INTERVAL)),
-            Err(_) => break None,
-        }
-    };
-    let status = match status {
-        Some(status) => status,
-        None => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
-        }
-    };
-    let _ = reader.join();
-    if !status.success() {
+    let out = crate::exec::run_bounded(&models_argv(agy_bin), timeout, MAX_OUTPUT_BYTES)?;
+    if !out.status.success() {
         return None;
     }
-    parse_models_json(&String::from_utf8_lossy(&stdout))
+    parse_models_json(&String::from_utf8_lossy(&out.stdout))
 }
-
-/// Poll interval while reaping a child whose stdout already reached EOF.
-const POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 /// The live agy model catalog: CLI discovery, or `None` when the discovery
 /// cannot run or yields nothing usable.
