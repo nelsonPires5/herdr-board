@@ -32,6 +32,12 @@ jobs:
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'main'
     runs-on: ubuntu-latest
+    # The Windows build and the final publish run as dependent jobs; they read
+    # the release decision from here instead of re-deriving it.
+    outputs:
+      release_needed: ${{ steps.state.outputs.release_needed }}
+      version: ${{ steps.state.outputs.version }}
+      head_sha: ${{ steps.state.outputs.head_sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -85,6 +91,8 @@ jobs:
           tag="v$version"
           tarball_name="board-$version-x86_64-unknown-linux-gnu.tar.gz"
           checksum_name="$tarball_name.sha256"
+          windows_zip_name="board-$version-x86_64-pc-windows-msvc.zip"
+          windows_checksum_name="$windows_zip_name.sha256"
           remote_tag_sha="$(git ls-remote --tags "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "refs/tags/$tag" "refs/tags/$tag^{}" | awk -v tag="$tag" '
             $2 == "refs/tags/" tag "^{}" { peeled = $1 }
             $2 == "refs/tags/" tag { direct = $1 }
@@ -104,7 +112,7 @@ jobs:
             release_exists=true
             release_draft="$(printf '%s' "$release_json" | jq -r '.isDraft')"
             release_tag_name="$(printf '%s' "$release_json" | jq -r '.tagName')"
-            release_has_assets="$(printf '%s' "$release_json" | jq -r --arg tarball "$tarball_name" --arg checksum "$checksum_name" '[.assets[].name] | (index($tarball) != null and index($checksum) != null)')"
+            release_has_assets="$(printf '%s' "$release_json" | jq -r --arg tarball "$tarball_name" --arg checksum "$checksum_name" --arg winzip "$windows_zip_name" --arg winchecksum "$windows_checksum_name" '[.assets[].name] | (index($tarball) != null and index($checksum) != null and index($winzip) != null and index($winchecksum) != null)')"
             echo "Found release $release_tag_name (draft=$release_draft, assets=$release_has_assets)."
           fi
 
@@ -138,7 +146,7 @@ jobs:
           echo "release_complete=$release_complete" >> "$GITHUB_OUTPUT"
 
           if [ "$release_complete" = true ]; then
-            echo "Release $tag is published with both expected assets; no-op."
+            echo "Release $tag is published with all expected assets; no-op."
           else
             echo "Release $tag needs creation or recovery."
           fi
@@ -251,9 +259,88 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --clobber
 
-      - name: Publish draft release
-        if: steps.state.outputs.release_needed == 'true'
+  # Native Windows asset, built on a Windows runner from the same green SHA and
+  # attached to the draft the release job created. Rerunning a failed run
+  # re-enters here; uploads use --clobber like the Linux assets.
+  windows:
+    name: windows release asset
+    needs: release
+    if: needs.release.outputs.release_needed == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release.outputs.head_sha }}
+          persist-credentials: false
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        shell: bash
+        run: cargo build --locked --release -p board-cli
+
+      # The zip mirrors the Linux tarball layout (a plugin directory whose
+      # manifest runs target/release/board.exe), with the PowerShell scripts
+      # in place of the bash ones.
+      - name: Package release zip
+        id: package
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $name = "board-$env:VERSION-x86_64-pc-windows-msvc"
+          $stage = Join-Path 'dist' $name
+          New-Item -ItemType Directory -Force -Path (Join-Path $stage 'target/release'), (Join-Path $stage 'scripts') | Out-Null
+
+          Copy-Item 'target/release/board.exe' (Join-Path $stage 'target/release/board.exe')
+          Copy-Item 'herdr-plugin.toml' (Join-Path $stage 'herdr-plugin.toml')
+          Copy-Item 'skill' (Join-Path $stage 'skill') -Recurse
+          Copy-Item 'scripts/build.ps1', 'scripts/install-cli.ps1', 'scripts/open-board.ps1' (Join-Path $stage 'scripts')
+          if (Test-Path 'README.md') { Copy-Item 'README.md' (Join-Path $stage 'README.md') }
+          foreach ($lic in 'LICENSE', 'LICENSE.md', 'LICENSE-MIT', 'LICENSE.txt') {
+            if (Test-Path $lic) { Copy-Item $lic (Join-Path $stage $lic) }
+          }
+
+          $zip = "dist/$name.zip"
+          # .NET's ZipFile writes portable `/` entry names (old Compress-Archive
+          # versions wrote `\`); the archive's top-level folder is $name.
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::CreateFromDirectory(
+            (Join-Path $PWD $stage), (Join-Path $PWD $zip),
+            [System.IO.Compression.CompressionLevel]::Optimal, $true)
+          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
+          # Same `<sha256>  <file>` line format as the Linux sha256sum output.
+          [System.IO.File]::WriteAllText((Join-Path $PWD "$zip.sha256"), "$hash  $name.zip`n")
+          "zip=$zip" >> $env:GITHUB_OUTPUT
+          "checksum=$zip.sha256" >> $env:GITHUB_OUTPUT
+          (Get-ChildItem -Recurse -File $stage).FullName
+          Get-Content "$zip.sha256"
+
+      - name: Upload Windows release assets (recoverable)
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release edit "v${{ steps.state.outputs.version }}" --repo "$GITHUB_REPOSITORY" --draft=false
+        run: |
+          gh release upload "v${{ needs.release.outputs.version }}" \
+            "${{ steps.package.outputs.zip }}" \
+            "${{ steps.package.outputs.checksum }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+
+  # Publish only once every platform's assets are attached to the draft.
+  publish:
+    name: publish release
+    needs: [release, windows]
+    if: needs.release.outputs.release_needed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "v${{ needs.release.outputs.version }}" --repo "$GITHUB_REPOSITORY" --draft=false

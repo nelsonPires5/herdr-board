@@ -483,15 +483,139 @@ class InstallCliTests(unittest.TestCase):
                                  f"no leaked marker inside raced directory: {leaked}")
 
 
+UNIX_PLATFORMS = ["linux", "macos"]
+WINDOWS_PLATFORMS = ["windows"]
+POWERSHELL_FILE = [
+    "powershell.exe",
+    "-NoLogo",
+    "-NoProfile",
+    "-NonInteractive",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+]
+
+
+def _load_manifest() -> dict:
+    with (REPO_ROOT / "herdr-plugin.toml").open("rb") as manifest_file:
+        return tomllib.load(manifest_file)
+
+
+def _effective_platforms(item: dict, manifest: dict) -> list[str]:
+    # Herdr: item-level `platforms` override the top-level list.
+    return item.get("platforms", manifest.get("platforms"))
+
+
+def _for_platform(items: list[dict], manifest: dict, platform: str) -> list[dict]:
+    return [
+        item for item in items if platform in _effective_platforms(item, manifest)
+    ]
+
+
 class PluginManifestTests(unittest.TestCase):
     def test_build_runs_before_managed_cli_install(self) -> None:
-        with (REPO_ROOT / "herdr-plugin.toml").open("rb") as manifest_file:
-            manifest = tomllib.load(manifest_file)
-
+        manifest = _load_manifest()
+        for platform in UNIX_PLATFORMS:
+            with self.subTest(platform=platform):
+                self.assertEqual(
+                    [
+                        step["command"]
+                        for step in _for_platform(manifest["build"], manifest, platform)
+                    ],
+                    [["./scripts/build.sh"], ["./scripts/install-cli.sh"]],
+                )
         self.assertEqual(
-            [step["command"] for step in manifest["build"]],
-            [["./scripts/build.sh"], ["./scripts/install-cli.sh"]],
+            [
+                step["command"]
+                for step in _for_platform(manifest["build"], manifest, "windows")
+            ],
+            [
+                POWERSHELL_FILE + ["scripts/build.ps1"],
+                POWERSHELL_FILE + ["scripts/install-cli.ps1"],
+            ],
         )
+
+    def test_unix_entries_keep_their_commands_and_are_never_offered_on_windows(
+        self,
+    ) -> None:
+        """Windows support must not change what Linux/macOS run.
+
+        Herdr rejects duplicate pane/action ids even across disjoint
+        `platforms`, so Windows gets its own ids and every Unix entry pins
+        `["linux", "macos"]` explicitly (the top-level list includes windows).
+        """
+        manifest = _load_manifest()
+        self.assertEqual(manifest["platforms"], ["linux", "macos", "windows"])
+        for section in ("build", "panes", "actions"):
+            for item in manifest[section]:
+                with self.subTest(section=section, item=item.get("id", item["command"])):
+                    self.assertIn(
+                        item.get("platforms"),
+                        (UNIX_PLATFORMS, WINDOWS_PLATFORMS),
+                        "every entry must pin its platforms explicitly",
+                    )
+
+        def by_id(section: str, platform: str) -> dict[str, list[str]]:
+            return {
+                item["id"]: item["command"]
+                for item in _for_platform(manifest[section], manifest, platform)
+            }
+
+        for platform in UNIX_PLATFORMS:
+            with self.subTest(platform=platform):
+                self.assertEqual(
+                    by_id("panes", platform),
+                    {"board": ["./target/release/board", "tui"]},
+                )
+                self.assertEqual(
+                    by_id("actions", platform),
+                    {"open-board": ["bash", "scripts/open-board.sh"]},
+                )
+        self.assertEqual(
+            by_id("panes", "windows"),
+            {
+                "board-windows": [
+                    "cmd.exe",
+                    "/d",
+                    "/c",
+                    r"target\release\board.exe",
+                    "tui",
+                ]
+            },
+        )
+        self.assertEqual(
+            by_id("actions", "windows"),
+            {"open-board-windows": POWERSHELL_FILE + ["scripts/open-board.ps1"]},
+        )
+
+    def test_pane_and_action_ids_are_unique_across_platforms(self) -> None:
+        manifest = _load_manifest()
+        for section in ("panes", "actions"):
+            ids = [item["id"] for item in manifest[section]]
+            with self.subTest(section=section):
+                self.assertEqual(len(ids), len(set(ids)), f"duplicate {section} id")
+
+    def test_windows_launcher_opens_the_windows_pane_entrypoint(self) -> None:
+        launcher = (REPO_ROOT / "scripts" / "open-board.ps1").read_text(encoding="ascii")
+        self.assertIn("$entrypoint = 'board-windows'", launcher)
+        self.assertIn("--entrypoint $entrypoint", launcher)
+
+    def test_powershell_scripts_are_ascii_and_referenced_files_exist(self) -> None:
+        """Windows PowerShell 5.1 reads BOM-less scripts in the ANSI code page."""
+        manifest = _load_manifest()
+        referenced = {
+            item["command"][-1]
+            for section in ("build", "actions")
+            for item in manifest[section]
+            if item["command"][0] == "powershell.exe"
+        }
+        self.assertEqual(
+            referenced,
+            {"scripts/build.ps1", "scripts/install-cli.ps1", "scripts/open-board.ps1"},
+        )
+        for script in sorted((REPO_ROOT / "scripts").glob("*.ps1")):
+            with self.subTest(script=script.name):
+                script.read_bytes().decode("ascii")
 
 
 if __name__ == "__main__":

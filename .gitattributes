@@ -1,0 +1,30 @@
+# Line-ending policy. Every tracked text file is stored with LF, and checked out
+# with LF on every platform (including Windows with core.autocrlf=true), so the
+# Rust sources, insta snapshots, shell scripts, and the fake provider executables
+# stay byte-identical across Linux, macOS, and Windows checkouts.
+* text=auto eol=lf
+
+# Explicit LF for the files whose bytes matter at runtime or in tests: shell
+# scripts and the extensionless e2e fake providers break under CRLF (shebang
+# `bash\r`), and snapshot/docs/source diffs must not churn on Windows.
+*.sh text eol=lf
+e2e/fake-bin/* text eol=lf
+*.snap text eol=lf
+*.rs text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.py text eol=lf
+
+# PowerShell scripts are Windows-only entry points: check them out with CRLF so
+# Windows PowerShell 5.1 and editors treat them natively. The index stays LF.
+*.ps1 text eol=crlf
+
+# Binary assets: never normalized or diffed as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.zip binary
+*.gz binary
+*.exe binary

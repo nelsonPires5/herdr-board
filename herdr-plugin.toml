@@ -13,18 +13,40 @@ name = "Herdr Board"
 version = "0.19.1"
 description = "Kanban board for AI coding agents: cards are prompts, columns are pipeline stages; moving a card dispatches an agent into a herdr pane."
 min_herdr_version = "0.9.0"
-platforms = ["linux", "macos"]
+platforms = ["linux", "macos", "windows"]
+
+# Windows: every command below is argv-only (herdr never adds a shell), and pane
+# and action ids must be unique across ALL platforms (herdr rejects a duplicate
+# id even when the two entries declare disjoint `platforms`). So each Unix entry
+# pins `platforms = ["linux", "macos"]` and keeps its exact pre-Windows command,
+# and Windows gets its own entries: build steps run PowerShell twins of the
+# shell scripts, the pane is `board-windows`, the action is `open-board-windows`.
+# Item-level `platforms` override the top-level list (Herdr 0.9.0 and later).
 
 # Build the `board` binary at install time (idempotent: cargo no-ops when nothing
 # changed). Produces target/release/board, which the pane command below runs.
 [[build]]
 command = ["./scripts/build.sh"]
+platforms = ["linux", "macos"]
 
 # Copy the built CLI to a stable user PATH location. This must remain separate
 # from install.sh, whose plugin-link, skill, and keybinding changes are intended
 # only for explicit local-development installs.
 [[build]]
 command = ["./scripts/install-cli.sh"]
+platforms = ["linux", "macos"]
+
+# Windows build steps: Windows PowerShell 5.1 ships with every Windows install,
+# so `powershell.exe` resolves on PATH; `-File` paths resolve from the plugin
+# root (herdr's working directory for build commands). Produces
+# target\release\board.exe and installs it to %USERPROFILE%\.local\bin.
+[[build]]
+command = ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "scripts/build.ps1"]
+platforms = ["windows"]
+
+[[build]]
+command = ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "scripts/install-cli.ps1"]
+platforms = ["windows"]
 
 # The kanban TUI, spawned by Herdr in an overlay pane. `overlay` is accepted by
 # Herdr 0.9.0 / protocol 22. The same binary auto-starts the boardd daemon if it
@@ -33,7 +55,19 @@ command = ["./scripts/install-cli.sh"]
 id = "board"
 title = "Board"
 placement = "overlay"
+platforms = ["linux", "macos"]
 command = ["./target/release/board", "tui"]
+
+# The same TUI on Windows. Herdr's Windows pane launcher (ConPTY) does not
+# resolve a relative argv[0] against the plugin root or append `.exe`, so the
+# pane starts `cmd.exe` (found on PATH), whose working directory IS the plugin
+# root, to run the checkout's board.exe. `/d` skips cmd AutoRun hooks.
+[[panes]]
+id = "board-windows"
+title = "Board"
+placement = "overlay"
+platforms = ["windows"]
+command = ["cmd.exe", "/d", "/c", 'target\release\board.exe', "tui"]
 
 # Summon the board — bind this to a key via a [[keys.command]] in
 # ~/.config/herdr/config.toml (see README). The launcher is idempotent
@@ -42,4 +76,14 @@ command = ["./target/release/board", "tui"]
 id = "open-board"
 title = "Open board"
 description = "Open the herdr-board kanban as an overlay pane (focus/toggle if already open)."
+platforms = ["linux", "macos"]
 command = ["bash", "scripts/open-board.sh"]
+
+# The Windows twin of `open-board` (ids are unique across platforms). Bind it
+# with `herdr plugin action invoke open-board-windows --plugin herdr-board`.
+[[actions]]
+id = "open-board-windows"
+title = "Open board"
+description = "Open the herdr-board kanban as an overlay pane (focus/toggle if already open)."
+platforms = ["windows"]
+command = ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "scripts/open-board.ps1"]

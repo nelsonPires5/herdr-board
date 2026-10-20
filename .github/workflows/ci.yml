@@ -146,6 +146,38 @@ jobs:
       - name: Rust tests
         run: cargo test --workspace --all-features
 
+  # Native Windows (x86_64-pc-windows-msvc): the same clippy and Rust test gates
+  # as the Linux jobs above, so cfg(windows) code is linted and tested on every
+  # change. The Python tier, the e2e harness, and the live suite stay on Linux:
+  # they drive bash scripts and a Linux Herdr. Commands run under bash (Git for
+  # Windows) so they are byte-identical to the documented gate list.
+  windows:
+    name: windows
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `shell:` is per step, not a job-level `defaults: run:` block, so every
+      # `run:` key in this file stays a one-line command for test_docs.py.
+      - name: clippy (windows)
+        shell: bash
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      # Live-herdr tests are #[ignore]d here exactly as on Linux.
+      - name: Rust tests (windows)
+        shell: bash
+        run: cargo test --workspace --all-features
+
   live-e2e:
     name: live-e2e
     needs: [fmt, clippy, docs, scripts, e2e-safety, test]
