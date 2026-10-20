@@ -1,5 +1,5 @@
-//! Socket-level tests against an in-process fake herdr server on a temp unix
-//! socket. Covers the request/response happy path, error mapping, mid-call
+//! Socket-level tests against an in-process fake herdr server on a temp
+//! `board_ipc` endpoint (a unix socket, or a named pipe on Windows). Covers the request/response happy path, error mapping, mid-call
 //! disconnect, and event streaming.
 //!
 //! Like real herdr, the fake server serves **one request per connection**:
@@ -8,7 +8,6 @@
 //! stream to a closure for the persistent event-subscription case.
 
 use std::io::{self, BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -20,6 +19,7 @@ use board_herdr::{
     SplitDirection, Subscription, TabRenameParams, WorkspaceCreateParams, SUPPORTED_HERDR_PROTOCOL,
     SUPPORTED_HERDR_VERSION,
 };
+use board_ipc::{LocalListener, LocalStream};
 use serde_json::Value;
 
 /// What the fake server does with one request.
@@ -69,7 +69,7 @@ where
     F: Fn(&Value) -> Action + Send + Sync + 'static,
 {
     let path = temp_sock();
-    let listener = UnixListener::bind(&path).unwrap();
+    let listener = LocalListener::bind(&path).unwrap();
     thread::spawn(move || {
         for conn in listener.incoming() {
             let Ok(stream) = conn else { break };
@@ -100,10 +100,10 @@ where
 /// Serve a persistent connection by handing the raw stream to `handler`.
 fn serve_stream<F>(handler: F) -> PathBuf
 where
-    F: Fn(UnixStream) + Send + Sync + 'static,
+    F: Fn(LocalStream) + Send + Sync + 'static,
 {
     let path = temp_sock();
-    let listener = UnixListener::bind(&path).unwrap();
+    let listener = LocalListener::bind(&path).unwrap();
     thread::spawn(move || {
         for conn in listener.incoming() {
             let Ok(stream) = conn else { break };
@@ -726,6 +726,76 @@ fn poll_event_returns_bounded_on_partial_line_and_preserves_bytes() {
         }
         other => panic!("expected PaneExited(p1), got {other:?}"),
     }
+}
+
+#[test]
+fn poll_event_waits_on_idle_stream_then_delivers_and_detects_close() {
+    // The event stream runs nonblocking and waits with a readiness poll (unix
+    // `poll`, Windows a zero-byte overlapped read). An idle stream must time out cleanly
+    // without consuming anything, a later event must wake the poll, and a
+    // peer close must surface as Disconnected rather than another timeout.
+    use std::sync::mpsc;
+    use std::time::Instant;
+
+    let (send_event, event_requested) = mpsc::channel::<()>();
+    let event_requested = Arc::new(Mutex::new(event_requested));
+    let (send_close, close_requested) = mpsc::channel::<()>();
+    let close_requested = Arc::new(Mutex::new(close_requested));
+    let path = serve_stream(move |stream| {
+        let mut writer = stream.try_clone().unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            return;
+        }
+        writeln!(
+            writer,
+            r#"{{"id":"subscribe","result":{{"type":"subscription_started"}}}}"#
+        )
+        .unwrap();
+        event_requested.lock().unwrap().recv().unwrap();
+        writeln!(
+            writer,
+            r#"{{"event":"pane_closed","data":{{"type":"pane_closed","pane_id":"p3"}}}}"#
+        )
+        .unwrap();
+        close_requested.lock().unwrap().recv().unwrap();
+        // Dropping both halves closes the connection.
+    });
+
+    let mut events = HerdrEvents::connect_with_deadlines(
+        &path,
+        &[Subscription::pane_closed()],
+        short_deadlines(),
+    )
+    .unwrap();
+
+    let started = Instant::now();
+    assert!(matches!(
+        events.poll_event(Duration::from_millis(100)),
+        Ok(None)
+    ));
+    let waited = started.elapsed();
+    assert!(
+        waited >= Duration::from_millis(90),
+        "idle poll returned early: {waited:?}"
+    );
+    assert!(
+        waited < Duration::from_secs(5),
+        "idle poll overran: {waited:?}"
+    );
+
+    send_event.send(()).unwrap();
+    assert!(matches!(
+        events.poll_event(Duration::from_secs(5)),
+        Ok(Some(HerdrEvent::PaneExited { pane_id, .. })) if pane_id == "p3"
+    ));
+
+    send_close.send(()).unwrap();
+    assert!(matches!(
+        events.poll_event(Duration::from_secs(5)),
+        Err(HerdrError::Disconnected)
+    ));
 }
 
 fn short_deadlines() -> SocketDeadlines {

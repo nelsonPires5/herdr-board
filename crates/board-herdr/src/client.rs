@@ -1,4 +1,4 @@
-//! Blocking herdr socket client (`std::os::unix::net::UnixStream`, no async).
+//! Blocking herdr socket client ([`board_ipc::LocalStream`], no async).
 //!
 //! One [`HerdrClient`] owns a single request/response connection. Calls are
 //! synchronous: the daemon is expected to wrap them in `spawn_blocking` or a

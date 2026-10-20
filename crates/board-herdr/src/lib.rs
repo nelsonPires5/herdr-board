@@ -1,7 +1,10 @@
 //! board-herdr — a typed, blocking client for the herdr socket API.
 //!
-//! herdr speaks NDJSON over a unix socket (`~/.config/herdr/herdr.sock`, or
-//! `$HERDR_SOCKET`). Each request is one line
+//! herdr speaks NDJSON over a local endpoint named by a socket path
+//! (`$HERDR_SOCKET_PATH`, else `$HERDR_SOCKET`, else the default session's
+//! path — see [`default_socket_path`]). On unix that is an AF_UNIX socket; on
+//! Windows it is the named pipe `\\.\pipe\<path>` (the path itself is only a
+//! marker file). The transport lives in `board-ipc`. Each request is one line
 //! `{"id","method","params"}` and each reply is one line
 //! `{"id","result"}` or `{"id","error":{code,message}}`.
 //!

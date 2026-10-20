@@ -1,9 +1,9 @@
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use board_ipc::LocalStream;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -94,8 +94,8 @@ pub fn watch_subscriptions(pane_ids: &[String]) -> Vec<Subscription> {
 /// the socket closes.
 pub struct HerdrEvents {
     path: PathBuf,
-    reader: BufReader<UnixStream>,
-    writer: UnixStream,
+    reader: BufReader<LocalStream>,
+    writer: LocalStream,
     /// Partial line carried across [`HerdrEvents::poll_event`] timeouts so a
     /// read deadline mid-line never drops event bytes.
     pending: String,
@@ -125,6 +125,11 @@ impl HerdrEvents {
             // The Iterator impl uses poll with infinite timeout for blocking
             // semantics.
             transport::set_nonblocking(&stream, true)?;
+            // Windows pipe writes ignore nonblocking mode (a unix nonblocking
+            // write fails fast with `WouldBlock` instead), so bound them
+            // explicitly to keep a stalled peer from hanging a subscribe.
+            #[cfg(windows)]
+            stream.set_write_timeout(Some(deadlines.write))?;
 
             let reader = BufReader::new(stream.try_clone()?);
             let writer = stream;

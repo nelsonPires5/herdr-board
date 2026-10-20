@@ -1,21 +1,19 @@
-//! Socket-path resolution, deadline configuration, and platform-aware
-//! AF_UNIX transport helpers.
+//! Socket-path resolution, deadline configuration, and the thin herdr-specific
+//! layer over [`board_ipc::LocalStream`].
 //!
-//! All `unsafe` blocks live in this module. The safe wrappers handle:
-//! - AF_UNIX path-length validation
-//! - Non-blocking connect with a deadline
-//! - SOCK_CLOEXEC / SOCK_NONBLOCK atomically on Linux, portable fallback
-//!   elsewhere
-//! - Clearing the read timeout so blocking iterators wait forever — on
-//!   platforms where `set_read_timeout(None)` returns `EINVAL` (macOS) we
-//!   fall back to a huge sentinel duration.
+//! The platform transport (an AF_UNIX socket on unix, a named pipe on
+//! Windows) lives in `board-ipc`, including the deadline connect and the
+//! readiness poll. This module only maps its `io::Error`s onto
+//! [`HerdrError`] and resolves the default endpoint path. Endpoint paths stay
+//! on-disk paths everywhere (Herdr's `HERDR_SOCKET_PATH`); the Windows
+//! `\\.\pipe\` translation happens inside `board-ipc` at connect.
 
+use std::ffi::OsString;
 use std::io;
-use std::os::fd::FromRawFd;
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+use board_ipc::LocalStream;
 
 use crate::error::{HerdrError, Result};
 
@@ -24,17 +22,47 @@ use crate::error::{HerdrError, Result};
 /// Default socket path: `$HERDR_SOCKET_PATH` (herdr's canonical variable,
 /// injected into panes/plugins so named sessions resolve to their own socket),
 /// else `$HERDR_SOCKET` (this crate's override), else the default session's
-/// `~/.config/herdr/herdr.sock`.
+/// socket — `~/.config/herdr/herdr.sock` on unix,
+/// `%APPDATA%\herdr\herdr.sock` on Windows (an on-disk marker file; the
+/// endpoint itself is the named pipe derived from that path).
 pub fn default_socket_path() -> PathBuf {
-    for var in ["HERDR_SOCKET_PATH", "HERDR_SOCKET"] {
-        if let Ok(p) = std::env::var(var) {
-            if !p.is_empty() {
-                return PathBuf::from(p);
-            }
+    socket_path_from_env(|name| std::env::var_os(name))
+}
+
+/// [`default_socket_path`] over an injectable environment lookup.
+fn socket_path_from_env(var: impl Fn(&str) -> Option<OsString>) -> PathBuf {
+    for name in ["HERDR_SOCKET_PATH", "HERDR_SOCKET"] {
+        if let Some(path) = var(name).filter(|path| !path.is_empty()) {
+            return PathBuf::from(path);
         }
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    default_session_socket(var)
+}
+
+#[cfg(unix)]
+fn default_session_socket(var: impl Fn(&str) -> Option<OsString>) -> PathBuf {
+    // Unchanged from the unix-only resolver: an unset or non-UTF-8 `HOME`
+    // falls back to `/root`.
+    let home = var("HOME")
+        .and_then(|home| home.into_string().ok())
+        .unwrap_or_else(|| "/root".to_string());
     PathBuf::from(home).join(".config/herdr/herdr.sock")
+}
+
+#[cfg(windows)]
+fn default_session_socket(var: impl Fn(&str) -> Option<OsString>) -> PathBuf {
+    // Herdr keeps per-user state under the roaming AppData folder. Without
+    // `APPDATA`, derive it from the profile; never borrow a unix-style path.
+    let appdata = var("APPDATA")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            var("USERPROFILE")
+                .filter(|path| !path.is_empty())
+                .map(|profile| PathBuf::from(profile).join("AppData").join("Roaming"))
+        })
+        .unwrap_or_default();
+    appdata.join("herdr").join("herdr.sock")
 }
 
 // -- deadline configuration ---------------------------------------------------
@@ -66,114 +94,29 @@ impl Default for SocketDeadlines {
 
 // -- connect with deadline ----------------------------------------------------
 
-/// Open a blocking AF_UNIX stream to `path`, bounded by `timeout`.
+/// Open a blocking stream to the Herdr endpoint at `path`, bounded by
+/// `timeout`.
 ///
-/// The returned stream is in **blocking** mode (O_NONBLOCK cleared) so
-/// callers can use std `read`/`write` with optional `set_read_timeout`.
-pub(crate) fn connect_with_deadline(path: &Path, timeout: Duration) -> Result<UnixStream> {
-    let path_bytes = path.as_os_str().as_bytes();
-    let max_path = std::mem::size_of::<libc::sockaddr_un>()
-        - std::mem::offset_of!(libc::sockaddr_un, sun_path);
-    if path_bytes.len() >= max_path {
-        return Err(HerdrError::Io(std::io::Error::from_raw_os_error(
-            libc::ENAMETOOLONG,
-        )));
-    }
-
-    // SAFETY: all libc pointers below refer to initialized local storage for
-    // the duration of each call. `fd` has one owner and is closed on every
-    // error path or transferred exactly once to `UnixStream`.
-    unsafe {
-        let socket_kind = libc::SOCK_STREAM;
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        let socket_kind = socket_kind | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK;
-        let fd = libc::socket(libc::AF_UNIX, socket_kind, 0);
-        if fd < 0 {
-            return Err(HerdrError::Io(std::io::Error::last_os_error()));
+/// The returned stream is in **blocking** mode with no read/write timeout so
+/// callers can use std `read`/`write` with optional `set_read_timeout`. Only
+/// expiry of `timeout` becomes [`HerdrError::Deadline`]; every other failure
+/// (missing endpoint, refused, path too long) stays [`HerdrError::Io`].
+pub(crate) fn connect_with_deadline(path: &Path, timeout: Duration) -> Result<LocalStream> {
+    LocalStream::connect_with_deadline(path, timeout).map_err(|error| {
+        if error.kind() == io::ErrorKind::TimedOut {
+            HerdrError::Deadline {
+                operation: "connect",
+            }
+        } else {
+            HerdrError::Io(error)
         }
-        let close_error = |error| {
-            libc::close(fd);
-            error
-        };
-        #[cfg(not(any(target_os = "linux", target_os = "android")))]
-        {
-            let descriptor_flags = libc::fcntl(fd, libc::F_GETFD);
-            if descriptor_flags < 0
-                || libc::fcntl(fd, libc::F_SETFD, descriptor_flags | libc::FD_CLOEXEC) < 0
-            {
-                return Err(close_error(HerdrError::Io(std::io::Error::last_os_error())));
-            }
-            let status_flags = libc::fcntl(fd, libc::F_GETFL);
-            if status_flags < 0
-                || libc::fcntl(fd, libc::F_SETFL, status_flags | libc::O_NONBLOCK) < 0
-            {
-                return Err(close_error(HerdrError::Io(std::io::Error::last_os_error())));
-            }
-        }
-        let mut address: libc::sockaddr_un = std::mem::zeroed();
-        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
-        std::ptr::copy_nonoverlapping(
-            path_bytes.as_ptr().cast(),
-            address.sun_path.as_mut_ptr(),
-            path_bytes.len(),
-        );
-        let address_len = (std::mem::offset_of!(libc::sockaddr_un, sun_path) + path_bytes.len() + 1)
-            as libc::socklen_t;
-        if libc::connect(
-            fd,
-            (&raw const address).cast::<libc::sockaddr>(),
-            address_len,
-        ) < 0
-        {
-            let error = std::io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::EINPROGRESS) {
-                return Err(close_error(HerdrError::Io(error)));
-            }
-            let millis = timeout.as_millis().min(i32::MAX as u128).max(1) as i32;
-            let mut poll_fd = libc::pollfd {
-                fd,
-                events: libc::POLLOUT,
-                revents: 0,
-            };
-            let ready = libc::poll(&raw mut poll_fd, 1, millis);
-            if ready == 0 {
-                return Err(close_error(HerdrError::Deadline {
-                    operation: "connect",
-                }));
-            }
-            if ready < 0 {
-                return Err(close_error(HerdrError::Io(std::io::Error::last_os_error())));
-            }
-            let mut socket_error = 0;
-            let mut error_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
-            if libc::getsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                libc::SO_ERROR,
-                (&raw mut socket_error).cast(),
-                &raw mut error_len,
-            ) < 0
-            {
-                return Err(close_error(HerdrError::Io(std::io::Error::last_os_error())));
-            }
-            if socket_error != 0 {
-                return Err(close_error(HerdrError::Io(
-                    std::io::Error::from_raw_os_error(socket_error),
-                )));
-            }
-        }
-        let flags = libc::fcntl(fd, libc::F_GETFL);
-        if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) < 0 {
-            return Err(close_error(HerdrError::Io(std::io::Error::last_os_error())));
-        }
-        Ok(UnixStream::from_raw_fd(fd))
-    }
+    })
 }
 
 // -- nonblocking toggle ------------------------------------------------------
 
-/// Set or clear O_NONBLOCK on a Unix stream.
-pub(crate) fn set_nonblocking(stream: &UnixStream, nonblocking: bool) -> Result<()> {
+/// Set or clear nonblocking reads on a stream (shared by every clone of it).
+pub(crate) fn set_nonblocking(stream: &LocalStream, nonblocking: bool) -> Result<()> {
     stream
         .set_nonblocking(nonblocking)
         .map_err(HerdrError::from)
@@ -193,55 +136,83 @@ pub(crate) fn deadline_io(error: io::Error, operation: &'static str) -> HerdrErr
     }
 }
 
-/// Block until `stream` is readable or `deadline` expires, without touching
-/// SO_RCVTIMEO.  Returns `Ok(true)` when data is ready, `Ok(false)` on
-/// timeout, and `Err` on error.
-pub(crate) fn poll_read_ready(stream: &UnixStream, deadline: Duration) -> Result<bool> {
-    use std::os::fd::AsRawFd;
-    let millis = deadline.as_millis().min(i32::MAX as u128).max(1) as i32;
-    let fd = stream.as_raw_fd();
-    unsafe {
-        let mut pfd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        loop {
-            let ready = libc::poll(&raw mut pfd, 1, millis);
-            if ready < 0 {
-                let err = io::Error::last_os_error();
-                if err.raw_os_error() == Some(libc::EINTR) {
-                    continue;
-                }
-                return Err(HerdrError::from(err));
-            }
-            return Ok(ready > 0);
-        }
-    }
+/// Block until `stream` is readable (data or peer close) or `deadline`
+/// expires, without consuming data or touching the read timeout. Returns
+/// `Ok(true)` when ready, `Ok(false)` on timeout, and `Err` on error.
+pub(crate) fn poll_read_ready(stream: &LocalStream, deadline: Duration) -> Result<bool> {
+    stream
+        .poll_read_ready(Some(deadline))
+        .map_err(HerdrError::from)
 }
 
 /// Block indefinitely until `stream` becomes readable or closes.
-pub(crate) fn poll_read_ready_infinite(stream: &UnixStream) -> Result<bool> {
-    use std::os::fd::AsRawFd;
-    let fd = stream.as_raw_fd();
-    // SAFETY: fd is valid for the duration of poll.  poll with timeout -1
-    // blocks until the fd is readable or an error occurs.
-    unsafe {
-        let mut pfd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        loop {
-            let ready = libc::poll(&raw mut pfd, 1, -1);
-            if ready < 0 {
-                let err = std::io::Error::last_os_error();
-                if err.raw_os_error() == Some(libc::EINTR) {
-                    continue;
-                }
-                return Err(HerdrError::from(err));
-            }
-            return Ok(ready > 0);
+pub(crate) fn poll_read_ready_infinite(stream: &LocalStream) -> Result<bool> {
+    stream.poll_read_ready(None).map_err(HerdrError::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<OsString> + 'a {
+        move |name| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| OsString::from(value))
         }
+    }
+
+    #[test]
+    fn explicit_socket_variables_win_in_order() {
+        let both = [
+            ("HERDR_SOCKET_PATH", "/a/herdr.sock"),
+            ("HERDR_SOCKET", "/b/herdr.sock"),
+            ("HOME", "/home/me"),
+            ("APPDATA", r"C:\Users\me\AppData\Roaming"),
+        ];
+        assert_eq!(
+            socket_path_from_env(env(&both)),
+            PathBuf::from("/a/herdr.sock")
+        );
+        let override_only = [("HERDR_SOCKET_PATH", ""), ("HERDR_SOCKET", "/b/herdr.sock")];
+        assert_eq!(
+            socket_path_from_env(env(&override_only)),
+            PathBuf::from("/b/herdr.sock")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_default_is_under_home_config() {
+        assert_eq!(
+            socket_path_from_env(env(&[("HOME", "/home/me")])),
+            PathBuf::from("/home/me/.config/herdr/herdr.sock")
+        );
+        assert_eq!(
+            socket_path_from_env(env(&[])),
+            PathBuf::from("/root/.config/herdr/herdr.sock")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_default_is_under_roaming_appdata() {
+        // Verified on Herdr 0.9.x for Windows: the default session's marker
+        // file is `%APPDATA%\herdr\herdr.sock`.
+        assert_eq!(
+            socket_path_from_env(env(&[
+                ("APPDATA", r"C:\Users\me\AppData\Roaming"),
+                ("HOME", "/root"),
+            ])),
+            PathBuf::from(r"C:\Users\me\AppData\Roaming\herdr\herdr.sock")
+        );
+        assert_eq!(
+            socket_path_from_env(env(&[("USERPROFILE", r"C:\Users\me")])),
+            PathBuf::from(r"C:\Users\me\AppData\Roaming\herdr\herdr.sock")
+        );
+        let unresolved = socket_path_from_env(env(&[("HOME", "/root")]));
+        assert_eq!(unresolved, PathBuf::from(r"herdr\herdr.sock"));
+        assert!(!unresolved.starts_with("/root"));
     }
 }

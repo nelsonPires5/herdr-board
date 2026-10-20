@@ -1,10 +1,10 @@
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 use board_herdr::{HerdrError, HerdrEvents, Subscription};
+use board_ipc::{LocalListener, LocalStream};
 
 #[derive(Clone, Default)]
 struct TraceBuffer(Arc<Mutex<Vec<u8>>>);
@@ -36,14 +36,14 @@ impl TraceBuffer {
     }
 }
 
-fn socket() -> (tempfile::TempDir, PathBuf, UnixListener) {
+fn socket() -> (tempfile::TempDir, PathBuf, LocalListener) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("herdr.sock");
-    let listener = UnixListener::bind(&path).unwrap();
+    let listener = LocalListener::bind(&path).unwrap();
     (dir, path, listener)
 }
 
-fn request_id(reader: &mut BufReader<UnixStream>) -> String {
+fn request_id(reader: &mut BufReader<LocalStream>) -> String {
     let mut line = String::new();
     assert_ne!(reader.read_line(&mut line).unwrap(), 0);
     serde_json::from_str::<serde_json::Value>(&line).unwrap()["id"]
@@ -71,7 +71,7 @@ fn matching_subscription_ack_requires_protocol_19_typed_result() {
     // `herdr api schema --json` (Herdr 0.8.0, protocol 19).
     let (_initial_dir, initial_path, initial_listener) = socket();
     let initial_peer = thread::spawn(move || {
-        let (stream, _) = initial_listener.accept().unwrap();
+        let stream = initial_listener.accept().unwrap();
         let mut reader = BufReader::new(stream.try_clone().unwrap());
         let id = request_id(&mut reader);
         writeln!(
@@ -96,7 +96,7 @@ fn matching_subscription_ack_requires_protocol_19_typed_result() {
     // for a later add-subscription request with its own exact matching id.
     let (_add_dir, add_path, add_listener) = socket();
     let add_peer = thread::spawn(move || {
-        let (stream, _) = add_listener.accept().unwrap();
+        let stream = add_listener.accept().unwrap();
         let mut reader = BufReader::new(stream.try_clone().unwrap());
         let initial_id = request_id(&mut reader);
         writeln!(

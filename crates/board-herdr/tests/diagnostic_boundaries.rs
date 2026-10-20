@@ -1,13 +1,13 @@
 //! Regression coverage for metadata-only, exactly-once Herdr diagnostics.
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use board_herdr::{HerdrClient, HerdrError, HerdrEvents, SocketDeadlines, Subscription};
+use board_ipc::LocalListener;
 use serde_json::Value;
 
 const METHOD_SENTINEL: &str = "HERDR_METHOD_SECRET_/tmp/watcher.sock";
@@ -42,10 +42,10 @@ impl TraceBuffer {
     }
 }
 
-fn listener() -> (tempfile::TempDir, PathBuf, UnixListener) {
+fn listener() -> (tempfile::TempDir, PathBuf, LocalListener) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("herdr.sock");
-    let listener = UnixListener::bind(&path).unwrap();
+    let listener = LocalListener::bind(&path).unwrap();
     (dir, path, listener)
 }
 
@@ -74,9 +74,9 @@ fn public_calls_and_all_subscription_failures_complete_once_without_secrets() {
     let (_call_dir, call_path, call_listener) = listener();
     let call_server = thread::spawn(move || {
         // HerdrClient::connect performs one reachability probe.
-        drop(call_listener.accept().unwrap().0);
+        drop(call_listener.accept().unwrap());
         for expected_method in [METHOD_SENTINEL, "ping"] {
-            let (stream, _) = call_listener.accept().unwrap();
+            let stream = call_listener.accept().unwrap();
             let mut writer = stream.try_clone().unwrap();
             let mut line = String::new();
             BufReader::new(stream).read_line(&mut line).unwrap();
@@ -109,7 +109,7 @@ fn public_calls_and_all_subscription_failures_complete_once_without_secrets() {
 
     let (_stream_dir, stream_path, stream_listener) = listener();
     let stream_server = thread::spawn(move || {
-        let (stream, _) = stream_listener.accept().unwrap();
+        let stream = stream_listener.accept().unwrap();
         let mut writer = stream.try_clone().unwrap();
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
