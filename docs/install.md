@@ -93,8 +93,8 @@ herdr plugin pane open --plugin herdr-board --entrypoint board-windows --placeme
   `.herdr-board-cli-managed`, follows the same ownership rule as on Linux/macOS; the marker text
   names `install-cli.ps1`.
 - **Data, config, and logs:** `%APPDATA%\herdr-board\` holds `board.db`, `config.toml`, and
-  `logs\`. The daemon's endpoint is the named pipe `\.\pipe\` followed by the full `boardd.sock`
-  path (for example `\.\pipe\C:\Users\me\AppData\Roaming\herdr-board\boardd.sock`), with a small
+  `logs\`. The daemon's endpoint is the named pipe `\\.\pipe\` followed by the full `boardd.sock`
+  path (for example `\\.\pipe\C:\Users\me\AppData\Roaming\herdr-board\boardd.sock`), with a small
   identity marker file at the `.sock` path itself.
 - **Release zip:** each GitHub release also has `board-X.Y.Z-x86_64-pc-windows-msvc.zip` and its
   `.sha256`. It holds a prebuilt `target\release\board.exe`, `herdr-plugin.toml`, `skill\`, and
