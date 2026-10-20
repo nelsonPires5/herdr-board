@@ -8,7 +8,7 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
-- [#0](https://github.com/nelsonPires5/herdr-board/pull/0) feat: Run the board natively on Windows 10/11 x64 with Herdr's Windows build, installed as a plugin or from a release zip.
+- [#153](https://github.com/nelsonPires5/herdr-board/pull/153) feat: Run the board natively on Windows 10/11 x64 with Herdr's Windows build, installed as a plugin or from a release zip.
 
 ## [0.19.1] - 2026-10-14
 
