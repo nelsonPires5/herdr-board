@@ -34,7 +34,7 @@ Separation card ↔ run is deliberate (vibe-kanban converged on task/attempt/exe
 │  │  board TUI (herdr plugin pane)  │   │  pi … (card #42 run)         │ │
 │  └───────────────┬─────────────────┘   └──────────────┬───────────────┘ │
 └──────────────────┼─────────────────────────────────── │ ────────────────┘
-                   │ board API (unix socket, JSON)      │ `board comment/done`
+                   │ board API (local socket, JSON)     │ `board comment/done`
                    ▼                                    ▼
              ┌──────────────────────────────────────────────┐
              │            boardd (daemon)                   │
@@ -764,6 +764,15 @@ error. The script deletes itself when it starts; if the pane runner fails synchr
 removes it and closes only the pane boardd allocated. If scheduling succeeds but the pane never
 opens the script, the residual configured-script orphan is an accepted asynchronous limitation.
 
+On Windows the same bridge is a UTF-8 `.ps1` script: each argv element is single-quoted for
+PowerShell, argv[0] is resolved to an absolute path, the child's `$LASTEXITCODE` is preserved (a
+missing program exits `127`), and the `__pane-exited` guard is called the same way. Because `herdr
+pane run` types its command into the pane's shell, the runner line is
+`pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "<script_path>"` (`powershell.exe` when `pwsh`
+does not resolve), passed as one argument. Paths containing `"`, `$`, a backtick, `%`, `!`, or a
+control character are refused. On Windows, Claude's `--allowedTools` also carries
+`"PowerShell(board:*)"` after `"Bash(board:*)"`.
+
 - **Session strategy**: Pi's first auto column mints an exact `--session-id`; later stages reuse it; retry uses `--fork <old> --session-id <new>` and persists the new target. Claude keeps exact mint, `--resume`, and `--fork-session`. Codex mints its own thread id (no session flag, `NULL` persisted), captures the reported id after launch, and re-attaches with the `resume <id>` / `fork <id>` subcommands; a fork's newly captured id supersedes the recorded source id atomically, and a fork whose new id was never captured keeps the source id instead of wiping it. OpenCode mints its own `ses_…` id the same way (no session flag, `NULL` persisted) and re-attaches with the trailing session flags `-s <id>` / `-s <id> --fork`; the same atomic supersede/keep rules apply. Column config can force `fresh_session = true` (for self-minting harnesses that means a fresh Mint rather than a resume).
 - **Configured harnesses** remain unmanaged. Their exact configured argv is not inferred to be Pi or Claude; prompt channels arrive as `BOARD_PROMPT` / `BOARD_SYSTEM_PROMPT`. The configured runner resolves a nonempty `HERDR_BIN_PATH`, otherwise `herdr`.
 
@@ -890,7 +899,7 @@ mode, terminal capture, or telemetry upload.
 1. **Language: Rust** — ratatui TUI, rusqlite, tokio daemon; single binary `board` with canonical nested subcommands (`board`, `card`, `column`, `comment`, `run`) plus retained top-level aliases.
 2. **Access: overlay keybinding only** (no pinned workspace); `?` shows all keybinds.
 3. **DB: `~/.local/share/herdr-board/board.db`** (XDG data; overridable via `BOARD_DB` for tests). Plugin config dir holds only config — DB survives plugin reinstall.
-4. **Long-text editing: modal textarea + `Ctrl+E` → `$EDITOR`.**
+4. **Long-text editing: modal textarea + `Ctrl+E` → `$EDITOR`** (then `$VISUAL`, else `vi`; `notepad` on Windows).
 5. boardd lifecycle: `board tui` auto-starts the daemon if absent; daemon outlives the overlay (runs continue with the board closed; `herdr notification show` covers "done while closed").
 
 6. **Independent canonical-path boards.** Git-root/CWD chooses the pipeline board; `Global` preserves legacy data. The agent's runtime session/workspace remains explicit card configuration and is never inferred from board scope.

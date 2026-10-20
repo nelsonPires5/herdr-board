@@ -46,9 +46,12 @@ board done --outcome ok --summary "feature X shipped, tests green"
 board done --outcome fail --summary "2 integration tests still fail; needs schema work"
 ```
 
+On Windows (PowerShell) the same commands work unchanged; read the preset variables as
+`$env:BOARD_CARD_ID`, `$env:BOARD_RUN_ID`, and `$env:BOARD_SOCKET`.
+
 ## TUI
 
-Run `board tui` or invoke the `open-board` Herdr plugin action. Use arrows or `h/j/k/l` to navigate,
+Run `board tui` or invoke the `open-board` Herdr plugin action (`open-board-windows` on Windows). Use arrows or `h/j/k/l` to navigate,
 `n` for a card, `N` for a column, `m` to move a card (form fields: Project → Board → Column →
 Position; the move never changes the selection), `M` to reorder the focused column, `O` to
 reorder the selected card within its column (`j`/`k` stage, `Enter` commits, `Esc` cancels),
@@ -291,7 +294,7 @@ Bad enum values are one shape everywhere: `invalid <kind> '<value>' (expected: a
 
 ### Exit codes
 
-Scripted agents should branch on `$?`, not on stderr text.
+Scripted agents should branch on `$?` (`$LASTEXITCODE` in PowerShell), not on stderr text.
 
 | Code | Meaning |
 |---|---|
@@ -306,6 +309,15 @@ board done --outcome ok || case $? in
   4) echo "herdr is unavailable; retry later" ;;
   64) echo "my own invocation was wrong" ;;
 esac
+```
+
+```powershell
+board done --outcome ok
+switch ($LASTEXITCODE) {
+  2  { "no open run for this card" }
+  4  { "herdr is unavailable; retry later" }
+  64 { "my own invocation was wrong" }
+}
 ```
 
 ### Aliases

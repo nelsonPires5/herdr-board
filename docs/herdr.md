@@ -287,6 +287,15 @@ socket via a temporary runner script. Agents must still use `board comment` and
 `board done`; the configured runner reports a silent child exit back to boardd
 as a failed run with no automatic column transition.
 
+On Windows, `herdr pane run` queues command text plus Enter into the pane's
+interactive shell (per `herdr pane run --help` and `herdr --skill`), and panes run
+the user's Herdr default shell, so the runner script is a UTF-8 `.ps1` instead of
+`#!/bin/sh`. The typed line is one argument,
+`pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "<script>"` (`powershell.exe`
+when `pwsh` does not resolve), which parses the same in pwsh, Windows PowerShell,
+cmd, and sh panes. How Herdr's Windows build turns `agent.start` args and
+`pane run` text into a shell line has not been verified against a live session yet.
+
 ## 0.9.0 runtime behaviors behind live validation
 
 The release notes describe behavior that a schema diff cannot prove. Keep these
@@ -317,6 +326,53 @@ These behaviors motivate the live validation cases around lifecycle signals,
 managed prompt delivery, rescue/resume, plugin opening, and pane reads. The
 provider-free scenarios use disposable sessions and fake harnesses; this page
 makes no claim that a live suite has been run for the current checkout.
+
+## Windows: named pipes and paths
+
+Observed with read-only probes against Herdr's Windows build (0.9.2 and the
+0.9.4 preview, both speaking **protocol 22**). Re-verify on the installed binary
+before relying on any of it in new code:
+
+- **Endpoint:** the API is a **named pipe** whose name is `\\.\pipe\` followed by
+  the `HERDR_SOCKET_PATH` string verbatim, e.g.
+  `\\.\pipe\C:\Users\me\AppData\Roaming\herdr\herdr.sock`. The wire protocol is
+  the same NDJSON; a `ping` over the pipe answers
+  `{"id":…,"result":{"type":"pong","protocol":22,…}}`.
+- **Marker file:** the `.sock` path on disk is a small regular **file** (about
+  25 bytes) holding `<pid>:<nanos>`, not a socket. It exists while Herdr runs,
+  so `path.exists()` is a reasonable reachability hint, but only connecting to the
+  pipe proves a server is there.
+- **Locations:** the default is `%APPDATA%\herdr\herdr.sock`; named sessions live
+  under `%APPDATA%\herdr\sessions\<name>\herdr.sock`. `board-herdr`'s default
+  resolves `HERDR_SOCKET_PATH`, then `HERDR_SOCKET`, then
+  `%APPDATA%\herdr\herdr.sock`, then `%USERPROFILE%\AppData\Roaming\herdr\herdr.sock`.
+- **`herdr session list --json`:** `socket_path` is the **on-disk** path with
+  backslashes (JSON-escaped, e.g. `"C:\\Users\\me\\AppData\\Roaming\\herdr\\herdr.sock"`),
+  not the pipe name. `paths::session_name_from_socket` accepts both separators.
+- **Panes** run the user's `default_shell` (PowerShell 7 on the probed host).
+  `pane.process_info` cwd values carry a **trailing backslash**; the daemon
+  compares pane cwds case- and separator-insensitively on Windows, ignoring a
+  `\\?\` prefix and trailing separators, and reports the cwd without them.
+- `herdr pane run <PANE_ID> <COMMAND>...` exists on Windows as on unix.
+
+What the board does with this:
+
+- Every path the board stores or compares is the on-disk path. `board-ipc` builds
+  the pipe name only at connect time, and the daemon never canonicalizes a Windows
+  socket path (a junction, redirected profile, or 8.3 name would resolve to a
+  different string and so a pipe Herdr never created). Two socket paths are equal
+  when they match ignoring case and separator style.
+- An absent endpoint is `NotFound` on Windows (the pipe does not exist). A busy
+  pipe (`ERROR_PIPE_BUSY`) or a connect timeout is **not** absent.
+- Pipe names are one machine-wide namespace, so after opening Herdr's (or
+  boardd's) pipe the client checks who serves it: the pipe must be owned by the
+  current user (or by Administrators/SYSTEM, which only an elevated process can
+  assign), or its server process must run as the current user. Otherwise the
+  connect fails with a permission error before anything is sent, and the
+  endpoint counts as occupied, not absent.
+- boardd's own endpoint follows the same convention: a pipe named from
+  `BOARD_SOCKET`, plus a `<pid>:<nanos>` identity marker written at that path
+  after the pipe is bound (see [`protocol.md`](protocol.md#transport)).
 
 ## Socket request and subscription bounds
 

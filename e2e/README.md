@@ -83,7 +83,7 @@ require the sample because a fast provider response can finish between polls.
 
 ## Prerequisites
 
-- **Herdr 0.9.0 or 0.9.1 speaking socket protocol 22**, `python3`, and Bash ≥4. The provider-free standard suite supports Linux and macOS; `run-all.sh` resolves absolute Herdr and Bash paths before applying its controlled `PATH`. Every scenario checks both `herdr --version` and the ephemeral server's `ping` before dispatch; any other protocol is rejected. Your real sessions are never
+- **Herdr 0.9.0 or 0.9.1 speaking socket protocol 22**, `python3`, and Bash ≥4. The provider-free standard suite supports Linux and macOS, not native Windows (it is bash-driven and expects a unix-socket Herdr; from a Windows machine, run it through the Docker sandbox under WSL2); `run-all.sh` resolves absolute Herdr and Bash paths before applying its controlled `PATH`. Every scenario checks both `herdr --version` and the ephemeral server's `ping` before dispatch; any other protocol is rejected. Your real sessions are never
   touched — the suite boots its own **ephemeral** Herdr server/session.
 - `cargo` on `PATH` — `run-all.sh` builds the release `board` binary once
   (`scripts/build.sh`); scenarios reuse it.

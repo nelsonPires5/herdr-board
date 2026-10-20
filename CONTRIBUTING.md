@@ -8,7 +8,8 @@ welcome. For the full cross-agent contributor guide (crate ownership, herdr gotc
 
 Requirements: a **Rust toolchain** (stable, edition 2021) and **Herdr 0.9.0+ speaking socket
 protocol 22** on `PATH` for the end-to-end path (unit and integration tests need neither
-herdr nor an agent harness).
+herdr nor an agent harness). Linux, macOS, and Windows (x86_64 MSVC) all build and run the Rust
+tests; the e2e suite and the Docker sandbox are Linux/macOS only.
 
 ```bash
 git clone https://github.com/nelsonPires5/herdr-board
@@ -19,14 +20,21 @@ cargo run -p board-cli -- tui   # run the board locally
 
 Prefer not to run Herdr and the test suite against your own machine? The Docker sandbox gives an
 agent-friendly edit-test loop in an isolated container (works with Colima on macOS and Docker
-Engine on Linux): `./scripts/sandbox.sh prepare` once, then `./scripts/sandbox.sh gates` — see
-[`docs/sandbox.md`](docs/sandbox.md).
+Engine on Linux; on Windows, run it from WSL2): `./scripts/sandbox.sh prepare` once, then
+`./scripts/sandbox.sh gates` — see [`docs/sandbox.md`](docs/sandbox.md).
+
+**On Windows**, `scripts\build.ps1` builds the release `board.exe`. Code under `#[cfg(windows)]`
+can only be compiled and tested on a Windows host (or by the `windows` CI job). Run `cargo clippy`
+and `cargo test` there with a scrubbed environment so nothing reaches your real Herdr or board,
+and never run the TUI, `e2e/`, or real agents against your own Herdr; see
+[`docs/testing.md`](docs/testing.md#windows-tests).
 
 ## Architecture
 
-One `board` binary, five workspace crates: `board-core` (models, protocol, database, engine,
+One `board` binary, six workspace crates: `board-core` (models, protocol, database, engine,
 prompts, config, harness adapters), `board-daemon` (orchestration and dispatch), `board-herdr`
-(Herdr socket client), `board-tui` (Ratatui application), and `board-cli` (the `board` binary).
+(Herdr socket client), `board-ipc` (local sockets on unix, named pipes on Windows), `board-tui`
+(Ratatui application), and `board-cli` (the `board` binary).
 
 | Role | Responsibility |
 |---|---|
@@ -37,7 +45,7 @@ prompts, config, harness adapters), `board-daemon` (orchestration and dispatch),
 The CLI and TUI share the typed `board_core::client::BoardClient`; only boardd touches SQLite.
 Design and protocol: [`docs/design.md`](docs/design.md) and [`docs/protocol.md`](docs/protocol.md);
 index: [`docs/README.md`](docs/README.md). `schema.sql` is the SQLite migration source of truth;
-`scripts/` holds build/install helpers; `e2e/` holds scenarios 01–36 against disposable Herdr
+`scripts/` holds build/install helpers; `e2e/` holds scenarios 01–40 against disposable Herdr
 sessions and workspaces.
 
 ## Gates that must pass

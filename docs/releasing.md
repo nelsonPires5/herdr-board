@@ -99,7 +99,8 @@ merges) is a no-op.
 
 `main` is protected by an active branch ruleset: every change must come through a pull request
 merged with a **merge commit** (squash/rebase are not allowed), and the six fast CI jobs are
-required status checks with a strict policy. Direct pushes to `main` are blocked by the
+required status checks with a strict policy (the `windows` CI job is not in that ruleset list, but
+a red `windows` job still fails the `CI` workflow, which blocks Release). Direct pushes to `main` are blocked by the
 pull-request rule; the only writers in practice are maintainers merging PRs (promotion, hotfix,
 back-merge) with GitHub-verified merge commits. `dev` is protected the same way
 (PR + merge commit + required checks). There is no signature requirement on either branch: the
@@ -125,19 +126,26 @@ job—satisfying all of these:
 It checks out `head_sha`, verifies the release files, installs stable Rust with the same cache
 used by CI, builds with `--locked`, and creates the tag at that exact SHA. A per-CI-commit concurrency lock serializes retries for the same recovery run without dropping a pending release when later main commits complete CI.
 
+The workflow has three jobs. `release` (Linux) decides whether a release is needed, builds and
+packages the Linux tarball, creates the tag and the draft, and uploads the Linux assets. `windows`
+(`windows-latest`) then checks out the same SHA, builds `board.exe` with `--locked`, packages the
+Windows zip, and uploads it to the same draft. `publish` flips the draft to published only after
+both have succeeded, so a release is never published with a platform missing.
+
 ## Recovery and reruns
 
 Release state is inspected before mutation:
 
 - the tag must be absent or point to the exact CI `head_sha`; a tag at another SHA is a hard
   error and is never moved;
-- a GitHub Release is checked for draft status and both exact asset names;
+- a GitHub Release is checked for draft status and all four exact asset names;
 - an existing release with no tag fails closed. The workflow never recreates a missing tag from
   the current CI run;
 - a missing release is created as a **draft** after the tag exists;
 - existing drafts are reused;
-- both assets are uploaded with `gh release upload --clobber`, then the draft is published;
-- the only no-op is a release that is already published and has both expected assets.
+- every asset is uploaded with `gh release upload --clobber` (Linux by `release`, Windows by
+  `windows`), then `publish` publishes the draft;
+- the only no-op is a release that is already published and has all expected assets.
 
 Therefore a failure after tag creation, draft creation, or one asset upload can be recovered by
 rerunning the same green `workflow_run`; the per-CI-commit lock serializes retries for that commit. A release with a
@@ -152,9 +160,16 @@ Expected assets:
 
 - `board-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz`
 - `board-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz.sha256`
+- `board-X.Y.Z-x86_64-pc-windows-msvc.zip`
+- `board-X.Y.Z-x86_64-pc-windows-msvc.zip.sha256`
 
 The tarball contains the release binary, `herdr-plugin.toml`, `skill/`, packaging scripts,
-`README.md`, and any license file present at build time.
+`README.md`, and any license file present at build time. The Windows zip has the same layout
+under a top-level `board-X.Y.Z-x86_64-pc-windows-msvc/` folder: `target/release/board.exe`,
+`herdr-plugin.toml`, `skill/`, the PowerShell scripts (`scripts/build.ps1`,
+`scripts/install-cli.ps1`, `scripts/open-board.ps1`), `README.md`, and any license file. Each
+`.sha256` file is one `<sha256>  <file name>` line, checkable with `sha256sum -c` or compared
+against `Get-FileHash -Algorithm SHA256`.
 
 ## Tag policy
 

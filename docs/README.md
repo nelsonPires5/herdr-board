@@ -14,6 +14,7 @@ The reference detail behind the [root README](../README.md). Start here to find 
 | Runtime launch | daemon-owned `Spawner`, placement, process/pane handles | [implementation.md](implementation.md) |
 | Config | typed `RootConfig`, one parse, environment overrides after parse | [configuration.md](configuration.md), [design.md](design.md) |
 | Live catalog | scenarios 01–40; provider-free fake/safe harness boundary | [e2e/README.md](../e2e/README.md) |
+| Platforms | Linux and macOS; Windows 10/11 x64 over named pipes (`board-ipc`), Rust tiers only in CI | [README → Windows](../README.md#windows), [herdr.md](herdr.md#windows-named-pipes-and-paths) |
 | Branches | `dev` integration; `main` production (PR-only, merge-commit, signed); action-owned promotion; tags only from green `main` | [releasing.md](releasing.md) |
 
 Keep these links as navigation, not duplicate wire definitions: serde types and migrations are the
@@ -26,11 +27,11 @@ isolation is an agent prompt concern, not a board space primitive.
 | [configuration.md](configuration.md) | `~/.config/herdr-board/config.toml`: top-level and typed `[daemon]` settings, config-defined `[harness.NAME]` adapters (argv placeholders, capability catalogs, `resume`), parse/override precedence, and every environment variable. | are tuning the daemon, adding a config-defined harness, or need what an environment variable does. |
 | [operations.md](operations.md) | Day-two operations: updating over an existing plugin (including the graceful `board daemon --stop` handshake), the safe uninstall sequence for the daemon/CLI/plugin, removing board data, and the local-development source install. | are updating, uninstalling, or setting up a checkout you plan to edit. |
 | [design.md](design.md) | Architecture, data model, column configuration, the full dispatch → run → transition data flow, pane placement, and the standing design decisions. | want to understand how the board works end to end, or are changing behavior. |
-| [protocol.md](protocol.md) | The boardd unix-socket protocol (v1) — transport (NDJSON), auto-start, every method and event, error codes. **The single source of truth** for the daemon⇄client contract; serde types live in `board-core::protocol`. | are writing a client, adding a method, or debugging the wire. |
+| [protocol.md](protocol.md) | The boardd local-socket protocol (v1; a unix socket, or a named pipe on Windows) — transport (NDJSON), auto-start, every method and event, error codes. **The single source of truth** for the daemon⇄client contract; serde types live in `board-core::protocol`. | are writing a client, adding a method, or debugging the wire. |
 | [implementation.md](implementation.md) | The cargo workspace crate layout, crate ownership, shared dependencies, key traits (`BoardClient`, `Spawner`), and the build phases with their tests. | are navigating the codebase or picking up a build task. |
 | [research.md](research.md) | The verified herdr capability map (commands/events/IDs), prior-art survey of agent-kanban tools, and verified harness invocation flags (Pi/Claude/codex/gemini/opencode/antigravity). | are scoping a feature that touches herdr or a new harness, and want the background that grounded the design. |
 | [releasing.md](releasing.md) | The release contract: the `dev`/`main` branch model (feature → dev, action-owned promotion to main, hotfix, back-merge), Prepare Release, version bumps, CI-gated tagging/publishing, artifacts, reruns, and tag policy. | are cutting a release or need the repo's release policy. |
-| [herdr.md](herdr.md) | How to learn and verify **Herdr** facts (there is no man page): the live sources of truth (`herdr api schema --json`, `herdr <cmd> --help`, `herdr api snapshot`), the Herdr 0.9.0/protocol-22 delta, per-harness integrations, and the protocol-22 compatibility gate. | hit a Herdr command/shape that misbehaves, or need to confirm what the installed Herdr actually does. |
+| [herdr.md](herdr.md) | How to learn and verify **Herdr** facts (there is no man page): the live sources of truth (`herdr api schema --json`, `herdr <cmd> --help`, `herdr api snapshot`), the Herdr 0.9.0/protocol-22 delta, per-harness integrations, the protocol-22 compatibility gate, and Herdr's Windows named-pipe and path conventions. | hit a Herdr command/shape that misbehaves, or need to confirm what the installed Herdr actually does. |
 | [testing.md](testing.md) | The testing pyramid in this repo (unit/pure → daemon+CLI integration → TUI snapshots → live E2E), how the provider-free fake managed-harness suite works (fake Pi/Claude/Codex/OpenCode/Antigravity `agy`, including the current pane-first scenarios 16/17, whose filenames are historical), and how to write a scenario. The use case ↔ scenario catalog lives in [`../e2e/README.md`](../e2e/README.md). | are adding a feature and need to test it, or are writing/running the live E2E suite. |
 | [sandbox.md](sandbox.md) | The Docker sandbox (`scripts/sandbox.sh`): running the full gate set and every live E2E scenario in an isolated, network-disabled, non-root container from a read-only worktree mount; shell/CLI/TUI use against a container-local Herdr; the explicit real-provider agent opt-in (pi/codex/antigravity, keyed to pinned CLIs and SHA-verified antigravity tarballs); artifacts, cache reset, architecture behavior, and troubleshooting. | want a fast edit-test loop without touching the host's active Herdr, board daemon, or sessions. |
 
@@ -66,6 +67,12 @@ succeed, installs the SHA-verified Herdr 0.9.0 binary, and runs the wrapper abov
 fast while making the complete live suite part of the same required `CI` workflow. `test_docs.py`
 asserts that every `scripts/tests/test_*.py` is matched by a pattern above, so a new module cannot
 land in no job at all.
+
+A separate `windows` job (`windows-latest`, x86_64-pc-windows-msvc) runs the same `cargo clippy`
+and `cargo test` commands above, so the native Windows code paths are linted and tested on every
+change. It runs only the Rust tiers: the Python tier, the e2e harness, and the live suite drive bash
+and a Linux Herdr and stay on Linux. It is not a `live-e2e` prerequisite, but it is part of the
+same `CI` workflow, so a red Windows job still blocks the Release workflow.
 
 Locally the whole Python tier is one command:
 

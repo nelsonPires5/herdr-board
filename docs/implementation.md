@@ -8,6 +8,9 @@ crates/
   board-core/    # OWNED BY PHASE A. models, protocol types, db(rusqlite)+migrations,
                  # column engine (pure), prompt assembly, harness adapters, config,
                  # blocking NDJSON client (used by CLI + TUI)
+  board-ipc/     # local endpoints: AF_UNIX sockets on unix, named pipes on Windows
+                 # (blocking stream/listener + optional tokio listener); the only
+                 # crate that opens a socket or pipe directly
   board-herdr/   # herdr socket client: envelope, typed workspace/tab/agent/pane/
                  # notification/session calls, events stream (no worktree API)
   board-tui/     # OWNED BY PHASE C. ratatui app (lib with run() entry)
@@ -63,7 +66,7 @@ directories (paths), tracing + tracing-subscriber (daemon logs), libc or nix for
 ## Key boundaries
 
 ```rust
-// board-core::client — blocking NDJSON client over UnixStream (TUI + CLI use it).
+// board-core::client — blocking NDJSON client over board_ipc::LocalStream (TUI + CLI use it).
 pub trait BoardClient {
     // The only raw transport primitive; typed wrappers are default methods.
     fn call(&mut self, method: &str, params: serde_json::Value)

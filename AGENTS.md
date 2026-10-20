@@ -19,12 +19,23 @@ edit-test loop, interactive shell/board CLI/TUI, the explicit opt-in real-provid
 mode (pi/codex/antigravity), visual validation through the sandbox, and the handoff
 checklist. Host-side execution is an explicit, documented exception only.
 
+**Windows host exception.** The sandbox is a Linux container, so `#[cfg(windows)]` code can only
+be compiled and tested on a Windows host (or the `windows` CI job). Run host `cargo clippy` /
+`cargo test` there with a **scrubbed environment**, never against the user's Herdr or board:
+unset every `HERDR_*` variable (`HERDR_SOCKET_PATH`, `HERDR_SOCK`, `HERDR_SOCKET`,
+`HERDR_PANE_ID`, …), point `HERDR_BIN_PATH` at a path that does not exist, drop Herdr from
+`PATH`, and point `APPDATA`, `BOARD_DB`, `BOARD_SOCKET`, `BOARD_LOG_DIR`, and
+`HERDR_BOARD_CONFIG` into a throwaway temp directory. Never touch `%APPDATA%\herdr` and never run
+the TUI, `e2e/`, real agents, or a mutating `herdr` command on the host. On a Windows machine the
+sandbox itself runs from WSL2 (`./scripts/sandbox.sh` inside a Linux distribution with Docker).
+
 ## Workspace layout & crate ownership
 
 | Crate | Owns | Never leaks into |
 |---|---|---|
 | `board-core` | models, `board-core::protocol` types, SQLite db + migrations, the pure column engine, prompt assembly, harness adapters, config, the blocking boardd client | herdr/tokio/ratatui specifics |
-| `board-herdr` | the Herdr unix-socket client (envelope, typed workspace/tab/agent/pane/notification/session calls, event stream) | board state; no worktree API |
+| `board-ipc` | the local-endpoint split: AF_UNIX sockets on unix, named pipes on Windows (blocking `LocalStream`/`LocalListener`, the `tokio`-feature async listener, `endpoint` name/length/absence helpers). Nothing else opens a socket or pipe directly | board or Herdr semantics |
+| `board-herdr` | the Herdr socket client over `board-ipc` (envelope, typed workspace/tab/agent/pane/notification/session calls, event stream) | board state; no worktree API |
 | `board-tui` | the ratatui app (`run()` entry), forms, snapshot tests | daemon logic |
 | `board-daemon` | boardd server: run queue, dispatch, per-session herdr clients, watchers, spawner | — |
 | `board-cli` | the `board` binary: clap subcommands wiring the above | business logic |
@@ -76,6 +87,7 @@ Full layering, test placement, harness details, and how to add tests live in
   | | `spawner/` | launch and placement; `placement/` (alloc/geometry/race), `herdr/` (managed + configured), `error.rs` |
   | | `watchers/` | timeout/liveness/Herdr observation |
   | | `herdr_conn.rs` | the gated connect: normalize the socket path, connect, run the protocol-22 check, in one place. New placement, discovery, and mutation paths go through it. The two space-resolution sites that still connect directly (`ops/cards.rs`, `dispatch/launch_plan.rs`) run the same gate inside `dispatch/space.rs`; cleanup/observation retain an ungated client only for panes this daemon already owns |
+  | | `endpoint.rs` | boardd's own endpoint: bind, secure, release. Unix: the `0600` socket file. Windows: the owner-only pipe plus the `<pid>:<nanos>` identity marker at `BOARD_SOCKET` |
   | | `rescue.rs`, `recovery.rs`, `logging.rs`, `testkit.rs` | run rescue, per-session recovery, tracing setup, and the `cfg(test)` daemon/fake-Herdr builders |
   | `board-tui` | `app/` | the pure reducer — `state`/`effect`/`nav`/`drag` plus one module per screen |
   | | `driver/` | the effect loop (`dispatch`, `load`); `runtime.rs` owns terminal setup/teardown, `origin.rs` the Herdr-plugin origin context |
@@ -84,13 +96,23 @@ Full layering, test placement, harness details, and how to add tests live in
   | | `render.rs` | the single output path. Handlers never branch on `--json`: they hand a value to `emit`/`emit_line`, and every text listing goes through one `table` helper |
   | | `context.rs` | lazy client/board resolution and client-side column lookup |
   | `board-core` | `engine/` | pure decisions — lifecycle, transitions, validation, signals, `columns.rs` |
-  | | `client/` | traits, Unix transport, fake client |
+  | | `client/` | traits, the local transport (`LocalClient` over `board-ipc`; `UnixClient` is an alias), fake client |
+  | | `exec.rs` | spawning user/harness programs: `command`/`resolve_program` (PATH + PATHEXT on Windows, so `.cmd` shims resolve) and the deadline/size-bounded `run_bounded` |
   | `board-herdr` | `events/` | event parsing and streams |
+  | `board-ipc` | `endpoint` | pipe-name mapping, length checks, and `is_absent` (what "nothing is listening" means on each platform) |
 
   Before adding a helper, check `board-core` for one: `Patch::from_flags`/`from_option`,
   `protocol::parse_timestamp`, `capability::default_capabilities`, `engine::resolve_column`,
-  `engine::run_elapsed`, `Comment::is_system`, `paths::session_name_from_socket`, and
-  `Db::require_card`/`require_column` are shared primitives, not per-crate copies.
+  `engine::run_elapsed`, `Comment::is_system`, `paths::session_name_from_socket`,
+  `paths::home_dir`, `exec::command`, `client::is_daemon_absent`, and
+  `Db::require_card`/`require_column` are shared primitives, not per-crate copies. Inside
+  `board-daemon`, compare two Herdr socket paths only with `herdr_conn::same_socket` (case- and
+  separator-insensitive on Windows).
+- **Platform code stays behind its boundary.** Windows support lives in `#[cfg(windows)]` modules
+  or helpers next to their `#[cfg(unix)]` twins (`board-ipc`, the daemon's `endpoint.rs`,
+  `spawner/job_object.rs`, `logging.rs`), not as `cfg` sprinkled through callers. The unix paths
+  keep their exact behaviour; a change that alters a unix code path to suit Windows needs its own
+  justification and test.
 
   Keep private tests beside those boundaries; describe ownership rather than maintaining a
   file-by-file test manifest.
@@ -119,8 +141,11 @@ Full layering, test placement, harness details, and how to add tests live in
 - `RootConfig` is parsed once at daemon startup; typed `[daemon]` settings are resolved before
   environment overrides, and malformed existing config is fatal. CLI and TUI use typed
   `board-core::client::BoardClient` wrappers rather than raw method/result handling.
-- Auto-start creates one child process-group leader (no double-fork/`setsid`); stop is an exact
-  socket/identity-gated operation. The active-run summary drives TUI timers, and the always-on
+- Auto-start creates one child process-group leader (no double-fork/`setsid`; on Windows, one
+  child in a new process group with a hidden console, deliberately not `DETACHED_PROCESS`); stop is an exact socket/identity-gated operation. On Windows the
+  identity is the pipe server's process id checked against the `<pid>:<nanos>` marker at
+  `BOARD_SOCKET`, stop is the `daemon.stop` RPC (there is no signal), and a busy pipe counts as a
+  live daemon, never as stale. The active-run summary drives TUI timers, and the always-on
   per-session supervisor reconnects and reconciles conservatively.
 - Definition of done for a user-facing change: update the docs and `CHANGELOG.md` in the same change. `Unreleased` entries are grouped under Keep-a-Changelog categories (`### Added` / `### Changed` / `### Fixed` / `### Removed`), one entry per PR, and each entry is one short sentence of user-facing outcome — what the user can do or see, never env var names, internal flags, module names, or tuning numbers (an internal refactor with no visible change gets one short line or none). Every entry starts with the clickable PR link — GitHub does not auto-link bare `#NN` inside rendered markdown — and fits ≤ 200 chars total: `- [#31](https://github.com/nelsonPires5/herdr-board/pull/31) feat: Pin Herdr plugin installs to a released tag.` The PR body holds the rationale. `scripts/tests/test_docs.py` enforces these rules for `Unreleased` (released sections are exempt). Write the entry first, then fill in the PR link once the PR is open.
 - Release/version changes follow [`docs/releasing.md`](docs/releasing.md). Agents must never create,
@@ -160,3 +185,11 @@ differs from 0.9.0; re-verify against `api schema` before changing that gate or 
   pane id)`, not pane id alone.
 - **AF_UNIX paths cap at 108 chars.** Test DBs/sockets must live under a short `/tmp` dir
   (`tempfile::tempdir()`), not a deep nested path, or `connect` fails with a cryptic error.
+  (Windows pipe names cap at 256 UTF-16 units including the `\\.\pipe\` prefix.)
+- **On Windows, Herdr's socket is a named pipe.** The endpoint is `\\.\pipe\` + the
+  `HERDR_SOCKET_PATH` string verbatim (e.g. `\\.\pipe\C:\Users\me\AppData\Roaming\herdr\herdr.sock`);
+  the `.sock` path on disk is a small regular file holding `<pid>:<nanos>`, a marker, not a socket.
+  Always pass the on-disk path around (it is what `herdr session list --json` reports, with
+  backslashes) and let `board-ipc` build the pipe name at connect. Never canonicalize it: resolving
+  a junction or 8.3 name changes the pipe name. Pane cwds from Herdr carry a trailing backslash.
+  Details: [`docs/herdr.md`](docs/herdr.md#windows-named-pipes-and-paths).

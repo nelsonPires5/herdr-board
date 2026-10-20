@@ -10,9 +10,20 @@ Supported hosts: **Docker Engine on Linux** and **Docker through Colima on
 macOS**; both **amd64** and **arm64** (Apple Silicon included). CI integration
 is intentionally out of scope — this is a local tool.
 
+**Windows hosts: use WSL2.** `sandbox.sh` is a bash script that drives a Linux
+container, so run it from a WSL2 Linux distribution (for example Ubuntu) with
+Docker available inside it (Docker Engine installed in the distribution, or
+Docker Desktop's WSL integration), against the worktree as seen from WSL
+(`/mnt/c/...`). It then behaves exactly as on Linux. The sandbox exercises only
+the Linux build; the Windows-native code paths are covered by the Rust tests on
+a Windows host or the `windows` CI job (see
+[`testing.md`](testing.md#windows-tests)).
+
 ## Setup
 
 - Linux: install Docker Engine.
+- Windows: install WSL2 with a Linux distribution and Docker inside it, then
+  run every `scripts/sandbox.sh` command from that distribution's shell.
 - macOS: install Colima (`brew install colima docker`) and start it
   (`colima start`). The wrapper talks to whatever docker CLI/context is active.
 

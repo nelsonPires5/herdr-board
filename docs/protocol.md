@@ -10,7 +10,22 @@ protocol version.
 - Unix socket. Path resolution (both daemon and clients): `$BOARD_SOCKET` if set, else
   `~/.local/share/herdr-board/boardd.sock`. The daemon sets the socket to mode `0600`; local socket
   access is the protocol's authentication boundary.
-- DB path resolution (daemon only): `$BOARD_DB` if set, else `~/.local/share/herdr-board/board.db`.
+- Windows: a named pipe, `\\.\pipe\` + the same `$BOARD_SOCKET` path string (default
+  `%APPDATA%\herdr-board\boardd.sock`), the convention Herdr uses on Windows. The pipe is created
+  with an owner-only DACL (the current user's SID) and rejects remote clients, so no other user
+  can connect to boardd. Pipe names share one machine-wide namespace, so the other direction is
+  checked by the client: after opening a pipe (boardd's or Herdr's), it refuses the connection
+  with a permission error unless the pipe is owned by the current user (or by Administrators or
+  SYSTEM, which only an elevated process can assign), or its server process runs as the current
+  user. A refused pipe is never treated as "no daemon". Together these are the authentication
+  boundary. After binding, the daemon atomically writes an identity marker file at
+  the `$BOARD_SOCKET` path containing ASCII `<pid>:<nanos>` (boardd's process id and a per-start
+  token) and removes it on clean shutdown only if it still holds that start's text. A second
+  daemon whose pipe name is taken fails with "another process already serves this boardd
+  endpoint". Clients treat a pipe that does not exist as "no daemon", but a busy pipe or a connect
+  timeout as a live daemon.
+- DB path resolution (daemon only): `$BOARD_DB` if set, else `~/.local/share/herdr-board/board.db`
+  (`%APPDATA%\herdr-board\board.db` on Windows).
 - Log directory resolution (daemon only): `$BOARD_LOG_DIR` if set, else `<data>/logs`.
 - Newline-delimited JSON (NDJSON), UTF-8. One JSON object per line, both directions.
 - Request: `{"id":"<string>","method":"<name>","params":{...}}` (params may be omitted = `{}`).
@@ -76,8 +91,9 @@ a checked dispatch path fails the run before workspace mutation.
 
 ## Auto-start
 
-`board tui` and every CLI subcommand try to connect; on failure they spawn one detached
-`board daemon` child (pre-subscriber stderr → private, truncated `logs/bootstrap.log`; structured
+`board tui` and every CLI subcommand try to connect; when nothing is listening at the endpoint
+they spawn one detached `board daemon` child (a busy or unreachable endpoint is waited on for the
+same ~3s and is never given a second daemon) (pre-subscriber stderr → private, truncated `logs/bootstrap.log`; structured
 runtime diagnostics → daily `logs/daemon.YYYY-MM-DD.ndjson`), then retry with
 backoff for ~3s. The child owns a new process group led by its exact PID; there is deliberately no
 double-fork or `setsid`, so diagnostics and the safe harness retain an unambiguous owner token.
@@ -85,11 +101,24 @@ Lifecycle control uses the daemon socket (`daemon.stop`), never a broad process-
 takes an exclusive flock on `<db>.lock` — a second daemon on the same DB must exit 0 silently
 (lost the race = someone else serves).
 
+On Windows the auto-started child gets a new process group and its own hidden console
+(`CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`, breaking away from the caller's job when the job
+allows it; deliberately not `DETACHED_PROCESS`, which would flash a console window for every
+program the daemon runs). The CLI's standard handles are made non-inheritable first, so a caller
+capturing `board` output never waits on the daemon. The same `<db>.lock` rule holds
+(`LockFileEx` instead of `flock`). There is no signal-based stop: `daemon.stop` is the stop path,
+and a foreground daemon also shuts down gracefully on console Ctrl+C, Ctrl+Break, close, logoff,
+and shutdown events. Before treating an endpoint as stale, the client checks it: a connectable
+pipe whose server process id matches the marker's `<pid>` is the live daemon; a pipe that does
+not exist with a leftover marker is stale, and the marker is removed only if its text is
+unchanged; a busy pipe or a timeout is left alone.
+
 ## Client boundary
 
 `board-core::client::BoardClient` is the shared typed client boundary used by the CLI and TUI.
 Its wrappers encode the v1 method parameters and decode result DTOs; the CLI and TUI do not build
-method strings or inspect raw result values for these operations. `UnixClient` keeps the blocking
+method strings or inspect raw result values for these operations. `LocalClient` (formerly
+`UnixClient`, which remains as an alias; a unix socket or a Windows named pipe) keeps the blocking
 NDJSON `call(method, params)` primitive internally for transport implementations and compatibility
 with lightweight recording/fake clients. Production clients perform no SQLite I/O; only boardd owns
 and mutates the database.
@@ -450,7 +479,7 @@ wrapper. It accepts the exact matching open queued or started **configured** run
 that arrives before spawn registration), then records `fail` with summary "configured harness exited
 without calling board done", adds "pane exited without board done", leaves the card in its current
 column, and does **not** apply `on_fail`. Stale/replaced/already-completed and built-in (pi/claude/codex/opencode/antigravity)
-runs are rejected. This is protected by the local board Unix socket trust boundary, not an unforgeable
+runs are rejected. This is protected by the local board socket (named pipe on Windows) trust boundary, not an unforgeable
 token; the wrapper ignores an expected rejection when `run.done` won the race. The generated
 script removes itself when it starts; if `pane run` accepts scheduling but the pane never opens
 it, a residual configured-script orphan is an explicitly documented limitation.
@@ -571,6 +600,7 @@ Coarse by design — the TUI refetches only its selected `board.get {board_id}` 
     - managed self-minting harnesses (codex, opencode, and antigravity): the same `agent.start` readiness contract **without any prompt file** — none of the three has a system-prompt-file equivalent, so startup argv carries neither system nor task text and there is no `--` delimiter. After readiness the daemon runs a **bounded post-launch capture** on the same gated connection: it polls `agent.get` (at most 5 probes, 10s wall-clock cap) for `AgentInfo.agent_session`, and accepts only an `id`-kind reference owned by the expected agent with a non-empty `value` — for codex the source is deliberately unconstrained, while opencode and antigravity pin the exact source the current Herdr integration reports. The capture is ordered per harness: for **codex** it runs before the prompt (the integration reports its thread id as soon as the CLI is interactive); for **opencode and antigravity** it runs **after** the prompt — real OpenCode mints its `ses_…` id and reports `agent_session` only once the first `agent.prompt` lands, so a pre-prompt capture would lose the id, while a prompt-less opencode rescue reduces to capture-after-readiness (antigravity is ordered like opencode — see the launch spec below). A missing, wrong-agent, wrong-source, `path`-kind, or blank report degrades to `None` with a warning and the launch **continues**: basic execution works, but the run keeps its enqueue-time `NULL` id, so same-conversation reuse hops and `run.focus` rescue fail closed (no recorded id). A captured id is persisted atomically **with** the run promotion (run + card in one transaction), so a cancel-during-spawn that ends the run discards the capture together with the handle; a capture racing promotion writes through the same single-row UoW and fails closed if the run is no longer open. Then `agent.prompt` delivers the prompt (before the capture for codex, after it for opencode and antigravity): a Mint receives one delimited block (`## herdr-board system instructions` + `## herdr-board card task`), a resume/fork fresh pane receives the task alone, same-pane reuse the task alone, and a rescue sends nothing. **After a successful managed launch** (fresh or reuse), the daemon closes the tab anchor with `pane.close` — closing a split parent is live-verified safe, and the harness pane keeps its process/env — so the tab converges to exactly one harness pane; the promoted run persists a NULL anchor. If that close fails, the anchor is kept (and persisted) rather than failing the already-successful launch. A failed launch never closes the anchor: it remains for the next allocation, per the child-only cleanup rule.
    - managed pane name is `card-<id>-<column-slug>` (e.g. `card-14-execute`); `agent_name_taken` retries once on the same pane with `card-<id>-<column-slug>-r<run>`.
    - configured harness: `pane.rename` the owned pane, create one mode-`0700` self-removing script whose POSIX-quoted command is the exact configured argv, and invoke exactly the selected Herdr binary (`HERDR_BIN_PATH` when nonempty, otherwise `herdr`) as `pane run <pane_id> <script_path>` with `HERDR_SOCKET_PATH` set to the selected socket. The script runs the child, preserves its status, then calls hidden `board __pane-exited --run-id "$BOARD_RUN_ID"`; the internal run-id guard accepts only the exact open queued/started configured run (including callback-before-registration), rejects stale/completed and built-in runs, and never applies `on_fail`.
+     On Windows the script is a UTF-8 `.ps1` (every argv element single-quoted for PowerShell; argv[0] resolved to an absolute path through PATH/PATHEXT so no alias or cmdlet can shadow it) and the runner argv stays `pane run <pane_id> <line>` where `<line>` is `pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "<script_path>"` (`powershell.exe` when `pwsh` does not resolve). A missing program exits `127`, the child's `$LASTEXITCODE` is preserved, and `$env:BOARD_BIN __pane-exited` is called the same way. A script path containing `"`, `$`, a backtick, `%`, `!`, or a control character is refused, so `%TEMP%` must not contain them; exact fidelity for embedded `"` and empty arguments needs pwsh 7.3 or later, and only for a real executable: PowerShell passes a `.cmd`/`.bat` program (such as an npm shim) its arguments with legacy quoting and cmd.exe cuts at line breaks, so a batch-file argv[0] whose arguments contain a line break, a `"`, or an empty string is refused before launch (point the harness at the real executable instead). The prompt file on Windows is not chmod'd; the per-user `%TEMP%` ACL protects it.
    - a disappearing selected/owned child restarts discovery at `tab.list` and retries the complete placement once. Retry/terminal cleanup closes only the board-created run child; the shell anchor and pre-existing panes are never closed. `pane_not_found` means cleanup already won. This placement rediscovery path is separate from the bounded same-child `agent_pane_busy` retry above. A synchronous configured-runner failure also removes its script; after successful scheduling, the script owns self-removal.
    - card status `running`, store exact pane/workspace ids + `session` on the run, emit `run_started`.
 4. Finish signals, priority order (the full signal→state mapping is under
@@ -599,6 +629,8 @@ Their persisted startup argv contains neither system nor card prompt:
     unprefixed `prompt_snapshot`.
 - Built-in `claude`:
   `claude [--model M] [--effort E] [--permission-mode P] --allowedTools "Bash(board:*)" (--session-id UUID | --resume ID [--fork-session])`
+  - on Windows `--allowedTools` carries a second value, `"Bash(board:*)" "PowerShell(board:*)"`,
+    so the agent may run `board` from either shell tool;
   - pane-first managed launch uses `kind:"claude"`, startup args without `claude`, then appends
     `--append-system-prompt-file <mode-0600-file>`; `agent.prompt` separately carries the card task.
 - Built-in `codex`:
@@ -689,8 +721,8 @@ Their persisted startup argv contains neither system nor card prompt:
   never receives `BOARD_PROMPT`). Template
   elements support `{model}`, `{effort}`, `{permission_mode}`, `{card_id}`, `{card_title}`,
   and `{card_short_name}` and are dropped if their value is unset.
-  The 0700 script bridge described above preserves multiline/special-character argv boundaries that
-  direct `herdr pane run` cannot preserve.
+  The 0700 script bridge described above (the `.ps1` bridge on Windows) preserves
+  multiline/special-character argv boundaries that direct `herdr pane run` cannot preserve.
 - `permission_mode=bypassPermissions` is refused unless the card explicitly sets it (never via column override).
 
 For every new v7 run, `system_prompt_snapshot` is authoritative for managed and configured launch.

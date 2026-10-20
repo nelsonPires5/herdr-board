@@ -20,6 +20,11 @@ are non-zero and preserve the socket; stale-socket cleanup is only performed aft
 connect and an identity check. The next `board` command auto-starts a fresh daemon from the new
 binary.
 
+On Windows the same applies through `scripts/build.ps1`, and the stop matters more there: a running
+`board.exe` cannot be overwritten at all. The daemon has no signal-based stop on Windows; `--stop`
+uses the `daemon.stop` request, and the daemon is identified by the pipe's server process id
+matching the `<pid>` in its marker file. A busy pipe is treated as a live daemon, never as stale.
+
 Run the install once from each named Herdr session where the plugin is registered.
 
 If you are updating from a version older than the `--stop` flag and a stale daemon is still
@@ -31,9 +36,13 @@ process-name kill.
 
 boardd writes one JSON object per line to private daily files in the XDG data directory:
 `~/.local/share/herdr-board/logs/daemon.YYYY-MM-DD.ndjson` on Linux (the platform data
-directory equivalent on macOS; override the directory with `BOARD_LOG_DIR`). The directory is
+directory equivalent on macOS, `%APPDATA%\herdr-board\logs\` on Windows; override the directory
+with `BOARD_LOG_DIR`). The directory is
 mode `0700` and regular log files are mode
-`0600`. `board daemon --foreground` mirrors the same structured events to stderr.
+`0600`. On Windows the directory (wherever `BOARD_LOG_DIR` points) gets a protected access list
+naming only the current user, which the daily files and `bootstrap.log` inherit, and a log
+directory or daily file that is a reparse point (symlink or junction) or not a regular file is
+refused. `board daemon --foreground` mirrors the same structured events to stderr.
 
 Each board RPC and outbound Herdr RPC/subscription completion records its method, duration,
 outcome, error category/code when applicable, and safe correlation IDs. Board request correlation
@@ -101,11 +110,37 @@ fi
 herdr plugin uninstall herdr-board
 ```
 
+On Windows, the same sequence in PowerShell (the marker written by `install-cli.ps1` has its own
+prefix):
+
+```powershell
+board daemon --stop
+if ($LASTEXITCODE -ne 0) { throw 'board daemon did not stop safely; endpoint preserved' }
+if (Test-Path Env:HERDR_BOARD_CLI_INSTALL_DIR) { $dir = $env:HERDR_BOARD_CLI_INSTALL_DIR }
+else { $dir = Join-Path $env:USERPROFILE '.local\bin' }
+$board = Join-Path $dir 'board.exe'
+$marker = Join-Path $dir '.herdr-board-cli-managed'
+$prefix = 'herdr-board install-cli.ps1 managed board.exe sha256:'
+function Test-PlainFile($p) {
+  $i = Get-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+  $i -and -not $i.PSIsContainer -and -not ($i.Attributes -band [IO.FileAttributes]::ReparsePoint)
+}
+$owned = $false
+if ((Test-PlainFile $board) -and (Test-PlainFile $marker)) {
+  $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $board).Hash.ToLowerInvariant()
+  $owned = ([IO.File]::ReadAllText($marker).TrimEnd("`n") -ceq "$prefix$hash")
+}
+if ($owned) { Remove-Item -LiteralPath $board, $marker }
+else { Write-Warning "board CLI was changed or is unrecognized; retaining $board and $marker" }
+herdr plugin uninstall herdr-board
+```
+
 If `HERDR_BOARD_CLI_INSTALL_DIR` was used, use the same directory for every update and cleanup.
 Uninstall the plugin from each named session where it was registered.
 
 To remove all board data (cards, columns, runs), delete the data directory — `BOARD_DB`'s default
-(`~/Library/Application Support/herdr-board` on macOS, `~/.local/share/herdr-board` on Linux).
+(`~/Library/Application Support/herdr-board` on macOS, `~/.local/share/herdr-board` on Linux,
+`%APPDATA%\herdr-board` on Windows).
 This is optional and never needed for a normal reinstall.
 
 ## Local development / source install
@@ -122,3 +157,5 @@ cd herdr-board
 ```
 
 This broader development installer is intentionally separate from the GitHub plugin install flow.
+It is a bash script for Linux and macOS; there is no Windows equivalent. On Windows, build with
+`scripts\build.ps1` and install the CLI with `scripts\install-cli.ps1` from the checkout.

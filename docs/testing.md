@@ -18,6 +18,12 @@ CI is configured to run all four layers. The live job starts only after the chea
 installs the pinned Herdr 0.9.0 binary, and boots only suite-owned ephemeral servers — see
 [Running](#running).
 
+**Windows tier.** Layers 1–3 also run natively on Windows: the `windows` CI job
+(`windows-latest`, x86_64-pc-windows-msvc) runs the same `cargo clippy` and `cargo test` gate
+commands. Layer 4 (the live e2e suite), the static `e2e/test-harness.sh` gate, and the Python
+tier stay on Linux/macOS: they are bash-driven, and the live suite pins a Linux Herdr. See
+[Windows tests](#windows-tests).
+
 ## The pyramid
 
 ### 1. Unit / pure tests (per crate)
@@ -31,9 +37,10 @@ The stable ownership layout is responsibility-oriented, not a file manifest:
 
 | Area | Boundary and representative coverage |
 |---|---|
-| `board-core` | Public engine, client, protocol, configuration, prompt, harness, and database behavior lives under `crates/board-core/tests/`. Database coverage is one binary, `tests/db.rs`, delegating to `tests/db/{migrations,crud,runs,atomic}.rs` over shared fixtures — `migrations.rs` owns every schema upgrade and `atomic.rs` owns rollback of the durable units of work. The production responsibilities are separated into `crates/board-core/src/engine/` (pure lifecycle, transitions, validation, signals, and column resolution) and `crates/board-core/src/client/` (traits, Unix transport, and fake client). |
+| `board-core` | Public engine, client, protocol, configuration, prompt, harness, and database behavior lives under `crates/board-core/tests/`. Database coverage is one binary, `tests/db.rs`, delegating to `tests/db/{migrations,crud,runs,atomic}.rs` over shared fixtures — `migrations.rs` owns every schema upgrade and `atomic.rs` owns rollback of the durable units of work. The production responsibilities are separated into `crates/board-core/src/engine/` (pure lifecycle, transitions, validation, signals, and column resolution) and `crates/board-core/src/client/` (traits, the `board-ipc` local transport, and fake client). |
 | `board-daemon` | Queue lifecycle and launch behavior remain private daemon tests under `crates/board-daemon/src/dispatch/tests/` and `crates/board-daemon/src/spawner/tests/`; request operation tests live under `crates/board-daemon/src/ops/tests/`, and timeout/local/Herdr observation tests under `crates/board-daemon/src/watchers/tests/`. Their production owners are the corresponding responsibility directories. Each of those directories is split by *concern*, not by file size — `dispatch/tests/{atomicity,finalize,registration,ownership,space}.rs`, `spawner/tests/{card_tabs,managed,races,placement}.rs`, `ops/tests/{lifecycle,rollback}.rs`. Supervisor, server, session, settings, and snapshot tests remain adjacent to those smaller private modules, and all of them build on `crates/board-daemon/src/testkit.rs` (below). |
-| `board-herdr` | Public envelope, event, and socket behavior is tested from `crates/board-herdr/tests/`, including ignored live probes. Event parsing, backoff, and stream handling are owned by `crates/board-herdr/src/events/`; all unsafe board-herdr Unix transport operations remain in `crates/board-herdr/src/transport.rs`. |
+| `board-herdr` | Public envelope, event, and socket behavior is tested from `crates/board-herdr/tests/`, including ignored live probes. Event parsing, backoff, and stream handling are owned by `crates/board-herdr/src/events/`; `crates/board-herdr/src/transport.rs` is now safe code over `board-ipc` (connect deadline, nonblocking, read readiness). |
+| `board-ipc` | Public endpoint behavior is tested from `crates/board-ipc/tests/`: `blocking.rs` (both platforms: round trips, absent endpoints, `AddrInUse`, timeouts, clones, readiness, EOF, nonblocking), `async_listener.rs` (the `tokio` feature, cancel-safe accept), and `windows.rs` (pipe-name mapping and limits, busy-is-not-absent, server process id). |
 | `board-tui` | Public reducer, form, and rendering behavior is tested from `crates/board-tui/tests/` (`update.rs`, `forms.rs`, `layout.rs`, `mouse.rs`, and snapshots). Each of those declares `required-features = ["fake-client"]` in `Cargo.toml`, because they all link `crates/board-tui/src/testkit.rs`, which is compiled only under that feature; `help.rs` is the exception — it reads the handler *sources* as text to prove `view::HELP_KEYS` still lists every handled key, so it needs no client at all. The implementation is organized under `crates/board-tui/src/app/` (reducer, split into `state`/`effect`/`nav`/`drag` plus one module per screen), `crates/board-tui/src/driver/` (the effect loop), `crates/board-tui/src/forms/`, and `crates/board-tui/src/view/`; only view tests that need private rendering helpers remain adjacent in `crates/board-tui/src/view/tests.rs`. |
 
 The public core suites cover deterministic engine decisions, schema-v14 migrations and atomic
@@ -55,7 +62,8 @@ a dozen near-identical hand-rolled setups that drift apart and then hide bugs in
   one builder for the twelve-argument `Daemon::new`, with an in-memory store, a `LocalSpawner` and
   dummy paths by default; `build()` also hands back the event and dispatch receivers, so a test can
   prove that a rolled-back operation emitted *nothing*. `herdr_server()` is one fake Herdr 0.9.0 /
-  protocol 22 Unix socket with a settable protocol/version (so the compatibility gate can be served
+  protocol 22 endpoint (a `board_ipc::LocalListener`; on Windows it also writes Herdr's marker
+  file) with a settable protocol/version (so the compatibility gate can be served
   a **wrong** one), per-method canned responses, an optional accept count, and recorded-request
   inspection, plus the current-contract JSON constructors (`pane_info`, `agent_started`, …) used to
   build those responses. Finally the shared negative assertions `assert_no_events`, `assert_no_effects`,
@@ -423,11 +431,31 @@ Checklist:
       (exit 3). `run-all.sh` reports SKIP, not FAIL.
 - [ ] End with a clear `step "NN-…: ALL CHECKS PASSED"`.
 
+## Windows tests
+
+Windows-specific code (`#[cfg(windows)]`) compiles and runs only on a Windows host or in the
+`windows` CI job; the Docker sandbox is a Linux container. On a Windows host:
+
+- Run only `cargo clippy` and `cargo test` (the [gate commands](README.md#test-gates-single-source)),
+  never the TUI, `e2e/`, real agents, or a mutating `herdr` command.
+- Scrub the environment first so no test can reach your real Herdr or board: unset every
+  `HERDR_*` variable, set `HERDR_BIN_PATH` to a path that does not exist, drop Herdr from `PATH`,
+  and point `APPDATA`, `BOARD_DB`, `BOARD_SOCKET`, `BOARD_LOG_DIR`, and `HERDR_BOARD_CONFIG` into a
+  throwaway directory.
+- Windows tests stand in for unix fixtures: `.cmd` shims instead of `/bin/sh` scripts
+  (`testkit::stdout_fixture_bin` in the daemon), named pipes plus a marker file instead of socket
+  files, and junctions where unix tests use symlinks (they need no privilege). Some tests run
+  `pwsh.exe` (or `powershell.exe`) and `python`, which the GitHub Windows runners provide.
+- Tests that pin an exact Claude argv must use `board_core::harness::CLAUDE_ALLOWED_TOOLS`: on
+  Windows it adds `PowerShell(board:*)`.
+
+Linux behavior is checked from a Windows machine through the Docker sandbox under WSL2.
+
 ## Field-tested gotchas
 
 | Gotcha | What to do |
 |---|---|
-| **AF_UNIX 108-char limit** | Test db/socket must live under a short path. `e2e_isolate` uses `/tmp/hb-e2e.XXXXXX`, not `$TMPDIR` (which may be long). |
+| **AF_UNIX 108-char limit** | Test db/socket must live under a short path. `e2e_isolate` uses `/tmp/hb-e2e.XXXXXX`, not `$TMPDIR` (which may be long). Windows pipe names cap at 256 UTF-16 units including `\.\pipe\`. |
 | **A unit test must not need `herdr` on `PATH`** | Layers 1–3 run without a live herdr, but `SessionRegistry::resolve` shells out to `herdr session list --json` even for the default session (only to name it), so any test reaching it passes on a developer machine and fails in CI, which has no herdr. Seed the listing with `SessionRegistry::with_entries` instead of `::new`. Reproduce CI locally before pushing: `env -u HERDR_BIN_PATH PATH="$(echo "$PATH" \| tr ':' '\n' \| grep -v "$HOME/.local/bin" \| paste -sd:):$HOME/.cargo/bin" cargo test --workspace --all-features`. |
 | **done-race** | Managed built-ins still require a registered pane, so an instant `board done` for a queued built-in run is rejected. A configured harness is different: its exact `board done` is accepted even before runner registration, and the fake agent still sleeps `FAKE_AGENT_SLEEP` (default 1.5s) before reporting in ordinary scenarios. |
 | **A pane dies with its process** | A herdr pane closes when its command exits. To inspect a live layout, keep the process alive — set `FAKE_AGENT_HOLD` (e.g. 300) so the agent sleeps **after** `board done`. Cleanup closes the workspace to end it. |

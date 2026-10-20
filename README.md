@@ -3,7 +3,7 @@
 ![Rust](https://img.shields.io/badge/rust-edition%202021-orange.svg)
 ![herdr 0.9.0+](https://img.shields.io/badge/herdr-0.9.0%2B-8a2be2)
 ![board protocol v1 · schema v15](https://img.shields.io/badge/board-protocol%20v1%20%C2%B7%20schema%20v15-blue.svg)
-![platforms: linux, macOS](https://img.shields.io/badge/platforms-linux%2C%20macOS-informational)
+![platforms: linux, macOS, Windows](https://img.shields.io/badge/platforms-linux%2C%20macOS%2C%20Windows-informational)
 
 **Turn a kanban card into a real AI coding agent running in a visible Herdr pane.** Cards hold
 prompts, columns define pipeline stages, and moving work across the board can plan, execute, review,
@@ -88,8 +88,8 @@ Agents run in visible Herdr panes, one stable `card-<id>` tab per card.
 
 `boardd` runs as a background daemon and orchestrates everything; the TUI and the CLI are the two
 interfaces that talk to it. The CLI also exposes `board skill`, which prints the exact contract a
-dispatched agent is held to. All board state lives under `~/.local/share/herdr-board/`; Herdr's own
-state is never modified.
+dispatched agent is held to. All board state lives under `~/.local/share/herdr-board/`
+(`%APPDATA%\herdr-board\` on Windows); Herdr's own state is never modified.
 
 ## Install
 
@@ -102,6 +102,10 @@ Open the board:
 ```bash
 herdr plugin action invoke open-board --plugin herdr-board
 ```
+
+On Windows the same install command works; the plugin registers Windows-only twins, so open the
+board with `herdr plugin action invoke open-board-windows --plugin herdr-board` instead (see
+[Windows](#windows)).
 
 <details>
 <summary><strong>Set up a keybinding to open the board from anywhere</strong></summary>
@@ -120,7 +124,7 @@ description = "open herdr-board kanban (overlay)"
 
 Herdr's default prefix is `ctrl+b`, so with defaults the binding is `Ctrl+B Shift+K` (if your
 prefix is `ctrl+a`, it is `Ctrl+A Shift+K`). Do not reuse `prefix+k` — it is Herdr's
-`focus_pane_up` by default.
+`focus_pane_up` by default. On Windows, use `open-board-windows` in the command.
 
 </details>
 
@@ -138,12 +142,14 @@ prefix is `ctrl+a`, it is `Ctrl+A Shift+K`). Do not reuse `prefix+k` — it is H
 <summary><strong>Requirements and details</strong></summary>
 
 - Requires **Herdr 0.9.0+ speaking socket protocol 22** (0.9.0 and 0.9.1 verified), Git, and a
-  Rust toolchain with `cargo`; Linux and macOS are supported. The daemon rejects any other socket
+  Rust toolchain with `cargo`; Linux, macOS, and Windows 10/11 x64 are supported (see
+  [Windows](#windows)). The daemon rejects any other socket
   protocol before workspace discovery and pane launch; a different Herdr version is warned about,
   not rejected, as long as the socket speaks protocol 22.
 - Board protocol **v1**, SQLite schema **v15** (`schema.sql`; upgrades via `board-core::db`).
-- The installer copies the `board` CLI to `~/.local/bin` — make sure that directory is on your
-  `PATH` (`HERDR_BOARD_CLI_INSTALL_DIR` overrides it before installing).
+- The installer copies the `board` CLI to `~/.local/bin` (`%USERPROFILE%\.local\bin\board.exe` on
+  Windows) — make sure that directory is on your `PATH` (`HERDR_BOARD_CLI_INSTALL_DIR` overrides it
+  before installing).
 - Without the harness integration the board still dispatches and accepts `board done`, but runs in
   degraded mode without precise working/blocked/done signals.
 - To open the board as a tab instead of an overlay:
@@ -152,10 +158,40 @@ prefix is `ctrl+a`, it is `Ctrl+A Shift+K`). Do not reuse `prefix+k` — it is H
   herdr plugin pane open --plugin herdr-board --entrypoint board --placement tab --focus
   ```
 
+  (On Windows the entrypoint is `board-windows`.)
+
 - Custom CLI directory, harness integration, optional agent skill, and named sessions:
   [`docs/install.md`](docs/install.md).
 
 </details>
+
+### Windows
+
+Native Windows (x86_64, Windows 10 or 11) is supported with **Herdr's Windows build speaking socket
+protocol 22**. On Windows, Herdr serves its API over a named pipe rather than a Unix socket, and
+herdr-board's daemon does the same for its own endpoint.
+
+- **Install:** the same `herdr plugin install` command. The plugin's Windows build steps run
+  `scripts/build.ps1` and `scripts/install-cli.ps1` through Windows PowerShell, so you need a Rust
+  toolchain for the MSVC target (`rustup` plus the Visual Studio C++ build tools) and Git. The
+  CLI is installed to `%USERPROFILE%\.local\bin\board.exe`.
+- **Open:** the Windows pane is `board-windows` and the action is `open-board-windows`. The
+  Linux/macOS `board` pane and `open-board` action are not available on Windows, and Herdr reports
+  them as unsupported on that platform.
+- **Release zip:** each release also ships `board-X.Y.Z-x86_64-pc-windows-msvc.zip` (with a
+  `.sha256`), which contains a prebuilt `board.exe`, the plugin manifest, the skill, and the
+  PowerShell scripts.
+- **Locations:** board data, config, and logs live under `%APPDATA%\herdr-board\` (`board.db`,
+  `config.toml`, `logs\`). `BOARD_DB`, `BOARD_SOCKET`, `BOARD_LOG_DIR`, and `HERDR_BOARD_CONFIG`
+  override them as on other platforms.
+- **Agents:** panes run your Herdr default shell (for example PowerShell 7). Dispatched agents use
+  the same `board` commands and read `$env:BOARD_CARD_ID` / `$env:BOARD_RUN_ID`. Configured
+  harnesses need `pwsh` or `powershell` on the pane's `PATH`.
+- **Known limitations:** the live e2e suite and the Docker sandbox run on Linux and macOS only (on
+  a Windows machine, run the sandbox from WSL2). Windows CI runs the Rust lint and test tiers. The
+  live Windows Herdr flows (plugin install, pane launch, agent dispatch) have no automated
+  coverage; validate them by hand in a disposable Herdr session. More detail:
+  [`docs/install.md`](docs/install.md#install-on-windows).
 
 ## Developing in the Docker sandbox
 
@@ -165,7 +201,7 @@ sessions: `./scripts/sandbox.sh prepare` once, then `./scripts/sandbox.sh gates`
 It also opens shells, runs `board` CLI commands and the interactive TUI against the isolated
 environment, and gates real-provider agent dispatches (pi/codex/antigravity) behind an explicit
 opt-in with the provider credentials mounted read-only. Works with Docker
-Engine on Linux and Colima on macOS, on amd64 and arm64. See
+Engine on Linux and Colima on macOS, on amd64 and arm64; on Windows, run it from WSL2. See
 [`docs/sandbox.md`](docs/sandbox.md).
 
 ## Quickstart

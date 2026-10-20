@@ -6,8 +6,8 @@ environment overrides applied after it is parsed. The [root README](../README.md
 
 ## Configure the daemon and custom harnesses
 
-Configuration lives at `~/.config/herdr-board/config.toml`; override it with
-`HERDR_BOARD_CONFIG`.
+Configuration lives at `~/.config/herdr-board/config.toml` (`%APPDATA%\herdr-board\config.toml`
+on Windows); override it with `HERDR_BOARD_CONFIG`.
 
 ```toml
 max_concurrent = 3         # global cap on concurrent runs
@@ -147,9 +147,9 @@ override values also prevent daemon startup.
 
 | Variable | Purpose |
 |---|---|
-| `BOARD_DB` | SQLite path. Default: `~/.local/share/herdr-board/board.db`. |
-| `BOARD_SOCKET` | Daemon socket. Default: `~/.local/share/herdr-board/boardd.sock`. |
-| `BOARD_LOG_DIR` | Structured diagnostic log directory. Default: `~/.local/share/herdr-board/logs`. |
+| `BOARD_DB` | SQLite path. Default: `~/.local/share/herdr-board/board.db` (`%APPDATA%\herdr-board\board.db` on Windows). |
+| `BOARD_SOCKET` | Daemon socket. Default: `~/.local/share/herdr-board/boardd.sock`. On Windows the daemon serves the named pipe `\.\pipe\` + this path (default `%APPDATA%\herdr-board\boardd.sock`) and keeps an identity marker file at the path itself. |
+| `BOARD_LOG_DIR` | Structured diagnostic log directory. Default: `~/.local/share/herdr-board/logs` (`%APPDATA%\herdr-board\logs` on Windows). |
 | `HERDR_BOARD_CONFIG` | Configuration path override. |
 | `BOARD_SCOPE_PATH` | Canonicalizable scope override for CLI/TUI automation; when no selection exists yet it selects the project at CLI/TUI startup (the selected project otherwise prevails over the current directory). |
 | `BOARD_SPAWNER` | `herdr` or `local`; overrides `[daemon] spawner`. |
