@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/board-core",
     "crates/board-herdr",
+    "crates/board-ipc",
     "crates/board-tui",
     "crates/board-daemon",
     "crates/board-cli",
@@ -51,6 +52,22 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 libc = "0.2"
 
+# Portability (Windows support). `board-ipc` owns the platform IPC split:
+# AF_UNIX on unix, named pipes on Windows.
+dunce = "1"
+which = "8"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
+
 # Dev / test
 insta = "1"
 tempfile = "3"
@@ -58,6 +75,7 @@ tempfile = "3"
 # Internal crates
 board-core = { path = "crates/board-core" }
 board-herdr = { path = "crates/board-herdr" }
+board-ipc = { path = "crates/board-ipc" }
 board-tui = { path = "crates/board-tui" }
 board-daemon = { path = "crates/board-daemon" }
 board-cli = { path = "crates/board-cli" }

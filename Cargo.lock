@@ -99,12 +99,14 @@ dependencies = [
  "board-core",
  "board-daemon",
  "board-herdr",
+ "board-ipc",
  "board-tui",
  "clap",
  "libc",
  "serde",
  "serde_json",
  "tempfile",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -112,7 +114,9 @@ name = "board-core"
 version = "0.19.1"
 dependencies = [
  "anyhow",
+ "board-ipc",
  "directories",
+ "dunce",
  "rusqlite",
  "serde",
  "serde_json",
@@ -120,6 +124,7 @@ dependencies = [
  "thiserror",
  "toml",
  "uuid",
+ "which",
 ]
 
 [[package]]
@@ -129,6 +134,8 @@ dependencies = [
  "anyhow",
  "board-core",
  "board-herdr",
+ "board-ipc",
+ "dunce",
  "libc",
  "rusqlite",
  "serde",
@@ -139,19 +146,31 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "which",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "board-herdr"
 version = "0.19.1"
 dependencies = [
- "libc",
+ "board-ipc",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "board-ipc"
+version = "0.19.1"
+dependencies = [
+ "libc",
+ "tempfile",
+ "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -361,6 +380,12 @@ dependencies = [
  "redox_users",
  "windows-sys 0.48.0",
 ]
+
+[[package]]
+name = "dunce"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
 name = "either"
@@ -1371,6 +1396,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc1b4cb0cc549fcf58d7dfc081778139b3d283a081644e833e84682ad71cea24"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "which"
+version = "8.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bae2f2b2b816647a1cab1acc91f5bd20812d53cb344382635ec2181940c8034f"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
