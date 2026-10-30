@@ -10,6 +10,10 @@ All notable changes to this project are documented here. The format is based on
 
 - [#138](https://github.com/nelsonPires5/herdr-board/pull/138) feat: Config-defined card actions (`[[card_action]]`) shown as buttons and bound to `1`-`9` in the TUI card detail dialog.
 
+### Fixed
+
+- [#154](https://github.com/nelsonPires5/herdr-board/pull/154) fix: Open the board and resolve sessions after Herdr is upgraded under a running server.
+
 ## [0.19.1] - 2026-10-14
 
 ### Fixed

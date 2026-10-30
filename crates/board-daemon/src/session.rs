@@ -74,14 +74,44 @@ pub struct SessionRegistry {
     cache: Mutex<Option<(Instant, Vec<SessionEntry>)>>,
 }
 
+/// Resolve the Herdr CLI binary to shell out to.
+///
+/// `HERDR_BIN_PATH` can outlive the binary it names when Herdr is upgraded
+/// while `herdr server` stays running (on Linux `/proc/self/exe` then carries a
+/// trailing `" (deleted)"` suffix). Prefer an executable `HERDR_BIN_PATH`, then
+/// the stripped path if the replacement binary lives at the same location, and
+/// finally `"herdr"` on `PATH`.
+pub(crate) fn resolve_herdr_bin() -> String {
+    let candidate = std::env::var("HERDR_BIN_PATH").ok();
+    resolve_herdr_bin_from(candidate.as_deref())
+}
+
+pub(crate) fn resolve_herdr_bin_from(candidate: Option<&str>) -> String {
+    if let Some(candidate) = candidate.filter(|s| !s.is_empty()) {
+        if is_executable_file(Path::new(candidate)) {
+            return candidate.to_string();
+        }
+        if let Some(stripped) = candidate.strip_suffix(" (deleted)") {
+            if !stripped.is_empty() && is_executable_file(Path::new(stripped)) {
+                return stripped.to_string();
+            }
+        }
+    }
+    "herdr".to_string()
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && (m.permissions().mode() & 0o111 != 0))
+        .unwrap_or(false)
+}
+
 impl SessionRegistry {
     /// Build a registry. `default_socket` is the herdr socket the daemon itself
     /// connects to (`board_herdr::default_socket_path()`).
     pub fn new(default_socket: PathBuf) -> SessionRegistry {
-        let herdr_bin = std::env::var("HERDR_BIN_PATH")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "herdr".to_string());
+        let herdr_bin = resolve_herdr_bin();
         SessionRegistry {
             herdr_bin,
             default_socket,

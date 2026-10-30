@@ -24,10 +24,7 @@ pub(crate) struct HerdrCliPaneRunner;
 
 impl PaneRunner for HerdrCliPaneRunner {
     fn run(&self, socket: &Path, argv: &[String]) -> anyhow::Result<()> {
-        let herdr_bin = std::env::var("HERDR_BIN_PATH")
-            .ok()
-            .filter(|path| !path.is_empty())
-            .unwrap_or_else(|| "herdr".to_string());
+        let herdr_bin = crate::session::resolve_herdr_bin();
         let status = Command::new(herdr_bin)
             .args(argv)
             .env("HERDR_SOCKET_PATH", socket)
