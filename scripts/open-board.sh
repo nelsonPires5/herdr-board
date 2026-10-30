@@ -17,6 +17,14 @@
 set -uo pipefail
 
 herdr_bin="${HERDR_BIN_PATH:-herdr}"
+if [ ! -x "$herdr_bin" ]; then
+  stripped="${herdr_bin% (deleted)}"
+  if [ -n "$stripped" ] && [ -x "$stripped" ]; then
+    herdr_bin="$stripped"
+  else
+    herdr_bin="herdr"
+  fi
+fi
 
 open_pane() {
   exec "$herdr_bin" plugin pane open \

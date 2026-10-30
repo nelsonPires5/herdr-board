@@ -127,3 +127,20 @@ fn fetch_surfaces_a_nonzero_exit_with_stderr() {
     let error = reg.list().unwrap_err().to_string();
     assert!(error.contains("no session dir"), "{error}");
 }
+
+#[test]
+fn resolve_herdr_bin_handles_valid_deleted_and_missing_paths() {
+    let (_dir, bin) = fake_herdr_bin("exit 0");
+    assert_eq!(resolve_herdr_bin_from(Some(&bin)), bin);
+
+    let deleted = format!("{bin} (deleted)");
+    assert_eq!(resolve_herdr_bin_from(Some(&deleted)), bin);
+
+    assert_eq!(
+        resolve_herdr_bin_from(Some("/nonexistent/herdr (deleted)")),
+        "herdr"
+    );
+    assert_eq!(resolve_herdr_bin_from(Some("/nonexistent/herdr")), "herdr");
+    assert_eq!(resolve_herdr_bin_from(Some("")), "herdr");
+    assert_eq!(resolve_herdr_bin_from(None), "herdr");
+}
